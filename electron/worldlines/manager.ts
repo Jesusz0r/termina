@@ -128,6 +128,7 @@ import {
   type PendingCandidateReady,
   type PromoteSeed,
   type PromotionDirectoryPlan,
+  type PromotionEntryState,
   type PromotionJournalAdmissionResult,
   type PromotionJournalBinding,
   type PromotionJournalPath,
@@ -651,14 +652,16 @@ export class WorldlineManager {
       return { ok: false, error: "the run has no captured task or pre-task anchor" };
     }
     if (cmp.engine !== "core") return { ok: false, error: "core is the only engine" };
-    // This comparison is replaced by the challenge pair, so its live
-    // candidates free their budget slots.
-    if (this.liveWorldlineCount() - cmp.candidates.size + 2 > 3) {
-      return { ok: false, error: "the live worldline budget is exhausted" };
-    }
     const uncertaintyAdmission = await this.acquireUncertainComparisonAdmission();
     if (!uncertaintyAdmission.ok) return { ok: false, error: uncertaintyAdmission.error };
     const admissionLease = uncertaintyAdmission.lease;
+    // Inside the admission gate: the owner serializes creators, so this sees
+    // every materialized rival. This comparison is replaced by the challenge
+    // pair, so its live candidates free their budget slots.
+    if (this.liveWorldlineCount() - cmp.candidates.size + 2 > 3) {
+      admissionLease.release();
+      return { ok: false, error: "the live worldline budget is exhausted" };
+    }
     this.challengeInFlight.add(comparisonId);
     try {
     // Snapshot the candidate head as the new reference A.
@@ -696,7 +699,6 @@ export class WorldlineManager {
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease: admissionLease,
       removeUncertainRequested: false,
       createdAt: Date.now(),
       candidates: new Map(),
@@ -1117,7 +1119,6 @@ export class WorldlineManager {
     }
     if (!run.startStateId || !run.settledStateId) return { ok: false, error: "the run has no complete source checkpoints" };
     if (!run.sessionBranchFile) return { ok: false, error: "the run has no session branch copy" };
-    if (this.liveWorldlineCount() + 2 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
     // The fork preflight (WORLDLINES §4): repository, platform, disk.
     const pre = await this.deps.preflight();
     if (!pre.ok) return { ok: false, error: pre.reasons.join("; ") };
@@ -1161,6 +1162,12 @@ export class WorldlineManager {
 
     const uncertaintyAdmission = await this.acquireUncertainComparisonAdmission();
     if (!uncertaintyAdmission.ok) return { ok: false, error: uncertaintyAdmission.error };
+    // Inside the admission gate: the owner serializes creators, so this sees
+    // every materialized rival instead of racing it.
+    if (this.liveWorldlineCount() + 2 > 3) {
+      uncertaintyAdmission.lease.release();
+      return { ok: false, error: "the live worldline budget is exhausted" };
+    }
     let cmp: ComparisonState;
     try {
       cmp = await this.createComparison(run, opts.challengeProfile, uncertaintyAdmission.lease);
@@ -1238,7 +1245,6 @@ export class WorldlineManager {
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease,
       removeUncertainRequested: false,
       createdAt: Date.now(),
       candidates: new Map(),
@@ -2120,31 +2126,27 @@ export class WorldlineManager {
         throw error;
       }
     };
+    const removeJournal = async (): Promise<void> => {
+      if (!journalBinding) return;
+      // Cleanup failure never fails the promotion: the journal is retained
+      // as evidence and counted by the next admission.
+      await boundPromotionRemoveTree({
+        root: journalBinding.root.path,
+        rootIdentity: promotionIdentityOf(journalBinding.root),
+        components: [journalBinding.name],
+        parentIdentity: promotionIdentityOf(journalBinding.root),
+        expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
+      }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
+    };
     const fail = async (message: string): Promise<{ ok: false; error: string }> => {
       releaseLeases();
-      if (journalBinding) {
-        await boundPromotionRemoveTree({
-          root: journalBinding.root.path,
-          rootIdentity: promotionIdentityOf(journalBinding.root),
-          components: [journalBinding.name],
-          parentIdentity: promotionIdentityOf(journalBinding.root),
-          expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-        }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
-      }
+      await removeJournal();
       await this.finishPromotion(comparisonId, false, message);
       return { ok: false, error: message };
     };
     const askConfirm = async (message: string): Promise<{ ok: false; confirm: string }> => {
       releaseLeases();
-      if (journalBinding) {
-        await boundPromotionRemoveTree({
-          root: journalBinding.root.path,
-          rootIdentity: promotionIdentityOf(journalBinding.root),
-          components: [journalBinding.name],
-          parentIdentity: promotionIdentityOf(journalBinding.root),
-          expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-        }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
-      }
+      await removeJournal();
       await this.finishPromotion(comparisonId, false, null);
       return { ok: false, confirm: message };
     };
@@ -2258,6 +2260,25 @@ export class WorldlineManager {
       const maybeCheckpointJournal = async (): Promise<void> => {
         if (paths.length % PROMOTION_JOURNAL_CHECKPOINT_PATHS === 0) await checkpointJournal();
       };
+      // Copy one before-image into journal evidence and attach its identity
+      // to the record. Shared by the write and delete gather loops.
+      const copyBeforeImage = async (abs: string, rel: string, beforeState: PromotionEntryState, record: PromotionJournalPath): Promise<void> => {
+        const sourceParentPlan = parentPlans.get(resolve(dirname(abs)));
+        if (!sourceParentPlan) throw new Error(`promotion before-image parent was not pre-bound: ${dirname(abs)}`);
+        const sourceParent = await promotionParentIdentity(abs, canonicalPrimaryRoot, this.deps.canonicalPath, sourceParentPlan);
+        const sourceExpected = await boundPromotionExpectedLeaf(abs, beforeState, `promotion before-image ${rel}`);
+        const copied = await copyBoundBeforeImage(
+          primaryRootBinding,
+          promotionSourceComponents(rel),
+          { path: sourceParent.path, dev: String(sourceParent.dev), ino: String(sourceParent.ino), capability: sourceParent.capability },
+          journalBinding!.directory,
+          ["before", ...promotionSourceComponents(rel)],
+          sourceExpected,
+        );
+        record.beforeImageIdentity = copied.identity;
+        if (copied.state.type !== "file") throw new Error(`before-image copy changed type at ${rel}`);
+        record.beforeImageSize = copied.state.size;
+      };
       try {
       for (const rel of writeRels) {
         const abs = await promotionDestination(this.deps.primaryRoot, canonicalPrimaryRoot, rel, this.deps.canonicalPath);
@@ -2277,21 +2298,7 @@ export class WorldlineManager {
         };
         if (before.state.type === "file") {
           reservePromotionOperationBytes(promotionBudget, before.size!, `before-image ${rel}`);
-          const sourceParentPlan = parentPlans.get(resolve(dirname(abs)));
-          if (!sourceParentPlan) throw new Error(`promotion before-image parent was not pre-bound: ${dirname(abs)}`);
-          const sourceParent = await promotionParentIdentity(abs, canonicalPrimaryRoot, this.deps.canonicalPath, sourceParentPlan);
-          const sourceExpected = await boundPromotionExpectedLeaf(abs, before.state, `promotion before-image ${rel}`);
-          const copied = await copyBoundBeforeImage(
-            primaryRootBinding,
-            promotionSourceComponents(rel),
-            { path: sourceParent.path, dev: String(sourceParent.dev), ino: String(sourceParent.ino), capability: sourceParent.capability },
-            journalBinding!.directory,
-            ["before", ...promotionSourceComponents(rel)],
-            sourceExpected,
-          );
-          record.beforeImageIdentity = copied.identity;
-          if (copied.state.type !== "file") throw new Error(`before-image copy changed type at ${rel}`);
-          record.beforeImageSize = copied.state.size;
+          await copyBeforeImage(abs, rel, before.state, record);
         }
         paths.push(record);
         await maybeCheckpointJournal();
@@ -2315,21 +2322,7 @@ export class WorldlineManager {
           // reserve that second file copy as well so the operation cap covers
           // both rollback input and preservation-first retention.
           reservePromotionOperationBytes(promotionBudget, before.size!, `retained delete ${rel}`);
-          const sourceParentPlan = parentPlans.get(resolve(dirname(abs)));
-          if (!sourceParentPlan) throw new Error(`promotion before-image parent was not pre-bound: ${dirname(abs)}`);
-          const sourceParent = await promotionParentIdentity(abs, canonicalPrimaryRoot, this.deps.canonicalPath, sourceParentPlan);
-          const sourceExpected = await boundPromotionExpectedLeaf(abs, before.state, `promotion before-image ${rel}`);
-          const copied = await copyBoundBeforeImage(
-            primaryRootBinding,
-            promotionSourceComponents(rel),
-            { path: sourceParent.path, dev: String(sourceParent.dev), ino: String(sourceParent.ino), capability: sourceParent.capability },
-            journalBinding!.directory,
-            ["before", ...promotionSourceComponents(rel)],
-            sourceExpected,
-          );
-          record.beforeImageIdentity = copied.identity;
-          if (copied.state.type !== "file") throw new Error(`before-image copy changed type at ${rel}`);
-          record.beforeImageSize = copied.state.size;
+          await copyBeforeImage(abs, rel, before.state, record);
         }
         paths.push(record);
         await maybeCheckpointJournal();
@@ -2517,15 +2510,7 @@ export class WorldlineManager {
       } catch (refreshError) {
         const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);
         releaseLeases();
-        if (journalBinding) {
-          await boundPromotionRemoveTree({
-            root: journalBinding.root.path,
-            rootIdentity: promotionIdentityOf(journalBinding.root),
-            components: [journalBinding.name],
-            parentIdentity: promotionIdentityOf(journalBinding.root),
-            expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-          }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
-        }
+        await removeJournal();
         return {
           ok: false,
           error: `the source was promoted, but the workspace snapshot was not refreshed: ${refreshMessage}`,
@@ -2533,15 +2518,7 @@ export class WorldlineManager {
         };
       }
       releaseLeases();
-      if (journalBinding) {
-        await boundPromotionRemoveTree({
-          root: journalBinding.root.path,
-          rootIdentity: promotionIdentityOf(journalBinding.root),
-          components: [journalBinding.name],
-          parentIdentity: promotionIdentityOf(journalBinding.root),
-          expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-        });
-      }
+      await removeJournal();
       return { ok: true, terminalId: opened.terminalId };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2555,15 +2532,7 @@ export class WorldlineManager {
         }
         releaseLeases();
         await this.finishPromotion(comparisonId, true, null);
-        if (journalBinding) {
-          await boundPromotionRemoveTree({
-            root: journalBinding.root.path,
-            rootIdentity: promotionIdentityOf(journalBinding.root),
-            components: [journalBinding.name],
-            parentIdentity: promotionIdentityOf(journalBinding.root),
-            expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-          }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
-        }
+        await removeJournal();
         const suffix = snapshotError
           ? ` the workspace snapshot was not refreshed: ${snapshotError}`
           : ` the new session did not open: ${message}`;
@@ -2619,12 +2588,17 @@ export class WorldlineManager {
       sourceRunId: rootRun.id,
       baseStateId: rootRun.startStateId,
     };
-    if (this.liveWorldlineCount() + 1 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
     const store = await this.deps.getStore();
     if (!store) return { ok: false, error: "recording is not available" };
     const uncertaintyAdmission = await this.acquireUncertainComparisonAdmission();
     if (!uncertaintyAdmission.ok) return { ok: false, error: uncertaintyAdmission.error };
     const admissionLease = uncertaintyAdmission.lease;
+    // Inside the admission gate: the owner serializes creators, so this sees
+    // every materialized rival instead of racing it.
+    if (this.liveWorldlineCount() + 1 > 3) {
+      admissionLease.release();
+      return { ok: false, error: "the live worldline budget is exhausted" };
+    }
     let id: string;
     let dir: string;
     let rootIdentity: PromotionFsIdentity;
@@ -2669,7 +2643,6 @@ export class WorldlineManager {
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease: admissionLease,
       removeUncertainRequested: false,
       createdAt: Date.now(),
       candidates: new Map(),
@@ -3538,7 +3511,6 @@ export class WorldlineManager {
       uncertainSessionArtifacts: [...manifest.uncertainSessionArtifacts],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease: null,
       removeUncertainRequested: false,
       createdAt: manifest.createdAt,
       candidates,
@@ -3556,7 +3528,9 @@ export class WorldlineManager {
   private liveWorldlineCount(): number {
     let n = 0;
     for (const cmp of this.comparisons.values()) {
-      if (cmp.phase === "running" || cmp.phase === "creating") n += cmp.candidates.size;
+      // A draining comparison still holds trees and processes until its
+      // teardown releases them; only a finished drain frees budget.
+      if (cmp.phase === "running" || cmp.phase === "creating" || cmp.teardownPromise !== null) n += cmp.candidates.size;
     }
     return n;
   }
@@ -3616,13 +3590,9 @@ export class WorldlineManager {
         continue;
       }
       for (const candidate of Object.values(manifest.candidates)) {
-        if (candidate.pid !== null && candidate.lstart && (await processStartMatches(candidate.pid, candidate.lstart))) {
-          try {
-            process.kill(-candidate.pid, "SIGKILL");
-          } catch {
-            /* The process can exit before the signal. */
-          }
-        }
+        // Post-crash orphans get the same TERM grace as live teardown, so a
+        // clean shutdown can still write its settled markers.
+        await this.terminateCandidateGroup(candidate.pid, candidate.lstart);
       }
       if (manifest.status === "uncertain") {
         // Keep the comparison addressable after restart. It is intentionally

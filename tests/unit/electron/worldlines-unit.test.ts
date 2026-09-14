@@ -207,7 +207,6 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease: null,
       removeUncertainRequested: false,
       createdAt: Date.now(),
       candidates: new Map([["A", candidate]]),

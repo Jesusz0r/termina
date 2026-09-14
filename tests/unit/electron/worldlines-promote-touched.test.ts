@@ -41,6 +41,8 @@ async function makeFixture(opts: {
   mergedPaths: string[];
   materialize: (dir: string) => Promise<void>;
   workspaceAt?: (wsRoot: string) => Promise<{ id: string; generation: number; lastStateCommit: string | null } | null>;
+  captureImpl?: (head: string, parent: string | null) => Promise<{ commit: string; tree: string }>;
+  installPromoted?: () => Promise<{ terminalId: string }>;
 }): Promise<PromoteFixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "termina-promote-touched-")));
   const worldsRoot = join(root, "worlds");
@@ -63,8 +65,8 @@ async function makeFixture(opts: {
   const store = {
     sourceRoot: primaryRoot,
     sourceGitDir: join(primaryRoot, ".git"),
-    capture: async (_head: string, parent: string | null): Promise<{ commit: string; tree: string }> =>
-      parent === "base" ? { commit: "w", tree: "w" } : parent === "p0" ? { commit: "p", tree: "p" } : { commit: "m", tree: "m" },
+    capture: opts.captureImpl ?? (async (_head: string, parent: string | null): Promise<{ commit: string; tree: string }> =>
+      parent === "base" ? { commit: "w", tree: "w" } : parent === "p0" ? { commit: "p", tree: "p" } : { commit: "m", tree: "m" }),
     diffTree: async (): Promise<Array<{ relPath: string; status: "created" | "modified" | "deleted" }>> => opts.changes,
     treePaths: async (state: string): Promise<Set<string>> =>
       state === "merge-tree" ? new Set(opts.mergedPaths) : new Set(opts.primaryPaths),
@@ -132,7 +134,7 @@ async function makeFixture(opts: {
     onEvidenceUpdate: () => {},
     onPromotionApply: () => {},
     primarySessionDir: async (cwd: string) => join(cwd, "sessions"),
-    installPromoted: async () => ({ terminalId: "term-promoted" }),
+    installPromoted: opts.installPromoted ?? (async () => ({ terminalId: "term-promoted" })),
   });
 
   manager.recordRun({
@@ -208,7 +210,6 @@ async function makeFixture(opts: {
     uncertainSessionArtifacts: [],
     manifestWriteFailed: false,
     teardownPromise: null,
-    uncertainAdmissionLease: null,
     removeUncertainRequested: false,
     createdAt: Date.now(),
     candidates: new Map([["A", cand]]),
@@ -427,6 +428,92 @@ describe("candidate apply fence (issue #199)", () => {
       expect(cmp.candidates.get("A")!.state).toBe("ready");
     } finally {
       mockWriteFile.mockImplementation(baseImpl);
+      await fx.manager.dispose();
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+describe("promotion journal cleanup paths (issue #202)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function journalsOf(fx: PromoteFixture): Promise<string[]> {
+    try {
+      return await readdir(join(fx.worldsRoot, "promotion-journal"));
+    } catch {
+      return [];
+    }
+  }
+
+  it("askConfirm removes its journal and leaves the pair usable", async () => {
+    const fx = await makeFixture({
+      changes: [{ relPath: "touched.txt", status: "modified" }],
+      primaryPaths: ["touched.txt", "other.txt"],
+      mergedPaths: ["touched.txt", "other.txt"],
+      materialize: async (dir) => {
+        await writeFile(join(dir, "touched.txt"), "new\n");
+      },
+    });
+    try {
+      const result = await fx.manager.promote(fx.comparisonId, "A");
+      expect(result.ok).toBe(false);
+      expect(result.confirm ?? "").toMatch(/without current passing evidence/);
+      expect(await journalsOf(fx)).toEqual([]);
+      const cmp = (fx.manager as unknown as { comparisons: Map<string, ComparisonState> }).comparisons.get(fx.comparisonId)!;
+      expect(cmp.candidates.get("A")!.state).toBe("ready");
+    } finally {
+      await fx.manager.dispose();
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("a failed snapshot refresh removes its journal and reports the terminal", async () => {
+    const fx = await makeFixture({
+      changes: [{ relPath: "touched.txt", status: "modified" }],
+      primaryPaths: ["touched.txt", "other.txt"],
+      mergedPaths: ["touched.txt", "other.txt"],
+      materialize: async (dir) => {
+        await writeFile(join(dir, "touched.txt"), "new\n");
+      },
+      captureImpl: async (_head: string, parent: string | null) => {
+        if (parent === "p") throw new Error("snapshot store unavailable");
+        return parent === "base" ? { commit: "w", tree: "w" } : { commit: "p", tree: "p" };
+      },
+    });
+    try {
+      const result = await fx.manager.promote(fx.comparisonId, "A", true);
+      expect(result.ok).toBe(false);
+      expect(result.error ?? "").toMatch(/snapshot was not refreshed/);
+      expect(result.terminalId).toBe("term-promoted");
+      expect(await readFile(join(fx.primaryRoot, "touched.txt"), "utf8")).toBe("new\n");
+      expect(await journalsOf(fx)).toEqual([]);
+    } finally {
+      await fx.manager.dispose();
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("a failed session open removes its journal through the done-phase catch", async () => {
+    const fx = await makeFixture({
+      changes: [{ relPath: "touched.txt", status: "modified" }],
+      primaryPaths: ["touched.txt", "other.txt"],
+      mergedPaths: ["touched.txt", "other.txt"],
+      materialize: async (dir) => {
+        await writeFile(join(dir, "touched.txt"), "new\n");
+      },
+      installPromoted: async () => {
+        throw new Error("no terminal available");
+      },
+    });
+    try {
+      const result = await fx.manager.promote(fx.comparisonId, "A", true);
+      expect(result.ok).toBe(false);
+      expect(result.error ?? "").toMatch(/the new session did not open/);
+      expect(await readFile(join(fx.primaryRoot, "touched.txt"), "utf8")).toBe("new\n");
+      expect(await journalsOf(fx)).toEqual([]);
+    } finally {
       await fx.manager.dispose();
       await rm(fx.root, { recursive: true, force: true });
     }
