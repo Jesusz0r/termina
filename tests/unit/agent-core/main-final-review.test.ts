@@ -18,6 +18,7 @@ describe("Agent Core Main Final Review Contracts", () => {
     const files = await import("../../../agent-core/main/files.ts");
     const grep = await import("../../../agent-core/main/grep.ts");
     const fileOps = await import("../../../agent-core/main/file-ops.ts");
+    const output = await import("../../../agent-core/tool-output.ts");
     
     assert.deepEqual(
       main.traceWriteDisposition({ ok: false, persisted: false, retryable: true } as TraceWriteFailure),
@@ -40,9 +41,9 @@ describe("Agent Core Main Final Review Contracts", () => {
     const firstShutdown = main.shutdownAgentCore({ reason: "final-review", timeoutMs: 1 });
     assert.equal(firstShutdown, main.shutdownAgentCore({ reason: "final-review-repeat", timeoutMs: 1 }));
     await firstShutdown;
-    const boundedBody = await main.readBoundedHttpBody(
+    const boundedBody = await output.readBoundedResponseBody(
       new Response("x".repeat(1024), { headers: { "content-type": "text/plain" } }),
-      64,
+      { maxBytes: 64 },
     );
     assert.equal(boundedBody.truncated, true);
     assert.ok(Buffer.byteLength(boundedBody.text, "utf8") <= 64);

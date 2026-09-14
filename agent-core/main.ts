@@ -174,6 +174,7 @@ import {
   BoundedTextAccumulator,
   boundedToolResult,
   logicalToolText,
+  readBoundedResponseBody,
   type BoundedText,
   type CompletionState,
   type ToolTextResult,
@@ -3051,7 +3052,7 @@ async function providerPost(
       if (nextTurnState) codexTurnState = nextTurnState;
     }
     if (res.status === 401) {
-      await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES);
+      await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES });
       if (auth.kind === "oauth" && !replayed) {
         await onRetry?.({ status: 401, kind: "oauth-refresh", retryCount: retries + 1 });
         const refreshed = await refreshOauth(providerId, signal);
@@ -3063,7 +3064,7 @@ async function providerPost(
     }
     const wait = retryAfter(res.status, res.headers, retries);
     if (wait != null) {
-      await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES);
+      await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES });
       retries++;
       await onRetry?.({ status: res.status, kind: "retryable-status", retryCount: retries });
       await sleep(wait, signal);
@@ -3157,53 +3158,8 @@ export function providerReportedUsd(usage: Pick<Usage, "reportedUsd"> | null): n
 const PROVIDER_BODY_CAP_BYTES = 256 * 1024;
 const PROVIDER_ERROR_BODY_CAP_BYTES = 64 * 1024;
 
-/** Read a response body through the shared UTF-8 bounded accumulator. */
-export async function readBoundedHttpBody(
-  res: Response,
-  maxBytes = PROVIDER_BODY_CAP_BYTES,
-): Promise<BoundedText> {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
-    throw new Error("response body bound must be a non-negative safe integer");
-  }
-  const marker = "[response body truncated]";
-  if (!res.body) {
-    const declared = Number(res.headers.get("content-length")?.trim() ?? "");
-    if (Number.isFinite(declared) && declared > maxBytes) {
-      return boundedToolResult("", {
-        maxBytes,
-        marker: "[response body exceeds bound]",
-        state: "failed",
-        isError: true,
-      });
-    }
-    return boundedToolResult("", { maxBytes, marker, state: "complete", isError: false });
-  }
-  const accumulator = new BoundedTextAccumulator({ maxBytes, marker });
-  const reader = res.body.getReader();
-  let sourceBytes = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      sourceBytes += value.byteLength;
-      accumulator.push(value);
-      if (sourceBytes > maxBytes) {
-        try {
-          await reader.cancel();
-        } catch {
-          /* The body is already bounded; cancellation is best effort. */
-        }
-        break;
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return accumulator.finish("complete");
-}
-
 async function readBoundedJson(res: Response, maxBytes = PROVIDER_BODY_CAP_BYTES): Promise<unknown> {
-  const body = await readBoundedHttpBody(res, maxBytes);
+  const body = await readBoundedResponseBody(res, { maxBytes });
   if (body.state !== "complete" || body.truncated) {
     throw new Error(`response JSON exceeded ${maxBytes} bytes`);
   }
@@ -3281,7 +3237,7 @@ function failProviderStream(
 }
 
 async function apiFailure(res: Response, hint = ""): Promise<never> {
-  const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
+  const detail = (await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES })).text.slice(0, 300);
   throw new Error(`API ${res.status}${detail ? `: ${detail}` : ""}${hint}`);
 }
 
@@ -3667,7 +3623,7 @@ async function callModel(
   let optionalCacheFallbackUsed = false;
   let res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true, cacheIdentity, onRetry);
   if (!res.ok || !res.body) {
-    const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
+    const detail = (await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES })).text.slice(0, 300);
     // Check the cheap preconditions first: the full-body serialization below
     // only runs when this is actually a 400 about cache fields.
     const fallbackCandidate = res.status === 400 && /prompt_cache_(?:breakpoint|options)/i.test(detail);
@@ -3732,7 +3688,7 @@ async function callModel(
     }
   }
   if (!res.ok || !res.body) {
-    const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
+    const detail = (await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES })).text.slice(0, 300);
     throw new Error(`API ${res.status}: ${detail}`);
   }
 
@@ -4316,7 +4272,7 @@ async function loadRates(): Promise<boolean> {
   try {
     const res = await fetch(RATE_CATALOG_URL, { signal: controller.signal });
     if (!res.ok) return false;
-    const body = await readBoundedHttpBody(res, RATE_CATALOG_BODY_CAP_BYTES);
+    const body = await readBoundedResponseBody(res, { maxBytes: RATE_CATALOG_BODY_CAP_BYTES });
     if (body.state !== "complete" || body.truncated) return false;
     let parsed: unknown;
     try {

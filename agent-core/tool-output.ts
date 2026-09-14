@@ -427,6 +427,11 @@ function responseResult(
  * has crossed maxBytes; callers can therefore use this for both success and
  * error responses without first materializing an untrusted body.
  *
+ * This is the canonical bounder for fetch-Response reads (provider and rates
+ * bodies, #210). MCP HTTP runs on node:http streams, which expose no Response
+ * body reader; its stream-based counterpart is readCappedBody in
+ * mcp/client.ts, with the same fail-closed contract in throwing form.
+ *
  * A valid Content-Length supplies the total byte count even when cancellation
  * happens after only a prefix. Missing or unsafe lengths are simply treated
  * as unknown while a stream is available. If there is no stream, the helper

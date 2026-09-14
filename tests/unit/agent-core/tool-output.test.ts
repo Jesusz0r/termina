@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Buffer } from "node:buffer";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -354,6 +354,32 @@ describe("Agent Core Bounded Output Foundation", () => {
       expect(result.text).toMatch(/provider error body truncated/);
       expect(result.outputBytes).toBe(Buffer.byteLength(result.text, "utf8"));
       expect(result.outputBytes).toBeLessThanOrEqual(result.limitBytes);
+    });
+
+    it("fails closed on a declared-but-streamless body (T18)", async () => {
+      const response = new Response(null, { status: 200, headers: { "content-length": "5000" } });
+      expect(response.body).toBeNull();
+      const result = await readBoundedResponseBody(response, { maxBytes: 8192 });
+      expect(result.state).toBe("failed");
+      expect(result.truncated).toBe(true);
+      expect(result.text).toContain("output incomplete: failed");
+    });
+
+    it("accepts provably empty streamless bodies", async () => {
+      const zeroLength = new Response(null, { status: 200, headers: { "content-length": "0" } });
+      const zeroResult = await readBoundedResponseBody(zeroLength, { maxBytes: 64 });
+      expect(zeroResult.state).toBe("complete");
+      expect(zeroResult.truncated).toBe(false);
+      const noContent = new Response(null, { status: 204 });
+      const noContentResult = await readBoundedResponseBody(noContent, { maxBytes: 64 });
+      expect(noContentResult.state).toBe("complete");
+      expect(noContentResult.truncated).toBe(false);
+    });
+
+    it("is the canonical live bounder for provider and rates reads (#210)", () => {
+      const mainSource = readFileSync(new URL("../../../agent-core/main.ts", import.meta.url), "utf8");
+      expect(mainSource.includes("readBoundedResponseBody(")).toBe(true);
+      expect(mainSource.includes("readBoundedHttpBody")).toBe(false);
     });
   });
 

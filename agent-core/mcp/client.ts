@@ -217,6 +217,12 @@ function parseSseRpc(text: string, id: number): RpcMsg {
 }
 
 
+/**
+ * Stream-based counterpart to readBoundedResponseBody (tool-output.ts, #210):
+ * MCP HTTP runs on node:http, whose responses expose a stream rather than a
+ * fetch body reader. Same fail-closed contract in throwing form: declared or
+ * observed oversize and invalid UTF-8 throw instead of returning partial text.
+ */
 async function readCappedBody(res: PolicyHttpResponse, max: number, name: string): Promise<string> {
   const declared = res.headers.get("content-length")?.trim() ?? "";
   const declaredBytes = /^\d+$/.test(declared) ? Number(declared) : null;
