@@ -17,6 +17,8 @@ interface FakePage {
   goto(url: string, opts?: unknown): Promise<void>;
   evaluate<T>(fn: () => T): Promise<T>;
   locator(sel: string): object;
+  isClosed(): boolean;
+  url(): string;
 }
 
 function strictEqual(actual: unknown, expected: unknown): void {
@@ -41,9 +43,26 @@ function loadNavigationCallback(): SpecCallback {
     },
     { describe: (_name: string, fn: () => void): void => fn() },
   );
-  const fakeExpect = (actual: unknown): { toBe(expected: unknown): void; toBeHidden(opts?: unknown): Promise<void> } => ({
+  const fakeExpect = (actual: unknown): {
+    toBe(expected: unknown): void;
+    toBeHidden(opts?: unknown): Promise<void>;
+    toContain(expected: string): void;
+    not: { toContain(expected: string): void };
+  } => ({
     toBe: (expected: unknown): void => strictEqual(actual, expected),
     toBeHidden: async (_opts?: unknown): Promise<void> => {},
+    toContain: (expected: string): void => {
+      if (typeof actual !== "string" || !actual.includes(expected)) {
+        throw new Error(`expected ${JSON.stringify(actual)} to contain ${JSON.stringify(expected)}`);
+      }
+    },
+    not: {
+      toContain: (expected: string): void => {
+        if (typeof actual === "string" && actual.includes(expected)) {
+          throw new Error(`expected ${JSON.stringify(actual)} not to contain ${JSON.stringify(expected)}`);
+        }
+      },
+    },
   });
   new Function("test", "expect", code)(testFn, fakeExpect);
   const callback = collected.get("foreign page navigation cannot invoke privileged IPC");
@@ -56,6 +75,8 @@ function fakePage(adapter: { goto(): Promise<void>; foreign(): { loaded: boolean
     goto: async (_url: string) => adapter.goto(),
     evaluate: async <T>(_fn: () => T): Promise<T> => adapter.foreign() as unknown as T,
     locator: (_sel: string) => ({}),
+    isClosed: () => false,
+    url: () => "file:///app/dist-renderer/index.html",
   };
 }
 
@@ -82,10 +103,21 @@ describe("navigation spec harness (refs #146)", () => {
     const callback = loadNavigationCallback();
     const blockedPage = fakePage({
       goto: async () => {
-        throw new Error("navigation blocked");
+        throw new Error("page.goto: net::ERR_ABORTED at data:text/html");
       },
       foreign: () => ({ loaded: false, bridge: "undefined" }),
     });
     await expect(callback({ page: blockedPage })).resolves.toBeUndefined();
+  });
+
+  it("fails when navigation fails in an unexpected way", async () => {
+    const callback = loadNavigationCallback();
+    const crashedPage = fakePage({
+      goto: async () => {
+        throw new Error("page.goto: Timeout 3000ms exceeded");
+      },
+      foreign: () => ({ loaded: false, bridge: "undefined" }),
+    });
+    await expect(callback({ page: crashedPage })).rejects.toThrow();
   });
 });

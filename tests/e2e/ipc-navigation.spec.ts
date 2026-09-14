@@ -20,19 +20,24 @@ test.describe("Privileged Renderer IPC Navigation Isolation", () => {
       "<title>foreign</title><script>window.__foreignLoaded = true;</script>",
     )}`;
 
-    // Only the navigation itself may fail closed (blocked by Electron security
-    // policies). The bridge assertions below run outside the catch: once
-    // navigation succeeds, a remaining bridge must fail the test, never pass it.
-    let navigationBlocked = false;
+    // Only the navigation itself may fail closed (blocked by main's
+    // will-navigate prevention). The bridge assertions below run outside the
+    // catch: once navigation succeeds, a remaining bridge must fail the test,
+    // never pass it.
+    let blockedError: unknown = null;
     try {
       await page.goto(foreignUrl, { timeout: 3_000 });
-    } catch {
-      navigationBlocked = true;
+    } catch (err) {
+      blockedError = err;
     }
-    if (navigationBlocked) {
-      // Fail closed: the app window never left, so the trusted bridge is
-      // intact and no foreign page exists to abuse it.
-      await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    if (blockedError !== null) {
+      // Fail closed: the abort must be main's prevention (net::ERR_ABORTED),
+      // not a timeout or crash. The abort detaches Playwright's CDP session
+      // as a side effect, so the intactness check uses only non-CDP state:
+      // the window never left the app document.
+      expect(String(blockedError)).toContain("net::ERR_ABORTED");
+      expect(page.isClosed()).toBe(false);
+      expect(page.url()).not.toContain("data:text/html");
       return;
     }
 
