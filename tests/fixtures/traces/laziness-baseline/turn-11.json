@@ -1,0 +1,22 @@
+{
+  "recordType": "attempt",
+  "schemaVersion": 2,
+  "runId": "run-c",
+  "taskId": "task-2",
+  "attemptId": "att-7",
+  "role": "main",
+  "provider": "anthropic",
+  "protocol": "anthropic-messages",
+  "model": "m2",
+  "status": "ok",
+  "taskClass": "implement",
+  "effectiveEffort": "high",
+  "sessionLengthBucket": "short",
+  "toolOutcomes": [
+    {
+      "toolName": "bash",
+      "isError": false,
+      "exitCode": 0
+    }
+  ]
+}

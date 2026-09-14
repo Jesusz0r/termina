@@ -1,0 +1,21 @@
+{
+  "recordType": "attempt",
+  "schemaVersion": 2,
+  "runId": "run-d",
+  "taskId": "task-1",
+  "attemptId": "att-8",
+  "role": "main",
+  "provider": "anthropic",
+  "protocol": "anthropic-messages",
+  "model": "m1",
+  "status": "ok",
+  "taskClass": "implement",
+  "effectiveEffort": "high",
+  "sessionLengthBucket": "long",
+  "toolOutcomes": [
+    {
+      "toolName": "read_file",
+      "isError": false
+    }
+  ]
+}

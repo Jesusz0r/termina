@@ -1,0 +1,21 @@
+{
+  "recordType": "attempt",
+  "schemaVersion": 2,
+  "runId": "run-c",
+  "taskId": "task-1",
+  "attemptId": "att-6",
+  "role": "main",
+  "provider": "anthropic",
+  "protocol": "anthropic-messages",
+  "model": "m1",
+  "status": "ok",
+  "taskClass": "implement",
+  "effectiveEffort": "low",
+  "sessionLengthBucket": "long",
+  "toolOutcomes": [
+    {
+      "toolName": "edit",
+      "isError": false
+    }
+  ]
+}

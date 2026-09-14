@@ -1,0 +1,11 @@
+{
+  "recordType": "task-settled",
+  "schemaVersion": 2,
+  "runId": "run-b",
+  "taskId": "task-2",
+  "outcome": {
+    "status": "success",
+    "correctness": "correct"
+  },
+  "taskClass": "question"
+}
