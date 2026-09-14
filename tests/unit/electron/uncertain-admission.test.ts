@@ -48,6 +48,13 @@ async function ledgerEntry(worldsRoot: string): Promise<{ counted: boolean; byte
   return ledger.entries[0]!;
 }
 
+async function ledgerEntryNames(worldsRoot: string): Promise<string[]> {
+  const ledger = JSON.parse(await readFile(join(worldsRoot, UNCERTAIN_COMPARISON_USAGE_LEDGER), "utf8")) as {
+    entries: Array<{ name: string }>;
+  };
+  return ledger.entries.map((entry) => entry.name);
+}
+
 async function topIdentity(dir: string): Promise<{ dev: string; ino: string; size: string; mtimeNs: string; ctimeNs: string }> {
   const info = await lstat(dir, { bigint: true });
   return { dev: String(info.dev), ino: String(info.ino), size: String(info.size), mtimeNs: String(info.mtimeNs), ctimeNs: String(info.ctimeNs) };
@@ -111,6 +118,28 @@ describe("uncertain admission measurement (issue #192)", () => {
         await owner.drain();
         const entry = await ledgerEntry(worldsRoot);
         expect(entry.counted).toBe(true);
+      } finally {
+        releaseUncertainComparisonAdmissionOwner(owner);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("orders ledger entries by code unit, never by locale (issue #193)", async () => {
+    const { root, worldsRoot } = await setupWorlds();
+    try {
+      await seedRetained(worldsRoot, "a", 1);
+      await seedRetained(worldsRoot, "B", 1);
+      const binding = await ensureBoundDirectory(worldsRoot, "worlds root");
+      const owner = uncertainComparisonAdmissionOwnerFor(binding);
+      try {
+        const admission = await owner.acquire(() => false);
+        expect(admission.ok).toBe(true);
+        if (admission.ok) admission.lease.release();
+        await owner.drain();
+        // Code-unit order ("B" < "a"); locale order would put "a" first.
+        expect(await ledgerEntryNames(worldsRoot)).toEqual(["B", "a"]);
       } finally {
         releaseUncertainComparisonAdmissionOwner(owner);
       }

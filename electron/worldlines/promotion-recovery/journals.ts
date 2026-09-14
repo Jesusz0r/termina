@@ -38,7 +38,7 @@ export async function createPromotionArtifactManifest(path: string): Promise<Pro
     if (entries.length >= MAX_PROMOTION_SCAN_ENTRIES) throw new Error(`promotion artifact exceeds its ${MAX_PROMOTION_SCAN_ENTRIES}-entry bound`);
     entries.push({ rel: current.relative, dev: info.dev, ino: info.ino, state: observed.state });
     if (!info.isDirectory()) continue;
-    const names = await boundedWorldlineEntries(current.path, MAX_PROMOTION_SCAN_ENTRIES, `promotion artifact contains too many child entries`);
+    const names = await boundedWorldlineEntries(current.path, MAX_PROMOTION_SCAN_ENTRIES, `promotion artifact contains too many child entries`, MAX_PROMOTION_SCAN_WORK_BYTES);
     names.sort().reverse();
     for (const name of names) {
       if (pending.length >= MAX_PROMOTION_SCAN_PENDING) throw new Error(`promotion artifact exceeds its ${MAX_PROMOTION_SCAN_PENDING}-entry pending bound`);

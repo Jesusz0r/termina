@@ -137,11 +137,56 @@ function publicRoots(pkgText: string): string[] {
 
 /** Normalize a declaration file: strip comments, trim, drop blank lines. */
 function normalizeSignature(text: string): string {
-  const lines = text
+  const lines = stripComments(text)
     .split("\n")
-    .map((l) => l.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/, "").replace(/\s+$/g, ""))
+    .map((l) => l.replace(/\s+$/g, ""))
     .filter((l) => l.length > 0);
   return lines.join("\n");
+}
+
+/**
+ * Strip block and line comments, keeping comment markers inside string
+ * literals (notably `//` in URLs) intact. Unterminated constructs compare
+ * literally, which fails closed toward "changed".
+ */
+function stripComments(text: string): string {
+  let out = "";
+  let i = 0;
+  const n = text.length;
+  let quote: string | null = null;
+  while (i < n) {
+    const ch = text[i]!;
+    if (quote) {
+      out += ch;
+      if (ch === "\\" && i + 1 < n) {
+        out += text[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end === -1 ? n : end + 2;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "/") {
+      const end = text.indexOf("\n", i + 2);
+      i = end === -1 ? n : end;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 /** The declared dependency names of a package text. */
@@ -313,6 +358,13 @@ export class EvidenceEngine {
       };
     }
     const n = cfg.samples;
+    if (!Number.isSafeInteger(n) || n <= 0) {
+      const reason = "the base benchmark declares no usable sample count (termina.benchmark)";
+      return {
+        A: this.benchmarkUnavailable(stateIds.A, reason),
+        B: this.benchmarkUnavailable(stateIds.B, reason),
+      };
+    }
     const samples: Record<"A" | "B", number[]> = { A: [], B: [] };
     const out: Partial<Record<"A" | "B", EvidenceRecord>> = {};
 
@@ -525,11 +577,19 @@ export class EvidenceEngine {
     let changedFiles = 0;
     let bytes = 0;
     for (const c of changed) {
-      if (c.status === "deleted") continue;
+      if (c.status === "deleted") {
+        // A deletion removes every base line; it must count like an addition.
+        changedFiles++;
+        const buf = await this.deps.store.readBlob(this.deps.baseStateId, c.relPath);
+        if (buf) changedLines += buf.toString("utf8").split("\n").length;
+        continue;
+      }
       changedFiles++;
       const buf = await this.deps.store.readBlob(stateId, c.relPath);
       if (buf) {
         bytes += buf.length;
+        // Modified files count head lines (an approximation: exact
+        // added/removed needs an uncapped shared diff counter).
         changedLines += buf.toString("utf8").split("\n").length;
       }
     }
@@ -707,12 +767,11 @@ export interface TrajectorySignals {
  * commands are not logged; a missing test label is not a fail.
  */
 function parseTrajectoryLog(text: string, testLabel: string | null): TrajectorySignals {
-  const lines = text.split("\n");
+  // Parse each line once: remember records, then replay from the last run.
+  const records: Array<ReturnType<typeof parseSidecarRecord>> = text.split("\n").map((line) => (line.trim() ? parseSidecarRecord(line) : null));
   let start = 0;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-    const rec = parseSidecarRecord(line);
+  for (let i = records.length - 1; i >= 0; i--) {
+    const rec = records[i];
     if (rec && sidecarEventFromRecord(rec)?.t === "agent_start") {
       start = i;
       break;
@@ -726,10 +785,8 @@ function parseTrajectoryLog(text: string, testLabel: string | null): TrajectoryS
   let cancelled = 0;
   let testLabelSeen = false;
   const needle = testLabel && testLabel.trim() ? testLabel.trim() : "";
-  for (let i = start; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-    const rec = parseSidecarRecord(line);
+  for (let i = start; i < records.length; i++) {
+    const rec = records[i];
     if (!rec) continue;
     if (rec.timedOut === true) timedOut++;
     if (rec.cancelled === true) cancelled++;
@@ -792,6 +849,8 @@ export function rankProfiles(
   mineReason: Record<"A" | "B", string | null>,
   thresholdFraction = 0.05,
 ): ProfileVerdict[] {
+  // A non-finite threshold would silently disable ties; fall back to default.
+  const threshold = Number.isFinite(thresholdFraction) && thresholdFraction >= 0 ? thresholdFraction : 0.05;
   const rec = (label: "A" | "B", kind: EvidenceKind): EvidenceRecord | undefined => summary[label].find((r) => r.kind === kind);
   const verifyOk = (label: "A" | "B"): boolean => rec(label, "verify")?.status === "pass";
   const eligible = (label: "A" | "B", requireVerify: boolean): string => {
@@ -908,7 +967,6 @@ export function rankProfiles(
         const med = { A: medA, B: medB };
         const direction = bm.A.result.direction === "higher" ? 1 : -1;
         const effect = (med.B - med.A) / Math.max(med.A, med.B, 1e-9) * direction;
-        const threshold = thresholdFraction;
         if (Math.abs(effect) <= threshold) {
           winner = "tie";
           reason = `the effect (${(Math.abs(effect) * 100).toFixed(1)}%) does not exceed the ${threshold * 100}% threshold`;
@@ -939,7 +997,10 @@ function variability(rec: EvidenceRecord | undefined): number | null {
   const p25 = finiteQuartile(rec, "p25");
   const p75 = finiteQuartile(rec, "p75");
   if (median === null || p25 === null || p75 === null || p25 > p75) return null;
-  return (p75 - p25) / median;
+  if (p75 === p25) return 0;
+  if (median === 0) return Number.POSITIVE_INFINITY;
+  // Absolute spread: a negative median must not pass the bound check.
+  return Math.abs((p75 - p25) / median);
 }
 
 function finiteQuartile(rec: EvidenceRecord, key: "p25" | "p75"): number | null {

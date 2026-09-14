@@ -7,7 +7,8 @@
 import { parseSessionBundlePath } from "../../../agent-core/session.js";
 import { boundPromotionCopyFile, boundPromotionCreateSymlink, boundPromotionInstallDirectory, boundPromotionListDirectories, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionTransition, boundPromotionWriteFile, disposeWorldlineGitCore, readBoundPromotionJournal, type BoundPromotionExpectedLeaf, type PromotionFsIdentity } from "../../worldline-git.js";
 import { promotionIdentityOf } from "../bindings.js";
-import { errnoCode, isInside } from "../guards.js";
+import { isInside } from "../guards.js";
+import { errorCode } from "../../../shared/guards.js";
 import { promotionJournalAdmissionOwnerFor, releasePromotionJournalAdmissionOwner } from "../promotion-journal.js";
 import { type BoundPromotionDirectory, type CanonicalPath, type PromotionArtifactManifest, type PromotionDirectoryPlan, type PromotionEntryState, type PromotionJournalBinding, type PromotionRecoveryContext } from "../types.js";
 import { randomUUID } from "node:crypto";
@@ -71,7 +72,7 @@ async function collectRecoveryMarkerInputs(primaryRoot: string, rels: string[]):
     try {
       info = await lstatPath(join(primaryRoot, rel), { bigint: true });
     } catch (error) {
-      if (errnoCode(error) === "ENOENT") {
+      if (errorCode(error) === "ENOENT") {
         inputs.push({ rel, present: false, dev: "0", ino: "0", size: "0", mtimeNs: "0" });
         continue;
       }
@@ -217,7 +218,7 @@ async function tryCompleteAppliedPromotion(
         return false;
       }
     } catch (error) {
-      if (errnoCode(error) !== "ENOENT") return false;
+      if (errorCode(error) !== "ENOENT") return false;
     }
     if (manifest.status !== "planned") return false;
     const stagedBundleDir = join(sessionRootPath, parsed.sessionId);
@@ -229,7 +230,7 @@ async function tryCompleteAppliedPromotion(
     try {
       stagedInfo = await lstatPath(stagedBundleDir, { bigint: true });
     } catch (error) {
-      if (errnoCode(error) === "ENOENT") return false;
+      if (errorCode(error) === "ENOENT") return false;
       return false;
     }
     if (!stagedInfo.isDirectory() || stagedInfo.isSymbolicLink()) return false;
@@ -240,7 +241,7 @@ async function tryCompleteAppliedPromotion(
     try {
       destInfo = await lstatPath(parsed.projectDir, { bigint: true });
     } catch (error) {
-      if (errnoCode(error) === "ENOENT") return false;
+      if (errorCode(error) === "ENOENT") return false;
       return false;
     }
     if (!destInfo.isDirectory() || destInfo.isSymbolicLink()) return false;

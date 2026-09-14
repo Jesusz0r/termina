@@ -45,3 +45,48 @@ describe("preserve-api verdict (issue #188)", () => {
     expect(preserveApi(record("api", "pass"), record("api", "unavailable", "no public root")).winner).toBe("unavailable");
   });
 });
+
+function benchmarkRecord(median: number, p25: number, p75: number): EvidenceRecord {
+  return {
+    kind: "benchmark",
+    stateId: "s",
+    baseStateId: "b",
+    status: "pass",
+    result: { unit: "ms", direction: "lower", samples: [median], median, p25, p75 },
+    reason: null,
+  };
+}
+
+function performanceFirst(a: EvidenceRecord, b: EvidenceRecord, threshold = 0.05): { winner: string; reason: string } {
+  const summary = { A: [verifyPass(), a], B: [verifyPass(), b] };
+  const verdict = rankProfiles(summary, { A: null, B: null }, threshold).find((v) => v.profile === "performance-first")!;
+  return { winner: verdict.winner, reason: verdict.reason };
+}
+
+describe("performance-first variability (issue #193)", () => {
+  it("bounds absolute spread for negative medians", () => {
+    const { winner, reason } = performanceFirst(
+      benchmarkRecord(-100, -130, -70),
+      benchmarkRecord(-100, -130, -70),
+    );
+    expect(winner).toBe("unavailable");
+    expect(reason).toContain("variability exceeds");
+  });
+
+  it("treats a zero median without spread as a tie, not NaN", () => {
+    const { winner, reason } = performanceFirst(
+      benchmarkRecord(0, 0, 0),
+      benchmarkRecord(0, 0, 0),
+    );
+    expect(winner).toBe("tie");
+    expect(reason).not.toContain("NaN");
+  });
+
+  it("falls back to the default threshold when it is NaN", () => {
+    const close = { A: benchmarkRecord(100, 99, 101), B: benchmarkRecord(102, 101, 103) };
+    expect(performanceFirst(close.A, close.B, NaN).winner).toBe("tie");
+    expect(performanceFirst(close.A, close.B, Number.NaN).reason).toContain("5%");
+    const far = { A: benchmarkRecord(100, 99, 101), B: benchmarkRecord(200, 199, 201) };
+    expect(performanceFirst(far.A, far.B, NaN).winner).toBe("A");
+  });
+});

@@ -6,7 +6,8 @@
  */
 import { boundPromotionCopyFile, type BoundPromotionExpectedLeaf } from "../../worldline-git.js";
 import { promotionIdentityOf } from "../bindings.js";
-import { errnoCode, isInside } from "../guards.js";
+import { isInside } from "../guards.js";
+import { errorCode } from "../../../shared/guards.js";
 import { MAX_PROMOTION_FILE_BYTES } from "../limits.js";
 import { type BoundPromotionDirectory, type CanonicalPath, type PromotionDirectoryPlan, type PromotionEntryState } from "../types.js";
 import { createHash } from "node:crypto";
@@ -48,7 +49,7 @@ export async function readPromotionEntry(abs: string): Promise<{ state: Promotio
   try {
     pathInfo = await lstatPath(abs);
   } catch (error) {
-    if (errnoCode(error) === "ENOENT") return { state: { type: "missing" } };
+    if (errorCode(error) === "ENOENT") return { state: { type: "missing" } };
     throw error;
   }
   if (pathInfo.isSymbolicLink()) {

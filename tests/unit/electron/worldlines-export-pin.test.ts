@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildUnifiedPatch } from "../../../electron/worldlines/export.ts";
@@ -19,8 +19,8 @@ const mockTree = vi.mocked(gitCommitTree);
 
 type Head = { ok: boolean; commit?: string; tree?: string; error?: string };
 
-async function makeCtx(heads: Head[], candState = "running"): Promise<{ ctx: ExportCandidateContext; worldsRoot: string }> {
-  const worldsRoot = await mkdtemp(join(tmpdir(), "termina-export-pin-"));
+async function makeCtx(heads: Head[], candState = "running", worldsRootOverride?: string): Promise<{ ctx: ExportCandidateContext; worldsRoot: string }> {
+  const worldsRoot = worldsRootOverride ?? await mkdtemp(join(tmpdir(), "termina-export-pin-"));
   const cand = { state: candState, role: "reference", dir: join(worldsRoot, "cand") } as CandidateState;
   const cmp = {
     baseCommit: "base",
@@ -108,6 +108,76 @@ describe("export head pinning (issue #191)", () => {
       const result = await exportCandidateRun(ctx, "cmp-191", "A");
       expect(result.ok).toBe(false);
       expect(result.error ?? "").toMatch(/only a live candidate can be exported/);
+    } finally {
+      await rm(worldsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns the canonical bundle path (issue #193)", async () => {
+    const realRoot = await mkdtemp(join(tmpdir(), "termina-export-real-"));
+    const link = `${realRoot}-link`;
+    await symlink(realRoot, link);
+    const worldsRoot = join(link, "worlds");
+    const { ctx } = await makeCtx(
+      [
+        { ok: true, commit: "h1", tree: "t1" },
+        { ok: true, commit: "h1", tree: "t1" },
+      ],
+      "running",
+      worldsRoot,
+    );
+    try {
+      const result = await exportCandidateRun(ctx, "cmp-191", "A");
+      expect(result.ok).toBe(true);
+      expect(result.path).not.toContain("-link");
+      expect(result.path!.startsWith(await realpath(realRoot))).toBe(true);
+      await readFile(join(result.path!, "candidate.patch"), "utf8");
+    } finally {
+      await rm(link, { force: true });
+      await rm(realRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("gathers many files concurrently without loss or duplication (issue #193)", async () => {
+    const files = Array.from({ length: 25 }, (_, i) => ({ relPath: `m-${String(i).padStart(2, "0")}.ts`, status: "modified" as const }));
+    mockWorking.mockResolvedValue(files);
+    mockCommitted.mockResolvedValue([]);
+    mockTree.mockResolvedValue([]);
+    const { ctx, worldsRoot } = await makeCtx([
+      { ok: true, commit: "h1", tree: "t1" },
+      { ok: true, commit: "h1", tree: "t1" },
+    ]);
+    ctx.fileOf = async (_cid, _label, relPath) => ({ ok: true, content: `after-${relPath}\n` });
+    ctx.baseFileOf = async (_cid, relPath) => ({ ok: true, content: `before-${relPath}\n` });
+    try {
+      const result = await exportCandidateRun(ctx, "cmp-191", "A");
+      expect(result.ok).toBe(true);
+      const patch = await readFile(join(result.path!, "candidate.patch"), "utf8");
+      expect(patch.match(/diff --git/g)?.length).toBe(25);
+      for (const file of files) {
+        expect(patch).toContain(`diff --git a/${file.relPath} b/${file.relPath}`);
+      }
+      const metadata = JSON.parse(await readFile(join(result.path!, "metadata.json"), "utf8")) as { files?: number };
+      expect(metadata.files).toBe(25);
+    } finally {
+      await rm(worldsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("carries the executable bit into created-file modes (issue #193)", async () => {
+    mockWorking.mockResolvedValue([{ relPath: "tool.sh", status: "created" }]);
+    mockCommitted.mockResolvedValue([]);
+    mockTree.mockResolvedValue([]);
+    const { ctx, worldsRoot } = await makeCtx([
+      { ok: true, commit: "h1", tree: "t1" },
+      { ok: true, commit: "h1", tree: "t1" },
+    ]);
+    ctx.fileOf = async () => ({ ok: true, content: "x\n", mode: "100755" });
+    try {
+      const result = await exportCandidateRun(ctx, "cmp-191", "A");
+      expect(result.ok).toBe(true);
+      const patch = await readFile(join(result.path!, "candidate.patch"), "utf8");
+      expect(patch).toContain("new file mode 100755");
     } finally {
       await rm(worldsRoot, { recursive: true, force: true });
     }

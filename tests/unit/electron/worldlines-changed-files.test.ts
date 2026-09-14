@@ -56,4 +56,12 @@ describe("changedFiles merge (issue #187)", () => {
       { relPath: "w.ts", status: "modified" },
     ]);
   });
+
+  it("fails closed when the comparison base is missing (issue #193)", async () => {
+    states([], []);
+    const cmp = { baseCommit: null } as ComparisonState;
+    const cand = { dir: "/tmp/cand" } as CandidateState;
+    await expect(changedFiles(cmp, cand)).rejects.toThrow(/comparison base is missing/);
+    expect(mockWorking).not.toHaveBeenCalled();
+  });
 });

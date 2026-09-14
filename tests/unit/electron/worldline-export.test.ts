@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -89,6 +89,16 @@ describe("export unified diff", () => {
     expect(patch).toContain("+++ b/f.ts");
     expect(patch.endsWith("\n")).toBe(true);
   });
+
+  it("keeps +x on created executables, 644 otherwise", () => {
+    const patch = buildUnifiedPatch([
+      { relPath: "run.sh", before: null, after: "x\n", mode: "100755" },
+      { relPath: "plain.ts", before: null, after: "x\n" },
+      { relPath: "bogus.ts", before: null, after: "x\n", mode: "100777" },
+    ]);
+    expect(patch).toContain("new file mode 100755");
+    expect(patch.match(/new file mode 100644/g)?.length).toBe(2);
+  });
 });
 
 describe("export git apply (issue #189)", () => {
@@ -151,6 +161,70 @@ describe("export git apply (issue #189)", () => {
       ]);
       // Nothing patchable: an empty patch plus the skipped-files listing.
       expect(allStub).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("export newlines (issue #193)", () => {
+  it("renders the trailing-newline matrix git-faithfully", () => {
+    expect(unifiedFileDiff("a", "a\n")).toEqual(["@@ -1 +1 @@", "-a", "\\ No newline at end of file", "+a"]);
+    expect(unifiedFileDiff("a\n", "a")).toEqual(["@@ -1 +1 @@", "-a", "+a", "\\ No newline at end of file"]);
+    expect(unifiedFileDiff("hello", "hello\n")).toEqual(["@@ -1 +1 @@", "-hello", "\\ No newline at end of file", "+hello"]);
+    expect(unifiedFileDiff("a\nb", "a\nc")).toEqual([
+      "@@ -1,2 +1,2 @@",
+      " a",
+      "-b",
+      "\\ No newline at end of file",
+      "+c",
+      "\\ No newline at end of file",
+    ]);
+    // Identical bytes (either newline state) still diff empty.
+    expect(unifiedFileDiff("a", "a")).toEqual([]);
+    expect(unifiedFileDiff("a\n", "a\n")).toEqual([]);
+  });
+
+  it("applies the matrix with byte-exact results, including +x", () => {
+    const dir = mkdtempSync(join(tmpdir(), "termina-export-newlines-"));
+    const git = (...args: string[]): void => {
+      execFileSync("git", ["-c", "user.email=test@termina.local", "-c", "user.name=test", "-c", "commit.gpgsign=false", ...args], { cwd: dir, stdio: "pipe" });
+    };
+    try {
+      git("init", "-q", ".");
+      writeFileSync(join(dir, "f1"), "a");
+      writeFileSync(join(dir, "f2"), "a\n");
+      writeFileSync(join(dir, "f3"), "a\nb");
+      writeFileSync(join(dir, "f5"), "x\n");
+      writeFileSync(join(dir, "f6"), "a");
+      writeFileSync(join(dir, "f7"), "hello");
+      git("add", ".");
+      git("commit", "-qm", "init");
+      const patch = buildUnifiedPatch([
+        { relPath: "f1", before: "a", after: "a\n" },
+        { relPath: "f2", before: "a\n", after: "a" },
+        { relPath: "f3", before: "a\nb", after: "a\nc" },
+        { relPath: "f4", before: null, after: "new\n" },
+        { relPath: "f5", before: "x\n", after: "" },
+        { relPath: "f6", before: "a", after: "a\nb\n" },
+        { relPath: "f7", before: "hello", after: "hello\n" },
+        { relPath: "run.sh", before: null, after: "x\n", mode: "100755" },
+      ]);
+      const patchPath = join(dir, "candidate.patch");
+      writeFileSync(patchPath, patch);
+      execFileSync("git", ["apply", "--check", patchPath], { cwd: dir, stdio: "pipe" });
+      execFileSync("git", ["apply", patchPath], { cwd: dir, stdio: "pipe" });
+      const bytes = (name: string): string => readFileSync(join(dir, name), "utf8");
+      expect(bytes("f1")).toBe("a\n");
+      expect(bytes("f2")).toBe("a");
+      expect(bytes("f3")).toBe("a\nc");
+      expect(bytes("f4")).toBe("new\n");
+      expect(bytes("f5")).toBe("");
+      expect(bytes("f6")).toBe("a\nb\n");
+      // The 5-byte file gains exactly its newline: 6 bytes, not 5.
+      expect(bytes("f7")).toBe("hello\n");
+      expect(readFileSync(join(dir, "f7"), "utf8").length).toBe(6);
+      expect(statSync(join(dir, "run.sh")).mode & 0o111).not.toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

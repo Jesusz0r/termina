@@ -147,6 +147,7 @@ import {
   MAX_STALE_SWEEP_BYTES,
   MAX_TEMPLATE_BYTES,
   MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
+  MAX_UNCERTAIN_SCAN_WORK_BYTES,
   MAX_WORLDLINE_FILE_BYTES,
   PROMOTION_JOURNAL_CHECKPOINT_PATHS,
   READY_TIMEOUT_MS,
@@ -963,7 +964,7 @@ export class WorldlineManager {
   }
 
   /** Read one file from a candidate tree. */
-  async fileOf(comparisonId: string, label: "A" | "B", relPath: string): Promise<{ ok: boolean; content?: string; error?: string }> {
+  async fileOf(comparisonId: string, label: "A" | "B", relPath: string): Promise<{ ok: boolean; content?: string; mode?: string; error?: string }> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
@@ -977,7 +978,9 @@ export class WorldlineManager {
       const info = await stat(canonicalTarget);
       if (!info.isFile()) return { ok: false, error: "the candidate path is not a file" };
       if (info.size > MAX_WORLDLINE_FILE_BYTES) return { ok: false, error: "the candidate file is too large" };
-      return { ok: true, content: await readFile(canonicalTarget, "utf8") };
+      // Git modes for export: any exec bit means 100755, else 100644.
+      const mode = (info.mode & 0o111) !== 0 ? "100755" : "100644";
+      return { ok: true, content: await readFile(canonicalTarget, "utf8"), mode };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -3552,6 +3555,7 @@ export class WorldlineManager {
         worldsRoot,
         MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
         `worldline root contains too many entries (${MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES}); resolve retained recovery evidence before retrying`,
+        MAX_UNCERTAIN_SCAN_WORK_BYTES,
       );
     } catch {
       return;

@@ -3,10 +3,10 @@
  * Manifest parsing, tree measurement, usage ledgers, and the admission
  * owner that bounds recovery evidence per worlds root. Never auto-deletes.
  */
-import { errnoCode, objectRecord } from "./guards.js";
+import { errorCode, isRecord } from "../../shared/guards.js";
 
 import { randomUUID, createHash } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { lstat as lstatPath, opendir, readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
@@ -19,7 +19,6 @@ import {
 } from "../../shared/session-retention-lock.js";
 import {
   MARKER,
-  MAX_PROMOTION_SCAN_WORK_BYTES,
   MAX_UNCERTAIN_COMPARISONS,
   MAX_UNCERTAIN_COMPARISON_BYTES,
   MAX_UNCERTAIN_COMPARISON_ENTRIES,
@@ -47,27 +46,22 @@ import type {
   UncertainComparisonUsageLedger,
 } from "./types.js";
 
-
-/**
- * Extract the errno code from an unknown caught value, or null.
- */
-
-/** Parse only a complete manifest shape; null is deliberately fail-closed. */
-
 /** Parse only a complete manifest shape; null is deliberately fail-closed. */
 export function parseComparisonManifest(value: unknown): ComparisonManifest | null {
-  const record = objectRecord(value);
-  if (!record || typeof record.id !== "string" || record.id.length === 0 || typeof record.sourceRunId !== "string" || record.sourceRunId.length === 0) return null;
+  if (!isRecord(value)) return null;
+  const record = value;
+  if (typeof record.id !== "string" || record.id.length === 0 || typeof record.sourceRunId !== "string" || record.sourceRunId.length === 0) return null;
   if (typeof record.createdAt !== "number" || !Number.isFinite(record.createdAt) || record.createdAt <= 0) return null;
   if (record.status !== "creating" && record.status !== "complete" && record.status !== "uncertain") return null;
   if (record.expectedCandidates !== 1 && record.expectedCandidates !== 2) return null;
-  const candidatesRecord = objectRecord(record.candidates);
-  if (!candidatesRecord) return null;
+  if (!isRecord(record.candidates)) return null;
+  const candidatesRecord = record.candidates;
   const candidates: Record<string, ComparisonManifestCandidate> = {};
   for (const [label, rawCandidate] of Object.entries(candidatesRecord)) {
     if (label !== "A" && label !== "B") return null;
-    const candidate = objectRecord(rawCandidate);
-    if (!candidate || (typeof candidate.pid !== "number" && candidate.pid !== null) || (typeof candidate.pid === "number" && (!Number.isInteger(candidate.pid) || candidate.pid < 0))) return null;
+    if (!isRecord(rawCandidate)) return null;
+    const candidate = rawCandidate;
+    if ((typeof candidate.pid !== "number" && candidate.pid !== null) || (typeof candidate.pid === "number" && (!Number.isInteger(candidate.pid) || candidate.pid < 0))) return null;
     if (typeof candidate.lstart !== "string" && candidate.lstart !== null) return null;
     if (!Array.isArray(candidate.paths) || candidate.paths.length === 0 || candidate.paths.some((path) => typeof path !== "string" || !isAbsolute(path))) return null;
     candidates[label] = { pid: candidate.pid as number | null, lstart: candidate.lstart as string | null, paths: [...candidate.paths] as string[] };
@@ -76,8 +70,9 @@ export function parseComparisonManifest(value: unknown): ComparisonManifest | nu
   if (!Array.isArray(record.uncertainSessionArtifacts)) return null;
   const uncertainSessionArtifacts: Array<{ path: string; error: string }> = [];
   for (const rawArtifact of record.uncertainSessionArtifacts) {
-    const artifact = objectRecord(rawArtifact);
-    if (!artifact || typeof artifact.path !== "string" || !isAbsolute(artifact.path) || artifact.path.length === 0 || typeof artifact.error !== "string" || artifact.error.length === 0) return null;
+    if (!isRecord(rawArtifact)) return null;
+    const artifact = rawArtifact;
+    if (typeof artifact.path !== "string" || !isAbsolute(artifact.path) || artifact.path.length === 0 || typeof artifact.error !== "string" || artifact.error.length === 0) return null;
     uncertainSessionArtifacts.push({ path: artifact.path, error: artifact.error });
   }
   if (record.status === "complete" && (Object.keys(candidates).length !== record.expectedCandidates || uncertainSessionArtifacts.length > 0)) return null;
@@ -109,12 +104,17 @@ export function comparisonManifestFor(cmp: ComparisonState, status: ComparisonMa
   };
 }
 
-function readComparisonManifest(dir: string): ComparisonManifest | null {
-  try {
-    return parseComparisonManifest(JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")));
-  } catch {
-    return null;
-  }
+function readComparisonManifest(dir: string): Promise<ComparisonManifest | null> {
+  return readFile(join(dir, "manifest.json"), "utf8").then(
+    (text) => {
+      try {
+        return parseComparisonManifest(JSON.parse(text));
+      } catch {
+        return null;
+      }
+    },
+    () => null,
+  );
 }
 
 
@@ -228,7 +228,7 @@ async function measureUncertainComparisonTree(root: string, isClosing: () => boo
   return { ok: true, bytes: Number(bytes), entries, proof: digest.digest("hex") };
 }
 
-export async function boundedWorldlineEntries(path: string, limit: number, message: string): Promise<string[]> {
+export async function boundedWorldlineEntries(path: string, limit: number, message: string, workBudget: number): Promise<string[]> {
   let directory;
   try {
     directory = await opendir(path);
@@ -240,7 +240,7 @@ export async function boundedWorldlineEntries(path: string, limit: number, messa
   try {
     for await (const entry of directory) {
       const addedNameBytes = Buffer.byteLength(entry.name, "utf8");
-      if (nameBytes > MAX_PROMOTION_SCAN_WORK_BYTES - addedNameBytes) throw new Error(message);
+      if (nameBytes > workBudget - addedNameBytes) throw new Error(message);
       nameBytes += addedNameBytes;
       names.push(entry.name);
       if (names.length > limit) throw new Error(message);
@@ -286,6 +286,7 @@ async function uncertainComparisonRootNames(root: string): Promise<string[]> {
     root,
     MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
     `uncertain comparison evidence root contains too many entries (${MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES}); explicitly discard retained recovery evidence before retrying`,
+    MAX_UNCERTAIN_SCAN_WORK_BYTES,
   );
   const marked: string[] = [];
   for (const name of names) {
@@ -294,7 +295,7 @@ async function uncertainComparisonRootNames(root: string): Promise<string[]> {
     try {
       info = await lstatPath(dir, { bigint: true });
     } catch (error) {
-      if (errnoCode(error) === "ENOENT") continue;
+      if (errorCode(error) === "ENOENT") continue;
       throw new Error("uncertain comparison evidence root is unreadable; explicitly discard retained recovery evidence before retrying");
     }
     if (!info.isDirectory() || info.isSymbolicLink()) continue;
@@ -302,23 +303,23 @@ async function uncertainComparisonRootNames(root: string): Promise<string[]> {
       await lstatPath(join(dir, MARKER), { bigint: true });
       marked.push(name);
     } catch (error) {
-      if (errnoCode(error) !== "ENOENT") throw new Error("uncertain comparison marker is unreadable; explicitly discard retained recovery evidence before retrying");
+      if (errorCode(error) !== "ENOENT") throw new Error("uncertain comparison marker is unreadable; explicitly discard retained recovery evidence before retrying");
     }
   }
   return marked.sort();
 }
 
-function uncertainComparisonIsSafe(root: string, name: string, safeIds: ReadonlySet<string>): boolean {
+async function uncertainComparisonIsSafe(root: string, name: string, safeIds: ReadonlySet<string>): Promise<boolean> {
   if (!safeIds.has(name)) return false;
   const dir = join(root, name);
   let marker;
   try {
-    marker = lstatSync(join(dir, MARKER));
+    marker = await lstatPath(join(dir, MARKER), { bigint: true });
   } catch {
     return false;
   }
   if (!marker.isFile() || marker.isSymbolicLink()) return false;
-  const manifest = readComparisonManifest(dir);
+  const manifest = await readComparisonManifest(dir);
   return manifest !== null && manifest.status !== "uncertain" && manifest.uncertainSessionArtifacts.length === 0;
 }
 
@@ -327,17 +328,17 @@ async function buildUncertainComparisonLedgerEntry(root: string, name: string, s
   try {
     info = await lstatPath(join(root, name), { bigint: true });
   } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
+    if (errorCode(error) === "ENOENT") return null;
     throw new Error("uncertain comparison evidence is unreadable or partial; explicitly discard retained recovery evidence before retrying");
   }
   if (!info.isDirectory() || info.isSymbolicLink()) return null;
   try {
     await lstatPath(join(root, name, MARKER), { bigint: true });
   } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
+    if (errorCode(error) === "ENOENT") return null;
     throw new Error("uncertain comparison marker is unreadable; explicitly discard retained recovery evidence before retrying");
   }
-  if (uncertainComparisonIsSafe(root, name, safeIds)) {
+  if (await uncertainComparisonIsSafe(root, name, safeIds)) {
     return { name, identity: uncertainIdentityOf(info), counted: false, bytes: 0, entries: 0, proof: "0".repeat(64) };
   }
   const measured = await measureUncertainComparisonTree(join(root, name), isClosing);
@@ -436,7 +437,7 @@ async function readUncertainComparisonUsageLedger(root: string, safeIds: Readonl
   try {
     info = await lstatPath(path, { bigint: true });
   } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
+    if (errorCode(error) === "ENOENT") return null;
     return null;
   }
   if (!info.isFile() || info.isSymbolicLink() || info.size > 8n * 1024n * 1024n) return null;
@@ -484,7 +485,7 @@ async function readUncertainComparisonUsageLedger(root: string, safeIds: Readonl
     } catch {
       return null;
     }
-    const safe = uncertainComparisonIsSafe(root, entry.name, safeIds);
+    const safe = await uncertainComparisonIsSafe(root, entry.name, safeIds);
     if (entry.counted !== !safe) return null;
     if (!entry.counted) {
       if (entry.proof !== "0".repeat(64)) return null;
@@ -541,7 +542,7 @@ async function uncertainLedgerFileIdentity(root: string): Promise<UncertainCompa
   try {
     return uncertainIdentityOf(await lstatPath(join(root, UNCERTAIN_COMPARISON_USAGE_LEDGER), { bigint: true }));
   } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
+    if (errorCode(error) === "ENOENT") return null;
     throw error;
   }
 }
@@ -730,7 +731,7 @@ export class UncertainComparisonAdmissionOwner {
         entriesByName.delete(name);
         continue;
       }
-      const safe = uncertainComparisonIsSafe(root, name, safeIds);
+      const safe = await uncertainComparisonIsSafe(root, name, safeIds);
       if (safe) {
         entriesByName.set(name, { name, identity: uncertainIdentityOf(current), counted: false, bytes: 0, entries: 0, proof: "0".repeat(64) });
       } else if (rescanExisting || !existing.counted || !sameUncertainIdentity(uncertainIdentityOf(current), existing.identity)) {
@@ -742,7 +743,7 @@ export class UncertainComparisonAdmissionOwner {
     for (const name of [...entriesByName.keys()]) {
       if (!names.includes(name)) entriesByName.delete(name);
     }
-    const entries = [...entriesByName.values()].sort((left, right) => left.name.localeCompare(right.name));
+    const entries = [...entriesByName.values()].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
     const next: UncertainComparisonUsageLedger = {
       version: 1,
       root: base.root,

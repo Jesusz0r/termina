@@ -20,11 +20,13 @@ export function isSafeRelativePath(relPath: string): boolean {
 
 /** Files differing from the base plus head-tree source statistics. */
 export async function changedFiles(cmp: ComparisonState, cand: CandidateState): Promise<{ files: WorldlineChangedFile[]; sourceFiles: number; sourceBytes: number }> {
+  // The export call site passes comparisons with no base guard of its own.
+  if (!cmp.baseCommit) throw new Error("the comparison base is missing");
   // Working tree vs HEAD: staged, unstaged, and untracked changes.
   const working = await gitWorkingChanges(cand.dir);
   // Committed changes since the shared base (A's settled apply and any
   // agent commits; B usually has none).
-  const committed = await gitCommittedChanges(cand.dir, cmp.baseCommit!, "HEAD");
+  const committed = await gitCommittedChanges(cand.dir, cmp.baseCommit, "HEAD");
   const tree = await gitCommitTree(cand.dir, "HEAD");
   const byPath = new Map<string, WorldlineChangedFile>();
   // Committed first, working tree last: both consumers (comparison details
@@ -41,6 +43,6 @@ export async function changedFiles(cmp: ComparisonState, cand: CandidateState): 
   for (const entry of tree) {
     sourceBytes += entry.size;
   }
-  const files = [...byPath.values()].sort((a, b) => a.relPath.localeCompare(b.relPath));
+  const files = [...byPath.values()].sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
   return { files, sourceFiles, sourceBytes };
 }

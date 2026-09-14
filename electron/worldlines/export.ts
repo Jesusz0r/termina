@@ -12,6 +12,8 @@ export interface ExportPatchFile {
   relPath: string;
   before: string | null;
   after: string | null;
+  /** New-file mode for created files (`100755` keeps +x; default `100644`). */
+  mode?: string;
 }
 
 /** Files over this size (or with NUL bytes) export as stubs, not hunks. */
@@ -25,7 +27,13 @@ export const MAX_EXPORT_FILE_LINES = 2000;
 const EXPORT_CONTEXT_LINES = 3;
 
 function splitLines(text: string): string[] {
-  return text.split("\n");
+  // An empty file has no lines, not one empty line.
+  return text === "" ? [] : text.split("\n");
+}
+
+/** Deterministic code-unit path order (never locale-dependent). */
+function compareRelPath(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 type Edit = { kind: "equal" | "del" | "add"; line: string };
@@ -76,7 +84,33 @@ export function unifiedFileDiff(before: string | null, after: string | null): st
   // Drop the artifact empty tail that a trailing newline produces.
   if (before !== null && beforeText.endsWith("\n")) beforeLines.pop();
   if (after !== null && afterText.endsWith("\n")) afterLines.pop();
-  const edits = diffLines(beforeLines, afterLines);
+  const beforeNoNewline = before !== null && beforeText !== "" && !beforeText.endsWith("\n");
+  const afterNoNewline = after !== null && afterText !== "" && !afterText.endsWith("\n");
+  const rawEdits = diffLines(beforeLines, afterLines);
+  // An equal line is context-safe only when both sides agree on its
+  // terminator state; only last lines can disagree. Split disagreements
+  // into del+add (git compares lines with terminators), so newline-only
+  // changes produce hunks and context never glues across a missing newline.
+  const edits: Edit[] = [];
+  let bi = 0;
+  let ai = 0;
+  for (const edit of rawEdits) {
+    if (edit.kind !== "equal") {
+      if (edit.kind === "del") bi++;
+      else ai++;
+      edits.push(edit);
+      continue;
+    }
+    const beforeLastNoNL = beforeNoNewline && bi === beforeLines.length - 1;
+    const afterLastNoNL = afterNoNewline && ai === afterLines.length - 1;
+    if (beforeLastNoNL !== afterLastNoNL) {
+      edits.push({ kind: "del", line: edit.line }, { kind: "add", line: edit.line });
+    } else {
+      edits.push(edit);
+    }
+    bi++;
+    ai++;
+  }
   // Group changed edit indices; a gap of context-or-less merges hunks.
   const groups: number[][] = [];
   let current: number[] = [];
@@ -118,6 +152,24 @@ export function unifiedFileDiff(before: string | null, after: string | null): st
         body.push(`+${edit.line}`);
         bCount++;
       }
+    }
+    // Mark a side whose last line lacks its trailing newline, like git.
+    // Both sides share one marker after a common context line.
+    let lastA = -1;
+    let lastB = -1;
+    for (let idx = end - 1; idx >= start; idx--) {
+      const edit = edits[idx]!;
+      if (lastA === -1 && edit.kind !== "add") lastA = idx - start;
+      if (lastB === -1 && edit.kind !== "del") lastB = idx - start;
+    }
+    const markA = beforeNoNewline && aCount > 0 && lastA !== -1 && aNum + aCount - 1 === beforeLines.length;
+    const markB = afterNoNewline && bCount > 0 && lastB !== -1 && bNum + bCount - 1 === afterLines.length;
+    const marks: number[] = [];
+    if (markA && lastA !== -1) marks.push(lastA);
+    if (markB && lastB !== -1 && lastB !== lastA) marks.push(lastB);
+    // Insert the higher index first so the lower one does not shift.
+    for (const at of marks.sort((x, y) => y - x)) {
+      body.splice(at + 1, 0, "\\ No newline at end of file");
     }
     out.push(hunkHeader(aCount === 0 ? aNum - 1 : aNum, aCount, bCount === 0 ? bNum - 1 : bNum, bCount));
     out.push(...body);
@@ -176,7 +228,7 @@ export function partitionExportPatchFiles(files: ExportPatchFile[]): { patchable
 /** The `skipped-files.txt` bundle companion: every listed-only stub. */
 export function buildSkippedFilesText(stubs: ExportStubFile[]): string {
   const lines = ["Listed, not patched (binary, oversized, or long files):"];
-  for (const stub of [...stubs].sort((a, b) => (a.relPath < b.relPath ? -1 : 1))) {
+  for (const stub of [...stubs].sort((a, b) => compareRelPath(a.relPath, b.relPath))) {
     lines.push(`${stub.relPath} (${stub.reason}, ${stub.beforeSize} -> ${stub.afterSize} bytes)`);
   }
   return `${lines.join("\n")}\n`;
@@ -186,13 +238,13 @@ export function buildSkippedFilesText(stubs: ExportStubFile[]): string {
  * excluded so the patch always round-trips through `git apply`. */
 export function buildUnifiedPatch(files: ExportPatchFile[]): string {
   const out: string[] = [];
-  const sorted = [...files].filter((file) => exportStubReason(file) === null).sort((a, b) => (a.relPath < b.relPath ? -1 : 1));
+  const sorted = [...files].filter((file) => exportStubReason(file) === null).sort((a, b) => compareRelPath(a.relPath, b.relPath));
   for (const file of sorted) {
     const devNull = "/dev/null";
     const from = file.before === null ? devNull : `a/${file.relPath}`;
     const to = file.after === null ? devNull : `b/${file.relPath}`;
     out.push(`diff --git ${from} ${to}`);
-    if (file.before === null) out.push("new file mode 100644");
+    if (file.before === null) out.push(`new file mode ${file.mode === "100755" ? "100755" : "100644"}`);
     if (file.after === null) out.push("deleted file mode 100644");
     out.push(`--- ${from}`);
     out.push(`+++ ${to}`);

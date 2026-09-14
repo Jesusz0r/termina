@@ -143,4 +143,22 @@ describe("candidate launch env (issue #197)", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("reports git modes from fileOf (issue #193)", async () => {
+    const { manager, root } = await setup(null, null);
+    try {
+      const candDir = join(root, "files");
+      await mkdir(candDir, { recursive: true });
+      await writeFile(join(candDir, "tool.sh"), "x\n", { mode: 0o755 });
+      await writeFile(join(candDir, "plain.txt"), "x\n", { mode: 0o644 });
+      (manager as unknown as { comparisons: Map<string, ComparisonState> }).comparisons.set("cmp-mode", {
+        candidates: new Map([["A", { dir: candDir }]]),
+      } as unknown as ComparisonState);
+      expect(await manager.fileOf("cmp-mode", "A", "tool.sh")).toMatchObject({ ok: true, mode: "100755" });
+      expect(await manager.fileOf("cmp-mode", "A", "plain.txt")).toMatchObject({ ok: true, mode: "100644" });
+    } finally {
+      await manager.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -303,7 +303,6 @@ export interface PromoteSeed {
 }
 
 /** One recorded run (WORLDLINES §6.5). */
-/** One recorded run (WORLDLINES §6.5). */
 export interface RunRecord {
   id: string;
   terminalId: string;
