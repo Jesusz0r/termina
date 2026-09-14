@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Termina — Mission control for your AI coding agent</title>
-  <meta name="description" content="Termina runs a real agent TUI beside a live Monaco IDE. Watch every edit, test in the background, fork any moment into isolated candidates, and merge the winner back — your Git repo stays untouched.">
+  <meta name="description" content="Termina is mission control for your coding agent: watch every edit live, verify in one click, fork any moment, and merge only the winner — your Git repo stays untouched.">
   <link rel="icon" type="image/svg+xml" href="assets/icon.svg?v=0.1.43">
   <link rel="icon" type="image/png" sizes="512x512" href="assets/icon.png?v=0.1.43">
   <link rel="shortcut icon" href="favicon.ico?v=0.1.43">
@@ -26,7 +26,6 @@
         <a href="#how">How it works</a>
         <a href="#worldlines">Worldlines</a>
         <a href="#safety">Safety</a>
-        <a href="#speed">Speed</a>
         <a href="guide.html">Guide</a>
       </nav>
       <div class="nav-actions">
@@ -39,16 +38,21 @@
   <!-- ============ HERO ============ -->
   <section class="hero">
     <div class="container">
-      <span class="eyebrow">Mission control for coding agents</span>
+      <span class="eyebrow">Mission control for your coding agent</span>
       <h1>Your agent writes the code.<br>You hold the <span class="hl">timeline.</span></h1>
       <p class="hero-sub">
-        Termina runs a <b>real agent TUI</b> in a terminal on the left and a <b>live Monaco IDE</b> on the right.
-        Every edit streams in as it happens. Test in the background, fork any moment into an isolated
-        candidate, and merge only the run that earns it.
+        <b>Watch</b> every edit live, <b>verify</b> in one click, <b>fork</b> any moment,
+        and <b>merge</b> only the winner — your Git repo stays untouched.
       </p>
       <div class="hero-ctas">
         <a href="#install" class="btn btn-primary">↓ Download for macOS &amp; Linux — free</a>
         <button class="btn btn-ghost copy-cmd" data-cmd="git clone https://github.com/Jesusz0r/termina.git && cd termina && sh scripts/install.sh">$ build from source →</button>
+      </div>
+      <div class="position-row" aria-label="What Termina does">
+        <span><b>Watch</b> live</span>
+        <span><b>Verify</b> in one click</span>
+        <span><b>Fork</b> any moment</span>
+        <span><b>Merge</b> only the winner</span>
       </div>
       <div class="hero-meta">
         <span><b>Signed + notarized</b> .dmg</span>
@@ -132,42 +136,39 @@
     </div>
   </section>
 
-  <!-- ============ LATEST ============ -->
+  <!-- ============ WHY TERMINA ============ -->
   <section id="latest" class="section latest-section">
     <div class="container">
       <div class="reveal">
-        <span class="eyebrow">Now in Termina</span>
-        <h2 class="section-title">More control at every decision point.</h2>
-        <p class="section-sub">The in-house agent is the only engine. Plans dispatch on schedule with auto-verify, candidates export to patch + PR bundles, and your effort level sticks across sessions. Latest: the explorer filters in place and answers the keyboard, session search runs off the main thread, and the agent loop self-corrects tool mistakes instead of stalling on them.</p>
+        <span class="eyebrow">Why Termina</span>
+        <h2 class="section-title">One row. Four promises.</h2>
+        <p class="section-sub">Chat wrappers show you text. IDE extensions show you diffs. Headless agents show you nothing until they are done. Termina shows you everything while it happens — and every step stays reversible.</p>
       </div>
 
       <div class="latest-grid reveal">
         <article class="latest-card latest-primary">
+          <span class="latest-key">WATCH LIVE</span>
+          <h3>See every edit land as it happens.</h3>
+          <p>A real agent TUI on the left, a live Monaco IDE on the right. Files the agent touches auto-open mid-run; the timeline records every action as a restorable dot.</p>
+          <div class="latest-proof"><span class="proof-dot"></span> terminal <b>+</b> editor <b>+</b> timeline, one window</div>
+        </article>
+
+        <article class="latest-card">
+          <span class="latest-key">VERIFY IN ONE CLICK</span>
+          <h3>Green or red, fed back to the agent.</h3>
+          <p><code>✓ Verify</code> runs your suite in the background and delivers the verdict on the agent's next turn — so it fixes its own failures instead of handing them to you.</p>
+        </article>
+
+        <article class="latest-card">
           <span class="latest-key">FORK ANY MOMENT</span>
           <h3>If you can see the dot, you can restore it.</h3>
-          <p>Run starts, tool calls, file changes, and settled boundaries appear only after Termina has both the immutable source state and matching session point. Cmd/Ctrl+Click to branch from exactly there.</p>
-          <div class="latest-proof"><span class="proof-dot"></span> source state <b>+</b> session address <b>+</b> isolated candidate</div>
+          <p>Cmd/Ctrl+Click any timeline dot to branch an isolated candidate from that exact source state. Or challenge a finished run to replay it under a constraint — fewer deps, preserved API, simpler code, faster.</p>
         </article>
 
         <article class="latest-card">
-          <span class="latest-key">CHALLENGE + EXPORT</span>
-          <h3>Ask for a meaningfully different answer.</h3>
-          <p>Launch a challenger with one click. The selected constraint is applied to the replayed task, deterministic evidence picks a winner, and Export writes a patch + PR bundle (<code>candidate.patch</code>, <code>pr-body.md</code>, <code>metadata.json</code>) without touching your Git history.</p>
-          <div class="profile-list" aria-label="Challenge profiles">
-            <span>Fewer dependencies</span><span>Preserve API</span><span>Simpler implementation</span><span>Performance-first</span>
-          </div>
-        </article>
-
-        <article class="latest-card">
-          <span class="latest-key">DELETION REVIEW</span>
-          <h3>Deleted does not mean gone.</h3>
-          <p>Open a deleted file in Change Review to see its pre-run content against an empty result. Accept the deletion, or Revert to recreate the file — including a removed parent folder.</p>
-        </article>
-
-        <article class="latest-card">
-          <span class="latest-key">SCHEDULED PLANS + EFFORT MEMORY</span>
-          <h3>Plans that run themselves.</h3>
-          <p>Tag any task with <code>@every 30m</code> or <code>@at 09:30</code> to dispatch it on cadence. Settled workers auto-verify once and report back, failing suites retry up to 3×. Your <code>/effort</code> level sticks across tabs, and <code>/models</code> fuzzy-finds across provider, id, and name.</p>
+          <span class="latest-key">MERGE ONLY THE WINNER</span>
+          <h3>Evidence picks. You promote.</h3>
+          <p>Deterministic evidence ranks candidates — tests, deps, footprint. The winner three-way merges back with crash-safe journaling. Your <code>.git</code> is never written; Export hands you a patch + PR bundle instead.</p>
         </article>
       </div>
     </div>
@@ -178,7 +179,7 @@
     <div class="container">
       <div class="reveal">
         <span class="eyebrow">How it works</span>
-        <h2 class="section-title">Four moves, zero leaps of faith.</h2>
+        <h2 class="section-title">The row, step by step.</h2>
       </div>
 
       <div class="steps reveal">
@@ -279,7 +280,7 @@
       <div class="reveal">
         <span class="eyebrow">Worldlines</span>
         <h2 class="section-title">Don't trust the first answer.<br>Fork fate and compare.</h2>
-        <p class="section-sub">Any completed run — any single dot on the timeline — can be forked into two isolated source trees. Replay the task under a constraint profile, measure both with deterministic evidence, and merge only the winner.</p>
+        <p class="section-sub">This is the fork-and-merge half of the row: any dot becomes two isolated candidates, evidence ranks them, and only the winner comes back.</p>
       </div>
 
       <!-- worldline diagram -->
@@ -382,7 +383,7 @@
       <div class="reveal">
         <span class="eyebrow">Guardrails</span>
         <h2 class="section-title">An agent with root instincts,<br>on a short leash.</h2>
-        <p class="section-sub">Autonomy is only useful when it is reversible. Termina isolates everything the agent touches.</p>
+        <p class="section-sub">The row only works if every step is reversible. Termina isolates everything the agent touches — and never writes your repo.</p>
       </div>
 
       <div class="guard-grid reveal">
@@ -431,8 +432,8 @@
     <div class="container">
       <div class="reveal">
         <span class="eyebrow">Speed</span>
-        <h2 class="section-title">Performance is a correctness requirement.</h2>
-        <p class="section-sub">Snapshotting happens on every agent action. If it were slow, the timeline would lag behind the truth. So the hot paths run in a compiled Rust binary — never the Git CLI. Every row below is measured, including the ones where git holds its own.</p>
+        <h2 class="section-title">Fast enough to record everything.</h2>
+        <p class="section-sub">Watch-live means snapshotting on every agent action. The hot paths run in a compiled Rust binary — never the Git CLI. Every row below is measured, including the ones where git holds its own.</p>
       </div>
 
       <div class="bench-chart reveal" id="bench-chart">
@@ -515,7 +516,7 @@
     <div class="container">
       <span class="eyebrow" style="justify-content:center;">No account. No cloud. MIT.</span>
       <h2>Stop reviewing blind diffs.<br><span class="hl">Start holding the timeline.</span></h2>
-      <p>Your next agent run deserves an undo button, an off switch, and a second opinion. Termina ships all three.</p>
+      <p>Watch live, verify in one click, fork any moment, merge only the winner. No account. No cloud. MIT.</p>
       <div class="hero-ctas">
         <a href="https://github.com/Jesusz0r/termina/releases/download/v0.1.43/Termina-0.1.43-arm64.dmg" class="btn btn-primary">↓ Download Termina v0.1.43 — free</a>
         <a href="https://github.com/Jesusz0r/termina" target="_blank" class="btn btn-ghost">read the source ↗</a>

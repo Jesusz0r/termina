@@ -2,10 +2,12 @@
 
 > **Status:** current product reference.
 
-Termina is a hybrid coding cockpit. The left side runs Termina's in-house
-coding agent, in a terminal. The right side is a Monaco (VS Code)
-editor that watches the agent work live. You review what changed, verify it,
-fork runs into isolated candidates, and promote the winner.
+Termina is mission control for your coding agent: watch every edit live,
+verify in one click, fork any moment, and merge only the winner — your Git
+repo stays untouched.
+
+The left side runs Termina's in-house coding agent, in a terminal. The
+right side is a Monaco (VS Code) editor that watches the agent work live.
 
 Everything runs locally. The terminal stays the source of truth: Termina
 records byte-exact source states in an app-owned snapshot store and never

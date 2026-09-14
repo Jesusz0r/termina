@@ -1,9 +1,12 @@
 # Termina
 
-**Termina** is a hybrid coding cockpit: the left side runs Termina's in-house
-agent — the real interactive TUI — inside a terminal; the right side is a
-Monaco IDE that watches the agent work live. Review what changed, verify it,
-fork runs into isolated candidates, and converge on green code together.
+**Termina is mission control for your coding agent:** watch every edit
+live, verify in one click, fork any moment, and merge only the winner —
+your Git repo stays untouched.
+
+The left side runs Termina's in-house agent — the real interactive TUI —
+inside a terminal; the right side is a Monaco IDE that watches the agent
+work live.
 
 ```
 ┌──────────────────────────────┬───────────────────────────────┐
