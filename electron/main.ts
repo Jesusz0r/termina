@@ -13,7 +13,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
-import { access, cp, link, lstat, mkdir, open, readFile, readdir, readlink, realpath as fsRealpath, rename as fsRename, rm, stat, symlink, unlink } from "node:fs/promises";
+import { access, cp, link, lstat, mkdir, open, readFile, readdir, readlink, realpath as fsRealpath, rename as fsRename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -7337,9 +7337,10 @@ class TerminaApp {
       try {
         await fsRename(src, dest);
       } catch (err) {
-        // Remove only our own empty reservation, never real content: a
-        // non-recursive remove refuses a non-empty directory.
-        await rm(dest, { recursive: false, force: true }).catch(() => undefined);
+        // Remove only our own empty reservation, never real content: rmdir
+        // refuses files, symlinks, and non-empty directories alike, so a
+        // destination swapped after the reservation survives the cleanup.
+        await rmdir(dest).catch(() => undefined);
         throw err;
       }
       return;
