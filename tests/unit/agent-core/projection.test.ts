@@ -240,6 +240,19 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     const orphanResult = projection({ messages: orphan, overlay });
     expect(orphanResult.ok).toBe(false);
     expect(orphanResult.error).toMatch(/no matching call/);
+
+    const unpairedServer = projectPersistedMessages({
+      messages: [message("assistant", [{ type: "server_tool_use", id: "s1", name: "web_search", input: { query: "x" } }], 1)],
+    });
+    expect(unpairedServer).toEqual({ ok: false, error: "incomplete tool-call sequence: s1" });
+
+    const pairedServer = projectPersistedMessages({
+      messages: [message("assistant", [
+        { type: "server_tool_use", id: "s1", name: "web_search", input: { query: "x" } },
+        { type: "web_search_tool_result", tool_use_id: "s1", content: [] },
+      ], 1)],
+    });
+    expect(pairedServer.ok).toBe(true);
   });
 
   it("strips C1 controls from host context without altering framing", () => {

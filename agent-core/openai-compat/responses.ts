@@ -4,7 +4,7 @@
  * Owns input mapping, explicit breakpoints, and the Responses body.
  * Split from agent-core/openai-compat.ts (issue #38).
  */
-import { applyCacheOpts, blockText, imageDataUrl, isGeminiModel } from "./completions.ts";
+import { applyCacheOpts, blockText, imageDataUrl, isGeminiModel, unmatchedToolCallError } from "./completions.ts";
 import type { CompletionsOpts, KernelMessage, ToolDef } from "./types.ts";
 
 
@@ -110,14 +110,8 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
   const openCalls: string[] = [];
 
   const flushOpenCalls = (): void => {
-    while (openCalls.length > 0) {
-      const callId = openCalls.shift()!;
-      out.push({
-        type: "function_call_output",
-        call_id: callId,
-        output: [{ type: "input_text", text: "(interrupted)" }],
-      });
-    }
+    const callId = openCalls[0];
+    if (callId) throw unmatchedToolCallError(callId);
   };
 
   for (const m of messages) {
@@ -153,6 +147,11 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
         if (b.type === "text") {
           text += blockText(b);
           continue;
+        }
+        // Anthropic server tools are not OpenAI function_calls; fail closed.
+        // https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools
+        if (b.type === "server_tool_use") {
+          throw unmatchedToolCallError(String(b.id ?? b.type));
         }
         if (b.type === "tool_use") {
           flushText();

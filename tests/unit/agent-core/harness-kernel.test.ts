@@ -3184,54 +3184,46 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         interleaved[1]?.call_id === "c1" &&
         interleaved[3]?.call_id === "c2",
     );
-    const orphanTest = compat.toResponsesInput([
-      {
-        role: "assistant",
-        content: [{ type: "tool_use", id: "call_9uC6HZkBPZk6cPwVyuGR4IwC", name: "bash", input: { command: "ls" } }],
-      },
-      {
-        role: "user",
-        content: "next prompt",
-      },
-    ]);
+    let orphanError = "";
+    try {
+      compat.toResponsesInput([
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "call_9uC6HZkBPZk6cPwVyuGR4IwC", name: "bash", input: { command: "ls" } }],
+        },
+        {
+          role: "user",
+          content: "next prompt",
+        },
+      ]);
+    } catch (err) {
+      orphanError = err instanceof Error ? err.message : String(err);
+    }
     check(
-      "toResponsesInput flushes missing tool output before next user turn",
-      orphanTest[1]?.type === "function_call_output" &&
-        orphanTest[1]?.call_id === "call_9uC6HZkBPZk6cPwVyuGR4IwC" &&
-        orphanTest[2]?.role === "user",
+      "toResponsesInput rejects unmatched tool calls instead of synthesizing output",
+      /unmatched tool call: call_9uC6HZkBPZk6cPwVyuGR4IwC/.test(orphanError) && !orphanError.includes("(interrupted)"),
     );
-    const partialAnswer = compat.toResponsesInput([
-      {
-        role: "assistant",
-        content: [
-          { type: "tool_use", id: "call_A", name: "bash", input: { command: "ls" } },
-          { type: "tool_use", id: "call_B", name: "bash", input: { command: "pwd" } },
-        ],
-      },
-      {
-        role: "user",
-        content: [{ type: "tool_result", tool_use_id: "call_A", content: "file.txt" }],
-      },
-    ]);
-    const partialOutput2: unknown = partialAnswer[2]?.output;
-    const partialFirst2 = Array.isArray(partialOutput2) ? partialOutput2[0] : undefined;
-    const partialType2: unknown = typeof partialFirst2 === "object" && partialFirst2 !== null && "type" in partialFirst2 ? partialFirst2.type : undefined;
-    const partialText2: unknown = typeof partialFirst2 === "object" && partialFirst2 !== null && "text" in partialFirst2 ? partialFirst2.text : undefined;
-    const partialOutput3: unknown = partialAnswer[3]?.output;
-    const partialFirst3 = Array.isArray(partialOutput3) ? partialOutput3[0] : undefined;
-    const partialType3: unknown = typeof partialFirst3 === "object" && partialFirst3 !== null && "type" in partialFirst3 ? partialFirst3.type : undefined;
-    const partialText3: unknown = typeof partialFirst3 === "object" && partialFirst3 !== null && "text" in partialFirst3 ? partialFirst3.text : undefined;
+    let partialError = "";
+    try {
+      compat.toResponsesInput([
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call_A", name: "bash", input: { command: "ls" } },
+            { type: "tool_use", id: "call_B", name: "bash", input: { command: "pwd" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "call_A", content: "file.txt" }],
+        },
+      ]);
+    } catch (err) {
+      partialError = err instanceof Error ? err.message : String(err);
+    }
     check(
-      "toResponsesInput flushes unanswered parallel tool calls even without user text",
-      partialAnswer.length === 4 &&
-        partialAnswer[0]?.call_id === "call_A" &&
-        partialAnswer[1]?.call_id === "call_B" &&
-        partialAnswer[2]?.call_id === "call_A" &&
-        partialType2 === "input_text" &&
-        partialText2 === "file.txt" &&
-        partialAnswer[3]?.call_id === "call_B" &&
-        partialType3 === "input_text" &&
-        partialText3 === "(interrupted)",
+      "toResponsesInput rejects unanswered parallel tool calls instead of synthesizing output",
+      /unmatched tool call: call_B/.test(partialError) && !partialError.includes("(interrupted)"),
     );
     const deltaThenDone = compat.responsesResultFromEvents(
       [
