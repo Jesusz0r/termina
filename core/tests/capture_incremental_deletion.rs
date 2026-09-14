@@ -146,6 +146,31 @@ impl CaptureHarness {
             .expect("incremental state")
     }
 
+    fn incremental_err(&mut self, parent: &str, hints: &[&str]) -> String {
+        let response = self
+            .core
+            .request(
+                "capture-incremental",
+                self.payload(json!({
+                    "parentCommit": parent,
+                    "hints": hints,
+                    "reconcile": [],
+                })),
+                DEADLINE,
+            )
+            .expect("incremental capture response");
+        assert_eq!(
+            response.get("ok").and_then(Value::as_bool),
+            Some(false),
+            "directory hint must fail capture loudly: {response}"
+        );
+        response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("failed capture is missing error: {response}"))
+            .to_string()
+    }
+
     fn paths(&mut self, commit: &str) -> HashSet<String> {
         self.core
             .request_ok(
@@ -369,6 +394,75 @@ fn file_directory_transitions_match_full() {
     let dir_to_file_full_paths = harness.paths(&state_str(&dir_to_file_full, "commit"));
     assert_eq!(dir_to_file_tree, dir_to_file_full_tree);
     assert_eq!(dir_to_file_paths, dir_to_file_full_paths);
+
+    harness.shutdown();
+}
+
+#[test]
+fn directory_hint_fails_loudly_and_preserves_subtree() {
+    let mut harness = CaptureHarness::with_files(
+        "inc-dir-hint",
+        &[
+            ("keep.txt", "keep\n"),
+            ("dir/a.txt", "a\n"),
+            ("dir/b.txt", "b\n"),
+            ("dir/nested/c.txt", "c\n"),
+        ],
+    );
+    let baseline = harness.capture(None);
+    let baseline_commit = state_str(&baseline, "commit");
+    let baseline_tree = state_str(&baseline, "tree");
+    let baseline_paths = harness.paths(&baseline_commit);
+
+    let error = harness.incremental_err(&baseline_commit, &["dir"]);
+    assert!(
+        error.contains("directory"),
+        "directory hint must fail closed: {error}"
+    );
+
+    // The failed capture must not publish a tree that dropped the subtree.
+    let after_paths = harness.paths(&baseline_commit);
+    assert_eq!(after_paths, baseline_paths);
+    assert!(after_paths.contains("dir/a.txt"));
+    assert!(after_paths.contains("dir/b.txt"));
+    assert!(after_paths.contains("dir/nested/c.txt"));
+
+    // A later full capture on the same parent still sees the live subtree.
+    let full = harness.capture(Some(&baseline_commit));
+    let full_tree = state_str(&full, "tree");
+    let full_paths = harness.paths(&state_str(&full, "commit"));
+    assert_eq!(full_tree, baseline_tree);
+    assert_eq!(full_paths, baseline_paths);
+
+    harness.shutdown();
+}
+
+#[test]
+fn file_to_empty_dir_transition_matches_full() {
+    let mut harness = CaptureHarness::with_files(
+        "inc-empty-dir",
+        &[("keep.txt", "keep\n"), ("flip.txt", "was-file\n")],
+    );
+    let baseline = harness.capture(None);
+    let baseline_commit = state_str(&baseline, "commit");
+
+    fs::remove_file(harness.source.join("flip.txt")).expect("remove flipped file");
+    fs::create_dir_all(harness.source.join("flip.txt")).expect("create empty dir");
+    let empty_dir = harness.incremental(&baseline_commit, &["flip.txt"]);
+    let empty_dir_commit = state_str(&empty_dir, "commit");
+    let empty_dir_tree = state_str(&empty_dir, "tree");
+    let empty_dir_paths = harness.paths(&empty_dir_commit);
+    assert!(
+        !empty_dir_paths.contains("flip.txt"),
+        "empty directory must not keep the old file entry: {empty_dir_paths:?}"
+    );
+    assert!(empty_dir_paths.contains("keep.txt"));
+
+    let full = harness.capture(Some(&empty_dir_commit));
+    let full_tree = state_str(&full, "tree");
+    let full_paths = harness.paths(&state_str(&full, "commit"));
+    assert_eq!(empty_dir_tree, full_tree);
+    assert_eq!(empty_dir_paths, full_paths);
 
     harness.shutdown();
 }
