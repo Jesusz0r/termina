@@ -139,6 +139,8 @@ const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
  *  tail before cancelling it: crash/reload cycles finish well inside, while
  *  a wedged renderer cannot stall teardown (and subagent cleanup) forever. */
 const PTY_EXIT_DRAIN_TIMEOUT_MS = 10_000;
+/** Absurd terminal dimensions are clamped before they reach the pty ioctl. */
+const MAX_TERMINAL_DIMENSION = 1024;
 const MAX_EXPLORER_ENTRIES = 2000;
 const MAX_VERIFY_OUTPUT = 200_000;
 /** Bound for one project snapshot context file (tree listing for a turn). */
@@ -2969,7 +2971,7 @@ class TerminaApp {
       // renderer (ready but never acking) gets a bounded wait, then its
       // retained output is cancelled so teardown — timeline release,
       // subagent cleanup, dispatch re-pending — cannot stall forever.
-      const drained = await this.ptyEgress.finishWithTimeout(inst.id, terminalGeneration, code, PTY_EXIT_DRAIN_TIMEOUT_MS);
+      const drained = await this.ptyEgress.finish(inst.id, terminalGeneration, code, PTY_EXIT_DRAIN_TIMEOUT_MS);
       if (!drained) {
         console.warn(`[main] terminal ${inst.id} exit drain timed out; dropping retained output`);
         this.ptyEgress.cancel(inst.id, terminalGeneration);
@@ -7562,7 +7564,11 @@ class TerminaApp {
     });
     ipcMain.handle("terminals:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
       if (typeof id !== "string" || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
-      this.terminals.get(id)?.pty.resize(Math.max(2, Math.floor(Number(cols))), Math.max(2, Math.floor(Number(rows))));
+      // Floor at 2 (a 1-wide pty collapses layouts); clamp absurd sizes
+      // before they reach the ioctl.
+      const clampedCols = Math.min(MAX_TERMINAL_DIMENSION, Math.max(2, Math.floor(Number(cols))));
+      const clampedRows = Math.min(MAX_TERMINAL_DIMENSION, Math.max(2, Math.floor(Number(rows))));
+      this.terminals.get(id)?.pty.resize(clampedCols, clampedRows);
     });
     ipcMain.handle("terminals:list", async () => {
       if (this.initialRestorePromise) await this.initialRestorePromise;

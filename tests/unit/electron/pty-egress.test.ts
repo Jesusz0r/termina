@@ -200,7 +200,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     assert.equal(scheduler.stats("framed").inFlightChunks, 1);
     acknowledgeAll(scheduler, sends);
     assert.equal(framedSource.paused, false);
-    await scheduler.drain("framed");
+    await waitFor(() => terminalStats(scheduler, "framed").retainedChunks === 0, "framed output was not retained-acked");
 
     const firstPacedIndex = sends.length;
     assert.equal(scheduler.enqueue("framed", 1, "a".repeat(PTY_EGRESS_CHUNK_BYTES)), true);
@@ -211,7 +211,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
       "one terminal emitted more than one IPC message in a frame",
     );
     acknowledgeAll(scheduler, sends.slice(firstPacedIndex));
-    await scheduler.drain("framed");
+    await waitFor(() => terminalStats(scheduler, "framed").retainedChunks === 0, "framed output was not retained-acked");
     scheduler.cancel("framed", 1);
   });
 
@@ -231,7 +231,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     ready(scheduler, "replay-framed", 1);
     assert.equal(scheduler.enqueue("replay-framed", 1, "one"), true);
     assert.equal(scheduler.enqueue("replay-framed", 1, "two"), true);
-    const finished = scheduler.finish("replay-framed", 1, 7);
+    const finished = scheduler.finish("replay-framed", 1, 7, 5000);
 
     await waitFor(() => events.length === 1, "coalesced data was not delivered before exit");
     assert.deepEqual(events.map((event) => [event.kind, event.data]), [["data", "onetwo"]]);
@@ -276,7 +276,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     assert.equal(sends[1].sequence, sends[0].sequence);
     assert.ok(sends[2].sequence > sends[1].sequence);
     acknowledgeAll(scheduler, sends.slice(1));
-    await scheduler.drain("sealed-replay");
+    await waitFor(() => terminalStats(scheduler, "sealed-replay").retainedChunks === 0, "replayed output was not retained-acked");
     scheduler.cancel("sealed-replay", 1);
   });
 
@@ -426,7 +426,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(hydrationSends[0].sequence, 1);
   assert.equal(hydrationSends[0].data, "before-hydration");
   acknowledgeAll(hydration, hydrationSends);
-  await hydration.drain("hydrated");
+  await waitFor(() => terminalStats(hydration, "hydrated").retainedChunks === 0, "hydrated output was not retained-acked");
   assert.equal(hydrationSource.paused, false);
   hydration.cancel("hydrated", 1);
 
@@ -456,7 +456,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.deepEqual(replaySends.slice(2).map((item) => item.data), ["one", "two"]);
   assert.deepEqual(replaySends.slice(2).map((item) => item.sequence), [1, 2]);
   acknowledgeAll(replay, replaySends.slice(2));
-  await replay.drain("replay");
+  await waitFor(() => terminalStats(replay, "replay").retainedChunks === 0, "replayed output was not retained-acked");
   replay.cancel("replay", 2);
 
   // A ready handshake from the old document cannot hydrate the replacement
@@ -709,7 +709,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.deepEqual(throwingDataSends.map((item) => item.sequence), [1, 1]);
   assert.equal(new Set(throwingDataSends.map((item) => item.sequence)).size, 1);
   assert.equal(throwingData.acknowledge("throw-data", 14, 103, 2, 1), true);
-  await throwingData.drain("throw-data");
+  await waitFor(() => terminalStats(throwingData, "throw-data").retainedChunks === 0, "retried output was not retained-acked");
   assert.equal(throwingData.stats("throw-data").retainedChunks, 0);
   assert.equal(throwingData.stats("throw-data").retainedBytes, 0);
   throwingData.cancel("throw-data", 14);
@@ -741,7 +741,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   throwingExit.register("throw-exit", 15, throwingExitSource);
   ready(throwingExit, "throw-exit", 15, 104, 1);
   assert.equal(throwingExit.enqueue("throw-exit", 15, "tail"), true);
-  const throwingExitDone = throwingExit.finish("throw-exit", 15, 37);
+  const throwingExitDone = throwingExit.finish("throw-exit", 15, 37, 5000);
   let throwingExitSettled = false;
   void throwingExitDone.then(() => { throwingExitSettled = true; });
   await waitFor(() => throwingExitSends.some((item) => item.kind === "data"), "exit data send did not run");
@@ -805,7 +805,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   reentrant.hydrateTerminal("reentrant", 3, 20, 2);
   await waitFor(() => reentrantSends.length === 3, "re-entrant replay missing");
   acknowledgeAll(reentrant, reentrantSends.slice(1));
-  await reentrant.drain("reentrant");
+  await waitFor(() => terminalStats(reentrant, "reentrant").retainedChunks === 0, "re-entrant output was not retained-acked");
   reentrant.cancel("reentrant", 3);
 
   // IPC admission itself is bounded by queued + in-flight bytes. A sink that
@@ -844,7 +844,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(slowSends.reduce((sum, item) => sum + Buffer.byteLength(item.data), 0) <= PTY_EGRESS_CHUNK_BYTES * 4, true);
   assert.equal(slowSource.paused, true, "unacknowledged IPC bytes pause the PTY source");
   acknowledgeAll(slow, slowSends);
-  await slow.drain("slow");
+  await waitFor(() => terminalStats(slow, "slow").retainedChunks === 0, "slow output was not retained-acked");
   assert.equal(slowSource.paused, false);
   slow.cancel("slow", 4);
 
@@ -884,7 +884,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(reuseSends[0].data, "new");
   assert.equal(reuseSends[0].terminalGeneration, 7);
   acknowledgeAll(reuse, reuseSends);
-  await reuse.drain("same-id");
+  await waitFor(() => terminalStats(reuse, "same-id").retainedChunks === 0, "reused output was not retained-acked");
   reuse.cancel("same-id", 7);
 
   // Delayed lifecycle events from an older BrowserWindow cannot disable the
@@ -906,7 +906,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(windows.stats().windowGeneration, 50);
   assert.equal(windows.acknowledge("window", 8, 49, 99, 1), false);
   assert.equal(windows.acknowledge("window", 8, 50, 1, 1), true);
-  await windows.drain("window");
+  await waitFor(() => terminalStats(windows, "window").retainedChunks === 0, "window output was not retained-acked");
   windows.cancel("window", 8);
 
   // Natural exit is an acknowledgement barrier: pty:exit may not overtake
@@ -933,7 +933,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   ready(ordered, "ordered", 9, 60, 1);
   ordered.enqueue("ordered", 9, "one");
   ordered.enqueue("ordered", 9, "two");
-  const ended = ordered.finish("ordered", 9);
+  const ended = ordered.finish("ordered", 9, 0, 5000);
   let endedSettled = false;
   void ended.then(() => { endedSettled = true; });
   await waitFor(() => orderedSends.length === 2, "natural-exit tail was not sent");
@@ -958,7 +958,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   const inactiveSource = source();
   inactive.register("inactive", 10, inactiveSource);
   inactive.setRendererReady(70, 1, false);
-  const inactiveEnded = inactive.finish("inactive", 10);
+  const inactiveEnded = inactive.finish("inactive", 10, 0, 5000);
   let inactiveSettled = false;
   void inactiveEnded.then(() => { inactiveSettled = true; });
   await sleep(10);
@@ -989,7 +989,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   exit.register("crash-exit", 13, exitSource);
   ready(exit, "crash-exit", 13, 71, 1);
   assert.equal(exit.enqueue("crash-exit", 13, "tail"), true);
-  const exitDone = exit.finish("crash-exit", 13, 23);
+  const exitDone = exit.finish("crash-exit", 13, 23, 5000);
   await waitFor(() => exitSends.length === 1, "exit data was not sent");
   acknowledgeAll(exit, exitSends.filter((item) => item.kind === "data"));
   await waitFor(() => exitSends.length === 2, "exit marker was not sent after data ack");
@@ -1049,7 +1049,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     }
   })();
   await producer;
-  await burst.drain("burst");
+  await waitFor(() => terminalStats(burst, "burst").retainedChunks === 0, "burst output was not retained-acked");
   clearInterval(interval);
   assert.equal(actual.digest("hex"), expected.digest("hex"), "100 MiB burst preserves exact byte order");
   assert.ok(intervalTicks.count > 5, "burst drain yields to timers and keeps the event loop responsive");
@@ -1085,7 +1085,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   await waitFor(() => fairSends.length === 9, "fair scheduler did not drain all terminals");
   assert.deepEqual(fairSends.slice(0, 3).map((value) => value.id), ["a", "b", "c"]);
   acknowledgeAll(fair, fairSends);
-  await fair.drain();
+  await waitFor(() => globalStats(fair).retainedChunks === 0, "fair output was not retained-acked");
   fair.dispose();
 
   // Close and shutdown clear retained data; delayed old acknowledgements and
@@ -1102,7 +1102,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   closing.register("closing", 30, closingSource);
   closing.setRendererReady(100, 1, false);
   closing.enqueue("closing", 30, "stale");
-  const cancelled = closing.finish("closing", 30);
+  const cancelled = closing.finish("closing", 30, 0, 5000);
   closing.cancel("closing", 30);
   assert.equal(await cancelled, false);
   closing.setRendererReady(100, 1, true);
@@ -1114,9 +1114,8 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   shutdown.setRendererReady(101, 1, true);
   shutdown.hydrateTerminal("shutdown", 31, 101, 1);
   shutdown.enqueue("shutdown", 31, "pending");
-  const shutdownDrain = shutdown.drain("shutdown");
   shutdown.dispose();
-  await shutdownDrain;
+  assert.equal(terminalStats(shutdown, "shutdown").retainedChunks, 0);
 
   console.log(JSON.stringify({
     burstBytes,
@@ -1146,7 +1145,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     scheduler.register("fast", 1, source());
     ready(scheduler, "fast", 1, 1, 1);
     assert.equal(scheduler.enqueue("fast", 1, "tail"), true);
-    const fastDone = scheduler.finishWithTimeout("fast", 1, 0, 5000);
+    const fastDone = scheduler.finish("fast", 1, 0, 5000);
     await waitFor(() => sends.length === 1, "fast exit tail was not sent");
     acknowledgeAll(scheduler, sends.filter((item) => item.kind === "data"));
     await waitFor(() => sends.length === 2, "fast exit marker was not sent");
@@ -1159,7 +1158,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     scheduler.register("wedged", 2, source());
     assert.equal(scheduler.hydrateTerminal("wedged", 2, 1, 1), true);
     assert.equal(scheduler.enqueue("wedged", 2, "stuck"), true);
-    const wedgedDone = scheduler.finishWithTimeout("wedged", 2, 0, 20);
+    const wedgedDone = scheduler.finish("wedged", 2, 0, 20);
     assert.equal(await wedgedDone, false);
     assert.equal(terminalStats(scheduler, "wedged").closing, true);
     assert.equal(scheduler.stats("wedged").retainedChunks > 0, true);
@@ -1172,7 +1171,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     scheduler.register("reload", 3, source());
     assert.equal(scheduler.hydrateTerminal("reload", 3, 1, 1), true);
     assert.equal(scheduler.enqueue("reload", 3, "tail"), true);
-    const reloadDone = scheduler.finishWithTimeout("reload", 3, 9, 5000);
+    const reloadDone = scheduler.finish("reload", 3, 9, 5000);
     await waitFor(() => sends.some((item) => item.kind === "data" && item.data === "tail"), "reload tail was not sent");
     assert.equal(scheduler.setRendererReady(1, 1, false), true);
     assert.equal(scheduler.setRendererReady(1, 2, true), true);
@@ -1192,8 +1191,103 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     assert.equal(await reloadDone, true);
 
     // Unknown terminals fail closed; invalid budgets throw instead of arming.
-    assert.equal(await scheduler.finishWithTimeout("missing", 1, 0, 50), false);
-    assert.throws(() => scheduler.finishWithTimeout("reload", 3, 0, -1), /invalid PTY egress finish timeout/);
+    assert.equal(await scheduler.finish("missing", 1, 0, 50), false);
+    assert.throws(() => scheduler.finish("reload", 3, 0, -1), /invalid PTY egress finish timeout/);
     scheduler.dispose();
+  });
+
+  it("splits output by arithmetic UTF-8 length, fast and exactly (refs #195)", () => {
+    // Reference: the old per-code-point Buffer re-encode. The arithmetic
+    // fast path must produce identical chunk boundaries on every input.
+    function* referenceSplit(data: string, maxBytes: number): Generator<string> {
+      let start = 0;
+      while (start < data.length) {
+        let end = start;
+        let bytes = 0;
+        while (end < data.length) {
+          const codePoint = data.codePointAt(end);
+          if (codePoint === undefined) break;
+          const width = codePoint > 0xffff ? 2 : 1;
+          const codeBytes = Buffer.byteLength(data.slice(end, end + width), "utf8");
+          if (end > start && bytes + codeBytes > maxBytes) break;
+          end += width;
+          bytes += codeBytes;
+        }
+        if (end === start) end = Math.min(data.length, start + 1);
+        yield data.slice(start, end);
+        start = end;
+      }
+    }
+    const adversarial = [
+      "",
+      "plain ascii",
+      "日本語のテキスト",
+      "😀🎉👍🏽",
+      "mixed ascii と日本語 and 😀 emoji",
+      "lone high \ud800 surrogate",
+      "lone low \udcff surrogate",
+      "\ud800\udcff paired across the string " + "x".repeat(100),
+      "é".repeat(1000),
+      "a😀".repeat(5000),
+    ];
+    for (const data of adversarial) {
+      for (const maxBytes of [1, 2, 3, 7, 64, 1024]) {
+        assert.deepEqual([...splitPtyData(data, maxBytes)], [...referenceSplit(data, maxBytes)]);
+      }
+    }
+    for (const chunk of splitPtyData("a😀".repeat(5000))) {
+      assert.ok(Buffer.byteLength(chunk, "utf8") <= PTY_EGRESS_CHUNK_BYTES);
+    }
+    // Throughput: 1 MiB of mixed multibyte text splits well under budget on
+    // the main thread (the old re-encode cost ~20 ms; the budget is generous
+    // to stay non-flaky on loaded CI).
+    const megabyte = "aé日😀".repeat(128 * 1024);
+    assert.ok(Buffer.byteLength(megabyte, "utf8") >= 1024 * 1024);
+    const started = Date.now();
+    const pieces = [...splitPtyData(megabyte)];
+    assert.ok(Date.now() - started < 1000, `split took ${Date.now() - started} ms`);
+    assert.equal(pieces.join(""), megabyte);
+  });
+
+  it("keeps every public scheduler method wired to a production caller (refs #195)", async () => {
+    const tsPrivates = new Set([
+      "beginFinish",
+      "canDeliver",
+      "hasDeliverableChunks",
+      "maybeFinishQueue",
+      "maybeQueueExit",
+      "maybeResumeSource",
+      "nextQueuedQueue",
+      "pauseSource",
+      "pump",
+      "removeQueue",
+      "replayInFlight",
+      "requeueRecord",
+      "retainedBytes",
+      "retainedChunks",
+      "schedulePump",
+    ]);
+    const names = Object.getOwnPropertyNames(PtyEgressScheduler.prototype).filter(
+      (name) => name !== "constructor" && !tsPrivates.has(name),
+    );
+    assert.deepEqual(names.sort(), [
+      "acknowledge",
+      "cancel",
+      "dispose",
+      "enqueue",
+      "finish",
+      "hydrateTerminal",
+      "register",
+      "setRendererReady",
+      "stats",
+    ]);
+    const prod = await readFile(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+    // stats is the introspection seam tests and diagnostics read; every other
+    // public method must be called from production (no drain()-style dead API).
+    assert.equal("drain" in PtyEgressScheduler.prototype, false);
+    for (const name of names) {
+      if (name === "stats") continue;
+      assert.ok(prod.includes(`ptyEgress.${name}(`), `${name} has no production caller`);
+    }
   });
 });
