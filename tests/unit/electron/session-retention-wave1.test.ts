@@ -14,6 +14,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -103,6 +104,45 @@ describe("Session Retention Wave 1 regressions", () => {
         const recoveredClaim = recovered.entries.find((entry: { kind: string }) => entry.kind === "claim");
         assert.equal(recoveredClaim?.destination?.name, "claim-run", "recovered ledger destination was not remeasured");
         assert.ok(recoveredClaim.destination.usage.bytes > 0, "recovered destination usage was not remeasured");
+      } finally {
+        disposeSessionRetentionCoreClient();
+      }
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 60000);
+
+  it("retries root binding after repair on the same owner (refs #151)", async () => {
+    const work = mkdtempSync(join(tmpdir(), "termina-retention-wave1-151-"));
+    try {
+      const { SessionRetentionOwner, disposeSessionRetentionCoreClient } = await loadRetentionBundle(work);
+      try {
+        const rootPath = join(work, "poison-root");
+        // A regular file where the root directory belongs: native binding
+        // must reject it.
+        writeFileSync(rootPath, "obstruction", { mode: 0o600 });
+        const owner = new SessionRetentionOwner(rootPath);
+        await assert.rejects(owner.list(), "obstructed root binding did not reject");
+
+        // Repair only the fixture. The same owner must retry instead of
+        // replaying its memoized rejection.
+        rmSync(rootPath, { force: true });
+        const repaired = await owner.list();
+        assert.deepEqual(repaired, [], "repaired root did not list on the same owner");
+
+        // Control: a fresh owner agrees the root is healthy.
+        const fresh = await new SessionRetentionOwner(rootPath).list();
+        assert.deepEqual(fresh, [], "fresh owner disagrees about the repaired root");
+
+        // A substituted root at the same path must still fail closed: the
+        // retry path never reinterprets unproven evidence as trusted. (A
+        // plain rm+mkdir reuses the same inode; renaming a separately
+        // created directory into place proves a true identity change.)
+        const substitute = join(work, "substitute-root");
+        mkdirSync(substitute, { recursive: true, mode: 0o700 });
+        rmSync(rootPath, { recursive: true, force: true });
+        renameSync(substitute, rootPath);
+        await assert.rejects(owner.list(), "substituted root did not fail closed");
       } finally {
         disposeSessionRetentionCoreClient();
       }
