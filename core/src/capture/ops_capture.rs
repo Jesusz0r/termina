@@ -21,6 +21,8 @@ use crate::util::{
     now_ms,
     oid_ext,
     opt_s,
+    require_utf8_git_path,
+    require_utf8_path_bytes,
     s,
     stat_at,
 };
@@ -61,8 +63,7 @@ pub(crate) fn enumerate_domain(
     let mut index_entries: HashMap<String, IndexEntry> = HashMap::new();
     let index = repo.index().map_err(|e| e.to_string())?;
     for entry in index.iter() {
-        let path = String::from_utf8(entry.path.clone())
-            .map_err(|_| "a tracked path is not valid UTF-8".to_string())?;
+        let path = require_utf8_path_bytes(entry.path.clone(), "tracked")?;
         let Some(path) = map_path(path) else { continue };
         if has_git_segment(&path) {
             return Err(format!("nested repository in capture domain: {path}"));
@@ -84,10 +85,7 @@ pub(crate) fn enumerate_domain(
         .map_err(|e| e.to_string())?;
     for status in statuses.iter() {
         if status.status().is_wt_new() {
-            let path = status.path().unwrap_or("").to_string();
-            if path.is_empty() {
-                continue;
-            }
+            let path = require_utf8_git_path(status.path(), "untracked")?;
             let Some(path) = map_path(path) else { continue };
             if has_git_segment(&path) {
                 return Err(format!("nested repository in capture domain: {path}"));
@@ -458,10 +456,12 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     let mut changed: HashSet<String> = HashSet::new();
     for hint in &hints {
         // A nested repository path must never enter the tree: apply-state
-        // would write into the target's own Git directory.
-        if is_safe_relative(hint) && !has_git_segment(hint) {
-            changed.insert(hint.clone());
+        // would write into the target's own Git directory. Unsafe hints
+        // are a caller bug — fail loudly instead of skipping the file.
+        if !is_safe_relative(hint) || has_git_segment(hint) {
+            return Err(format!("unsafe capture hint: {hint}"));
         }
+        changed.insert(hint.clone());
     }
     for (rel_path, oid_hex) in &reconcile {
         if !is_safe_relative(rel_path) || has_git_segment(rel_path) {
@@ -474,11 +474,12 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
         // through on an unknown path.
         let reconciled = oid_ext(&store, oid_hex)
             .map_err(|_| format!("reconcile oid is invalid for {rel_path}"))?;
-        let Some((_, parent_oid)) = parent_flat.get(rel_path) else {
-            continue; // not in the capture domain
-        };
-        if reconciled != *parent_oid {
-            changed.insert(rel_path.clone());
+        match parent_flat.get(rel_path) {
+            Some((_, parent_oid)) if reconciled == *parent_oid => {}
+            // Absent from the parent tree is a new file, not "out of domain".
+            Some(_) | None => {
+                changed.insert(rel_path.clone());
+            }
         }
     }
     if changed.len() > max_paths {
