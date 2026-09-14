@@ -16,10 +16,10 @@ vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
-    openSync: (...args: Parameters<typeof actual.openSync>): number => {
-      spy.openCalls.push({ path: String(args[0]), flags: args[1] });
-      return (actual.openSync as (...a: never[]) => number)(...args);
-    },
+    openSync: ((path: string, flags?: unknown, mode?: unknown) => {
+      spy.openCalls.push({ path: String(path), flags });
+      return (actual.openSync as (p: string, f?: unknown, m?: unknown) => number)(path, flags, mode);
+    }) as typeof actual.openSync,
     fsyncSync: (fd: number): void => {
       spy.fsyncCalls += 1;
       if (spy.failDirSync && spy.fsyncCalls === 2) throw new Error("injected dir-sync failure");
