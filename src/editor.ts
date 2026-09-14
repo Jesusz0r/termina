@@ -670,14 +670,55 @@ export class EditorManager {
       toast(`could not save ${pathBasename(tab.key)}: file owner is unavailable`, "error");
       return;
     }
-    const res = await window.termina.saveFile(tab.key, tab.model.getValue(), tab.owner);
-    if (res.ok) {
-      tab.savedVersionId = tab.model.getAlternativeVersionId();
-      this.syncDirty(tab);
-      tab.dom.classList.remove("conflict");
-    } else {
-      toast(`could not save ${pathBasename(tab.key)}: ${res.error ?? "unknown error"}`, "error");
-    }
+    await this.chainSave(tab.key, async () => {
+      const live = this.tabs.get(tab.key);
+      // The tab closed (or was replaced) while queued: a stale op must not
+      // touch the disposed model, let alone a new tab under the same key.
+      if (!live || live !== tab || !live.owner) return;
+      const submittedText = live.model.getValue();
+      const submittedVersion = live.model.getAlternativeVersionId();
+      const savedAtSubmit = live.savedVersionId;
+      let res: { ok: boolean; error?: string };
+      try {
+        res = await window.termina.saveFile(live.key, submittedText, live.owner);
+      } catch (err) {
+        toast(`could not save ${pathBasename(live.key)}: ${(err as Error).message}`, "error");
+        return;
+      }
+      if (res.ok) this.acknowledgeSave(live.key, live.model, submittedVersion, savedAtSubmit);
+      else toast(`could not save ${pathBasename(live.key)}: ${res.error ?? "unknown error"}`, "error");
+    });
+  }
+
+  /** In-flight save per tab key. Overlapping saves for one tab chain instead
+   *  of racing: each op submits the latest model text, the last writer wins
+   *  on disk, and acknowledgments apply in completion order. */
+  private saveQueue = new Map<string, Promise<unknown>>();
+
+  private chainSave<T>(key: string, op: () => Promise<T>): Promise<T> {
+    const prev = this.saveQueue.get(key) ?? Promise.resolve();
+    const next = prev.then(op, op);
+    this.saveQueue.set(key, next);
+    const cleanup = (): void => {
+      if (this.saveQueue.get(key) === next) this.saveQueue.delete(key);
+    };
+    void next.then(cleanup, cleanup);
+    return next;
+  }
+
+  /** Shared save acknowledgment for ordinary save and flush-save. Only the
+   *  submitted version is persisted, so the baseline advances to exactly
+   *  that — never to the model's newer current version. The baseline moves
+   *  only when nothing else claimed it while the save was pending (a watcher
+   *  push under a clean buffer, or an already-applied newer ack); dirty
+   *  state always recomputes from the current model. A closed or replaced
+   *  tab ignores the late ack. */
+  private acknowledgeSave(key: string, model: monaco.editor.ITextModel, submittedVersion: number, savedAtSubmit: number): void {
+    const tab = this.tabs.get(key);
+    if (!tab || tab.model !== model) return;
+    if (tab.savedVersionId === savedAtSubmit) tab.savedVersionId = submittedVersion;
+    this.syncDirty(tab);
+    if (!this.userDirty.has(key)) tab.dom.classList.remove("conflict");
   }
 
   /** Save every model with unsaved user edits. Returns the failed paths.
@@ -698,16 +739,24 @@ export class EditorManager {
         failed.push(key);
         continue;
       }
-      const res = writerId
-        ? await window.termina.flushSave(tab.key, tab.model.getValue(), writerId, tab.owner)
-        : await window.termina.saveFile(tab.key, tab.model.getValue(), tab.owner);
-      if (res.ok) {
-        tab.savedVersionId = tab.model.getAlternativeVersionId();
-        this.syncDirty(tab);
-        tab.dom.classList.remove("conflict");
-      } else {
-        failed.push(key);
-      }
+      const ok = await this.chainSave(key, async () => {
+        const live = this.tabs.get(key);
+        if (!live || live !== tab || !live.owner) return false;
+        const submittedText = live.model.getValue();
+        const submittedVersion = live.model.getAlternativeVersionId();
+        const savedAtSubmit = live.savedVersionId;
+        let res: { ok: boolean; error?: string };
+        try {
+          res = writerId
+            ? await window.termina.flushSave(live.key, submittedText, writerId, live.owner)
+            : await window.termina.saveFile(live.key, submittedText, live.owner);
+        } catch {
+          return false;
+        }
+        if (res.ok) this.acknowledgeSave(live.key, live.model, submittedVersion, savedAtSubmit);
+        return res.ok;
+      });
+      if (!ok) failed.push(key);
     }
     return { ok: failed.length === 0, failed };
   }
