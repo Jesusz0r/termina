@@ -190,6 +190,8 @@ function ensureToastContainer(): HTMLElement {
   if (!toastContainer) {
     toastContainer = document.createElement("div");
     toastContainer.className = "toast-container";
+    toastContainer.setAttribute("role", "status");
+    toastContainer.setAttribute("aria-live", "polite");
     document.body.appendChild(toastContainer);
   }
   return toastContainer;
@@ -206,7 +208,7 @@ export function toast(message: string, type: "info" | "warning" | "error" = "inf
 /** Stays until dismiss(). Reuses the toast stack; optional Retry-style action. */
 export function stickyToast(
   message: string,
-  type: "warning" | "error",
+  type: "warning" | "error" | "info" = "info",
   action?: { label: string; onClick: () => void },
 ): { dismiss: () => void } {
   const el = document.createElement("div");

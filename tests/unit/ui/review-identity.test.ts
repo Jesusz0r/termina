@@ -57,4 +57,13 @@ describe("review identity staging (refs #207)", () => {
     const body = show();
     expect(body.match(/if \(seq !== this\.loadSeq\) return;/g)?.length).toBe(3);
   });
+
+  it("stages preRevertContent and provides an undoable stickyToast on successful revert", () => {
+    const revertBody = methodBody(review, "async revert(): Promise<void>");
+    expect(revertBody).toContain("const preRevertContent = this.modifiedModel?.getValue()");
+    expect(revertBody).toContain("await window.termina.reviewRevert(this.terminalId, targetPath)");
+    expect(revertBody).toContain("stickyToast(");
+    expect(revertBody).toContain('label: "Undo"');
+    expect(revertBody).toContain("await window.termina.saveFile(targetPath, preRevertContent, targetOwner)");
+  });
 });

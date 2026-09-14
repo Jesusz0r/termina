@@ -3,10 +3,10 @@
  * the agent touched, with Revert / Accept / Open actions.
  */
 import * as monaco from "monaco-editor";
-import { toast } from "./components/modals";
+import { stickyToast, toast } from "./components/modals";
 import { languageForPath } from "./editor-language";
 import { applyMonacoTheme } from "./editor";
-import { cssFontFamily, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
+import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
 
 export class ReviewView {
   private container: HTMLElement;
@@ -342,9 +342,12 @@ export class ReviewView {
 
   async revert(): Promise<void> {
     if (!this.terminalId || !this.path) return;
+    const targetPath = this.path;
+    const targetOwner = this.owner;
+    const preRevertContent = this.modifiedModel?.getValue();
     let res;
     try {
-      res = await window.termina.reviewRevert(this.terminalId, this.path);
+      res = await window.termina.reviewRevert(this.terminalId, targetPath);
     } catch (err) {
       toast(`revert failed: ${(err as Error).message}`, "error");
       return;
@@ -355,7 +358,35 @@ export class ReviewView {
     }
     // The watcher updates the editor; refresh the diff to show the restored state.
     await this.refreshCurrent();
-    this.onReverted(this.path);
+    this.onReverted(targetPath);
+
+    if (preRevertContent !== undefined && targetOwner) {
+      const filename = pathBasename(targetPath);
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const handle = stickyToast(
+        `Reverted ${filename}`,
+        "info",
+        {
+          label: "Undo",
+          onClick: async () => {
+            if (timer) clearTimeout(timer);
+            handle.dismiss();
+            try {
+              const saveRes = await window.termina.saveFile(targetPath, preRevertContent, targetOwner);
+              if (!saveRes.ok) {
+                toast(saveRes.error ?? "could not undo revert", "error");
+                return;
+              }
+              await this.refreshCurrent(preRevertContent);
+              toast(`Restored changes to ${filename}`, "info");
+            } catch (err) {
+              toast(`could not undo revert: ${(err as Error).message}`, "error");
+            }
+          },
+        },
+      );
+      timer = setTimeout(() => handle.dismiss(), 10000);
+    }
   }
 
   accept(): void {

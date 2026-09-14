@@ -3431,6 +3431,10 @@ html[data-theme="light"] #statusbar .muted {
   border-left-color: var(--yellow);
 }
 
+.toast-info {
+  border-left-color: var(--accent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
