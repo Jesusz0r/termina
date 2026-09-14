@@ -1,5 +1,42 @@
 import { describe, it, expect } from "vitest";
-import { parseTerminalFileLinks } from "../../../src/terminal-links.ts";
+import type { ILink, Terminal } from "@xterm/xterm";
+import { cellColumnsForLine, createTerminalLinkProvider, parseTerminalFileLinks } from "../../../src/terminal-links.ts";
+
+/** Minimal fake buffer line: cells with chars/width plus the string view. */
+function makeFakeLine(
+  text: string,
+  opts: { wide?: (cp: string) => boolean; combining?: (cp: string) => boolean } = {},
+): { length: number; isWrapped: boolean; getCell(x: number): { getChars(): string; getWidth(): number } | undefined; translateToString(trimRight?: boolean): string } {
+  const cells: Array<{ chars: string; width: number }> = [];
+  for (const cp of text) {
+    const last = [...cells].reverse().find((c) => c.width > 0);
+    if (opts.combining?.(cp) && last) {
+      last.chars += cp;
+      continue;
+    }
+    if (opts.wide?.(cp)) cells.push({ chars: cp, width: 2 }, { chars: "", width: 0 });
+    else cells.push({ chars: cp, width: 1 });
+  }
+  return {
+    length: cells.length,
+    isWrapped: false,
+    getCell: (x: number) => {
+      const c = cells[x];
+      return c ? { getChars: () => c.chars, getWidth: () => c.width } : undefined;
+    },
+    translateToString: (trimRight?: boolean) => (trimRight ? text.replace(/\s+$/, "") : text),
+  };
+}
+
+function provideForLine(line: ReturnType<typeof makeFakeLine>): ILink[] | undefined {
+  const term = { buffer: { active: { getLine: (y: number) => (y === 0 ? line : undefined) } }, element: undefined };
+  const provider = createTerminalLinkProvider(term as unknown as Terminal, () => {});
+  let result: ILink[] | undefined;
+  provider.provideLinks(1, (links) => {
+    result = links;
+  });
+  return result;
+}
 
 describe("Terminal file link detection", () => {
   it("detects relative paths with line and column numbers", () => {
@@ -164,5 +201,50 @@ describe("Terminal file link detection", () => {
     expect(links).toHaveLength(1);
     expect(links[0].path).toBe("src/main.ts");
     expect(links[0].line).toBe(42);
+  });
+});
+
+describe("Terminal link provider ranges (refs #144)", () => {
+  it("maps string offsets to cells after a wide CJK character", () => {
+    // "界" occupies cells 0-1, the space is cell 2, so `s` sits at cell 3 (x=4).
+    const line = makeFakeLine("界 src/main.ts", { wide: (cp) => cp === "界" });
+    const links = provideForLine(line);
+    expect(links).toHaveLength(1);
+    expect(links![0].range.start).toEqual({ x: 4, y: 1 });
+    expect(links![0].range.end).toEqual({ x: 4 + "src/main.ts".length - 1, y: 1 });
+  });
+
+  it("maps string offsets to cells after a wide emoji", () => {
+    const line = makeFakeLine("⚡ src/main.ts:42", { wide: (cp) => cp === "⚡" });
+    const links = provideForLine(line);
+    expect(links).toHaveLength(1);
+    expect(links![0].range.start).toEqual({ x: 4, y: 1 });
+  });
+
+  it("maps string offsets to cells after a combining character", () => {
+    // "é" is two UTF-16 units (e + U+0301) in one cell: `s` is string offset 3 but cell 2.
+    const line = makeFakeLine("e\u0301 src/main.ts", { combining: (cp) => cp === "\u0301" });
+    const links = provideForLine(line);
+    expect(links).toHaveLength(1);
+    expect(links![0].range.start).toEqual({ x: 3, y: 1 });
+  });
+
+  it("keeps ASCII ranges at offset + 1", () => {
+    const line = makeFakeLine("See src/main.ts:42.");
+    const links = provideForLine(line);
+    expect(links).toHaveLength(1);
+    expect(links![0].range.start).toEqual({ x: 5, y: 1 });
+    expect(links![0].range.end).toEqual({ x: 5 + "src/main.ts:42".length - 1, y: 1 });
+  });
+
+  it("yields no links for blank lines or lines without references", () => {
+    expect(provideForLine(makeFakeLine("   "))).toBeUndefined();
+    expect(provideForLine(makeFakeLine("just words here"))).toBeUndefined();
+  });
+
+  it("maps every string unit of wide, combining, and plain cells", () => {
+    const line = makeFakeLine("界e\u0301x", { wide: (cp) => cp === "界", combining: (cp) => cp === "\u0301" });
+    // Cells: [界:0][placeholder:1][é:2][x:3]; string units: 界, e, ́, x.
+    expect(cellColumnsForLine(line as never, 4)).toEqual([0, 2, 2, 3]);
   });
 });

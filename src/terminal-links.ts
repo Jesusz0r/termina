@@ -1,4 +1,4 @@
-import type { IBufferRange, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
+import type { IBufferLine, IBufferRange, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
 
 const KNOWN_EXTENSIONS = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs",
@@ -254,6 +254,35 @@ export function parseTerminalFileLinks(lineText: string): ParsedTerminalFileLink
 }
 
 /**
+ * Maps each UTF-16 offset of a line's string (up to `textLength`) to its
+ * 0-based terminal cell, using only the supported buffer API.
+ *
+ * Wide characters occupy two cells but appear once in the string, combined
+ * marks share one cell, and empty cells stringify as a space — so string
+ * offsets and cell columns diverge after any non-trivial cell. The public
+ * `translateToString` takes only three arguments: the internal out-columns
+ * fourth argument is unreachable, and an `any` cast cannot change that.
+ */
+export function cellColumnsForLine(line: IBufferLine, textLength: number): number[] {
+  const columns: number[] = [];
+  let x = 0;
+  while (x < line.length && columns.length < textLength) {
+    const cell = line.getCell(x);
+    if (!cell) {
+      columns.push(x);
+      x++;
+      continue;
+    }
+    // Empty cells stringify as one space; wide cells advance past their placeholder.
+    const chars = cell.getChars() || " ";
+    const width = cell.getWidth() || 1;
+    for (let i = 0; i < chars.length; i++) columns.push(x);
+    x += width;
+  }
+  return columns;
+}
+
+/**
  * Creates an xterm.js ILinkProvider for clickable terminal file references.
  */
 export function createTerminalLinkProvider(
@@ -268,8 +297,7 @@ export function createTerminalLinkProvider(
         return;
       }
 
-      const outColumns: number[] = [];
-      const lineText = (line as any).translateToString(true, undefined, undefined, outColumns);
+      const lineText = line.translateToString(true);
       if (!lineText.trim()) {
         callback(undefined);
         return;
@@ -281,14 +309,14 @@ export function createTerminalLinkProvider(
         return;
       }
 
+      // Link ranges are terminal cells (1-based, end-inclusive), not string offsets.
+      const columns = cellColumnsForLine(line, lineText.length);
+      const cellOf = (offset: number): number => (offset < columns.length ? columns[offset]! : offset);
+
       const links: ILink[] = parsed.map((item) => {
-        const startX = outColumns.length > item.startIndex
-          ? outColumns[item.startIndex] + 1
-          : item.startIndex + 1;
+        const startX = cellOf(item.startIndex) + 1;
         const endCharIdx = Math.max(0, item.endIndex - 1);
-        const endX = outColumns.length > endCharIdx
-          ? outColumns[endCharIdx] + 1
-          : item.endIndex;
+        const endX = cellOf(endCharIdx) + 1;
 
         const range: IBufferRange = {
           start: { x: startX, y: bufferLineNumber },
