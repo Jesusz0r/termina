@@ -116,6 +116,12 @@ function effortLevelMap(provider: ProviderId, model: string, protocol: ProviderP
   }
   if (!responsesReasoningFamily(model)) return map;
   if (id.includes("grok")) return grokEffortLevelMap(model);
+  if (id.includes("muse-spark")) {
+    // Muse Spark rejects reasoning none with HTTP 400; floor at low.
+    map.off = null;
+    map.minimal = null;
+    return map;
+  }
   const openaiMap = openaiEffortLevelMap(model);
   // Preserve provider restrictions after applying the shared model defaults.
   // O-series rules take precedence even if a catalog id contains another family.

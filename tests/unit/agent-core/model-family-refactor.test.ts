@@ -48,6 +48,12 @@ describe("shared model capabilities across provider protocols", () => {
     expect(reasoningEffortFor("openai-codex", "gpt-5.6-sol", "minimal", "openai-codex-responses")).toBe("low");
   });
 
+  it("floors Muse Spark at low because the route rejects reasoning none", () => {
+    expect(reasoningEffortFor("opencode-zen", "muse-spark-1.3-contributor", "off", "openai-responses")).toBe("low");
+    expect(supportedEffortLevels("opencode-zen", "muse-spark-1.3-contributor", "openai-responses"))
+      .toEqual(["low", "medium", "high"]);
+  });
+
   it("controls Gemini 2.5 effort on the direct provider and marks unverified routes provider-default", () => {
     expect(supportedEffortLevels("google", "gemini-2.5-flash", "openai-completions"))
       .toEqual(["minimal", "low", "medium", "high"]);
