@@ -3,8 +3,9 @@
  * Perf compare: the Rust snapshot core against the Git CLI on equal work.
  *
  * Measures three operations on one synthetic fixture and prints medians
- * plus samples as JSON. The website Speed section cites these numbers;
- * re-run this script to reproduce them.
+ * plus samples as JSON. Public website ratios stay withdrawn until a
+ * documented re-run of this harness; do not paste chart literals from a
+ * machine that is not the published hardware.
  *
  * Methodology: one timing boundary per sample. Each workload callback
  * performs its fixture work first (dirtying files, cleaning destinations,
@@ -34,13 +35,14 @@ import { build } from "esbuild";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { perfInt } from "./perf-env.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "perf-compare-"));
 try {
-  const FILE_COUNT = Number(process.env.PERF_FILES ?? 1000);
-  const SAMPLES_PER_BLOCK = Number(process.env.PERF_SAMPLES ?? 12);
-  const MERGE_BLOCKS = Number(process.env.PERF_BLOCKS ?? 2);
-  const MATERIALIZE_BLOCKS = Number(process.env.PERF_BLOCKS ?? 2);
+  const FILE_COUNT = perfInt(process.env, "PERF_FILES", 1000);
+  const SAMPLES_PER_BLOCK = perfInt(process.env, "PERF_SAMPLES", 12);
+  const MERGE_BLOCKS = perfInt(process.env, "PERF_BLOCKS", 2);
+  const MATERIALIZE_BLOCKS = perfInt(process.env, "PERF_BLOCKS", 2);
 
   const entry = join(dir, "perf-entry.mjs");
   writeFileSync(
@@ -48,6 +50,7 @@ try {
     `
   import { SnapshotStore, boundPromotionOpenDirectory } from "${join(import.meta.dirname, "..", "electron", "worldline-git.ts")}";
   import { measure, phased } from "${join(import.meta.dirname, "perf-measure.ts")}";
+  import { MERGE_OURS, MERGE_THEIRS, mergeFileName, mergeChangedNames, assertSameNames, assertSameTree } from "${join(import.meta.dirname, "perf-workload.ts")}";
   import { spawnSync, execFileSync } from "node:child_process";
   import { lstatSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
   import { join } from "node:path";
@@ -165,33 +168,31 @@ try {
   execFileSync("git", ["reset", "-q", "--hard", baseOid], { cwd: fixture });
   const reinstall = (ref, lo, hi) => {
     for (let i = lo; i < hi; i++) {
-      const content = execFileSync("git", ["show", \`\${ref}:file-\${i}.ts\`], { cwd: fixture });
-      writeFileSync(join(fixture, \`file-\${i}.ts\`), content);
+      const content = execFileSync("git", ["show", \`\${ref}:\${mergeFileName(i)}\`], { cwd: fixture });
+      writeFileSync(join(fixture, mergeFileName(i)), content);
     }
   };
-  const changedNames = () => git(["diff", "--name-only", baseOid]).split("\\n").filter(Boolean).sort();
+  const dirtyNames = () => git(["diff", "--name-only", baseOid]).split("\\n").filter(Boolean);
   const expectChanged = (label, lo, hi) => {
-    const names = changedNames();
-    const expected = Array.from({ length: hi - lo }, (_, k) => \`file-\${lo + k}.ts\`);
-    if (names.length !== expected.length || names.some((name, k) => name !== expected[k])) {
-      throw new Error(\`\${label} worktree diverged from its branch: \${names.length} changed files\`);
-    }
+    assertSameNames(label, dirtyNames(), mergeChangedNames(lo, hi));
   };
-  reinstall("ours", 0, 50);
-  expectChanged("ours", 0, 50);
-  const tOurs = await store.captureIncremental(coldState.commit, Array.from({ length: 50 }, (_, i) => \`file-\${i}.ts\`), []);
-  reinstall(baseOid, 0, 50);
-  reinstall("theirs", 50, 100);
-  expectChanged("theirs", 50, 100);
-  const tTheirs = await store.captureIncremental(coldState.commit, Array.from({ length: 50 }, (_, i) => \`file-\${50 + i}.ts\`), []);
-  reinstall(baseOid, 0, 100);
-  if (changedNames().length !== 0) throw new Error("base worktree not restored after merge setup");
+  reinstall("ours", MERGE_OURS.lo, MERGE_OURS.hi);
+  expectChanged("ours", MERGE_OURS.lo, MERGE_OURS.hi);
+  const tOurs = await store.captureIncremental(coldState.commit, mergeChangedNames(MERGE_OURS.lo, MERGE_OURS.hi), []);
+  assertSameTree(tOurs.tree, git(["rev-parse", "ours^{tree}"]), "termina ours tree is not equivalent to git ours");
+  reinstall(baseOid, MERGE_OURS.lo, MERGE_OURS.hi);
+  reinstall("theirs", MERGE_THEIRS.lo, MERGE_THEIRS.hi);
+  expectChanged("theirs", MERGE_THEIRS.lo, MERGE_THEIRS.hi);
+  const tTheirs = await store.captureIncremental(coldState.commit, mergeChangedNames(MERGE_THEIRS.lo, MERGE_THEIRS.hi), []);
+  assertSameTree(tTheirs.tree, git(["rev-parse", "theirs^{tree}"]), "termina theirs tree is not equivalent to git theirs");
+  reinstall(baseOid, MERGE_OURS.lo, MERGE_THEIRS.hi);
+  if (dirtyNames().length !== 0) throw new Error("base worktree not restored after merge setup");
   // Warm-up plus output equivalence: both merges must produce the same tree.
   const expectedTree = git(["merge-tree", "--write-tree", "ours", "theirs"]);
   {
     const m = await store.merge3(tOurs.commit, tTheirs.commit);
     if (!m.ok || m.conflicts.length !== 0) throw new Error(\`termina merge not clean: \${JSON.stringify(m.conflicts)}\`);
-    if (m.tree !== expectedTree) throw new Error("termina merge tree differs from git merge-tree");
+    assertSameTree(m.tree, expectedTree, "termina merge tree differs from git merge-tree");
   }
   const mergeRow = await phased(
     MERGE_BLOCKS + 1,
@@ -199,13 +200,14 @@ try {
     async () => {
       let merged = null;
       const ms = await measure(async () => { merged = await store.merge3(tOurs.commit, tTheirs.commit); });
-      if (!merged.ok || merged.tree !== expectedTree) throw new Error("termina merge diverged from the git merge-tree result");
+      if (!merged.ok) throw new Error("termina merge diverged from the git merge-tree result");
+      assertSameTree(merged.tree, expectedTree, "termina merge diverged from the git merge-tree result");
       return ms;
     },
     async () => {
       let tree = "";
       const ms = await measure(() => { tree = git(["merge-tree", "--write-tree", "ours", "theirs"]); });
-      if (tree !== expectedTree) throw new Error("git merge-tree result changed mid-benchmark");
+      assertSameTree(tree, expectedTree, "git merge-tree result changed mid-benchmark");
       return ms;
     },
   );

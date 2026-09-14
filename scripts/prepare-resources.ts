@@ -778,11 +778,10 @@ export function prepareBin(resourcesDir = RESOURCES) {
   mkdirSync(binDir, { recursive: true });
   const src = join(process.cwd(), "bin", "termina");
   const dest = join(binDir, "termina");
-  if (existsSync(src)) {
-    copyFileSync(src, dest);
-    chmodSync(dest, 0o755);
-    console.log("✓ bin/termina staged");
-  }
+  if (!existsSync(src)) throw new Error(`missing CLI launcher: ${src}`);
+  copyFileSync(src, dest);
+  chmodSync(dest, 0o755);
+  console.log("✓ bin/termina staged");
 }
 
 async function main() {

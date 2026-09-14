@@ -13,11 +13,11 @@ import { build } from "esbuild";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { perfInt } from "./perf-env.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "perf-baseline-"));
 try {
-  const FILE_COUNT_RAW = Number(process.env.PERF_FILES ?? 200);
-  const FILE_COUNT = Number.isFinite(FILE_COUNT_RAW) && FILE_COUNT_RAW > 0 ? Math.floor(FILE_COUNT_RAW) : 200;
+  const FILE_COUNT = perfInt(process.env, "PERF_FILES", 200);
   const entry = join(dir, "perf-entry.mjs");
   writeFileSync(
     entry,
