@@ -50,7 +50,7 @@ import { loadPreferencesWithRetry } from "./preferences-boot";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { showContextMenu, type ContextMenuItem } from "./components/context-menu";
 import { SettingsView } from "./settings";
-import { emptyShortcuts, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
+import { applyEmptyStateShortcutHints, emptyShortcuts, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
 import { CommandDispatcher } from "./commands";
 import { PtySequenceLedger } from "./pty-sequence-ledger";
 import {
@@ -110,6 +110,7 @@ const rightPaneEl = document.getElementById("right-pane")!;
 // The base editor fills the pane before any project tab exists (the
 // no-project boot). Project views take over once a folder opens.
 const baseEmptyEl = emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
+applyEmptyStateShortcutHints(baseEmptyEl);
 rightPaneEl.appendChild(baseEmptyEl);
 
 let baseEditorInstance: EditorManagerInstance | null = null;
@@ -154,6 +155,7 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
   const containerEl = document.createElement("div");
   containerEl.className = "editor-container";
   const emptyEl = emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
+  applyEmptyStateShortcutHints(emptyEl);
   editorEl.append(chromeEl, containerEl, emptyEl);
   editorEl.style.display = "none";
   rightPaneEl.insertBefore(editorEl, rightPaneEl.firstElementChild);
@@ -464,6 +466,7 @@ const statusCwd = document.getElementById("status-cwd")!;
 const statusState = document.getElementById("status-state")!;
 const statusUsage = document.getElementById("status-usage")!;
 const btnAppUpdate = document.getElementById("btn-app-update") as HTMLButtonElement;
+const btnSettings = document.getElementById("btn-settings") as HTMLButtonElement;
 const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
@@ -2204,6 +2207,7 @@ commands.register("content-search", () => quickOpen.open("content"));
 commands.register("command-palette", () => quickOpen.open("actions"));
 
 // Settings
+btnSettings.addEventListener("click", () => settingsView.open(committedPreferences));
 commands.register("open-settings", () => settingsView.open(committedPreferences));
 
 window.termina.onMenuCommand((cmd) => {
