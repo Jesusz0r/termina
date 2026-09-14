@@ -307,17 +307,36 @@ function writeAuth(data: AuthFile, binding: AuthPathBinding): void {
 }
 
 
-export function modifyProvider(id: string, fn: (current: unknown) => unknown | null): void {
-  withLock((binding) => {
+export type AuthWriteOpts = {
+  /**
+   * Discard an unreadable auth file instead of refusing the write. The
+   * refusal stays the default: only logout and an explicitly confirmed
+   * login pass this.
+   */
+  discardCorrupt?: boolean;
+};
+
+
+export function modifyProvider(
+  id: string,
+  fn: (current: unknown) => unknown | null,
+  opts?: AuthWriteOpts,
+): { discardedCorrupt: boolean } {
+  return withLock((binding) => {
     const got = readAuth();
+    let discardedCorrupt = false;
     if (!got.ok && got.reason === "corrupt") {
-      throw new Error("auth.json is unreadable — refusing to write");
+      if (!opts?.discardCorrupt) {
+        throw new Error("auth.json is unreadable — refusing to write");
+      }
+      discardedCorrupt = true;
     }
     const data: AuthFile = got.ok ? { ...got.data } : {};
     const next = fn(data[id]);
     if (next === null) delete data[id];
     else data[id] = next;
     writeAuth(data, binding);
+    return { discardedCorrupt };
   });
 }
 

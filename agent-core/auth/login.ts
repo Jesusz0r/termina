@@ -10,10 +10,11 @@ import { SUPPORTED_PROVIDERS, type LoginMode, type ProviderId } from "./provider
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { ANTHROPIC_CLIENT_ID, ANTHROPIC_SCOPES, OPENAI_CODEX_CLIENT_ID, OPENAI_CODEX_SCOPES, authorizeUrl, defaultLoginMode, isSupportedProvider, redirectPath, redirectPort, redirectUri } from "./endpoints.ts";
+import { resolve } from "node:path";
+import { ANTHROPIC_CLIENT_ID, ANTHROPIC_SCOPES, OPENAI_CODEX_CLIENT_ID, OPENAI_CODEX_SCOPES, authPath, authorizeUrl, defaultLoginMode, isSupportedProvider, redirectPath, redirectPort, redirectUri } from "./endpoints.ts";
 import { exchangeAnthropic, exchangeCodex, exchangeGithubCopilotToken, exchangeOpenRouter, persistApiKey, persistOauth, pollGithubDeviceToken, pollXaiDeviceToken, requestGithubDeviceCode, requestXaiDeviceCode } from "./oauth.ts";
 import { authBanner, resolveAuth } from "./resolve.ts";
-import { modifyProvider } from "./store.ts";
+import { modifyProvider, readAuth, type AuthWriteOpts } from "./store.ts";
 
 
 export type LoginKind = "oauth" | "key";
@@ -394,31 +395,31 @@ async function collectCode(
 }
 
 
-async function loginKey(providerId: ProviderId, io: LoginIo): Promise<{ ok: true } | { ok: false; error: string }> {
+async function loginKey(providerId: ProviderId, io: LoginIo, opts?: AuthWriteOpts): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!io.waitForCode) return { ok: false, error: "login failed: no key input" };
   const env = providerDefinition(providerId).envKeys[0] ?? "API_KEY";
   io.write(`paste the ${providerId} API key (${env}), then press enter\n`);
   const key = (await io.waitForCode()).trim();
   if (!key) return { ok: false, error: "login failed: empty key" };
-  return persistApiKey(providerId, key);
+  return persistApiKey(providerId, key, opts);
 }
 
 
-async function loginXaiDevice(io: LoginIo): Promise<{ ok: true } | { ok: false; error: string }> {
+async function loginXaiDevice(io: LoginIo, opts?: AuthWriteOpts): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const device = await requestXaiDeviceCode(io.signal);
     io.write(`Open ${device.verificationUri} and enter code: ${device.userCode}\n`);
     openAuthorize(device.verificationUri, io);
     const tokens = await pollXaiDeviceToken(device, io.signal);
     if (!tokens.ok) return tokens;
-    return persistOauth("xai", tokens);
+    return persistOauth("xai", tokens, {}, opts);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
 }
 
 
-async function loginGithubCopilot(io: LoginIo): Promise<{ ok: true } | { ok: false; error: string }> {
+async function loginGithubCopilot(io: LoginIo, opts?: AuthWriteOpts): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const device = await requestGithubDeviceCode(io.signal);
     io.write(`Open ${device.verificationUri} and enter code: ${device.userCode}\n`);
@@ -431,6 +432,7 @@ async function loginGithubCopilot(io: LoginIo): Promise<{ ok: true } | { ok: fal
       "github-copilot",
       { access: session.access, refresh: github.githubToken, expires: session.expires },
       { apiUrl: session.apiUrl },
+      opts,
     );
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -438,7 +440,7 @@ async function loginGithubCopilot(io: LoginIo): Promise<{ ok: true } | { ok: fal
 }
 
 
-async function loginGithubCopilotKey(io: LoginIo): Promise<{ ok: true } | { ok: false; error: string }> {
+async function loginGithubCopilotKey(io: LoginIo, opts?: AuthWriteOpts): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!io.waitForCode) return { ok: false, error: "login failed: no token input" };
   io.write("paste a GitHub token with Copilot access, then press enter\n");
   const githubToken = (await io.waitForCode()).trim();
@@ -449,6 +451,7 @@ async function loginGithubCopilotKey(io: LoginIo): Promise<{ ok: true } | { ok: 
     "github-copilot",
     { access: session.access, refresh: githubToken, expires: session.expires },
     { apiUrl: session.apiUrl },
+    opts,
   );
 }
 
@@ -471,24 +474,40 @@ export async function runLogin(
   if (!isSupportedProvider(providerId)) {
     return { ok: false, error: `unsupported provider: ${providerId} (supported: ${SUPPORTED_PROVIDERS.join(", ")})` };
   }
+  // A corrupt store refuses every write. Ask once, up front — before any
+  // browser flow — whether to discard the named file; the flag is decided
+  // under the write lock, so a concurrent repair just merges normally.
+  let authWrite: AuthWriteOpts | undefined;
+  const pre = readAuth();
+  if (!pre.ok && pre.reason === "corrupt") {
+    const path = resolve(authPath());
+    if (!io.waitForCode) {
+      return { ok: false, error: `auth file is unreadable: ${path} — run /logout to discard it and start over` };
+    }
+    io.write(`stored credentials at ${path} are unreadable — signing in discards that file. type DISCARD to continue, or anything else to abort\n`);
+    if ((await io.waitForCode()).trim() !== "DISCARD") {
+      return { ok: false, error: "login cancelled — unreadable auth file left untouched" };
+    }
+    authWrite = { discardCorrupt: true };
+  }
   const chosen = mode;
   if (providerId === "github-copilot") {
-    const stored = chosen === "key" ? await loginGithubCopilotKey(io) : await loginGithubCopilot(io);
+    const stored = chosen === "key" ? await loginGithubCopilotKey(io, authWrite) : await loginGithubCopilot(io, authWrite);
     if (!stored.ok) return stored;
     return finishResolved(providerId, io.signal);
   }
   if (chosen === "key" || (chosen === "browser" && defaultLoginMode(providerId) === "key")) {
-    const stored = await loginKey(providerId, io);
+    const stored = await loginKey(providerId, io, authWrite);
     if (!stored.ok) return stored;
     return finishResolved(providerId, io.signal);
   }
   if (providerId === "xai") {
-    const stored = await loginXaiDevice(io);
+    const stored = await loginXaiDevice(io, authWrite);
     if (!stored.ok) return stored;
     return finishResolved(providerId, io.signal);
   }
   if (providerId === "openai" || providerId === "google") {
-    const stored = await loginKey(providerId, io);
+    const stored = await loginKey(providerId, io, authWrite);
     if (!stored.ok) return stored;
     return finishResolved(providerId, io.signal);
   }
@@ -498,7 +517,7 @@ export async function runLogin(
     const url = buildOpenRouterAuthorizeUrl(challenge, redirectUri(providerId, port, state));
     const code = await collectCode(providerId, chosen === "code" ? "code" : "browser", url, state, io);
     if (!code.ok) return code;
-    const exchanged = await exchangeOpenRouter(code.code, verifier, io.signal);
+    const exchanged = await exchangeOpenRouter(code.code, verifier, io.signal, authWrite);
     if (!exchanged.ok) return exchanged;
     return finishResolved(providerId, io.signal);
   }
@@ -506,14 +525,14 @@ export async function runLogin(
     const url = buildCodexAuthorizeUrl(challenge, state, port);
     const code = await collectCode(providerId, chosen === "code" ? "code" : "browser", url, state, io);
     if (!code.ok) return code;
-    const exchanged = await exchangeCodex(code.code, verifier, port, io.signal);
+    const exchanged = await exchangeCodex(code.code, verifier, port, io.signal, authWrite);
     if (!exchanged.ok) return exchanged;
     return finishResolved(providerId, io.signal);
   }
   const url = buildAnthropicAuthorizeUrl(challenge, state, port);
   const code = await collectCode("anthropic", chosen === "code" ? "code" : "browser", url, state, io);
   if (!code.ok) return code;
-  const exchanged = await exchangeAnthropic(code.code, verifier, port, io.signal);
+  const exchanged = await exchangeAnthropic(code.code, verifier, port, io.signal, authWrite);
   if (!exchanged.ok) return exchanged;
   return finishResolved(providerId, io.signal);
 }
@@ -524,7 +543,10 @@ export function runLogout(providerId: string): { ok: true; summary: string } | {
     return { ok: false, error: `unsupported provider: ${providerId} (supported: ${SUPPORTED_PROVIDERS.join(", ")})` };
   }
   try {
-    modifyProvider(providerId, () => null);
+    // Logout already intends to delete: discarding an unreadable file is
+    // within that intent, and it repairs the store for the next login.
+    const { discardedCorrupt } = modifyProvider(providerId, () => null, { discardCorrupt: true });
+    if (discardedCorrupt) return { ok: true, summary: `logged out ${providerId} (discarded unreadable auth file)` };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
