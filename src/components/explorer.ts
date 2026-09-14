@@ -5,6 +5,7 @@
  * Entries drag onto folders to move (cut + paste); the move itself reuses
  * the explorer:paste backend, so no new IPC exists for drag-drop.
  */
+import { canonicalizePath } from "../../shared/canonical-path";
 import { type CommandId, type ContentHit, type ExplorerEntry } from "../../shared/types";
 import { isRecord } from "../../shared/guards";
 import {
@@ -321,7 +322,7 @@ export class Explorer {
     row.addEventListener("click", () => {
       this.select(entry, row);
       this.keyboard.markFocus(row);
-      void this.setDirExpanded(entry.path, !state.expanded);
+      void this.setDirExpanded(canonicalizePath(entry.path), !state.expanded);
     });
     this.bindRowMenu(row, entry);
     this.setupDragSource(row, entry);
@@ -333,9 +334,9 @@ export class Explorer {
     node.dataset.path = entry.path;
     node.dataset.type = entry.type;
     this.rowEntry.set(row, entry);
-    this.dirViews.set(entry.path, { entry, state, node, children, row, arrow });
+    this.dirViews.set(canonicalizePath(entry.path), { entry, state, node, children, row, arrow });
     // A refresh can rebuild this row; selection is owned here, not by the DOM.
-    if (this.selected?.path === entry.path) this.select(entry, row);
+    if (this.selected && canonicalizePath(this.selected.path) === canonicalizePath(entry.path)) this.select(entry, row);
     this.setupDirDrop(row, children, entry, state);
     return node;
   }
@@ -347,7 +348,7 @@ export class Explorer {
    * state of unmounted descendants when collapsing.
    */
   private async setDirExpanded(absPath: string, expanded: boolean): Promise<void> {
-    const view = this.dirViews.get(absPath);
+    const view = this.dirViews.get(canonicalizePath(absPath));
     if (!view || view.state.expanded === expanded) return;
     view.state.expanded = expanded;
     if (!expanded) {
@@ -405,9 +406,9 @@ export class Explorer {
     const current = new Map<string, HTMLElement>();
     for (const node of children.querySelectorAll<HTMLElement>(":scope > [data-path]")) {
       const path = node.dataset.path;
-      if (path) current.set(path, node);
+      if (path) current.set(canonicalizePath(path), node);
     }
-    const nextDirPaths = new Set(entries.filter((child) => child.type === "dir").map((child) => child.path));
+    const nextDirPaths = new Set(entries.filter((child) => child.type === "dir").map((child) => canonicalizePath(child.path)));
     for (const [path, node] of current) {
       if (node.dataset.type === "dir" && !nextDirPaths.has(path)) this.tree.forgetDirectory(path);
     }
@@ -416,12 +417,12 @@ export class Explorer {
       next.push(makeNote("folder truncated (too many entries)"));
     }
     for (const child of entries) {
-      const existing = current.get(child.path);
+      const existing = current.get(canonicalizePath(child.path));
       const node = existing && existing.dataset.type === child.type
         ? existing
         : child.type === "dir" ? this.makeDirRow(child) : this.makeFileRow(child);
       if (child.type === "dir") {
-        const view = this.dirViews.get(child.path);
+        const view = this.dirViews.get(canonicalizePath(child.path));
         if (view) view.entry = child;
       }
       node.dataset.path = child.path;
@@ -449,7 +450,7 @@ export class Explorer {
     const name = makeNameEl(entry.name);
     row.append(icon, name, makeChangeMark());
     this.rowEntry.set(row, entry);
-    if (this.selected?.path === entry.path) this.select(entry, row);
+    if (this.selected && canonicalizePath(this.selected.path) === canonicalizePath(entry.path)) this.select(entry, row);
     row.addEventListener("click", () => {
       this.select(entry, row);
       this.keyboard.markFocus(row);

@@ -7,6 +7,7 @@
  * components/explorer.ts (issue #38) with no behavior change.
  */
 import { isPathDescendant, parentPath } from "../explorer-file";
+import { canonicalizePath } from "../../shared/canonical-path";
 import { pathBasename } from "../../shared/types";
 import { toast } from "./modals";
 import type { ExplorerEntry } from "../../shared/types";
@@ -31,6 +32,12 @@ export class ExplorerRefresh {
 
   constructor(private host: ExplorerRefreshHost) {}
 
+  /** Project root in the same form main already pushes (macOS aliases). */
+  private projectRoot(): string | null {
+    const cwd = this.host.projectCwd();
+    return cwd === null ? null : canonicalizePath(cwd);
+  }
+
   /** Drop pending disk-change work (project switch tears the tree down). */
   reset(): void {
     if (this.refreshTimer) {
@@ -41,7 +48,7 @@ export class ExplorerRefresh {
   }
   /** A file/dir changed on disk (watcher events) — refresh lazily. */
   handleDiskChange(path?: string): void {
-    if (path) this.pendingChanges.add(path);
+    if (path) this.pendingChanges.add(canonicalizePath(path));
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
@@ -52,7 +59,8 @@ export class ExplorerRefresh {
   }
 
   async refresh(changedPaths?: string[]): Promise<void> {
-    if (!this.host.projectCwd()) return;
+    const cwd = this.projectRoot();
+    if (!cwd) return;
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
@@ -65,12 +73,14 @@ export class ExplorerRefresh {
     }
     await this.renderRoot(false);
     const directories = new Set<string>();
-    for (const path of changedPaths) {
-      if (!path || !this.host.projectCwd()) continue;
-      let directory: string = path === this.host.projectCwd() ? path : parentPath(path);
+    for (const raw of changedPaths) {
+      const live = this.projectRoot();
+      if (!raw || !live) continue;
+      const path = canonicalizePath(raw);
+      let directory: string = path === live ? path : parentPath(path);
       // If an ancestor is collapsed, its descendants are not mounted. Mark
       // the nearest mounted ancestor stale so the branch reloads on expand.
-      while (!this.host.dirViews.has(directory) && directory !== this.host.projectCwd()) {
+      while (!this.host.dirViews.has(directory) && directory !== live) {
         const parent = parentPath(directory);
         if (parent === directory) break;
         directory = parent;
@@ -110,7 +120,7 @@ export class ExplorerRefresh {
   // -------------------------------------------------------------- filter --
 
   async renderRoot(forceReload = false): Promise<void> {
-    const cwd = this.host.projectCwd();
+    const cwd = this.projectRoot();
     if (!cwd) {
       this.host.dirViews.clear();
       this.host.treeEl.replaceChildren();
@@ -145,46 +155,37 @@ export class ExplorerRefresh {
   }
 
   dirState(absPath: string): DirState {
-    let state = this.host.dirs.get(absPath);
+    const key = canonicalizePath(absPath);
+    let state = this.host.dirs.get(key);
     if (!state) {
       state = { expanded: false, loaded: false, loadSeq: 0 };
-      this.host.dirs.set(absPath, state);
+      this.host.dirs.set(key, state);
     }
     return state;
   }
 
   /** A collapsed branch no longer needs expansion state for hidden descendants. */
   pruneCollapsedDescendants(absPath: string): void {
+    const ancestor = canonicalizePath(absPath);
     for (const path of this.host.dirs.keys()) {
-      if (isPathDescendant(path, absPath)) {
+      if (isPathDescendant(path, ancestor)) {
         this.host.dirs.delete(path);
         this.host.dirViews.delete(path);
       }
     }
   }
 
-  /**
-   * Drop expansion state for the mounted descendants of a collapsed branch.
-   * The nodes carry their own paths, so this stays exact where prefix
-   * matching cannot: the root key may be non-canonical (/var vs
-   * /private/var) and a prefix prune then silently misses every descendant,
-   * leaving stale expanded+loaded states behind detached nodes that never
-   * reload on re-expand.
-   */
+  /** Drop expansion state for the mounted descendants of a collapsed branch. */
   forgetMountedDescendants(children: HTMLElement): void {
-    for (const el of children.querySelectorAll<HTMLElement>("[data-path]")) {
-      const path = el.dataset.path;
-      if (path) {
-        this.host.dirs.delete(path);
-        this.host.dirViews.delete(path);
-      }
-    }
+    const parent = children.parentElement?.dataset.path;
+    if (parent) this.pruneCollapsedDescendants(parent);
   }
 
   /** Drop state for a directory that disappeared from its parent's listing. */
   forgetDirectory(absPath: string): void {
-    this.host.dirs.delete(absPath);
-    this.host.dirViews.delete(absPath);
-    this.pruneCollapsedDescendants(absPath);
+    const key = canonicalizePath(absPath);
+    this.host.dirs.delete(key);
+    this.host.dirViews.delete(key);
+    this.pruneCollapsedDescendants(key);
   }
 }

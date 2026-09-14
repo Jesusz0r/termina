@@ -7,6 +7,7 @@
  * when idle you can edit and save with Cmd+S.
  */
 import * as monaco from "monaco-editor";
+import { canonicalizePath } from "../shared/canonical-path";
 import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { languageForPath } from "./editor-language";
@@ -290,7 +291,7 @@ export class EditorManager {
     const preview = opts.preview ?? true;
     const owner = opts.owner ?? this.ownerProvider();
     if (!owner) throw new Error("file owner is unavailable");
-    const key = path;
+    let key = canonicalizePath(path);
     const existing = this.tabs.get(key);
     if (existing) {
       // Pin the preview when explicitly requested (for example double-click).
@@ -305,7 +306,7 @@ export class EditorManager {
     // Keep a replacement tab in the map before closing the previous preview.
     // Closing the last tab first would collapse the editor, then expand it again.
     const replacing = preview && this.previewKey && this.previewKey !== key ? this.previewKey : null;
-    const lease = acquireSharedFileModel(path, owner);
+    const lease = acquireSharedFileModel(key, owner);
     const model = lease.model;
     const tab = this.makeTab(key, model, owner, lease.release);
     if (preview) {
@@ -317,8 +318,8 @@ export class EditorManager {
     // do not pin. The same event marks the tab unsaved.
     tab.contentListener = model.onDidChangeContent((e) => {
       if (e.isFlush) return;
-      this.clearAgentChanges(key);
-      if (this.previewKey === key) this.pinPreview();
+      this.clearAgentChanges(tab.key);
+      if (this.previewKey === tab.key) this.pinPreview();
       this.syncDirty(tab);
     });
     this.tabs.set(key, tab);
@@ -331,10 +332,13 @@ export class EditorManager {
     const res = await window.termina.openFile(path, owner);
     if (res.ok) {
       const current = this.tabs.get(key);
-      // Learn the canonical alias whenever the tab still owns this model —
-      // above the version check, so the lost-race conflict branch learns it
-      // too and the tab keeps hearing canonical-path watcher pushes.
-      if (current?.model === model && res.path !== key) this.canonicalKeys.set(res.path, key);
+      // Retarget above the version check so a lost-race tab still hears
+      // watcher pushes on main's realpath (user symlinks that are not
+      // /tmp or /var). /tmp↔/private/tmp already matched at open.
+      if (current?.model === model && typeof res.path === "string" && res.path) {
+        const resolved = canonicalizePath(res.path);
+        if (resolved !== key) key = this.retargetTab(key, resolved);
+      }
       if (current?.model === model && model.getAlternativeVersionId() === initialVersionId) {
         model.setValue(res.content);
         tab.savedVersionId = model.getAlternativeVersionId();
@@ -382,16 +386,33 @@ export class EditorManager {
     this.previewKey = null;
   }
 
-  /** Canonical-path aliases per tab key. Main pushes canonical paths
-   *  (/private/tmp on macOS); tabs are keyed by the opened path. The open
-   *  response returns the canonical path, so every tab learns its alias. */
-  private canonicalKeys = new Map<string, string>();
-
-  /** The tab key for a pushed path: the path itself or its canonical alias. */
+  /** The tab key for a pushed path. Paths are canonicalized once so macOS
+   *  aliases (`/tmp` → `/private/tmp`) match the keys main already sends. */
   private resolveKey(path: string): string | null {
-    if (this.tabs.has(path)) return path;
-    const aliased = this.canonicalKeys.get(path);
-    return aliased !== undefined && this.tabs.has(aliased) ? aliased : null;
+    const key = canonicalizePath(path);
+    return this.tabs.has(key) ? key : null;
+  }
+
+  /** Move a tab from the as-opened key to main's realpath. No alias table. */
+  private retargetTab(from: string, to: string): string {
+    if (from === to) return from;
+    const tab = this.tabs.get(from);
+    if (!tab || (this.tabs.has(to) && this.tabs.get(to) !== tab)) return from;
+    this.tabs.delete(from);
+    tab.key = to;
+    this.tabs.set(to, tab);
+    this.order = this.order.map((k) => (k === from ? to : k));
+    if (this.previewKey === from) this.previewKey = to;
+    if (this.activeKey === from) this.activeKey = to;
+    if (this.userDirty.delete(from)) this.userDirty.add(to);
+    if (this.deletedOnDisk.delete(from)) this.deletedOnDisk.add(to);
+    if (this.mineKeys.delete(from)) this.mineKeys.add(to);
+    const queued = this.saveQueue.get(from);
+    if (queued) {
+      this.saveQueue.delete(from);
+      this.saveQueue.set(to, queued);
+    }
+    return to;
   }
 
   /** Update model content from the watcher (live edits). A model with
@@ -535,65 +556,78 @@ export class EditorManager {
     mine.className = "tab-mine";
     mine.textContent = "M";
     mine.title = "Mark as yours — the agent must not modify it";
-    mine.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (owner) this.onToggleMine(key, owner);
-    });
     const wline = document.createElement("span");
     wline.className = "tab-worldline";
     wline.style.display = "none";
     const close = document.createElement("span");
     close.className = "tab-close";
     close.textContent = "×";
+    const tab: OpenTab = {
+      key,
+      model,
+      owner,
+      releaseModel,
+      contentListener: null,
+      dom,
+      dirtyDot: dirty,
+      savedVersionId: model.getAlternativeVersionId(),
+      changeDecorations: [],
+      agentRevealLine: null,
+    };
+    // Listeners read tab.key so a post-open retarget keeps chrome working.
+    mine.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (owner) this.onToggleMine(tab.key, owner);
+    });
     close.addEventListener("click", (e) => {
       e.stopPropagation();
-      void this.requestCloseTab(key);
+      void this.requestCloseTab(tab.key);
     });
     dom.append(dirty, name, mine, wline, close);
     if (this.mineKeys.has(key)) dom.classList.add("mine");
     dom.addEventListener("click", () => {
       // A direct editor gesture: this is the one activation path that
       // takes focus. Programmatic opens never steal terminal focus.
-      this.activate(key);
+      this.activate(tab.key);
       this.focusEditor();
     });
     dom.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      this.openTabMenu(key, e.clientX, e.clientY);
+      this.openTabMenu(tab.key, e.clientX, e.clientY);
     });
     // Middle-click closes, like VS Code.
     dom.addEventListener("mousedown", (e) => {
       if (e.button === 1) {
         e.preventDefault();
-        void this.requestCloseTab(key);
+        void this.requestCloseTab(tab.key);
       }
     });
     // Drag to reorder. The drop indicator is a class on the target tab;
     // the order itself commits on drop so a cancelled drag changes nothing.
     dom.draggable = true;
     dom.addEventListener("dragstart", (e) => {
-      this.dragKey = key;
+      this.dragKey = tab.key;
       if (e.dataTransfer) {
-        e.dataTransfer.setData("text/plain", key);
+        e.dataTransfer.setData("text/plain", tab.key);
         e.dataTransfer.effectAllowed = "move";
       }
       dom.classList.add("dragging");
     });
     dom.addEventListener("dragover", (e) => {
-      if (!this.dragKey || this.dragKey === key) return;
+      if (!this.dragKey || this.dragKey === tab.key) return;
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
       const rect = dom.getBoundingClientRect();
-      this.setDropTarget(key, e.clientX > rect.left + rect.width / 2);
+      this.setDropTarget(tab.key, e.clientX > rect.left + rect.width / 2);
     });
     dom.addEventListener("drop", (e) => {
       e.preventDefault();
-      this.commitDrop(key);
+      this.commitDrop(tab.key);
     });
     dom.addEventListener("dragleave", () => this.clearDropTarget());
     dom.addEventListener("dragend", () => this.clearDrag());
-    return { key, model, owner, releaseModel, contentListener: null, dom, dirtyDot: dirty, savedVersionId: model.getAlternativeVersionId(), changeDecorations: [], agentRevealLine: null };
+    return tab;
   }
 
   private renderTabs(): void {
@@ -651,9 +685,6 @@ export class EditorManager {
   closeTab(key: string): void {
     const tab = this.tabs.get(key);
     if (!tab) return;
-    for (const [canonical, mapped] of this.canonicalKeys) {
-      if (mapped === key) this.canonicalKeys.delete(canonical);
-    }
     tab.contentListener?.dispose();
     tab.contentListener = null;
     tab.releaseModel();
