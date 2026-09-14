@@ -98,6 +98,10 @@ export function policyRequest(input: PolicyRequestInput): Promise<PolicyHttpResp
       settled = true;
       reject(err);
     };
+    // Track the socket so cancel releases the connection even after the
+    // response completed into the keep-alive pool (destroying req/res/body
+    // alone leaves a pooled socket open until its idle timeout).
+    let sock: { destroy: () => void } | null = null;
     const req = impl(
       input.url,
       {
@@ -129,6 +133,11 @@ export function policyRequest(input: PolicyRequestInput): Promise<PolicyHttpResp
           body,
           cancel: () => {
             try {
+              sock?.destroy();
+            } catch {
+              /* best effort */
+            }
+            try {
               body.destroy();
             } catch {
               /* best effort */
@@ -148,6 +157,9 @@ export function policyRequest(input: PolicyRequestInput): Promise<PolicyHttpResp
       },
     );
     req.on("error", (err) => fail(err instanceof Error ? err : new Error(String(err))));
+    req.on("socket", (s) => {
+      sock = s;
+    });
     if (input.body !== undefined && input.body.length > 0) req.write(input.body);
     req.end();
   });
