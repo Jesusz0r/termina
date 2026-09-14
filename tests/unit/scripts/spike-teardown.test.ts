@@ -63,7 +63,7 @@ describe("spike teardown wiring (#135)", () => {
       expect(source, `${spike} must track its fixture root`).toContain("trackSpikeFixtureRoot(mkdtempSync");
       expect(source, `${spike} must track raw core children`).toContain("trackSpikeChild(spawn(");
     }
-    for (const spike of ["tree-delta", "platform", "gitignore"]) {
+    for (const spike of ["tree-delta", "platform", "gitignore", "core-session-promotion", "promotion-transaction", "watcher-idle"]) {
       expect(read(`scripts/spikes/${spike}.ts`), `${spike} must track its fixture root`).toContain(
         "trackSpikeFixtureRoot(mkdtempSync",
       );

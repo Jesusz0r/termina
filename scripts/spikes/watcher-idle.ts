@@ -9,6 +9,7 @@ import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProjectWatcher } from "../../electron/watcher.js";
+import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -18,7 +19,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     results.push(ok);
     log(`${ok ? "PASS" : "FAIL"}  ${name}`);
   };
-  const root = mkdtempSync(join(tmpdir(), "termina-watcher-idle-"));
+  const root = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "termina-watcher-idle-")));
   const rawCallbacks: ((event: string, filename?: string | Buffer | null) => void)[] = [];
   const fakeWatch = (...args: unknown[]): FSWatcher => {
     const onRaw = args[2];

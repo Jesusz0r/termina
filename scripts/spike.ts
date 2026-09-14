@@ -18,7 +18,7 @@ const args = rawArgs[0] === "--" ? rawArgs.slice(1) : rawArgs;
 const name = args[0];
 const saveTo = args[1] === "--save" ? args[2] : null;
 if (!name || !/^[a-z0-9-]+$/.test(name)) {
-  console.error("usage: node scripts/spike.mjs <spike-name> [--save <file>]");
+  console.error("usage: node --experimental-strip-types scripts/spike.ts <spike-name> [--save <file>]");
   process.exit(2);
 }
 
