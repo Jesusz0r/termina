@@ -121,19 +121,11 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
         && bindings.getActiveProject().id === projectId
         && bindings.getEditor() === editor;
       // Snapshots are fetched on demand — the strip/IPC never carries content.
+      // Main waits for a write-snapshot ready signal; one call is enough.
       let res;
       try {
         res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);
         if (!isCurrent()) return;
-        // A write snapshot may still be filling in (the delayed fill takes
-        // 400 milliseconds) — retry
-        // briefly before giving up.
-        for (let i = 0; i < 5 && !res.ok; i++) {
-          await new Promise((resolve) => setTimeout(resolve, 250));
-          if (!isCurrent()) return;
-          res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);
-          if (!isCurrent()) return;
-        }
       } catch (err) {
         if (!isCurrent()) return;
         toast(`could not load this moment: ${(err as Error).message}`, "warning");

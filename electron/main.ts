@@ -34,11 +34,11 @@ import {
 } from "./pty-egress.js";
 import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher, watchContentIdentity } from "./watcher.js";
-import { SnapshotStore, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionReadFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
+import { SnapshotStore, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionReadFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, gitCommonDir, gitHead, gitObjectFormat, gitTrackedFiles, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
 import { EvidenceHomeStore } from "./evidence-home.js";
 import { benchmarkConfigFrom, detectTestCommand, detectTestFromState } from "./verify-detect.js";
 import { WorldlineManager, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
-import { worldlineAppReadPaths, worldlineCaptureHead, worldlineCapturePrimary, worldlinePreflight } from "./worldlines/bootstrap.js";
+import { classifyOpenedGitRoot, worldlineAppReadPaths, worldlineCaptureHead, worldlineCapturePrimary, worldlinePreflight } from "./worldlines/bootstrap.js";
 import {
   candidateSandboxLaunch,
   evidenceProfileContent,
@@ -149,6 +149,8 @@ const MAX_PROJECT_SNAPSHOT_BYTES = 12 * 1024;
 const PROJECT_SNAPSHOT_DEBOUNCE_MS = 5000;
 /** Timeline snapshots bigger than this are dropped (dot stays, no content). */
 const MAX_SNAPSHOT_SIZE = 100_000;
+/** Bound for one timeline:content wait on a write-snapshot ready signal. */
+const TIMELINE_CONTENT_WAIT_MS = 2500;
 /** file:changed pushes the content only up to this byte budget. The
  *  renderer fetches larger files on demand. */
 const MAX_LIVE_SYNC_BYTES = 256 * 1024;
@@ -697,6 +699,8 @@ class TerminaApp {
   private sidecarQueues = new Map<string, SidecarEventQueue>();
   /** One-use start preflights by token. */
   private pendingPreflights = new Map<string, PendingPreflight>();
+  /** Write-snapshot fills keyed by the timeline event object (same reference pushTimeline mutates). */
+  private timelineContentFills = new WeakMap<object, { promise: Promise<void>; resolve: () => void; timer: ReturnType<typeof setTimeout> }>();
   /** Capture tasks that must finish before store teardown. */
   private recordingTasks = new Set<Promise<unknown>>();
   /** Asynchronous bridge acknowledgements accepted from sidecar events. */
@@ -1789,12 +1793,13 @@ class TerminaApp {
         "worldlines",
         createHash("sha256").update(`v2:${storeRoot}`).digest("hex").slice(0, 16),
       );
-      const top = await gitTopLevel(ws.root);
-      if (!top) {
-        ws.recordError = "the opened folder is not inside a Git repository";
+      const classified = await classifyOpenedGitRoot(ws.root);
+      if (!classified.ok) {
+        ws.recordError = classified.reason;
         this.pushRecorderForWorkspace(ws, "paused", rendererTarget);
         return null;
       }
+      const top = classified.top;
       if (!captureRootInRepo(storeRoot, await this.canonicalPath(top))) {
         ws.recordError = "the opened folder is not inside a Git repository";
         this.pushRecorderForWorkspace(ws, "paused", rendererTarget);
@@ -3063,10 +3068,10 @@ class TerminaApp {
       pause: () => inst.pty.pause(),
       resume: () => inst.pty.resume(),
     });
-    inst.pty.onExit = async (code) => {
+    inst.pty.onExit = async (code: number, origin: "native" | "forced" = "native") => {
       if (inst.exitHandled) return;
       inst.exitHandled = true;
-      console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
+      console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}${origin === "forced" ? " (forced cleanup)" : ""}`);
       // Keep the terminal in the live map while queued output drains.  An
       // exit notification overtaking PTY bytes changes TUI semantics, and a
       // renderer reload must be able to receive the retained tail. A wedged
@@ -3093,6 +3098,7 @@ class TerminaApp {
       this.closeRunOnExit(inst);
       void this.cleanupPromptPayloads(inst);
       for (const event of inst.timeline) {
+        this.resolveTimelineContentFill(event);
         if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq, this.projectOfTerminal(inst.id));
       }
       // Resolve the owner before the map delete. projectOfTerminal reads
@@ -4474,24 +4480,34 @@ class TerminaApp {
     if (this.verifyRuns.has(id)) this.cancelVerify(id);
     inst.pty.killGroup("SIGTERM");
     inst.pty.kill("SIGTERM");
-    const existingOnExit = inst.pty.onExit;
+    type TerminalExitHandler = (code: number, origin?: "native" | "forced") => void | Promise<void>;
+    const existingOnExit = inst.pty.onExit as TerminalExitHandler;
     const killWatchdog = setTimeout(() => {
       if (!this.terminals.has(id) || inst.exitHandled) return;
-      try { inst.pty.killGroup("SIGKILL"); } catch {}
-      try { inst.pty.kill("SIGKILL"); } catch {}
+      try {
+        inst.pty.killGroup("SIGKILL");
+      } catch (error) {
+        console.warn(`[main] SIGKILL process-group failed for ${id}: ${(error as Error).message}`);
+      }
+      try {
+        inst.pty.kill("SIGKILL");
+      } catch (error) {
+        console.warn(`[main] SIGKILL failed for ${id}: ${(error as Error).message}`);
+      }
       // Native PTY exit delivery is best-effort after forced termination. Run
       // the same fenced cleanup path so stale terminal state cannot survive.
+      // The second argument marks this 137 as forced cleanup, not a native wait status.
       if (existingOnExit) {
         try {
-          existingOnExit(137);
+          existingOnExit(137, "forced");
         } catch (error) {
           console.warn(`[main] forced terminal cleanup failed for ${id}: ${(error as Error).message}`);
         }
       }
     }, 2000);
-    inst.pty.onExit = async (code) => {
+    inst.pty.onExit = async (code, origin: "native" | "forced" = "native") => {
       clearTimeout(killWatchdog);
-      if (existingOnExit) await existingOnExit(code);
+      if (existingOnExit) await existingOnExit(code, origin);
     };
     // Native exit or the hard-timeout fallback removes it from the map.
   }
@@ -4908,7 +4924,7 @@ class TerminaApp {
         this.sendTimelinePrefix(inst, rendererTarget);
         this.send("tool:target", { projectId: toolProject.id, workspaceId: toolWs.id, path, relPath: rel, toolName }, rendererTarget);
         // Session Timeline: snapshot the file as of this tool call. Create
-        // the event object first so a delayed content fill can find it later.
+        // the event object first so a watcher/tool_end fill can find it later.
         // The tool call and entry ids make the dot a forkable moment.
         const ev: Omit<TimelineEvent, "seq" | "ts"> = {
           t: "tool",
@@ -4927,12 +4943,17 @@ class TerminaApp {
       }
       case "tool_end": {
         const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
+        const toolEv = toolCallId
+          ? [...inst.timeline].reverse().find((e) => e.t === "tool" && e.toolCallId === toolCallId)
+          : undefined;
         if (toolCallId) {
           const rel = inst.pendingFileTools.get(toolCallId);
           inst.pendingFileTools.delete(toolCallId);
           // Ignore ends with no matching file-tool start (read, bash, orphan).
           if (rel !== undefined) inst.toolOutcomes.set(rel, event.isError === true ? "error" : "ok");
         }
+        if (toolEv) await this.finishTimelineWriteSnapshot(inst, toolEv);
+        else await this.finishUnmatchedTimelineWriteSnapshots(inst);
         this.sendTimelinePrefix(inst, rendererTarget);
         // The tool finished: schedule the moment capture for its dots.
         if (inst.currentRun) this.scheduleMomentCapture(inst, rendererTarget);
@@ -5527,6 +5548,7 @@ class TerminaApp {
 
   /** Debounce a moment capture: sibling tools coalesce into one state. */
   private scheduleMomentCapture(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
+    void this.finishUnmatchedTimelineWriteSnapshots(inst);
     if (!inst.currentRun) return;
     const ws = this.workspaceOfTerminal(inst);
     // Candidate workspaces record moments too (nested worldlines): their
@@ -5933,27 +5955,72 @@ class TerminaApp {
       this.setRunSnapshot(inst, path, content);
       return content.length > MAX_SNAPSHOT_SIZE ? { status } : { content, status };
     }
-    // write / create_file: prefer the watcher cache, else fill in shortly after.
+    // write / create_file: prefer the watcher cache. A miss waits for the
+    // watcher or tool_end — getTimelineContent awaits that ready signal.
     const cached = this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
     if (cached !== undefined) {
       this.setRunSnapshot(inst, path, cached);
       return cached.length > MAX_SNAPSHOT_SIZE ? { status } : { content: cached, status };
     }
-    // The write may not have landed in the watcher cache yet — retry shortly,
-    // addressing the event by reference (the tail may have moved on). Content
-    // stays main-side; the renderer fetches it on click.
-    setTimeout(() => {
-      if (this.disposed || !this.terminals.has(inst.id)) return;
-      const fresh = this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
-      if (fresh === undefined) return;
-      const idx = inst.timeline.indexOf(ev as TimelineEvent);
-      if (idx === -1) return; // dropped by the cap or terminal gone
-      const target = inst.timeline[idx];
-      target.content = fresh.length > MAX_SNAPSHOT_SIZE ? undefined : fresh;
-      target.status = status;
-      this.setRunSnapshot(inst, path, fresh);
-    }, 400);
+    this.beginTimelineContentFill(ev);
     return { status };
+  }
+
+  private beginTimelineContentFill(ev: object): void {
+    if (this.timelineContentFills.has(ev)) return;
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    const timer = setTimeout(() => this.expireTimelineContentFill(ev), TIMELINE_CONTENT_WAIT_MS);
+    this.timelineContentFills.set(ev, { promise, resolve, timer });
+  }
+
+  /** Unblock waiters without dropping the fill so a late tool_end can still read. */
+  private expireTimelineContentFill(ev: object): void {
+    const pending = this.timelineContentFills.get(ev);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pending.resolve();
+  }
+
+  private resolveTimelineContentFill(ev: object): void {
+    const pending = this.timelineContentFills.get(ev);
+    if (!pending) return;
+    this.timelineContentFills.delete(ev);
+    clearTimeout(pending.timer);
+    pending.resolve();
+  }
+
+  /** Writes with no toolCallId never match tool_end; finish them on the next moment. */
+  private async finishUnmatchedTimelineWriteSnapshots(inst: AgentTerminalInstance): Promise<void> {
+    for (let i = inst.timeline.length - 1; i >= 0; i--) {
+      const ev = inst.timeline[i]!;
+      if (ev.t !== "tool" || !this.timelineContentFills.has(ev)) continue;
+      const id = typeof ev.toolCallId === "string" ? ev.toolCallId.trim() : "";
+      if (id) continue;
+      await this.finishTimelineWriteSnapshot(inst, ev);
+    }
+  }
+
+  /** Complete a write snapshot when the tool has finished (or the watcher already did). */
+  private async finishTimelineWriteSnapshot(inst: AgentTerminalInstance, ev: TimelineEvent): Promise<void> {
+    if (!this.timelineContentFills.has(ev)) return;
+    if (ev.content !== undefined) {
+      this.resolveTimelineContentFill(ev);
+      return;
+    }
+    const path = ev.path;
+    if (!path) {
+      this.resolveTimelineContentFill(ev);
+      return;
+    }
+    let content = this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
+    if (content !== undefined && !this.contentSizeOk(content)) content = undefined;
+    if (content === undefined) content = await this.readSnapshotFile(path);
+    if (content !== undefined) {
+      ev.content = content;
+      this.setRunSnapshot(inst, path, content);
+    }
+    this.resolveTimelineContentFill(ev);
   }
 
   /** Content of a path before this run's first touch (baseline or cache). */
@@ -6051,6 +6118,7 @@ class TerminaApp {
     }
     // Timeline: drop every dot and release its captured state.
     for (const ev of inst.timeline) {
+      this.resolveTimelineContentFill(ev);
       if (ev.stateId) void this.releaseStateIfUnused(ev.stateId, terminalId, ev.seq, this.projectOfTerminal(terminalId));
     }
     inst.timeline = [];
@@ -6175,6 +6243,7 @@ class TerminaApp {
       const removedSeqs = new Set(seqs);
       inst.momentDots = inst.momentDots.filter((dot) => !removedSeqs.has(dot.seq));
       for (const old of removed) {
+        this.resolveTimelineContentFill(old);
         if (old.stateId) void this.releaseStateIfUnused(old.stateId, inst.id, old.seq, this.projectOfTerminal(inst.id));
       }
       // Hidden failed captures still consume the internal cap. Explicitly
@@ -6212,6 +6281,18 @@ class TerminaApp {
 
   private contentSizeOk(content: string | undefined): boolean {
     return content !== undefined && Buffer.byteLength(content, "utf8") <= MAX_SNAPSHOT_SIZE;
+  }
+
+  /** Read one timeline snapshot from disk, or skip when it exceeds the snapshot cap. */
+  private async readSnapshotFile(path: string): Promise<string | undefined> {
+    try {
+      const st = await stat(path);
+      if (!st.isFile() || st.size > MAX_SNAPSHOT_SIZE) return undefined;
+      const content = await readFile(path, "utf8");
+      return this.contentSizeOk(content) ? content : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async classifyWrite(path: string): Promise<"created" | "modified"> {
@@ -6328,7 +6409,9 @@ class TerminaApp {
    *  for the fill so an early diff open does not show a missing baseline. */
   private fillBaseline(inst: AgentTerminalInstance, path: string, status: "created" | "modified"): Promise<void> {
     const task = this.fillBaselineFromState(inst, path, status)
-      .catch(() => undefined)
+      .catch((err) => {
+        console.warn(`[main] baseline fill failed for ${path}: ${(err as Error).message}`);
+      })
       .finally(() => {
         if (inst.baselineFills.get(path) === task) inst.baselineFills.delete(path);
       });
@@ -7068,6 +7151,7 @@ class TerminaApp {
           if (last && last.t === "tool" && last.path === path && this.contentSizeOk(change.content)) {
             last.content = change.content;
             this.setRunSnapshot(inst, path, change.content);
+            this.resolveTimelineContentFill(last);
           }
         }
       } else if (!verifyInWorkspace) {
@@ -8060,10 +8144,19 @@ class TerminaApp {
       return this.timelinePrefixOf(inst);
     });
     ipcMain.handle("timeline:progress", (_e, terminalId: string, seq: number) => this.timelineProgress(terminalId, seq));
-    ipcMain.handle("timeline:content", (_e, terminalId: string, seq: number) => {
+    ipcMain.handle("timeline:content", async (_e, terminalId: string, seq: number) => {
       const inst = this.terminals.get(terminalId);
       const ev = inst?.timeline.find((e) => e.seq === seq);
       if (!ev) return { ok: false, seq };
+      if (ev.content === undefined) {
+        const pending = this.timelineContentFills.get(ev);
+        if (pending) {
+          await Promise.race([
+            pending.promise,
+            new Promise<void>((r) => setTimeout(r, TIMELINE_CONTENT_WAIT_MS)),
+          ]);
+        }
+      }
       if (ev.content === undefined) return { ok: false, seq, path: ev.path, relPath: ev.relPath };
       return { ok: true, seq, path: ev.path, relPath: ev.relPath, content: ev.content, ts: ev.ts, toolName: ev.toolName };
     });
@@ -8089,7 +8182,7 @@ class TerminaApp {
       // "no baseline" state.
       if (!inst.baselines.has(managed.path)) {
         const pending = inst.baselineFills.get(managed.path);
-        if (pending) await Promise.race([pending, new Promise((r) => setTimeout(r, 2000))]);
+        if (pending) await pending;
       }
       const status = inst.modified.get(managed.path)?.status;
       const b = inst.baselines.get(managed.path);
@@ -8389,8 +8482,8 @@ class TerminaApp {
             const blob = await store.readBlob(anchor, rel);
             if (blob !== null) data = blob;
           }
-        } catch {
-          // Fall through to the stored string.
+        } catch (err) {
+          console.warn(`[main] review revert: blob read failed for ${p} (anchor ${anchor}): ${(err as Error).message}`);
         }
       }
       // The file's parent may have been deleted with it.
@@ -8769,35 +8862,38 @@ class TerminaApp {
       lastCheck = now;
       void (async () => {
         if (!this.isCurrentPtyDocument(win, windowGeneration, rendererGeneration, nonce) || win.webContents.isDestroyed()) return;
-        let img: Electron.NativeImage | null = null;
+        let img: Electron.NativeImage;
         try {
           img = await Promise.race([
             win.webContents.capturePage(),
             new Promise<never>((_, rej) => setTimeout(() => rej(new Error("capture timeout")), 2500)),
           ]);
-        } catch {
-          img = null;
+        } catch (err) {
+          console.warn(`[main] paint watchdog: capture failed: ${(err as Error).message}`);
+          return;
         }
         // capturePage is asynchronous; the window or document may have been
         // replaced while it was in flight. Never let that stale callback
         // update watchdog state or reload the replacement.
         if (!this.isCurrentPtyDocument(win, windowGeneration, rendererGeneration, nonce) || win.webContents.isDestroyed()) return;
-        let uniform = img === null;
-        if (img && !img.isEmpty()) {
-          // Downscale before sampling: a full-window bitmap is megabytes; a
-          // 64x40 sample (2560 pixels) carries the same uniform-vs-content
-          // signal for a fraction of the allocation cost.
-          const small = img.resize({ width: 64, height: 40 });
-          const { width: w, height: h } = small.getSize();
-          if (w > 0 && h > 0) {
-            const bitmap = small.toBitmap();
-            const first = bitmap.readUInt32LE(0);
-            let same = 0;
-            for (let off = 0; off < bitmap.length; off += 4) {
-              if (bitmap.readUInt32LE(off) === first) same++;
-            }
-            uniform = same / (bitmap.length / 4) > 0.98;
+        if (img.isEmpty()) {
+          console.warn("[main] paint watchdog: capture returned an empty image");
+          return;
+        }
+        let uniform = false;
+        // Downscale before sampling: a full-window bitmap is megabytes; a
+        // 64x40 sample (2560 pixels) carries the same uniform-vs-content
+        // signal for a fraction of the allocation cost.
+        const small = img.resize({ width: 64, height: 40 });
+        const { width: w, height: h } = small.getSize();
+        if (w > 0 && h > 0) {
+          const bitmap = small.toBitmap();
+          const first = bitmap.readUInt32LE(0);
+          let same = 0;
+          for (let off = 0; off < bitmap.length; off += 4) {
+            if (bitmap.readUInt32LE(off) === first) same++;
           }
+          uniform = same / (bitmap.length / 4) > 0.98;
         }
         if (uniform) {
           blankCount++;

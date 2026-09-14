@@ -3,7 +3,9 @@
  * captures, and sandbox read paths. Pure over explicit inputs; main supplies
  * live project state at call time and keeps the manager wiring.
  */
-import { dirname } from "node:path";
+import { lstat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { isErrno } from "../../shared/guards.js";
 import { PathLookup } from "../path-lookup.js";
 import { sandboxResourceLimitPreflight } from "../sandbox.js";
 import {
@@ -15,6 +17,50 @@ import {
   platformHasSandboxExec,
   type SnapshotStore,
 } from "../worldline-git.js";
+
+/** The opened folder has no Git marker that we can see. */
+export const GIT_NOT_A_REPO_REASON = "the opened folder is not inside a Git repository";
+/** Core/protocol failure or a present `.git` that could not be opened. */
+export const GIT_UNREADABLE_REASON = "the Git repository could not be opened";
+
+export type OpenedGitRoot =
+  | { ok: true; top: string }
+  | { ok: false; reason: typeof GIT_NOT_A_REPO_REASON | typeof GIT_UNREADABLE_REASON };
+
+/**
+ * Classify git-top-level for recording/preflight. Core may still collapse
+ * corrupt repos to null; a thrown error or a present `.git` is not "not a repo".
+ */
+export async function classifyOpenedGitRoot(root: string): Promise<OpenedGitRoot> {
+  let top: string | null = null;
+  try {
+    top = await gitTopLevel(root);
+  } catch (err) {
+    console.warn(`[worldlines] git-top-level failed: ${(err as Error).message}`);
+    return { ok: false, reason: GIT_UNREADABLE_REASON };
+  }
+  if (top) return { ok: true, top };
+  if (await gitDirLooksPresent(root)) return { ok: false, reason: GIT_UNREADABLE_REASON };
+  return { ok: false, reason: GIT_NOT_A_REPO_REASON };
+}
+
+/** True when `.git` exists (or is unreadable) at `root` or an ancestor. */
+export async function gitDirLooksPresent(start: string): Promise<boolean> {
+  let dir = start;
+  for (;;) {
+    try {
+      await lstat(join(dir, ".git"));
+      return true;
+    } catch (err) {
+      // Missing marker: keep walking. Any other failure means we cannot
+      // honestly say this is not a repository.
+      if (!isErrno(err, "ENOENT")) return true;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
+}
 
 /** Read-only load paths for the sandboxed core (agent-core copy + electron + node). */
 export function worldlineAppReadPaths(corePath: string, paths: PathLookup): string[] {
@@ -43,10 +89,11 @@ export async function worldlinePreflight(opts: {
   if (store) {
     const repo = await store.preflightRepo({ worldsRoot: opts.worldsRoot });
     reasons.push(...repo.reasons);
+  } else if (!opts.primaryRoot) {
+    reasons.push(GIT_NOT_A_REPO_REASON);
   } else {
-    // No store: the folder is not a recordable repository.
-    const top = opts.primaryRoot ? await gitTopLevel(opts.primaryRoot).catch(() => null) : null;
-    if (!top) reasons.push("the opened folder is not inside a Git repository");
+    const classified = await classifyOpenedGitRoot(opts.primaryRoot);
+    if (!classified.ok) reasons.push(classified.reason);
   }
   if (!platformHasSandboxExec()) reasons.push("the platform has no sandbox-exec");
   const resourceLimitReason = sandboxResourceLimitPreflight();
