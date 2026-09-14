@@ -50,6 +50,7 @@ fn chmod_unreadable(path: &Path) {
 
 struct PreflightHarness {
     _fixture: TempFixture,
+    home: PathBuf,
     source: PathBuf,
     core: CoreProcess,
 }
@@ -80,6 +81,7 @@ impl PreflightHarness {
         let core = CoreProcess::spawn(&home, fixture.path());
         Self {
             _fixture: fixture,
+            home,
             source,
             core,
         }
@@ -198,6 +200,27 @@ fn gitattributes_replaced_with_directory_fails_closed() {
             .iter()
             .any(|r| r == "a .gitattributes file could not be read"),
         "missing unreadable-attributes reason: {reasons:?}"
+    );
+    harness.shutdown();
+}
+
+#[test]
+fn unreadable_user_gitconfig_fails_closed() {
+    let mut harness = PreflightHarness::with_files("pf-user-config", &[("keep.txt", "keep\n")]);
+    let global = harness.home.join(".gitconfig");
+    fs::write(
+        &global,
+        "[filter \"hidden\"]\n\tclean = true\n\tsmudge = true\n",
+    )
+    .expect("write user gitconfig");
+    chmod_unreadable(&global);
+    let (ok, reasons) = harness.run();
+    assert!(!ok, "unreadable user gitconfig must fail closed: {reasons:?}");
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r == "Git config could not be enumerated"),
+        "unreadable user gitconfig must not pass as setting-absent: {reasons:?}"
     );
     harness.shutdown();
 }

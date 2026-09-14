@@ -1,7 +1,7 @@
 //! Preflight: repository capability checks (drivers, transforms, filters)
 //! that decide whether a working tree is safe to capture.
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -55,6 +55,17 @@ fn is_lfs_config_key(name: &str) -> bool {
 fn push_unique(reasons: &mut Vec<String>, reason: &str) {
     if !reasons.iter().any(|existing| existing == reason) {
         reasons.push(reason.to_string());
+    }
+}
+
+/// True when `path` exists (or cannot be proven absent) but cannot be read.
+/// ENOENT/ENOTDIR is verified absence; permission and type errors are not.
+fn existing_path_unreadable(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Err(err) if missing_path(&err) => false,
+        Err(_) => true,
+        Ok(meta) if !meta.is_file() => true,
+        Ok(_) => fs::read(path).is_err(),
     }
 }
 
@@ -176,6 +187,17 @@ pub(crate) fn op_preflight(req: &Value) -> Result<Value, String> {
             None
         }
     };
+    // libgit2 can omit an unreadable config file and keep enumerating, which
+    // would treat "setting unverifiable" as "setting absent". Probe the
+    // files ourselves: missing is absence, present-but-unreadable is not.
+    if existing_path_unreadable(&source_git_dir.join("config")) {
+        push_unique(&mut reasons, REASON_CONFIG_UNREADABLE);
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        && existing_path_unreadable(&PathBuf::from(home).join(".gitconfig"))
+    {
+        push_unique(&mut reasons, REASON_CONFIG_UNREADABLE);
+    }
     if let Some(config) = &config {
         // Sparse checkout and partial clones.
         match config_string(config, "core.sparseCheckout") {
