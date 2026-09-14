@@ -45,6 +45,7 @@ html[data-theme="light"] {
   --text: #1f2328;
   --text-dim: #57606a;
   --accent: #0969da;
+  --on-accent: #ffffff;
   --green: #1a7f37;
   --yellow: #9a6700;
   --red: #cf222e;
