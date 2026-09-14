@@ -391,8 +391,10 @@ pins. Make cleanup idempotent and retry stale app-owned resources on startup.
 
 ### Are external side effects isolated?
 
-Not completely. Deny network by default except the active model provider. A
-one-run explicit grant can allow a required domain. Worldlines must warn that
+Not completely. Live candidates keep network access for the model provider
+(a per-provider allowlist is not expressible in the sandbox language);
+evidence and candidate-Verify runs are fully offline unless the immutable
+evidence contract explicitly grants a domain. Worldlines must warn that
 commands can still affect an allowed remote service. Never present filesystem
 isolation as a full security sandbox for external systems.
 
@@ -776,7 +778,9 @@ Run candidate agent, shell, dispatch, Verify, and child processes under one poli
   sibling candidate;
 - close nonessential inherited file descriptors;
 - deny process inspection and signals outside the candidate process group;
-- deny network except the active model provider by default;
+- keep network access for live candidates (a per-provider allowlist is not
+  expressible in the profile language); deny all evidence and
+  candidate-Verify network by default;
 - apply bounded memory, CPU time, file-size, process-count, open-file, and
   output limits; and
 - keep every descendant in a tracked process group whose supervisor terminates

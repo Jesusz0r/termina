@@ -49,6 +49,9 @@ describe("support/security contract docs (#128)", () => {
     // allowlist bullet must stay gone from it.
     const plan = worldlines().slice(worldlines().indexOf("### `scripts/worldline-isolation-test.mjs`"));
     expect(plan).not.toContain("Deny candidate network except the active model provider");
+    // The retired promise must be gone from the whole design doc, including
+    // the FAQ and the section 6 candidate policy — not just the test plan.
+    expect(worldlines()).not.toContain("except the active model provider");
   });
 
   it("distinguishes unsandboxed primaries, live candidates, and offline workers", () => {
