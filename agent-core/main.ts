@@ -259,6 +259,7 @@ import {
   writeSubagentApprovalRequest,
   writeSubagentTaskFile,
   MAX_SUBAGENT_RESULT_CHARS,
+  type SubagentPermissionMode,
   type SubagentTaskFile,
 } from "./subagents.ts";
 import {
@@ -4629,6 +4630,20 @@ function lastAssistantText(): string {
  * line on stdout, and exit. Stdout keeps the full `-p`-style transcript;
  * the host takes the LAST framed line, so model text cannot collide with it.
  */
+
+/**
+ * Child permission mode (#206): the validated task file carries ask/dangerous
+ * faithfully; `always` additionally requires the host bridge
+ * (TERMINA_CORE_APPROVE=all), so a forged task file alone cannot grant it.
+ */
+export function resolveSubagentPermissionMode(
+  taskMode: SubagentPermissionMode,
+  approveEnv: string | undefined,
+): PermissionMode {
+  if (taskMode === "always") return approveEnv === "all" ? "always" : "ask";
+  return taskMode;
+}
+
 async function runSubagentTask(taskPath: string): Promise<never> {
   const fail = async (message: string): Promise<never> => {
     process.stderr.write(`agent-core: subagent task failed: ${message}\n`);
@@ -4657,6 +4672,7 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   const task = (checked as { ok: true; file: SubagentTaskFile }).file;
   route = { provider: task.provider, model: task.model };
   effortWanted = task.effort;
+  permissionMode = resolveSubagentPermissionMode(task.permissionMode, process.env.TERMINA_CORE_APPROVE);
   if (!process.env.TERMINA_CORE_SUMMARY_MODEL) {
     summaryRoute = parseModelRef(DEFAULT_MODELS[task.provider].summary, task.provider);
   }
