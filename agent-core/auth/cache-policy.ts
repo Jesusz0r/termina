@@ -5,6 +5,7 @@
  * capability matrix. Split from agent-core/auth.ts (issue #38).
  */
 import { type ProviderId, type ProviderProtocol } from "./providers/types.ts";
+import { providerDefinition } from "./providers/index.ts";
 import { modelLooksClaude } from "../models/families/anthropic.ts";
 import { modelLooksGemini } from "../models/families/google.ts";
 import { modelLeaf } from "../models/families/identity.ts";
@@ -61,29 +62,44 @@ export interface CacheCapabilityObservation {
 export const CACHE_POLICY_PROVENANCE = {
   anthropicPromptCaching: {
     url: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
-    retrievedAt: "2026-08-30",
+    retrievedAt: "2026-09-14",
   },
   openaiPromptCaching: {
     url: "https://developers.openai.com/api/docs/guides/prompt-caching",
-    retrievedAt: "2026-08-30",
+    retrievedAt: "2026-09-14",
   },
   openaiResponses: {
     url: "https://developers.openai.com/api/reference/cli/resources/responses/methods/create",
-    retrievedAt: "2026-08-30",
+    retrievedAt: "2026-09-14",
   },
   xaiPromptCaching: {
     url: "https://docs.x.ai/developers/advanced-api-usage/prompt-caching",
-    retrievedAt: "2026-08-30",
-  },
-  googleContextCaching: {
-    url: "https://ai.google.dev/gemini-api/docs/generate-content/caching",
-    retrievedAt: "2026-08-30",
+    retrievedAt: "2026-09-14",
   },
   openrouterPromptCaching: {
     url: "https://openrouter.ai/docs/guides/best-practices/prompt-caching",
-    retrievedAt: "2026-09-04",
+    retrievedAt: "2026-09-14",
   },
 } as const;
+
+
+/**
+ * Default origin for capability gates when no custom `*_BASE_URL` is set.
+ * OpenRouter's production host is documented; unknown relays stay opaque
+ * names that cannot match a documented domain.
+ */
+export function documentedCacheRoute(provider: ProviderId): string {
+  if (
+    provider === "anthropic" ||
+    provider === "openai" ||
+    provider === "xai" ||
+    provider === "google" ||
+    provider === "openrouter"
+  ) {
+    return providerDefinition(provider).baseUrl;
+  }
+  return `${provider}`;
+}
 
 
 function unknownCapability(reason: string, provenance: CacheCapabilityProvenance | null = null): CacheCapabilityObservation {
@@ -191,16 +207,15 @@ export function documentedCacheCapability(scope: CacheCapabilityScope): CacheCap
     if (scope.protocol === "openai-responses" && feature === CACHE_CAPABILITY_FEATURE.promptCacheKey) {
       return documentedCapability(CACHE_POLICY_PROVENANCE.xaiPromptCaching, "xAI Responses prompt_cache_key is documented");
     }
-    if (scope.protocol === "openai-completions" && feature === CACHE_CAPABILITY_FEATURE.xaiConversationHeader) {
-      return documentedCapability(CACHE_POLICY_PROVENANCE.xaiPromptCaching, "xAI Chat conversation header is documented");
-    }
+    // x-grok-conv-id is Chat Completions only
+    // (https://docs.x.ai/developers/advanced-api-usage/prompt-caching/maximizing-cache-hits).
+    // Production xAI is openai-responses and uses prompt_cache_key instead.
   }
-  if (scope.provider === "google" && scope.protocol === "google-generate" && feature === CACHE_CAPABILITY_FEATURE.googleCachedContent) {
-    return documentedCapability(CACHE_POLICY_PROVENANCE.googleContextCaching, "Gemini native cached content is documented");
-  }
-  if (scope.provider === "google" && scope.protocol === "google-generate" && feature === CACHE_CAPABILITY_FEATURE.ttl) {
-    return documentedCapability(CACHE_POLICY_PROVENANCE.googleContextCaching, "Gemini native cache duration is documented; value remains policy data");
-  }
+  // Production Google speaks openai-completions against the OpenAI-compat
+  // endpoint. Native cachedContent/TTL live on generateContent
+  // (https://ai.google.dev/gemini-api/docs/generate-content/caching) and are
+  // not claimed: the google provider never selects google-generate, and
+  // Zen-Gemini stays an opaque relay.
   return unknownCapability("feature-not-documented-for-route");
 }
 

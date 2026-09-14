@@ -65,6 +65,7 @@ import {
   usesResponsesApi as configuredUsesResponsesApi,
   CACHE_CAPABILITY_FEATURE,
   documentedCacheCapability,
+  documentedCacheRoute,
   cacheRouteDomain,
   type CacheCapabilityScope,
   cacheIdentityFor,
@@ -485,12 +486,7 @@ function cacheRouteForProvider(provider: ProviderId): string {
     const configured = process.env[definition.baseEnv]?.trim();
     if (configured) return configured;
   }
-  // Only these origins have documented capability gates; relays keep their
-  // opaque provider name so they can never match a documented route.
-  if (provider === "anthropic" || provider === "openai" || provider === "xai" || provider === "google") {
-    return definition.baseUrl;
-  }
-  return `${provider}`;
+  return documentedCacheRoute(provider);
 }
 
 /** One bounded, route/model/feature-scoped cache capability cache for this
@@ -6085,8 +6081,10 @@ function startAuthCommand(line: string): void {
   const abort = loginAbort;
   void runLogin(parsed.provider, parsed.mode, {
     write: (text) => out(text),
-    waitForCode: () => {
-      surface?.setRawInput(true);
+    waitForCode: (opts) => {
+      // TTY masks when secret. Non-TTY readline cannot mask and must not be
+      // used for key or code entry — the terminal echoes the line.
+      surface?.setRawInput(true, { secret: opts?.secret === true });
       return new Promise<string>((resolve) => {
         loginCodeResolve = (code) => {
           surface?.setRawInput(false);

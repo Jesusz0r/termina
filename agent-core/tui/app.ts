@@ -12,6 +12,9 @@ import type { StyledSpan, ToolTranscriptState, TranscriptEntry, TranscriptHandle
 /** Composer draft bound: every keystroke re-scans the draft, so cap it. */
 const MAX_DRAFT_BYTES = 256 * 1024;
 
+/** Transcript echo for secret submits. Fixed so the secret length is not leaked. */
+const SECRET_ECHO = "********";
+
 /** Bracketed-paste staging bound: the run cap plus room to trim from. */
 const MAX_PASTE_BUFFER_BYTES = MAX_DRAFT_BYTES + 64 * 1024;
 
@@ -74,6 +77,7 @@ export class AgentTui {
   private pasteTrimmed = false;
   private capNotedAt = 0;
   private rawInput = false;
+  private secretInput = false;
   private model = "";
   private effort = "off";
   private pendingImageCount = 0;
@@ -212,9 +216,11 @@ export class AgentTui {
     this.schedule();
   }
 
-  setRawInput(raw: boolean): void {
-    if (this.rawInput === raw) return;
+  setRawInput(raw: boolean, opts?: { secret?: boolean }): void {
+    const secret = raw && opts?.secret === true;
+    if (this.rawInput === raw && this.secretInput === secret) return;
     this.rawInput = raw;
+    this.secretInput = secret;
     this.slashIndex = 0;
     this.schedule();
   }
@@ -875,7 +881,8 @@ export class AgentTui {
   private composerInput(cols: number): { wrapped: string[]; pos: { row: number; col: number } } {
     const width = inputWrapWidth(cols);
     if (!this.choicePrompt || this.chars.length > 0) {
-      return wrapInput(INPUT_PREFIX, this.chars, this.cursor, width);
+      const chars = this.secretInput ? this.chars.map((g) => (g === "\n" ? "\n" : "•")) : this.chars;
+      return wrapInput(INPUT_PREFIX, chars, this.cursor, width);
     }
     return {
       wrapped: wrapText(this.choicePrompt, width),
@@ -1008,13 +1015,18 @@ export class AgentTui {
     this.histIndex = -1;
     this.draft = "";
     if (wasChoice && isChoicePick) this.clearChoices();
-    if ((!wasChoice || !isChoicePick) && line && (this.history.length === 0 || this.history[this.history.length - 1] !== line)) {
+    if (
+      !this.secretInput &&
+      (!wasChoice || !isChoicePick) &&
+      line &&
+      (this.history.length === 0 || this.history[this.history.length - 1] !== line)
+    ) {
       this.history.push(line);
       if (this.history.length > MAX_HISTORY) this.history.shift();
     }
     this.follow = true;
     this.scroll = 0;
-    if (line) this.appendPlain(`\n> ${echo}\n`);
+    if (line) this.appendPlain(`\n> ${this.secretInput ? SECRET_ECHO : echo}\n`);
     else this.schedule();
     if (line === "/exit" || line === "/quit") {
       this.onExit();
@@ -1492,7 +1504,7 @@ export class AgentTui {
   }
 
   private historyBy(delta: number): void {
-    if (this.search || this.history.length === 0) return;
+    if (this.secretInput || this.search || this.history.length === 0) return;
     if (this.histIndex < 0) this.draft = this.chars.join("");
     const next = this.histIndex < 0 ? this.history.length - 1 : this.histIndex + delta;
     if (next < 0) {

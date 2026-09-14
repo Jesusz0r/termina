@@ -65,11 +65,16 @@ describe("auth corrupt-file recovery", () => {
     writeCorrupt();
     const inputs = ["DISCARD", "sk-test-key"];
     const written: string[] = [];
+    const waitOpts: Array<{ secret?: boolean } | undefined> = [];
     const result = await login.runLogin("openai", "key", {
       write: (text) => written.push(text),
-      waitForCode: async () => inputs.shift() ?? "",
+      waitForCode: async (opts) => {
+        waitOpts.push(opts);
+        return inputs.shift() ?? "";
+      },
     });
     expect(result.ok).toBe(true);
+    expect(waitOpts).toEqual([undefined, { secret: true }]);
     expect(written.join("")).toContain(authFile);
     const got = store.readAuth();
     expect(got.ok && (got.data.openai as { key?: string }).key).toBe("sk-test-key");
