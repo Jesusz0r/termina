@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
@@ -41,7 +41,20 @@ function extractMethod(source: string, signature: string): string {
   throw new Error(`unclosed method ${signature}`);
 }
 
-function loadHandler(channel: string, paramNames: string): (this: object, ...args: unknown[]) => Promise<unknown> {
+function loadMethod(factoryName: string, signature: string, names: string[], values: unknown[]): unknown {
+  const methodSource = extractMethod(main, signature).replace(/^private /, "");
+  const factory = ts.transpileModule(`return ({ ${methodSource} }).${factoryName};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  return (new Function(...names, factory) as (...args: unknown[]) => unknown)(...values);
+}
+
+function loadHandler(
+  channel: string,
+  paramNames: string,
+  names: string[] = [],
+  values: unknown[] = [],
+): (this: object, ...args: unknown[]) => Promise<unknown> {
   const handleAt = main.indexOf(`ipcMain.handle("${channel}"`);
   if (handleAt < 0) throw new Error(`missing handler ${channel}`);
   const arrow = main.indexOf("=>", handleAt);
@@ -57,7 +70,7 @@ function loadHandler(channel: string, paramNames: string): (this: object, ...arg
         const factory = ts.transpileModule(`return (async function handler(${paramNames}) ${body});`, {
           compilerOptions: { target: ts.ScriptTarget.ES2022 },
         }).outputText;
-        return new Function(factory)() as (this: object, ...args: unknown[]) => Promise<unknown>;
+        return (new Function(...names, factory) as (...args: unknown[]) => (this: object, ...args: unknown[]) => Promise<unknown>)(...values);
       }
     }
   }
@@ -88,12 +101,18 @@ describe("timeline content ready path (refs #253)", () => {
     expect(snapshot).not.toContain(", 400)");
     expect(main).toContain("private beginTimelineContentFill(");
     expect(main).toContain("private async finishTimelineWriteSnapshot(");
-    expect(extractMethod(main, "private async finishTimelineWriteSnapshot(")).toContain("readFile(path, \"utf8\")");
+    expect(extractMethod(main, "private async finishTimelineWriteSnapshot(")).toContain("this.readSnapshotFile(path)");
+    expect(extractMethod(main, "private async readSnapshotFile(")).toContain("st.size > MAX_SNAPSHOT_SIZE");
+    expect(main).toContain("const TIMELINE_CONTENT_WAIT_MS = 2500");
+    expect(extractMethod(main, "private beginTimelineContentFill(")).toContain("setTimeout(() => this.resolveTimelineContentFill(ev), TIMELINE_CONTENT_WAIT_MS)");
+    expect(extractMethod(main, "private scheduleMomentCapture(")).toContain("finishUnmatchedTimelineWriteSnapshots");
   });
 
   it("awaits the pending fill in timeline:content and drops the renderer jump-poll", () => {
     const handler = extractMethod(main, 'ipcMain.handle("timeline:content"');
-    expect(handler).toContain("await pending.promise");
+    expect(handler).toContain("await Promise.race([");
+    expect(handler).toContain("pending.promise");
+    expect(handler).toContain("TIMELINE_CONTENT_WAIT_MS");
     expect(timelinePane).toContain("res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);");
     expect(timelinePane).not.toContain("for (let i = 0; i < 5 && !res.ok; i++)");
     expect(timelinePane).not.toContain("setTimeout(resolve, 250)");
@@ -101,7 +120,7 @@ describe("timeline content ready path (refs #253)", () => {
   });
 
   it("waits for the fill promise instead of returning a false no-snapshot", async () => {
-    const handler = loadHandler("timeline:content", "_e, terminalId, seq");
+    const handler = loadHandler("timeline:content", "_e, terminalId, seq", ["TIMELINE_CONTENT_WAIT_MS"], [5_000]);
     const ev: { seq: number; path: string; relPath: string; content?: string; ts: number; toolName: string } = {
       seq: 3,
       path: "/proj/a.ts",
@@ -133,6 +152,90 @@ describe("timeline content ready path (refs #253)", () => {
       ts: 1,
       toolName: "write",
     });
+  });
+
+  it("does not hang forever when the fill never resolves", async () => {
+    vi.useFakeTimers();
+    try {
+      const handler = loadHandler("timeline:content", "_e, terminalId, seq", ["TIMELINE_CONTENT_WAIT_MS"], [40]);
+      const ev: { seq: number; path: string; relPath: string; content?: string } = {
+        seq: 4,
+        path: "/proj/b.ts",
+        relPath: "b.ts",
+      };
+      const fills = new WeakMap<object, { promise: Promise<void>; resolve: () => void }>();
+      fills.set(ev, { promise: new Promise<void>(() => {}), resolve: () => {} });
+      const app = {
+        terminals: new Map([["term-1", { timeline: [ev] }]]),
+        timelineContentFills: fills,
+      };
+      const pending = handler.call(app, {}, "term-1", 4);
+      let settled = false;
+      void pending.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(39);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({
+        ok: false,
+        seq: 4,
+        path: "/proj/b.ts",
+        relPath: "b.ts",
+      });
+      expect(ev.content).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not assign snapshot content over MAX_SNAPSHOT_SIZE", async () => {
+    const finish = loadMethod("finishTimelineWriteSnapshot", "private async finishTimelineWriteSnapshot(", [], []) as (
+      inst: object,
+      ev: { path: string; content?: string },
+    ) => Promise<void>;
+    const ev = { path: "/proj/huge.ts", content: undefined as string | undefined };
+    const fills = new WeakMap<object, { promise: Promise<void>; resolve: () => void; timer: ReturnType<typeof setTimeout> }>();
+    fills.set(ev, { promise: Promise.resolve(), resolve: () => {}, timer: setTimeout(() => {}, 0) });
+    const assigned: string[] = [];
+    const reads: string[] = [];
+    await finish.call(
+      {
+        timelineContentFills: fills,
+        workspaceOfTerminal: () => ({ watcher: { lastContents: new Map([["/proj/huge.ts", "x".repeat(100_001)]]) } }),
+        contentSizeOk: (content: string | undefined) =>
+          content !== undefined && Buffer.byteLength(content, "utf8") <= 100_000,
+        readSnapshotFile: async (path: string) => {
+          reads.push(path);
+          return undefined;
+        },
+        setRunSnapshot: (_inst: object, _path: string, content: string) => {
+          assigned.push(content);
+        },
+        resolveTimelineContentFill(target: object) {
+          fills.delete(target);
+        },
+      },
+      {},
+      ev,
+    );
+    expect(ev.content).toBeUndefined();
+    expect(assigned).toEqual([]);
+    expect(reads).toEqual(["/proj/huge.ts"]);
+  });
+
+  it("skips reading a file that is already over the snapshot cap", async () => {
+    const reads: string[] = [];
+    const read = loadMethod("readSnapshotFile", "private async readSnapshotFile(", ["stat", "readFile"], [
+      async () => ({ isFile: () => true, size: 100_001 }),
+      async (path: string) => {
+        reads.push(path);
+        return "should-not-read";
+      },
+    ]) as (path: string) => Promise<string | undefined>;
+    await expect(read.call({
+      contentSizeOk: (content: string | undefined) =>
+        content !== undefined && Buffer.byteLength(content, "utf8") <= 100_000,
+    }, "/proj/huge.ts")).resolves.toBeUndefined();
+    expect(reads).toEqual([]);
   });
 });
 

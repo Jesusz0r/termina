@@ -149,6 +149,8 @@ const MAX_PROJECT_SNAPSHOT_BYTES = 12 * 1024;
 const PROJECT_SNAPSHOT_DEBOUNCE_MS = 5000;
 /** Timeline snapshots bigger than this are dropped (dot stays, no content). */
 const MAX_SNAPSHOT_SIZE = 100_000;
+/** Bound for one timeline:content wait on a write-snapshot ready signal. */
+const TIMELINE_CONTENT_WAIT_MS = 2500;
 /** file:changed pushes the content only up to this byte budget. The
  *  renderer fetches larger files on demand. */
 const MAX_LIVE_SYNC_BYTES = 256 * 1024;
@@ -698,7 +700,7 @@ class TerminaApp {
   /** One-use start preflights by token. */
   private pendingPreflights = new Map<string, PendingPreflight>();
   /** Write-snapshot fills keyed by the timeline event object (same reference pushTimeline mutates). */
-  private timelineContentFills = new WeakMap<object, { promise: Promise<void>; resolve: () => void }>();
+  private timelineContentFills = new WeakMap<object, { promise: Promise<void>; resolve: () => void; timer: ReturnType<typeof setTimeout> }>();
   /** Capture tasks that must finish before store teardown. */
   private recordingTasks = new Set<Promise<unknown>>();
   /** Asynchronous bridge acknowledgements accepted from sidecar events. */
@@ -4951,6 +4953,7 @@ class TerminaApp {
           if (rel !== undefined) inst.toolOutcomes.set(rel, event.isError === true ? "error" : "ok");
         }
         if (toolEv) await this.finishTimelineWriteSnapshot(inst, toolEv);
+        else await this.finishUnmatchedTimelineWriteSnapshots(inst);
         this.sendTimelinePrefix(inst, rendererTarget);
         // The tool finished: schedule the moment capture for its dots.
         if (inst.currentRun) this.scheduleMomentCapture(inst, rendererTarget);
@@ -5545,6 +5548,7 @@ class TerminaApp {
 
   /** Debounce a moment capture: sibling tools coalesce into one state. */
   private scheduleMomentCapture(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
+    void this.finishUnmatchedTimelineWriteSnapshots(inst);
     if (!inst.currentRun) return;
     const ws = this.workspaceOfTerminal(inst);
     // Candidate workspaces record moments too (nested worldlines): their
@@ -5966,14 +5970,27 @@ class TerminaApp {
     if (this.timelineContentFills.has(ev)) return;
     let resolve!: () => void;
     const promise = new Promise<void>((r) => { resolve = r; });
-    this.timelineContentFills.set(ev, { promise, resolve });
+    const timer = setTimeout(() => this.resolveTimelineContentFill(ev), TIMELINE_CONTENT_WAIT_MS);
+    this.timelineContentFills.set(ev, { promise, resolve, timer });
   }
 
   private resolveTimelineContentFill(ev: object): void {
     const pending = this.timelineContentFills.get(ev);
     if (!pending) return;
     this.timelineContentFills.delete(ev);
+    clearTimeout(pending.timer);
     pending.resolve();
+  }
+
+  /** Writes with no toolCallId never match tool_end; finish them on the next moment. */
+  private async finishUnmatchedTimelineWriteSnapshots(inst: AgentTerminalInstance): Promise<void> {
+    for (let i = inst.timeline.length - 1; i >= 0; i--) {
+      const ev = inst.timeline[i]!;
+      if (ev.t !== "tool" || !this.timelineContentFills.has(ev)) continue;
+      const id = typeof ev.toolCallId === "string" ? ev.toolCallId.trim() : "";
+      if (id) continue;
+      await this.finishTimelineWriteSnapshot(inst, ev);
+    }
   }
 
   /** Complete a write snapshot when the tool has finished (or the watcher already did). */
@@ -5989,14 +6006,9 @@ class TerminaApp {
       return;
     }
     let content = this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
-    if (content === undefined) {
-      try {
-        content = await readFile(path, "utf8");
-      } catch {
-        content = undefined;
-      }
-    }
-    if (content !== undefined && this.contentSizeOk(content)) {
+    if (content !== undefined && !this.contentSizeOk(content)) content = undefined;
+    if (content === undefined) content = await this.readSnapshotFile(path);
+    if (content !== undefined) {
       ev.content = content;
       this.setRunSnapshot(inst, path, content);
     }
@@ -6261,6 +6273,18 @@ class TerminaApp {
 
   private contentSizeOk(content: string | undefined): boolean {
     return content !== undefined && Buffer.byteLength(content, "utf8") <= MAX_SNAPSHOT_SIZE;
+  }
+
+  /** Read one timeline snapshot from disk, or skip when it exceeds the snapshot cap. */
+  private async readSnapshotFile(path: string): Promise<string | undefined> {
+    try {
+      const st = await stat(path);
+      if (!st.isFile() || st.size > MAX_SNAPSHOT_SIZE) return undefined;
+      const content = await readFile(path, "utf8");
+      return this.contentSizeOk(content) ? content : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async classifyWrite(path: string): Promise<"created" | "modified"> {
@@ -8118,7 +8142,12 @@ class TerminaApp {
       if (!ev) return { ok: false, seq };
       if (ev.content === undefined) {
         const pending = this.timelineContentFills.get(ev);
-        if (pending) await pending.promise;
+        if (pending) {
+          await Promise.race([
+            pending.promise,
+            new Promise<void>((r) => setTimeout(r, TIMELINE_CONTENT_WAIT_MS)),
+          ]);
+        }
       }
       if (ev.content === undefined) return { ok: false, seq, path: ev.path, relPath: ev.relPath };
       return { ok: true, seq, path: ev.path, relPath: ev.relPath, content: ev.content, ts: ev.ts, toolName: ev.toolName };
