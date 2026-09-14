@@ -95,20 +95,42 @@ describe("/clear writer-open failure (#222)", () => {
     const liveFile = seedBundle("clear-live-ok", [{ role: "user", content: "hello" }]);
     const resumed = await testOnlyResume(main, liveFile);
     expect(resumed.ok).toBe(true);
-    const originalHome = process.env.HOME;
-    const homeRoot = mkdtempSync(join(tmpdir(), "session-clear-home-"));
-    roots.push(homeRoot);
-    process.env.HOME = homeRoot;
-    try {
+    withTempHome(() => {
       main.testOnlyDispatchLine("/clear");
-    } finally {
-      if (originalHome === undefined) delete process.env.HOME;
-      else process.env.HOME = originalHome;
-    }
+    });
     expect(main.testOnlyResumeState()).toEqual({ historyLength: 0, storageSeq: 0, streamPrepared: true });
+  });
+
+  it("starts the next persist at storageSeq 1 after a live session", async () => {
+    const main = await import("../../../agent-core/main.ts");
+    const liveFile = seedBundle("clear-live-seq", [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+    ]);
+    const resumed = await testOnlyResume(main, liveFile);
+    expect(resumed.ok).toBe(true);
+    expect(main.testOnlyResumeState().storageSeq).toBe(2);
+    withTempHome(() => {
+      main.testOnlyDispatchLine("/clear");
+    });
+    expect(main.testOnlyResumeState()).toEqual({ historyLength: 0, storageSeq: 0, streamPrepared: true });
+    expect(main.testOnlyPersist()).toEqual({ ok: true, storageSeq: 1 });
   });
 });
 
 async function testOnlyResume(main: typeof import("../../../agent-core/main.ts"), sessionFile: string) {
   return main.testOnlyResumeSessionBody({ sessionFile, openWriter: () => {} });
+}
+
+function withTempHome(fn: () => void): void {
+  const originalHome = process.env.HOME;
+  const homeRoot = mkdtempSync(join(tmpdir(), "session-clear-home-"));
+  roots.push(homeRoot);
+  process.env.HOME = homeRoot;
+  try {
+    fn();
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  }
 }

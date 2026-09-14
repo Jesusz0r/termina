@@ -5454,6 +5454,15 @@ export function testOnlyResumeState(): { historyLength: number; storageSeq: numb
   return { historyLength: history.length, storageSeq, streamPrepared };
 }
 
+/** Test seam: persist one record against the live writer (covers /clear sequence reset). */
+export function testOnlyPersist(entry: Record<string, unknown> = { type: "checkpoint" }): SessionResult<{ storageSeq: number }> {
+  try {
+    return { ok: true, storageSeq: persist(entry) };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** Live-view reset shared by /clear success and its writer-open failure path. */
 function resetLiveSessionState(): void {
   storageSeq = 0;
@@ -6230,14 +6239,18 @@ function dispatchLine(line: string): void {
         showPrompt();
         return;
       }
+    }
+    // Zero the live sequence before opening so the writer's lastStorageSeq
+    // matches the empty bundle. Opening first reused the prior sequence and
+    // the next persist failed with decreasing storageSeq.
+    resetLiveSessionState();
+    if (sessionFile) {
       try {
         openSessionWriter();
       } catch (err) {
-        // The old view is archived, but there is no live writer: reset to a
-        // coherent not-prepared state instead of keeping orphaned history
-        // with sequence 0. The next prompt re-prepares (retrying the open)
-        // rather than running writerless or reusing sequence numbers.
-        resetLiveSessionState();
+        // The old view is archived, but there is no live writer: stay
+        // not-prepared so the next prompt re-prepares (retrying the open)
+        // rather than running writerless.
         streamPrepared = false;
         syncIndicators();
         out(`(could not start a fresh session: ${err instanceof Error ? err.message : String(err)}; retry with /clear or send a prompt)\n`);
@@ -6245,7 +6258,6 @@ function dispatchLine(line: string): void {
         return;
       }
     }
-    resetLiveSessionState();
     streamPrepared = true;
     syncIndicators();
     out("(session cleared)\n");
