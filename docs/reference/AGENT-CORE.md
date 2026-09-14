@@ -77,10 +77,12 @@ for Google, 500,000 for xAI, and 128,000 for unknown providers
 (`UNKNOWN_CONTEXT_FLOOR`). Anthropic Haiku uses 200,000. A live model
 catalog can provide another value. There is no
 1,000,000-token run cap. Context reclamation is driven by the window's
-high-water mark, not a fixed token total. Separately, a logical run stops
-requesting continuation at 500 model turns or before a batch would exceed
-2,500 client tool calls. These safety fuses survive compaction; a natural
-final answer at the turn limit is still accepted.
+high-water mark, not a fixed token total. A logical run has no turn-count,
+tool-call, or wall-clock fuse, and does not re-open a finished answer for
+verification or review. Stall detection stops unproductive loops. Five
+consecutive server-tool `pause_turn` continuations still stop a wedged
+provider stream; a client tool turn resets that streak. A natural final
+answer ends the run.
 
 ## P2 — Separate reclamation from summarization
 
@@ -251,10 +253,9 @@ footprint, not these numbers.
   empty searches: broaden scope; identical successful reads: write_file/edit
   instead of reading again); three more repetitions of that same loop
   stop the run. Changed observations allow recovery; re-reading unchanged text
-  and oscillating edits do not count as progress. The run fuses above bound
-  longer or changing loops that these heuristics cannot recognize.
+  and oscillating edits do not count as progress.
 - Every admitted client call gets one paired result, including calls refused
-  for duplication, cancellation, or run limits. Duplicate call IDs fail
+  for duplication or cancellation. Duplicate call IDs fail
   admission. Recovery is appended after results, or nested inside a result when
   a server tool is unresolved, preserving the provider's continuation rules.
 - A spawned subagent is never automatically restarted after failure, crash, or

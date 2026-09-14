@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_RUN_MODEL_TURNS, MAX_RUN_TOOL_CALLS } from "../../../agent-core/stall.ts";
+const TEST_PROVIDER_TURN_CAP = 80;
 
 type Row = Record<string, any>;
 function jsonLines(path: string): Row[] {
@@ -37,7 +37,7 @@ async function scenario(toolProgram: string, check: (result: {
     const textFor = (turn) => { ${textProgram} };
     globalThis.fetch = async (input, init) => {
       if (String(input) === "https://models.dev/api.json") return new Response("{}", { status: 200 });
-      if (++turn > ${MAX_RUN_MODEL_TURNS + 2}) throw new Error("test provider request safety bound");
+      if (++turn > ${TEST_PROVIDER_TURN_CAP}) throw new Error("test provider request safety bound");
       appendFileSync(${JSON.stringify(requestsFile)}, JSON.stringify(JSON.parse(init.body)) + "\\n");
       const tools = toolsFor(turn);
       const items = tools.map((tool, i) => ({ type: "function_call", id: "item-" + turn + "-" + i,
@@ -157,60 +157,29 @@ describe("real tool loop regressions", () => {
       if (turn === 4) return [{ name: "read_file", input: { path: "file.txt" } }];
       if (turn === 5) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "fixed" } }];
       return [];`, (result) => {
-      // The edit lands, but no check command is ever observed: the settle
-      // gate spends one grace nudge (7th request) and then fails the run.
-      expect(result.requests).toHaveLength(7);
-      expect(JSON.stringify(result.requests[6])).toContain("Settle gate");
-      expect(result.events.find((row) => row.t === "agent_settled")?.error).toContain("settle gate");
+      expect(result.requests).toHaveLength(6);
+      expect(JSON.stringify(result.requests)).not.toContain("Settle gate");
+      expect(result.events.find((row) => row.t === "agent_settled")?.error).toBeNull();
       expect(result.traces.some((row) => row.status === "stalled")).toBe(false);
       expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("fixed\n");
       expectPaired(result.messages);
     });
   });
 
-  it("settles success when edits are covered by an observed check", async () => {
-    await scenario(`if (turn === 1) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "fixed" } }];
-      if (turn === 2) return [{ name: "bash", input: { command: "make check" } }];
+  it("settles when the model finishes after edits, without extra review turns", async () => {
+    await scenario(`if (turn === 1) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "v1" } }];
+      if (turn === 2) return [{ name: "edit", input: { path: "file.txt", old_text: "v1", new_text: "v2" } }];
       return [];`, (result) => {
       expect(result.requests).toHaveLength(3);
+      expect(JSON.stringify(result.requests)).not.toContain("code-review critic");
+      expect(JSON.stringify(result.requests)).not.toContain("Settle gate");
       expect(result.events.find((row) => row.t === "agent_settled")?.error).toBeNull();
-      expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("fixed\n");
-      expectPaired(result.messages);
-    }, 40_000, { Makefile: "check:\n\ttrue\n" });
-  });
-
-  it("records a critic verdict on non-trivial runs", async () => {
-    await scenario(`if (turn === 1) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "v1" } }];
-      if (turn === 2) return [{ name: "edit", input: { path: "file.txt", old_text: "v1", new_text: "v2" } }];
-      if (turn === 3) return [{ name: "bash", input: { command: "make check" } }];
-      return [];`, (result) => {
-      expect(result.requests).toHaveLength(5);
-      expect(JSON.stringify(result.requests[4])).toContain("code-review critic");
-      expect(result.events.find((row) => row.t === "agent_settled")?.error).toBeNull();
-      expect(result.traces.some((row) => row.recordType === "attempt" && row.role === "critic")).toBe(true);
+      expect(result.traces.some((row) => row.recordType === "attempt" && row.role === "critic")).toBe(false);
       const settled = result.traces.find((row) => row.recordType === "task-settled");
-      expect(settled?.critic).toMatchObject({ verdict: "pass", rounds: 1 });
+      expect(settled?.critic).toBeNull();
       expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("v2\n");
       expectPaired(result.messages);
-    }, 40_000, { Makefile: "check:\n\ttrue\n" });
-  });
-
-  it("gives a failing critic verdict one more round, then settles", async () => {
-    await scenario(`if (turn === 1) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "v1" } }];
-      if (turn === 2) return [{ name: "edit", input: { path: "file.txt", old_text: "v1", new_text: "v2" } }];
-      if (turn === 3) return [{ name: "bash", input: { command: "make check" } }];
-      return [];`, (result) => {
-      expect(result.requests).toHaveLength(7);
-      expect(JSON.stringify(result.messages)).toContain("scope-down test");
-      expect(result.events.find((row) => row.t === "agent_settled")?.error).toBeNull();
-      const settled = result.traces.find((row) => row.recordType === "task-settled");
-      expect(settled?.critic).toMatchObject({ verdict: "pass", rounds: 2 });
-      expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("v2\n");
-      expectPaired(result.messages);
-    }, 40_000, { Makefile: "check:\n\ttrue\n" },
-    `if (turn === 5) return JSON.stringify({ verdict: "fail", rationale: "scope-down test" });
-     if (turn === 7) return JSON.stringify({ verdict: "pass", rationale: "addressed" });
-     return "finished";`);
+    });
   });
 
   it("rejects missing or wrongly typed mutation arguments without changing files", async () => {
@@ -245,24 +214,9 @@ describe("real tool loop regressions", () => {
     });
   });
 
-  it("bounds unique tool turns and answers unexecuted calls on the final turn", async () => {
-    await scenario(`return turn < ${MAX_RUN_MODEL_TURNS}
-      ? [{ name: "read_file", input: { path: "file.txt", start_line: turn } }]
-      : [{ name: "write_file", input: { path: "must-not-exist", content: "unsafe" } }];`, (result) => {
-      expect(result.requests).toHaveLength(MAX_RUN_MODEL_TURNS);
-      expect(existsSync(join(result.root, "must-not-exist"))).toBe(false);
-      expect(result.traces.some((row) => row.status === "tool-limit")).toBe(true);
-      expect(toolResults(result.messages).at(-1)?.is_error).toBe(true);
-      expectPaired(result.messages);
-    }, 150_000);
-  }, 180_000);
-
-  it("rejects an entire over-budget tool batch before any side effects", async () => {
-    await scenario(`return Array.from({ length: ${MAX_RUN_TOOL_CALLS + 1} }, (_, i) => ({ name: "write_file", input: { path: "must-not-exist-" + i, content: "unsafe" } }));`, (result) => {
-      expect(result.requests).toHaveLength(1);
-      expect(readdirSync(result.root)).toEqual(["file.txt"]);
-      expect(toolResults(result.messages)).toHaveLength(MAX_RUN_TOOL_CALLS + 1);
-      expect(result.traces.some((row) => row.status === "tool-limit")).toBe(true);
+  it("does not cap a long unique-tool run", async () => {
+    await scenario(`return turn < 40 ? [{ name: "read_file", input: { path: "file.txt", start_line: turn } }] : [];`, (result) => {
+      expect(result.requests).toHaveLength(40);
       expectPaired(result.messages);
     });
   });

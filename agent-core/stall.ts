@@ -21,17 +21,6 @@ export const STALL_TURNS = 3;
 /** Consecutive same-target error/empty repeats before recovery guidance (then a stop if ignored). */
 export const STALL_FAILURE_TURNS = 3;
 
-/** Final run fuses: compaction must not make a malfunctioning run unbounded. */
-export const MAX_RUN_MODEL_TURNS = 500;
-export const MAX_RUN_TOOL_CALLS = 2_500;
-
-/** Called only for responses requesting continuation, not a natural final answer. */
-export function toolRunLimitReason(modelTurns: number, requestedToolCalls: number): string | null {
-  if (modelTurns >= MAX_RUN_MODEL_TURNS) return `run limit reached after ${MAX_RUN_MODEL_TURNS} model turns`;
-  if (requestedToolCalls > MAX_RUN_TOOL_CALLS) return `run would exceed ${MAX_RUN_TOOL_CALLS} tool calls`;
-  return null;
-}
-
 /** Stable empty-search sentinel emitted by grep/glob; single source for producers and checks. */
 export const GREP_NO_MATCHES_PREFIX = "(no matches)";
 

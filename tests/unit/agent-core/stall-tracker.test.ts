@@ -11,22 +11,11 @@ import {
   trackFailureLoopTurn,
   emptyToolLoopTracker,
   trackToolLoopTurn,
-  toolRunLimitReason,
-  MAX_RUN_MODEL_TURNS,
-  MAX_RUN_TOOL_CALLS,
 } from "../../../agent-core/stall.ts";
 
 function bashCall(command: string, output: string) {
   return { name: "bash", input: { command }, result: { type: "tool_result", content: output } };
 }
-
-describe("run fuses", () => {
-  it("allows work within the budget and refuses the next continuation at the bound", () => {
-    expect(toolRunLimitReason(MAX_RUN_MODEL_TURNS - 1, MAX_RUN_TOOL_CALLS)).toBeNull();
-    expect(toolRunLimitReason(MAX_RUN_MODEL_TURNS, 0)).toContain("model turns");
-    expect(toolRunLimitReason(1, MAX_RUN_TOOL_CALLS + 1)).toContain("tool calls");
-  });
-});
 
 describe("stall detector", () => {
   it("ignores text-only turns", () => {

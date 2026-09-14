@@ -52,8 +52,7 @@ export interface ToolOutcome {
   isError: boolean;
   /**
    * False when the tool never executed (denied, interrupted beforehand, or
-   * unknown). Absent means executed; the settle gate treats absent as true
-   * so older producers stay valid.
+   * unknown). Absent means executed.
    */
   executed?: boolean;
   /** Preserve bounded MCP accounting through the generic tool boundary. */

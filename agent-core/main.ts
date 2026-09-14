@@ -128,7 +128,6 @@ import {
 } from "./cache.ts";
 import {
   emptyToolLoopTracker,
-  toolRunLimitReason,
   trackToolLoopTurn,
 } from "./stall.ts";
 import { toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
@@ -223,18 +222,6 @@ import {
   type ToolUse,
 } from "./main/tools.ts";
 import { createFrontMatter } from "./main/front-matter.ts";
-import {
-  buildCriticPrompt,
-  CRITIC_SYSTEM_PROMPT,
-  gateEditCount,
-  needsCriticReview,
-  parseCriticVerdict,
-  recordGateObservation,
-  settleGateVerdict,
-  summarizeChangesForCritic,
-  summarizeCheckOutcomes,
-  type GateToolObservation,
-} from "./main/settle-gate.ts";
 import { renderHistoryTranscript, type ContentBlock } from "./main/history-view.ts";
 import { shouldAutoOpenLogin } from "./main/login-hint.ts";
 import {
@@ -347,7 +334,7 @@ let modelAvailabilityError: string | null = null;
 /** Leave room for thinking output. Thinking counts against max_tokens. */
 const OUTPUT_CAP = 16_384;
 const THINKING_OUTPUT_CAP = 64_000;
-/** Bound server-tool continuation requests so a provider cannot loop forever. */
+/** Consecutive server-tool pause_turn resumptions before treating the stream as wedged. */
 const MAX_PAUSE_TURN_CONTINUATIONS = 5;
 /** Trailing tool-output span never reclaimed (fraction of usable, clamped). */
 const PROTECT_MIN = 4_000;
@@ -1255,44 +1242,6 @@ async function writeSummaryTrace(opts: {
     wasteCause: null,
     cache: opts.cache ?? null,
     cost: opts.cost ?? traceCostForUsage(
-      opts.usage,
-      opts.attempt?.provider ?? summaryRoute.provider,
-      opts.attempt?.model ?? summaryRoute.model,
-      "summary",
-      opts.cache ?? null,
-    ),
-  });
-}
-
-/**
- * Critic-attempt records (#124). The attempt role is "critic"; the cost
- * scope stays "summary" because the review rides the cheap lane (the same
- * lane summarize bills), even on the main-route fallback.
- */
-async function writeCriticTrace(opts: {
-  status: string;
-  usage: Usage | null;
-  started: number;
-  attempt?: TraceAttemptState | null;
-  cache?: TraceCacheDiagnostics | null;
-  ttftMs?: number | null;
-}): Promise<void> {
-  await writeTraceAttempt(opts.attempt ?? null, {
-    status: opts.status,
-    storageSeqRange: null,
-    toolNames: [],
-    usage: opts.usage,
-    usd: null,
-    ttftMs: opts.ttftMs ?? null,
-    turnMs: opts.attempt?.ended !== null && opts.attempt?.ended !== undefined
-      ? Math.max(0, opts.attempt.ended - opts.attempt.started)
-      : Date.now() - opts.started,
-    revisions: 0,
-    revisionKinds: [],
-    wasteTokens: null,
-    wasteCause: null,
-    cache: opts.cache ?? null,
-    cost: traceCostForUsage(
       opts.usage,
       opts.attempt?.provider ?? summaryRoute.provider,
       opts.attempt?.model ?? summaryRoute.model,
@@ -4996,13 +4945,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let storageFailure: string | null = null;
   let taskFailure: string | null = null;
   let taskOutcomeStatus = "success";
-  let toolErrorObserved = false;
-  const gateObservations: GateToolObservation[] = [];
-  let gateNudged = false;
-  let lastAssistantText = "";
-  let criticRounds = 0;
-  let criticExtraRoundUsed = false;
-  let criticVerdict: TraceCriticVerdict | null = null;
   let retriedOverflow = false;
   let retriedProviderTermination = false;
   let terminatedDiagnostics: string | null = null;
@@ -5011,8 +4953,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let lastPlanText = "";
   let cacheCostCompactionAttempted = false;
   let toolLoopTracker = emptyToolLoopTracker();
-  let modelTurns = 0;
-  let requestedToolCalls = 0;
   codexTurnState = "";
   // Mid-stream poller: a long model stream must not hold child approvals
   // hostage until the turn ends. The per-turn poll below stays as the
@@ -5119,7 +5059,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         });
         throw new Error(admissionError);
       }
-      modelTurns += 1;
       if (activeSubagent) activeSubagent.turns += 1;
       const sys = frontMatter.systemPrompt();
       if (!result.usage) resetUsageContinuity();
@@ -5145,21 +5084,12 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       history.push(assistantMsg);
       syncIndicators();
       const assistantText = visibleAssistantText(result.blocks);
-      lastAssistantText = assistantText;
       const plan = planTextIfChanged(assistantText, lastPlanText);
       if (plan) {
         lastPlanText = plan;
         sidecar.logEvent({ t: "plan", text: plan });
       }
       const serverNames = renderServerTools(result.blocks);
-      if (result.blocks.some((block) => {
-        if (block.type !== "web_search_tool_result" || !block.content || typeof block.content !== "object" || Array.isArray(block.content)) {
-          return false;
-        }
-        return (block.content as { type?: string }).type === "web_search_tool_result_error";
-      })) {
-        toolErrorObserved = true;
-      }
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
       );
@@ -5173,25 +5103,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           "user",
           uses.map((u) => done(u, "(subagent turn budget reached; settle with what you have)", true).result as ContentBlock),
         );
-        break;
-      }
-      requestedToolCalls += uses.length;
-      const runLimit = !interrupted && (uses.length > 0 || result.stopReason === "pause_turn")
-        ? toolRunLimitReason(modelTurns, requestedToolCalls) : null;
-      if (runLimit) {
-        // No tools from an over-budget response execute, but every admitted
-        // call still receives a result so resume/replay cannot orphan it.
-        const skipped = uses.map((use) => done(use, `error: ${runLimit}; tool not executed`, true));
-        if (skipped.length) pushMessage("user", skipped.map((outcome) => ({ ...outcome.result, type: "tool_result", is_error: true })));
-        await writeMainTrace({
-          status: "tool-limit", seqBefore, toolNames: [...serverNames, ...uses.map((use) => use.name)],
-          usage: result.usage, waste, sysHash: hashSystem(sys), cache: traceCache,
-          started: callStarted, attempt: result.traceAttempt,
-          toolOutcomes: skipped.map((outcome, index) => toolOutcomeTraceInput(uses[index]!, outcome)),
-        });
-        taskFailure = runLimit;
-        taskOutcomeStatus = "failure";
-        out(`\n(${runLimit}; stopped before executing more tools. Continue in a new prompt if needed.)\n`);
         break;
       }
       if (uses.length === 0) {
@@ -5219,107 +5130,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           resumePaused = true;
           continue;
         }
-        if (!interrupted && taskOutcomeStatus === "success") {
-          const verdict = settleGateVerdict(
-            { observations: gateObservations, finalText: lastAssistantText },
-            gateNudged,
-          );
-          if (verdict.decision === "nudge") {
-            gateNudged = true;
-            pushMessage("user", verdict.nudge);
-            out(`\n(settle gate: ${verdict.detail})\n`);
-            continue;
-          }
-          if (verdict.decision === "fail") {
-            taskOutcomeStatus = "failure";
-            taskFailure = `settle gate: ${verdict.detail}`;
-            out(`\n(settle gate: ${verdict.detail})\n`);
-            break;
-          }
-          // Critic pass (#124): gate-green, non-trivial runs get one reviewer
-          // call over the request + tool-observed changes + report + checks.
-          // A fail verdict buys exactly one more work round; the second
-          // verdict is recorded but never triggers another round. Check
-          // observations accumulate, so an extra round cannot re-trip the
-          // gate on already-observed checks (stale checks are the critic's
-          // call to flag, not the gate's).
-          const editCount = gateEditCount(gateObservations);
-          if (
-            needsCriticReview({ editCount, modelTurns }) &&
-            (criticRounds === 0 || (criticRounds === 1 && criticExtraRoundUsed))
-          ) {
-            const criticStarted = Date.now();
-            currentAbort ??= new AbortController();
-            const criticPrompt = buildCriticPrompt({
-              request: taggedPrompt,
-              changes: summarizeChangesForCritic(gateObservations),
-              report: lastAssistantText,
-              checks: summarizeCheckOutcomes(gateObservations),
-            });
-            let folded: Awaited<ReturnType<typeof completeText>> | null = null;
-            try {
-              try {
-                folded = await completeText(
-                  summaryRoute.provider,
-                  summaryRoute.model,
-                  CRITIC_SYSTEM_PROMPT,
-                  criticPrompt,
-                  currentAbort.signal,
-                  { traceRole: "critic" },
-                );
-              } catch (err) {
-                // Cheap-lane credentials can lapse while the main route still
-                // works; retry once on the current model, mirroring summarize.
-                if (summaryRoute.provider === route.provider && summaryRoute.model === route.model) throw err;
-                folded = await completeText(
-                  route.provider,
-                  route.model,
-                  CRITIC_SYSTEM_PROMPT,
-                  criticPrompt,
-                  currentAbort.signal,
-                  { traceRole: "critic" },
-                );
-              }
-            } catch (err) {
-              // completeText owns provider-error persistence; the run still
-              // settles. A dead reviewer must not burn a work round.
-              criticRounds += 1;
-              const reason = sanitizeProviderError(err instanceof Error ? err.message : String(err)) ?? "unknown error";
-              criticVerdict = { verdict: "pass", rationale: `critic unavailable: ${reason.slice(0, 200)}`, rounds: criticRounds };
-              if (!interrupted) out(`\n(critic review failed: ${(err as Error).message})\n`);
-            }
-            if (folded) {
-              criticRounds += 1;
-              if (folded.usage) {
-                accumulateUsage(folded.usage);
-                lastUsd = null;
-                syncIndicators();
-              }
-              await writeCriticTrace({
-                status: "ok",
-                usage: folded.usage,
-                started: criticStarted,
-                attempt: folded.traceAttempt,
-                cache: folded.cache,
-                ttftMs: folded.ttftMs,
-              });
-              const parsed = parseCriticVerdict(folded.text);
-              criticVerdict = { verdict: parsed.verdict, rationale: parsed.rationale, rounds: criticRounds };
-              if (parsed.verdict === "fail" && !criticExtraRoundUsed) {
-                criticExtraRoundUsed = true;
-                pushMessage(
-                  "user",
-                  `Critic review found a problem with this change:\n${parsed.rationale ?? "(no rationale given)"}\n` +
-                    "Address the critique with minimal additional changes, then finish.",
-                );
-                out("\n(critic: change needs work — one more round)\n");
-                continue;
-              }
-            }
-          }
-        }
         break;
       }
+      // Client tools are progress: only a consecutive pause streak is a wedge.
+      pauseTurnContinuations = 0;
       const outcomes: ToolOutcome[] = [];
       const pendingOutcomes = new Map<number, Promise<ToolOutcome>>();
       const inputErrors = uses.map((use) => toolInputError(use, TOOLS));
@@ -5358,13 +5172,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           const item = settled[ci]!;
           if (item.status === "fulfilled") {
             const outcome = item.value;
-            const entry = wave[ci]!;
-            if (!inputErrors[entry.index] && entry.duplicateOf === undefined) {
-              recordGateObservation(gateObservations, chunk[ci]!, outcome);
-            }
-            if (outcome.isError || (outcome.bounded?.state !== undefined && outcome.bounded.state !== "complete")) {
-              toolErrorObserved = true;
-            }
             if (interrupted) {
               if (handles[ci]) surface?.finishTool(handles[ci]!, "cancelled");
             } else if (handles[ci]) {
@@ -5389,7 +5196,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             const message = err instanceof Error ? err.message : String(err);
             if (handles[ci]) surface?.finishTool(handles[ci]!, "error", capDisplay(message, TOOL_DISPLAY_BYTES));
             const outcome = done(chunk[ci]!, message, true);
-            toolErrorObserved = true;
             outcomes.push(outcome);
             sidecar.logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
           }
@@ -5403,7 +5209,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       const answered = outcomes.length;
       for (let i = answered; i < uses.length; i++) {
         const outcome = done(uses[i]!, "(interrupted by user)", true);
-        toolErrorObserved = true;
         outcomes.push(outcome);
         sidecar.logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
       }
@@ -5478,18 +5283,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   if (interrupted) {
     taskOutcomeStatus = "interrupted";
     taskFailure ??= "interrupted";
-  } else if (toolErrorObserved && taskOutcomeStatus === "success") {
-    taskOutcomeStatus = "failure";
-    taskFailure ??= "tool error";
-  }
-  if (!interrupted && !storageFailure && taskOutcomeStatus === "success") {
-    // Final enforcement for loop exits that bypassed the in-loop nudge
-    // (e.g. the subagent turn-budget break). No grace turn remains here.
-    const verdict = settleGateVerdict({ observations: gateObservations, finalText: lastAssistantText }, true);
-    if (verdict.decision !== "pass") {
-      taskOutcomeStatus = "failure";
-      taskFailure = `settle gate: ${verdict.detail}`;
-    }
   }
   sidecar.logEvent({
     t: "agent_settled",
@@ -5516,7 +5309,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       error: ack && typeof ack.error === "string" ? ack.error : null,
     });
   }
-  await settleTraceTask(taskOutcomeStatus, criticVerdict);
+  await settleTraceTask(taskOutcomeStatus);
   // Keep the engine busy until checkpointing and trace settlement finish. A
   // second prompt must not replace `activeTraceTask` while this task's
   // task-settled record is still being written.
