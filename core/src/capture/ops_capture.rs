@@ -515,6 +515,22 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
             changed_entries.insert(rel_path.clone(), None);
             continue;
         };
+        // A directory hint is not a file deletion. Recording `None` here
+        // drops the parent tree entry and every child with it. Watcher
+        // hints are files; agent tool-path hints can name directories.
+        // File→empty-dir has no parent subtree, so it still records a
+        // deletion (Git trees do not store empty directories).
+        if path.identity.is_dir() {
+            let prefix = format!("{rel_path}/");
+            let parent_has_subtree = parent_arc.keys().any(|path| path.starts_with(&prefix));
+            let child_hinted = changed.iter().any(|path| path.starts_with(&prefix));
+            if parent_has_subtree && !child_hinted {
+                return Err(format!("capture hint names a directory: {rel_path}"));
+            }
+            flat.remove(rel_path);
+            changed_entries.insert(rel_path.clone(), None);
+            continue;
+        }
         match hash_path(
             &mut object_transaction,
             &store,
