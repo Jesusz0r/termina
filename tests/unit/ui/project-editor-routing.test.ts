@@ -46,7 +46,7 @@ describe("multi-project editor event routing", () => {
   });
 
   it("scopes shared Monaco models by project", () => {
-    expect(editor).toContain("acquireSharedFileModel(path, owner)");
+    expect(editor).toContain("acquireSharedFileModel(key, owner)");
     expect(editor).toContain("project=");
   });
 
