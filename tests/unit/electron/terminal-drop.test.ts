@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, linkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -159,6 +160,40 @@ describe("Terminal drop unit tests", () => {
       }
       expect((await readDroppedImages(extras, 4)).ok).toBe(false);
       expect((await readDroppedImages([pngPath], 0)).ok).toBe(false);
+    });
+
+    it.runIf(process.platform !== "win32")("rejects a writer-less FIFO without blocking (refs #142)", async () => {
+      const fifo = join(root, "image.png");
+      expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+      try {
+        const started = Date.now();
+        const result = await Promise.race([
+          readDroppedImages([fifo], 4),
+          new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("drop read blocked on FIFO")), 5000)),
+        ]);
+        expect(result.ok).toBe(false);
+        expect(Date.now() - started).toBeLessThan(5000);
+      } finally {
+        rmSync(fifo, { force: true });
+      }
+    });
+
+    it.runIf(process.platform !== "win32")("validates the open descriptor, not a pre-open stat (refs #142)", async () => {
+      // A regular file swapped for a FIFO after any path-level check must
+      // still be rejected by the descriptor-based validation, without blocking.
+      const target = join(root, "swapped.png");
+      writeFileSync(target, png1x1);
+      rmSync(target, { force: true });
+      expect(spawnSync("mkfifo", [target]).status).toBe(0);
+      try {
+        const result = await Promise.race([
+          readDroppedImages([target], 4),
+          new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("drop read blocked on FIFO")), 5000)),
+        ]);
+        expect(result.ok).toBe(false);
+      } finally {
+        rmSync(target, { force: true });
+      }
     });
   });
 
