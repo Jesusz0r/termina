@@ -687,13 +687,13 @@ export class EditorManager {
       // The tab closed (or was replaced) while queued: a stale op must not
       // touch the disposed model, let alone a new tab under the same key.
       if (!live || live !== tab || !live.owner) return;
-      await this.restoreDeletedBeforeSave(live);
       const submittedText = live.model.getValue();
       const submittedVersion = live.model.getAlternativeVersionId();
       const savedAtSubmit = live.savedVersionId;
+      const restore = this.deletedOnDisk.has(live.key);
       let res: { ok: boolean; error?: string };
       try {
-        res = await window.termina.saveFile(live.key, submittedText, live.owner);
+        res = await window.termina.saveFile(live.key, submittedText, live.owner, restore);
       } catch (err) {
         toast(`could not save ${pathBasename(live.key)}: ${(err as Error).message}`, "error");
         return;
@@ -747,24 +747,6 @@ export class EditorManager {
     }
   }
 
-  /** Recreate a deleted-on-disk file before saving it. Main's save refuses
-   *  missing paths, so without the recreate the restore would fail. When the
-   *  file reappeared without a watcher push meanwhile, the create truncates
-   *  it — but the save below overwrites it with the buffer immediately, so
-   *  the empty window is transient (a push would already have cleared the
-   *  marking via updateContent). Errors stay silent here — the save itself
-   *  reports the real outcome. */
-  private async restoreDeletedBeforeSave(tab: OpenTab): Promise<void> {
-    if (!this.deletedOnDisk.has(tab.key) || !tab.owner) return;
-    const rel = this.relativePath(tab.key);
-    if (rel === null) return;
-    try {
-      await window.termina.createEntry(tab.owner.projectId, rel, "file");
-    } catch {
-      /* the save below reports the real outcome */
-    }
-  }
-
   /** Save every model with unsaved user edits. Returns the failed paths.
    *  With `writerId` (the write-lease holder) the saves bypass the lease
    *  block — the flush IS the holder's operation. */
@@ -786,15 +768,15 @@ export class EditorManager {
       const ok = await this.chainSave(key, async () => {
         const live = this.tabs.get(key);
         if (!live || live !== tab || !live.owner) return false;
-        await this.restoreDeletedBeforeSave(live);
         const submittedText = live.model.getValue();
         const submittedVersion = live.model.getAlternativeVersionId();
         const savedAtSubmit = live.savedVersionId;
+        const restore = this.deletedOnDisk.has(live.key);
         let res: { ok: boolean; error?: string };
         try {
           res = writerId
-            ? await window.termina.flushSave(live.key, submittedText, writerId, live.owner)
-            : await window.termina.saveFile(live.key, submittedText, live.owner);
+            ? await window.termina.flushSave(live.key, submittedText, writerId, live.owner, restore)
+            : await window.termina.saveFile(live.key, submittedText, live.owner, restore);
         } catch {
           return false;
         }

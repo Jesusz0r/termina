@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync, lstatSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync, lstatSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { lstat, mkdir, rm, writeFile, realpath as fsRealpath } from "node:fs/promises";
@@ -69,7 +69,8 @@ function loadMethod(factoryName: string, signature: string, names: string[], val
   return construct(...values);
 }
 
-type SaveEditorFile = (absPath: unknown, content: unknown, owner: unknown) => Promise<{ ok: boolean; error?: string }>;
+type SaveEditorFile = (absPath: unknown, content: unknown, owner: unknown, restore?: unknown) => Promise<{ ok: boolean; error?: string }>;
+type WriteLeasedEditorFile = (path: string, content: string, restore: boolean) => Promise<{ ok: boolean; error?: string }>;
 type RevertReviewFile = (terminalId: string, path: string) => Promise<{ ok: boolean; error?: string }>;
 type AcquireWriteLease = (wsId: string, requesterId: string, timeoutMs?: number) => Promise<{ ok: boolean; generation: number; error?: string }>;
 type ReleaseWriteLease = (wsId: string, requesterId: string) => void;
@@ -111,9 +112,16 @@ const TerminaAppConsts = {
 const saveEditorFile = loadMethod(
   "saveEditorFile",
   "private async saveEditorFile(",
-  ["MAX_OPEN_FILE_SIZE", "lstat", "writeFile", "randomUUID", "isErrno"],
-  [MAX_OPEN_FILE_SIZE, lstat, writeFile, randomUUID, isErrno],
+  ["MAX_OPEN_FILE_SIZE", "randomUUID"],
+  [MAX_OPEN_FILE_SIZE, randomUUID],
 ) as SaveEditorFile;
+
+const writeLeasedEditorFile = loadMethod(
+  "writeLeasedEditorFile",
+  "private async writeLeasedEditorFile(",
+  ["lstat", "mkdir", "dirname", "isErrno"],
+  [lstat, mkdir, dirname, isErrno],
+) as WriteLeasedEditorFile;
 
 const revertReviewFile = loadMethod(
   "revertReviewFile",
@@ -208,7 +216,7 @@ function makeLeaseBroker(ws: FakeWorkspace) {
 }
 
 function makeSaveApp(ws: FakeWorkspace, opts: { swapLeaf?: boolean } = {}) {
-  return {
+  const app = {
     ...makeLeaseBroker(ws),
     projectWorkspace: (owner: unknown) => (owner === "owner" ? { project: { id: "proj-1" }, workspace: ws } : null),
     managedPath: makeManagedPath(ws, opts),
@@ -217,7 +225,10 @@ function makeSaveApp(ws: FakeWorkspace, opts: { swapLeaf?: boolean } = {}) {
     durableReplaceFile: async (path: string, data: string | Buffer) => {
       await writeFile(path, data);
     },
+    writeLeasedEditorFile: (path: string, content: string, restore: boolean) =>
+      writeLeasedEditorFile.call(app, path, content, restore),
   };
+  return app;
 }
 
 function makeRevertApp(ws: FakeWorkspace, inst: FakeInst, store: FakeStore | null, opts: { swapLeaf?: boolean } = {}) {
@@ -323,6 +334,78 @@ describe("editor save write lease", () => {
     expect(dirRes.error ?? "").toContain("not a regular file");
     const missingRes = await saveEditorFile.call(app, join(dir, "missing.txt"), "new", "owner");
     expect(missingRes.ok).toBe(false);
+    expect(missingRes.error ?? "").toContain("not a regular file");
+    expect(ws.writerId).toBeNull();
+  });
+
+  it("restores a missing file including its parent directory under the same lease", async () => {
+    const ws = makeWorkspace(dir);
+    const file = join(dir, "sub", "gone.txt");
+    const res = await saveEditorFile.call(makeSaveApp(ws), file, "restored", "owner", true);
+    expect(res).toEqual({ ok: true });
+    expect(readFileSync(file, "utf8")).toBe("restored");
+    expect(ws.writerId).toBeNull();
+    expect(ws.leaseDepth).toBe(0);
+  });
+
+  it("overwrites a reappeared regular file when restoring", async () => {
+    const ws = makeWorkspace(dir);
+    const file = join(dir, "note.txt");
+    writeFileSync(file, "reappeared");
+    const res = await saveEditorFile.call(makeSaveApp(ws), file, "buffer", "owner", true);
+    expect(res).toEqual({ ok: true });
+    expect(readFileSync(file, "utf8")).toBe("buffer");
+    expect(ws.writerId).toBeNull();
+  });
+
+  it("refuses restore over a directory or a swapped symlink", async () => {
+    const ws = makeWorkspace(dir);
+    const app = makeSaveApp(ws);
+    const sub = join(dir, "sub");
+    mkdirSync(sub);
+    const dirRes = await saveEditorFile.call(app, sub, "new", "owner", true);
+    expect(dirRes.ok).toBe(false);
+    expect(dirRes.error ?? "").toContain("not a regular file");
+    expect(existsSync(sub)).toBe(true);
+
+    const target = join(dir, "target.txt");
+    writeFileSync(target, "target-content");
+    const link = join(dir, "link.txt");
+    symlinkSync(target, link);
+    const linkRes = await saveEditorFile.call(makeSaveApp(ws, { swapLeaf: true }), link, "evil", "owner", true);
+    expect(linkRes.ok).toBe(false);
+    expect(linkRes.error ?? "").toContain("not a regular file");
+    expect(readFileSync(target, "utf8")).toBe("target-content");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(ws.writerId).toBeNull();
+  });
+
+  it("fails restore busy when a promote lease is held", async () => {
+    const ws = makeWorkspace(dir);
+    ws.writerId = "promote:op-1";
+    ws.leaseDepth = 1;
+    const file = join(dir, "gone.txt");
+    const res = await saveEditorFile.call(makeSaveApp(ws), file, "new", "owner", true);
+    expect(res.ok).toBe(false);
+    expect(res.error ?? "").toMatch(/lease|busy/);
+    expect(existsSync(file)).toBe(false);
+    expect(ws.writerId).toBe("promote:op-1");
+    expect(ws.leaseDepth).toBe(1);
+  });
+
+  it("surfaces create and project-gone errors instead of a missing-path lie", async () => {
+    const ws = makeWorkspace(dir);
+    const blocker = join(dir, "blocker");
+    writeFileSync(blocker, "not-a-dir");
+    const blocked = await saveEditorFile.call(makeSaveApp(ws), join(blocker, "gone.txt"), "x", "owner", true);
+    expect(blocked.ok).toBe(false);
+    expect(blocked.error ?? "").not.toContain("not a regular file");
+    expect(ws.writerId).toBeNull();
+
+    const gone = makeSaveApp(ws);
+    gone.projectWorkspace = () => null;
+    const missingProject = await saveEditorFile.call(gone, join(dir, "gone.txt"), "x", "owner", true);
+    expect(missingProject).toEqual({ ok: false, error: "invalid project workspace" });
     expect(ws.writerId).toBeNull();
   });
 });
@@ -546,12 +629,17 @@ describe("save/revert wiring", () => {
   it("routes file:save through the leased method with no parallel path", () => {
     const handler = methodBody(main, 'ipcMain.handle("file:save"', 'ipcMain.handle("explorer:list-dir"');
     expect(handler).toContain("this.saveEditorFile(");
+    expect(handler).toContain("restore");
     expect(handler).not.toContain("assertWorkspaceWritable");
     expect(handler).not.toContain("writeFile(");
     const method = extractMethod(main, "private async saveEditorFile(");
     expect(method).toContain("acquireWriteLease");
     expect(method).toContain("releaseWriteLease");
-    expect(method).toContain("lstat(");
+    expect(method).toContain("this.writeLeasedEditorFile(");
+    expect(method).toContain("restore === true");
+    const write = extractMethod(main, "private async writeLeasedEditorFile(");
+    expect(write).toContain("lstat(");
+    expect(write).toContain("mkdir(");
   });
 
   it("routes review:revert through the blob method with no parallel path", () => {
@@ -570,8 +658,12 @@ describe("save/revert wiring", () => {
 
   it("guards the preflight flush write with lstat", () => {
     const handler = methodBody(main, 'ipcMain.handle("file:flush-save"', 'ipcMain.handle("verify:detect"');
-    expect(handler).toContain("lstat(managed.path)");
+    expect(handler).toContain("this.writeLeasedEditorFile(");
+    expect(handler).toContain("restore === true");
     expect(handler).not.toContain("await stat(managed.path)");
+    const write = extractMethod(main, "private async writeLeasedEditorFile(");
+    expect(write).toContain("lstat(");
+    expect(write).not.toContain("await stat(");
   });
 
   it("anchors baselines at the canonical capture points", () => {
@@ -585,8 +677,11 @@ describe("save/revert wiring", () => {
 
   it("routes editor saves through the durable replace helper", () => {
     const method = extractMethod(main, "private async saveEditorFile(");
-    expect(method).toContain("this.durableReplaceFile(");
+    expect(method).toContain("this.writeLeasedEditorFile(");
     expect(method).not.toContain("writeFile(");
+    const write = extractMethod(main, "private async writeLeasedEditorFile(");
+    expect(write).toContain("this.durableReplaceFile(");
+    expect(write).not.toContain("writeFile(");
   });
 
   it("routes review reverts through the durable replace helper", () => {
@@ -598,8 +693,11 @@ describe("save/revert wiring", () => {
 
   it("routes flush saves and acks through the durable replace helper", () => {
     const flush = methodBody(main, 'ipcMain.handle("file:flush-save"', 'ipcMain.handle("verify:detect"');
-    expect(flush).toContain("this.durableReplaceFile(");
+    expect(flush).toContain("this.writeLeasedEditorFile(");
     expect(flush).not.toContain("writeFile(");
+    const write = extractMethod(main, "private async writeLeasedEditorFile(");
+    expect(write).toContain("this.durableReplaceFile(");
+    expect(write).not.toContain("writeFile(");
     const ack = methodBody(main, "private writeAck(", "private flushDirtyModels(");
     expect(ack).toContain("this.durableReplaceFile(");
     expect(ack).not.toContain("writeFile(");

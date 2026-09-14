@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, isAbsolute } from "node:path";
-import { lstat, open, rm, rename as fsRename } from "node:fs/promises";
+import { lstat, mkdir, open, rm, rename as fsRename } from "node:fs/promises";
+import { dirname, join, relative, isAbsolute } from "node:path";
+import { isErrno } from "../../../shared/guards.ts";
 import { randomUUID } from "node:crypto";
 import { syncParentDir } from "../../../shared/fsync.ts";
 import ts from "typescript";
@@ -73,7 +74,7 @@ function loadFlushSave(names: string[], values: unknown[]): unknown {
       if (depth === 0) {
         const body = main.slice(bodyStart, i + 1);
         const factory = ts.transpileModule(
-          `return (async function flushSave(_e, absPath, content, writerId, owner) ${body});`,
+          `return (async function flushSave(_e, absPath, content, writerId, owner, restore) ${body});`,
           { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
         ).outputText;
         const construct = new Function(...names, factory) as unknown as (...args: unknown[]) => unknown;
@@ -93,6 +94,7 @@ type FlushSave = (
   content: string,
   writerId: unknown,
   owner: unknown,
+  restore?: unknown,
 ) => Promise<{ ok: boolean; error?: string }>;
 
 interface FakeWorkspace {
@@ -114,6 +116,7 @@ interface FakeApp {
   grantLeaseWaiter: (ws: FakeWorkspace) => void;
   leaseWaiters: Map<string, Array<{ requesterId: string; settled: boolean; timer: ReturnType<typeof setTimeout> }>>;
   durableReplaceFile: (path: string, data: string | Buffer, mode?: number) => Promise<void>;
+  writeLeasedEditorFile: (path: string, content: string, restore: boolean) => Promise<{ ok: boolean; error?: string }>;
   sweepReplaceTemps: (path: string) => Promise<void>;
   projectOfWorkspace: (id: string) => null;
   projectIsSwitching: (id: string | undefined) => boolean;
@@ -143,7 +146,13 @@ const realDurableReplace = loadMethod(
   ["open", "fsRename", "rm", "randomUUID", "syncParentDir"],
   [open, fsRename, rm, randomUUID, syncParentDir],
 ) as (path: string, data: string | Buffer, mode?: number) => Promise<void>;
-const flushSave = loadFlushSave(["MAX_OPEN_FILE_SIZE", "lstat"], [MAX_OPEN_FILE_SIZE, lstat]) as FlushSave;
+const realWriteLeased = loadMethod(
+  "writeLeasedEditorFile",
+  "private async writeLeasedEditorFile(",
+  ["lstat", "mkdir", "dirname", "isErrno"],
+  [lstat, mkdir, dirname, isErrno],
+) as (path: string, content: string, restore: boolean) => Promise<{ ok: boolean; error?: string }>;
+const flushSave = loadFlushSave(["MAX_OPEN_FILE_SIZE"], [MAX_OPEN_FILE_SIZE]) as FlushSave;
 
 function makeHarness(opts: { durableReplace?: (path: string, data: string | Buffer, mode?: number) => Promise<void> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "termina-flush-gate-"));
@@ -170,14 +179,16 @@ function makeHarness(opts: { durableReplace?: (path: string, data: string | Buff
     leaseWaiters: new Map(),
     durableReplaceFile: opts.durableReplace ?? ((path: string, data: string | Buffer, mode?: number) =>
       realDurableReplace.call(app, path, data, mode)),
+    writeLeasedEditorFile: (path: string, content: string, restore: boolean) =>
+      realWriteLeased.call(app, path, content, restore),
     sweepReplaceTemps: async (_path: string) => undefined,
     projectOfWorkspace: (_id: string): null => null,
     projectIsSwitching: (_id: string | undefined): boolean => false,
     terminalsOnWorkspace: (_ws: FakeWorkspace): unknown[] => [],
     kickWorkspaceMomentCapture: (_ws: FakeWorkspace): void => undefined,
   };
-  const call = (absPath: string, content: string, writerId: unknown) =>
-    flushSave.call(app, {}, absPath, content, writerId, owner);
+  const call = (absPath: string, content: string, writerId: unknown, restore?: boolean) =>
+    flushSave.call(app, {}, absPath, content, writerId, owner, restore);
   const cleanup = () => rmSync(dir, { recursive: true, force: true });
   return { dir, ws, owner, app, call, cleanup };
 }
@@ -295,6 +306,35 @@ describe("flush-save lease gate (refs #168)", () => {
       await h.app.acquireWriteLease(h.ws.id, "preflight:term-1:req-1", 0);
       const result = await h.call(h.dir, "flushed-bytes", "preflight:term-1:req-1");
       expect(result.ok).toBe(false);
+      h.app.releaseWriteLease(h.ws.id, "preflight:term-1:req-1");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("restores a missing file under the genuine holder's lease", async () => {
+    const h = makeHarness();
+    try {
+      const file = join(h.dir, "sub", "gone.txt");
+      await h.app.acquireWriteLease(h.ws.id, "preflight:term-1:req-1", 0);
+      const result = await h.call(file, "restored-bytes", "preflight:term-1:req-1", true);
+      expect(result).toEqual({ ok: true });
+      expect(readFileSync(file, "utf8")).toBe("restored-bytes");
+      expect(h.ws.writerId).toBe("preflight:term-1:req-1");
+      h.app.releaseWriteLease(h.ws.id, "preflight:term-1:req-1");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("refuses a missing file when the flush is not a restore", async () => {
+    const h = makeHarness();
+    try {
+      const file = join(h.dir, "gone.txt");
+      await h.app.acquireWriteLease(h.ws.id, "preflight:term-1:req-1", 0);
+      const result = await h.call(file, "flushed-bytes", "preflight:term-1:req-1");
+      expect(result.ok).toBe(false);
+      expect(result.error ?? "").toContain("not a regular file");
       h.app.releaseWriteLease(h.ws.id, "preflight:term-1:req-1");
     } finally {
       h.cleanup();
