@@ -120,11 +120,6 @@ export class ReviewView {
   /** Show the diff for a file the agent changed in the given terminal. */
   async show(terminalId: string, path: string, relPath: string, owner: ProjectWorkspaceRef): Promise<void> {
     const seq = ++this.loadSeq;
-    this.terminalId = terminalId;
-    this.path = path;
-    this.owner = owner;
-    this.nameEl.textContent = relPath;
-
     const hint = document.getElementById("review-hint")!;
     hint.textContent = "loading…";
     let res;
@@ -140,13 +135,21 @@ export class ReviewView {
       return;
     }
     if (seq !== this.loadSeq) return;
-    this.baseline = res.baseline;
-    const deleted = res.status === "deleted" && !current.ok && typeof this.baseline === "string";
+    const deleted = res.status === "deleted" && !current.ok && typeof res.baseline === "string";
     if (!current.ok && !deleted) {
       hint.textContent = current.error;
       toast(`could not load ${relPath}: ${current.error}`, "error");
       return;
     }
+    // Identity stages only after both loads succeed: a failed load for B must
+    // leave A's name, path, and diff sides untouched — Revert acts on the
+    // staged path, and matchesPath routes watcher pushes by it. The loadSeq
+    // guard above already covers interleaved shows.
+    this.terminalId = terminalId;
+    this.path = path;
+    this.owner = owner;
+    this.nameEl.textContent = relPath;
+    this.baseline = res.baseline;
     const currentText = current.ok ? current.content : "";
 
     this.setDiff(this.baseline ?? "", currentText);
