@@ -5503,6 +5503,7 @@ async function resumeSession(): Promise<SessionResult> {
 async function resumeSessionBody(overrides?: {
   sessionFile?: string | null;
   openWriter?: () => void;
+  testOnlyMaxBundleBytes?: number;
 }): Promise<SessionResult> {
   const file = overrides?.sessionFile !== undefined ? overrides.sessionFile : sessionFile;
   const open = overrides?.openWriter ?? openSessionWriter;
@@ -5515,8 +5516,20 @@ async function resumeSessionBody(overrides?: {
     streamPrepared = false;
     return { ok: true };
   }
-  const replayed = await replaySessionBundle(file);
+  const replayed = await replaySessionBundle(
+    file,
+    overrides?.testOnlyMaxBundleBytes === undefined
+      ? undefined
+      : { testOnlyMaxBundleBytes: overrides.testOnlyMaxBundleBytes },
+  );
   if (!replayed.ok) {
+    if (replayed.error.includes("MAX_SESSION_BUNDLE_BYTES")) {
+      // Capacity exhaustion is not corruption (#161): keep the acknowledged
+      // bundle in place so nothing is lost, and let /resume retry. Starting
+      // a fresh session archives this bundle aside for later inspection.
+      abortResumeKeepBundle(`(resume failed: ${replayed.error}; the bundle is kept — start a new session to archive it)`);
+      return { ok: false, error: replayed.error };
+    }
     abortResume(`(resume failed: ${replayed.error})`, file);
     return { ok: false, error: replayed.error };
   }
@@ -5575,6 +5588,7 @@ async function resumeSessionBody(overrides?: {
 export type ResumeTestOverrides = {
   sessionFile?: string | null;
   openWriter?: () => void;
+  testOnlyMaxBundleBytes?: number;
 };
 
 /** Test seam: drive the resume path against a temp bundle with an injected writer. */
