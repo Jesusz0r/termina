@@ -55,11 +55,13 @@ function mcpOmissionMarker(kind: string, reason: string, continuation: McpContin
 
 type StableOutputJson = Readonly<{
   encoded: string | null;
-  reason: "too-large" | "not-json-serializable" | null;
+  reason: "too-large" | "too-deep-or-cyclic" | "not-json-serializable" | null;
 }>;
 
 
 const OUTPUT_JSON_TOO_LARGE = Symbol("mcp output JSON too large");
+
+const OUTPUT_JSON_TOO_DEEP = Symbol("mcp output JSON too deep or cyclic");
 
 
 /**
@@ -106,7 +108,7 @@ function stableOutputJson(raw: unknown, maxBytes = MCP_RESULT_BYTES): StableOutp
       default:
         throw new Error("mcp output is not JSON-serializable");
     }
-    if (depth > SCHEMA_MAX_DEPTH || seen.has(value)) throw new Error("mcp output is too deep or cyclic");
+    if (depth > SCHEMA_MAX_DEPTH || seen.has(value)) throw OUTPUT_JSON_TOO_DEEP;
     seen.add(value);
     try {
       if (Array.isArray(value)) {
@@ -145,14 +147,20 @@ function stableOutputJson(raw: unknown, maxBytes = MCP_RESULT_BYTES): StableOutp
   } catch (err) {
     return Object.freeze({
       encoded: null,
-      reason: err === OUTPUT_JSON_TOO_LARGE ? "too-large" : "not-json-serializable",
+      reason: err === OUTPUT_JSON_TOO_LARGE
+        ? "too-large"
+        : err === OUTPUT_JSON_TOO_DEEP
+          ? "too-deep-or-cyclic"
+          : "not-json-serializable",
     });
   }
 }
 
 
 function stableOutputFailure(result: StableOutputJson): string {
-  return result.reason === "too-large" ? "too large" : "not JSON-serializable";
+  if (result.reason === "too-large") return "too large";
+  if (result.reason === "too-deep-or-cyclic") return "too deep or cyclic";
+  return "not JSON-serializable";
 }
 
 

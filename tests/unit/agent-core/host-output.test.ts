@@ -29,18 +29,37 @@ describe("Agent Core Host Output & Context Bounding", () => {
     writeFileSync(join(root, `mine-${terminalId}.json`), JSON.stringify([protectedFile]));
 
     expect(host.readContextFiles(root, terminalId)).toBe("");
-    expect([...host.readProtectedPaths(root, terminalId)]).toEqual([protectedFile]);
+    expect(host.readProtectedPaths(root, terminalId)).toEqual(new Set([protectedFile]));
   });
 
   it("fails closed on malformed or linked Mine policy files", () => {
     const policy = join(root, `mine-${terminalId}.json`);
     writeFileSync(policy, "not-json");
-    expect(host.readProtectedPaths(root, terminalId).size).toBe(0);
+    expect(host.readProtectedPaths(root, terminalId)).toBeNull();
     rmSync(policy, { force: true });
     const target = join(root, "mine-policy-target.json");
     writeFileSync(target, JSON.stringify([join(root, "protected.ts")]));
     symlinkSync(target, policy);
-    expect(host.readProtectedPaths(root, terminalId).size).toBe(0);
+    expect(host.readProtectedPaths(root, terminalId)).toBeNull();
+  });
+
+  it("reads an empty set only when the Mine policy file is missing", () => {
+    const missing = host.readProtectedPaths(root, terminalId);
+    expect(missing).not.toBeNull();
+    expect(missing!.size).toBe(0);
+  });
+
+  it("fails closed on oversize, non-array, empty, and non-regular Mine policy", () => {
+    const policy = join(root, `mine-${terminalId}.json`);
+    writeFileSync(policy, JSON.stringify(["x".repeat(70 * 1024)]));
+    expect(host.readProtectedPaths(root, terminalId)).toBeNull();
+    writeFileSync(policy, JSON.stringify({ paths: [] }));
+    expect(host.readProtectedPaths(root, terminalId)).toBeNull();
+    writeFileSync(policy, "");
+    expect(host.readProtectedPaths(root, terminalId)).toBeNull();
+    rmSync(policy, { force: true });
+    mkdirSync(policy);
+    expect(host.readProtectedPaths(root, terminalId)).toBeNull();
   });
 
   it("preserves complete UTF-8 text below the cap", () => {
@@ -148,5 +167,19 @@ describe("Agent Core Host Output & Context Bounding", () => {
       [imageRoot],
     );
     expect(image).toBeNull();
+  });
+
+  it("caps inline base64 images by decoded bytes (#222)", () => {
+    const over = Buffer.alloc(host.MAX_IMAGE_BYTES + 1, 7).toString("base64");
+    expect(over.length).toBeLessThanOrEqual(host.MAX_IMAGE_BYTES * 2);
+    expect(
+      host.expandFileImageSource({ type: "base64", media_type: "image/png", data: over }, []),
+    ).toBeNull();
+    const exact = Buffer.alloc(host.MAX_IMAGE_BYTES, 7).toString("base64");
+    const ok = host.expandFileImageSource({ type: "base64", media_type: "image/png", data: exact }, []);
+    expect(ok?.type).toBe("base64");
+    expect(
+      host.expandFileImageSource({ type: "base64", media_type: "image/png", data: "   " }, []),
+    ).toBeNull();
   });
 });

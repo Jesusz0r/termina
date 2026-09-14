@@ -7,11 +7,8 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
-  fstatSync,
   mkdirSync,
-  openSync,
   readdirSync,
-  readFileSync,
   readSync,
   realpathSync,
   renameSync,
@@ -33,8 +30,10 @@ import {
   confinePath,
   freezeCwd,
   gitignoreSkips,
+  openRegularFile,
   parseFileTags,
   posixRel,
+  readIgnoreFile,
   sortUtf8,
   underRoot,
   xmlSafe,
@@ -108,18 +107,24 @@ function linePrefix(n: number): string {
   return `${s.length >= LINE_NUM_WIDTH ? s : s.padStart(LINE_NUM_WIDTH, " ")}|`;
 }
 
-export function formatNumberedText(text: string, startLine: number): string {
-  if (text === "") return "";
+function stripCarriage(line: string): string {
+  return line.endsWith("\r") ? line.slice(0, -1) : line;
+}
+
+function numberLine(n: number, raw: string): string {
+  return `${linePrefix(n)}${stripCarriage(raw)}`;
+}
+
+function splitPageLines(text: string): { parts: string[]; endsWithNl: boolean } {
   const endsWithNl = text.endsWith("\n");
   const parts = text.split("\n");
   if (endsWithNl) parts.pop();
-  return parts.map((line, i) => `${linePrefix(startLine + i)}${line.replace(/\r$/, "")}`).join("\n");
+  return { parts, endsWithNl };
 }
 
-function newlineCount(buf: Buffer): number {
-  let n = 0;
-  for (let i = 0; i < buf.length; i++) if (buf[i] === 10) n++;
-  return n;
+export function formatNumberedText(text: string, startLine: number): string {
+  if (text === "") return "";
+  return splitPageLines(text).parts.map((line, i) => numberLine(startLine + i, line)).join("\n");
 }
 
 function lastNewlineIndex(buf: Buffer): number {
@@ -226,10 +231,10 @@ function gitignoreRulesFor(root: string, dirAbs: string): GitignoreRules {
   }
   for (const dir of dirs.reverse()) {
     try {
-      const gi = join(dir, ".gitignore");
-      if (!existsSync(gi)) continue;
+      const text = readIgnoreFile(join(dir, ".gitignore"));
+      if (text === null) continue;
       const rel = dir === root ? "" : posixRel(root, dir);
-      rules.set(rel, parseGitignore(readFileSync(gi, "utf8")));
+      rules.set(rel, parseGitignore(text));
     } catch {
       /* unreadable gitignore */
     }
@@ -303,9 +308,172 @@ function truncationMarker(nextOffset: number, nextLine?: number): string {
   return `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset}]`;
 }
 
+/** Largest integer with the same decimal width (marker-size probing). */
+function maxSameWidth(value: number): number {
+  return Number("9".repeat(String(Math.max(0, Math.floor(value))).length));
+}
+
+export interface NumberedPageEmission {
+  body: string;
+  /** Source bytes covered by the emitted body. */
+  emittedBytes: number;
+  /** Whole numbered lines emitted. */
+  emittedLines: number;
+  /** Body ends mid-line (the first line alone exceeded the budget). */
+  partial: boolean;
+}
+
+/**
+ * Budget numbered lines (prefixes included) into bodyLimit display bytes,
+ * mapping back to the source bytes actually emitted (#156). Whole lines
+ * only, except a code-point-safe partial first line when even one line
+ * exceeds the budget. The continuation offset derives from this mapping,
+ * never from the raw read length, so following it cannot skip displayed
+ * or undisplayed source text.
+ */
+export function emitNumberedPage(text: string, startLine: number, bodyLimit: number): NumberedPageEmission {
+  const { parts, endsWithNl } = splitPageLines(text);
+  if (parts.length === 0 || (parts.length === 1 && parts[0] === "" && !endsWithNl)) {
+    return { body: "", emittedBytes: 0, emittedLines: 0, partial: false };
+  }
+  const rendered: string[] = [];
+  let used = 0;
+  let emittedBytes = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const raw = parts[i]!;
+    const display = numberLine(startLine + i, raw);
+    const entryBytes = Buffer.byteLength(display, "utf8") + (rendered.length > 0 ? 1 : 0);
+    if (used + entryBytes > bodyLimit) break;
+    used += entryBytes;
+    rendered.push(display);
+    emittedBytes += Buffer.byteLength(raw, "utf8") + (i < parts.length - 1 || endsWithNl ? 1 : 0);
+  }
+  if (rendered.length > 0) {
+    return { body: rendered.join("\n"), emittedBytes, emittedLines: rendered.length, partial: false };
+  }
+  const prefix = linePrefix(startLine);
+  const room = Math.max(0, bodyLimit - Buffer.byteLength(prefix, "utf8"));
+  const content = Buffer.from(stripCarriage(parts[0]!), "utf8");
+  const keep = completeUtf8Boundary(content.subarray(0, room));
+  const body = prefix + content.subarray(0, keep).toString("utf8");
+  return { body, emittedBytes: keep, emittedLines: 0, partial: true };
+}
+
+export interface PlainPageEmission {
+  body: string;
+  emittedBytes: number;
+}
+
+/** Byte-budget plain text on a code-point boundary, with its source span. */
+export function emitPlainPage(text: string, bodyLimit: number): PlainPageEmission {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= bodyLimit) return { body: text, emittedBytes: buf.length };
+  const keep = completeUtf8Boundary(buf.subarray(0, bodyLimit));
+  return { body: buf.subarray(0, keep).toString("utf8"), emittedBytes: keep };
+}
+
+function renderNumberedView(args: {
+  text: string;
+  from: number;
+  until: number;
+  viewStartLine: number;
+  sourceBoundary: number;
+  decodeTruncated: boolean;
+  pointerReserve: number;
+  repro: string;
+}): ToolTextResult {
+  const rawComplete = args.from + args.sourceBoundary >= args.until;
+  // Fast path: the whole window fits without a marker; byte shape matches
+  // the pre-budget renderer exactly (plus pointer room for the re-wrap).
+  const full = emitNumberedPage(args.text, args.viewStartLine, READ_CAP_BYTES - args.pointerReserve);
+  if (!args.decodeTruncated && rawComplete && !full.partial && full.emittedBytes >= args.sourceBoundary) {
+    return logicalToolText(full.body, {
+      maxBytes: READ_CAP_BYTES,
+      state: "complete",
+      isError: false,
+      repro: args.repro,
+    });
+  }
+  // Truncated path: probe the marker at worst-case digit width (final values
+  // can only be smaller, so the reserved marker bytes never overflow), then
+  // emit within the remaining budget.
+  const totalLines = splitPageLines(args.text).parts.length;
+  const probe = truncationMarker(maxSameWidth(args.until), maxSameWidth(args.viewStartLine + totalLines));
+  const bodyLimit = Math.max(1024, READ_CAP_BYTES - Buffer.byteLength(probe, "utf8") - 1 - args.pointerReserve);
+  const page = emitNumberedPage(args.text, args.viewStartLine, bodyLimit);
+  let nextOffset = args.from + Math.min(page.emittedBytes, args.sourceBoundary);
+  // Undecodable windows emit nothing; skip one byte rather than stalling on
+  // the same offset forever.
+  if (nextOffset <= args.from && args.until > args.from) nextOffset = args.from + 1;
+  const nextLine = page.emittedLines > 0 ? args.viewStartLine + page.emittedLines : undefined;
+  if (rawComplete && args.decodeTruncated) {
+    const marker = truncationMarker(nextOffset);
+    return logicalToolText(page.body, {
+      maxBytes: READ_CAP_BYTES,
+      state: "unreadable",
+      isError: true,
+      forceMarker: true,
+      marker,
+      continuation: marker,
+      repro: args.repro,
+    });
+  }
+  const marker = truncationMarker(nextOffset, nextLine);
+  return logicalToolText(page.body, {
+    maxBytes: READ_CAP_BYTES,
+    state: "complete",
+    isError: false,
+    forceMarker: true,
+    marker,
+    continuation: marker,
+    repro: args.repro,
+  });
+}
+
+function renderPlainView(args: {
+  text: string;
+  from: number;
+  until: number;
+  sourceBoundary: number;
+  decodeTruncated: boolean;
+  repro: string;
+}): ToolTextResult {
+  const rawComplete = args.from + args.sourceBoundary >= args.until;
+  const full = emitPlainPage(args.text, READ_CAP_BYTES);
+  if (!args.decodeTruncated && rawComplete && full.emittedBytes >= args.sourceBoundary) {
+    return logicalToolText(full.body, {
+      maxBytes: READ_CAP_BYTES,
+      state: "complete",
+      isError: false,
+      marker: null,
+      repro: args.repro,
+    });
+  }
+  const probeTruncated = `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${maxSameWidth(args.until)}]`;
+  const probeInvalid = `[invalid UTF-8 omitted — continue with read_file offset ${maxSameWidth(args.until)}]`;
+  const probeBytes = Math.max(Buffer.byteLength(probeTruncated, "utf8"), Buffer.byteLength(probeInvalid, "utf8"));
+  const bodyLimit = Math.max(1024, READ_CAP_BYTES - probeBytes - 1);
+  const page = emitPlainPage(args.text, bodyLimit);
+  let nextOffset = args.from + Math.min(page.emittedBytes, args.sourceBoundary);
+  if (nextOffset <= args.from && args.until > args.from) nextOffset = args.from + 1;
+  const marker = nextOffset < args.until
+    ? `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset}]`
+    : `[invalid UTF-8 omitted — continue with read_file offset ${nextOffset}]`;
+  const unreadable = nextOffset >= args.until && args.decodeTruncated;
+  return logicalToolText(page.body, {
+    maxBytes: READ_CAP_BYTES,
+    state: unreadable ? "unreadable" : "complete",
+    isError: unreadable,
+    forceMarker: true,
+    marker,
+    continuation: marker,
+    repro: args.repro,
+  });
+}
+
 export function readTextView(
   abs: string,
-  opts: { offset: number; startLine?: number; endLine?: number },
+  opts: { offset: number; startLine?: number; endLine?: number; pointerReserve?: number },
 ): ToolTextResult {
   const repro = `read_file(${JSON.stringify(abs)})`;
   const fail = (content: string, state: CompletionState = "failed"): ToolTextResult => logicalToolText(content, {
@@ -316,12 +484,14 @@ export function readTextView(
   });
   let fd: number | undefined;
   try {
-    fd = openSync(abs, "r");
-    const st = fstatSync(fd);
-    const head = Buffer.alloc(Math.min(4096, st.size));
+    const opened = openRegularFile(abs);
+    if ("error" in opened) return fail(opened.error);
+    fd = opened.fd;
+    const size = opened.size;
+    const head = Buffer.alloc(Math.min(4096, size));
     if (head.length > 0) readSync(fd, head, 0, head.length, 0);
     if (head.includes(0)) return fail("error: binary file");
-    if (st.size === 0) return logicalToolText("", {
+    if (size === 0) return logicalToolText("", {
       maxBytes: READ_CAP_BYTES,
       state: "complete",
       isError: false,
@@ -334,9 +504,9 @@ export function readTextView(
     const endLine = opts.endLine;
     let from = opts.offset;
     let viewStartLine = 1;
-    let until = st.size;
+    let until = size;
     if (lineMode) {
-      const offsets = lineRangeOffsets(fd, st.size, startLine, endLine, started);
+      const offsets = lineRangeOffsets(fd, size, startLine, endLine, started);
       if ("error" in offsets) return fail(offsets.error, offsets.timedOut ? "timeout" : "failed");
       from = offsets.start;
       viewStartLine = startLine;
@@ -346,7 +516,7 @@ export function readTextView(
       if (typeof nls === "object") return fail(nls.error, nls.timedOut ? "timeout" : "failed");
       viewStartLine = nls + 1;
     }
-    if (from >= st.size || from >= until) return logicalToolText("", {
+    if (from >= size || from >= until) return logicalToolText("", {
       maxBytes: READ_CAP_BYTES,
       state: "complete",
       isError: false,
@@ -357,14 +527,10 @@ export function readTextView(
     if (want > 0) readSync(fd, slice, 0, want, from);
     const more = from + want < until;
     let view = slice;
-    let nextOffset = from + want;
-    let atLineBoundary = false;
     if (more) {
       const nl = lastNewlineIndex(slice);
       if (nl >= 0) {
         view = slice.subarray(0, nl + 1);
-        nextOffset = from + nl + 1;
-        atLineBoundary = true;
       }
     }
     const safe = new BoundedTextAccumulator({ maxBytes: READ_CAP_BYTES, direction: "head", marker: "" });
@@ -375,39 +541,14 @@ export function readTextView(
     // point; advancing by `want` would silently skip its remaining bytes.
     const completeBytes = completeUtf8Boundary(view);
     const sourceBoundary = Math.min(safeText.retainedBytes, completeBytes);
-    nextOffset = from + sourceBoundary;
-    const numbered = formatNumberedText(safeText.text, viewStartLine);
-    if (nextOffset < until) {
-      const nextLine = atLineBoundary && sourceBoundary === view.length
-        ? viewStartLine + newlineCount(view)
-        : undefined;
-      const marker = truncationMarker(nextOffset, nextLine);
-      return logicalToolText(numbered, {
-        maxBytes: READ_CAP_BYTES,
-        state: "complete",
-        isError: false,
-        forceMarker: true,
-        marker,
-        continuation: marker,
-        repro,
-      });
-    }
-    if (safeText.truncated) {
-      const marker = truncationMarker(nextOffset);
-      return logicalToolText(numbered, {
-        maxBytes: READ_CAP_BYTES,
-        state: "unreadable",
-        isError: true,
-        forceMarker: true,
-        marker,
-        continuation: marker,
-        repro,
-      });
-    }
-    return logicalToolText(numbered, {
-      maxBytes: READ_CAP_BYTES,
-      state: "complete",
-      isError: false,
+    return renderNumberedView({
+      text: safeText.text,
+      from,
+      until,
+      viewStartLine,
+      sourceBoundary,
+      decodeTruncated: safeText.truncated,
+      pointerReserve: opts.pointerReserve ?? 0,
       repro,
     });
   } catch (err) {
@@ -457,40 +598,35 @@ export function readFileResult(abs: string, offset: number): ToolTextResult {
   });
   let fd: number | undefined;
   try {
-    fd = openSync(abs, "r");
-    const st = fstatSync(fd);
-    const head = Buffer.alloc(Math.min(4096, st.size));
+    const opened = openRegularFile(abs);
+    if ("error" in opened) return fail(opened.error);
+    fd = opened.fd;
+    const size = opened.size;
+    const head = Buffer.alloc(Math.min(4096, size));
     if (head.length > 0) readSync(fd, head, 0, head.length, 0);
     if (head.includes(0)) return fail("error: binary file");
-    if (offset >= st.size) return logicalToolText("", {
+    if (offset >= size) return logicalToolText("", {
       maxBytes: READ_CAP_BYTES,
       state: "complete",
       isError: false,
       repro,
     });
-    const want = Math.min(READ_CAP_BYTES, Math.max(0, st.size - offset));
+    const want = Math.min(READ_CAP_BYTES, Math.max(0, size - offset));
     const slice = Buffer.alloc(want);
     if (want > 0) readSync(fd, slice, 0, want, offset);
     const safe = new BoundedTextAccumulator({ maxBytes: READ_CAP_BYTES, direction: "head", marker: "" });
     safe.push(slice);
     const text = safe.finish();
     const completeBytes = completeUtf8Boundary(slice);
-    const nextOffset = offset + Math.min(text.retainedBytes, completeBytes);
-    const marker = nextOffset < st.size
-      ? `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset}]`
-      : text.truncated
-        ? `[invalid UTF-8 omitted — continue with read_file offset ${nextOffset}]`
-        : null;
-    const result = logicalToolText(text.text, {
-      maxBytes: READ_CAP_BYTES,
-      state: nextOffset >= st.size && text.truncated ? "unreadable" : "complete",
-      isError: nextOffset >= st.size && text.truncated,
-      forceMarker: marker !== null,
-      marker,
-      continuation: marker,
+    const sourceBoundary = Math.min(text.retainedBytes, completeBytes);
+    return renderPlainView({
+      text: text.text,
+      from: offset,
+      until: size,
+      sourceBoundary,
+      decodeTruncated: text.truncated,
       repro,
     });
-    return result;
   } catch (err) {
     return fail(`error: ${(err as Error).message}`);
   } finally {
@@ -534,9 +670,17 @@ export function readProjectFile(
     }
     return listProjectDir(cwd, confined.abs);
   }
-  const got = readTextView(confined.abs, { offset: off, startLine, endLine });
-  if (got.isError) return got;
+  // The nested-instructions pointer is prepended after the read and re-capped;
+  // reserve its bytes up front so the continuation offset already accounts
+  // for the final page shape (#156).
   const pointer = nestedAgentsPointer(cwd, confined.abs);
+  const got = readTextView(confined.abs, {
+    offset: off,
+    startLine,
+    endLine,
+    pointerReserve: pointer ? Buffer.byteLength(pointer, "utf8") + 1 : 0,
+  });
+  if (got.isError) return got;
   if (pointer) {
     const pointerContent = `${pointer}\n${got.content}`;
     const pointerContinuation = typeof got.continuation === "string"
@@ -687,20 +831,22 @@ export function editProjectFile(
   if (oldText === "") return { content: "error: old_text must not be empty", isError: true };
   const confined = confinePath(cwd, path ?? "", { mustExist: true });
   if (!confined.ok) return { content: confined.error, isError: true };
-  let st;
-  try {
-    st = statSync(confined.abs);
-  } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
+  const opened = openRegularFile(confined.abs);
+  if ("error" in opened) {
+    return {
+      content: opened.error === "error: path is a directory" ? "error: EISDIR" : opened.error,
+      isError: true,
+    };
   }
-  if (st.isDirectory()) return { content: "error: EISDIR", isError: true };
-  if (st.size > EDIT_MAX_BYTES) return { content: `error: file exceeds ${EDIT_MAX_BYTES} bytes`, isError: true };
-  let fd: number | undefined;
+  if (opened.size > EDIT_MAX_BYTES) {
+    closeSync(opened.fd);
+    return { content: `error: file exceeds ${EDIT_MAX_BYTES} bytes`, isError: true };
+  }
+  const fileMode = opened.mode & 0o777;
   let body: string;
   try {
-    fd = openSync(confined.abs, "r");
-    const buf = Buffer.alloc(st.size);
-    if (st.size > 0) readSync(fd, buf, 0, st.size, 0);
+    const buf = Buffer.alloc(opened.size);
+    if (opened.size > 0) readSync(opened.fd, buf, 0, opened.size, 0);
     if (buf.subarray(0, Math.min(4096, buf.length)).includes(0)) {
       return { content: "error: binary file", isError: true };
     }
@@ -708,12 +854,16 @@ export function editProjectFile(
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    closeSync(opened.fd);
   }
   if (body.charCodeAt(0) === 0xfeff) body = body.slice(1);
   const ending = body.includes("\r\n") ? "\r\n" : "\n";
   const old = oldText.replace(/\r\n/g, "\n").replace(/\n/g, ending).replace(/^\uFEFF/, "");
   const replacement = newText.replace(/\r\n/g, "\n").replace(/\n/g, ending);
+  // A BOM-only search passes the pre-read empty check, then normalizes to
+  // "". indexOf("", from) always matches without advancing, which hangs
+  // both search modes. Reject the normalized empty term before matching.
+  if (old === "") return { content: "error: old_text must not be empty", isError: true };
   if (!replaceAll) {
     let count = 0;
     let idx = 0;
@@ -729,7 +879,7 @@ export function editProjectFile(
       if (fuzzy && !("ambiguous" in fuzzy)) {
         const next = body.slice(0, fuzzy.at) + replacement + body.slice(fuzzy.at + fuzzy.len);
         try {
-          atomicWrite(confined.abs, next, st.mode & 0o777);
+          atomicWrite(confined.abs, next, fileMode);
         } catch (err) {
           return { content: `error: ${(err as Error).message}`, isError: true };
         }
@@ -744,7 +894,7 @@ export function editProjectFile(
     const at = body.indexOf(old);
     const next = body.slice(0, at) + replacement + body.slice(at + old.length);
     try {
-      atomicWrite(confined.abs, next, st.mode & 0o777);
+      atomicWrite(confined.abs, next, fileMode);
     } catch (err) {
       return { content: `error: ${(err as Error).message}`, isError: true };
     }
@@ -766,7 +916,7 @@ export function editProjectFile(
   }
   if (n === 0) return { content: editMissDiagnostic(body, old), isError: true };
   try {
-    atomicWrite(confined.abs, next, st.mode & 0o777);
+    atomicWrite(confined.abs, next, fileMode);
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
   }

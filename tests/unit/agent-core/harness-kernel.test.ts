@@ -105,7 +105,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       WEB_SEARCH_TOOL,
       requestTools,
       stampHistoryCache,
-      placeStreamBlock,
       compactStreamBlocks,
       retryAfter,
       parseEffortCommand,
@@ -564,6 +563,17 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("waitForAck removes the ack file", !existsSync(join(hostDir, `ack-${hostId}-${ackId}.json`)));
     const missed = await host.waitForAck(hostDir, hostId, "missing-ack", 120, hostBridge);
     check("waitForAck times out to null", missed === null);
+    writeFileSync(join(hostDir, `ack-${hostId}-bad-ack.json`), "not-json{{{");
+    const corruptStarted = Date.now();
+    const corrupt = await host.waitForAck(hostDir, hostId, "bad-ack", 5000, hostBridge);
+    check(
+      "waitForAck reports a malformed ack promptly, not as a timeout",
+      corrupt !== null && corrupt.ok === false && corrupt.malformed === true && Date.now() - corruptStarted < 2000,
+    );
+    check("waitForAck removes a malformed ack file", !existsSync(join(hostDir, `ack-${hostId}-bad-ack.json`)));
+    writeFileSync(join(hostDir, `ack-${hostId}-scalar-ack.json`), "42");
+    const scalar = await host.waitForAck(hostDir, hostId, "scalar-ack", 5000, hostBridge);
+    check("waitForAck reports a non-object ack as malformed", scalar !== null && scalar.malformed === true);
     writeFileSync(
       join(hostDir, `startup-control-${hostId}.json`),
       JSON.stringify({ opId: "op-1", action: "structured", content: [{ type: "text", text: "do the task" }] }),
@@ -1133,7 +1143,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("fetch interrupt is an error", stopped.isError === true);
     fetchSrv.close();
     const slots: Array<{ type: string; text: string } | undefined> = [];
-    placeStreamBlock(slots, 1, { type: "text", text: "kept" });
+    slots[1] = { type: "text", text: "kept" };
     check("stream compact skips holes", compactStreamBlocks(slots).length === 1 && compactStreamBlocks(slots)[0].text === "kept");
     check(
       "request projection strips view keys only",
@@ -4974,9 +4984,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       tuiMod.layoutHeights(24, 1, 7).transcript >= 2 && tuiMod.layoutHeights(24, 1, 7).header === 1,
     );
     check("layoutHeights fits a tiny screen", tuiMod.layoutHeights(5, 1, 7).transcript >= 1 && tuiMod.layoutHeights(5, 1, 7).slash < 7);
-    const visSrc = Array.from({ length: 80 }, (_, i) => `L${String(i).padStart(2, "0")}`).join("\n") + "\n";
-    const vis = tuiMod.visibleLines(visSrc, 10, 3, 0);
-    check("visibleLines is the tail", vis.join("|").includes("L79") && !vis.join("|").includes("L00"));
     const submitted: string[] = [];
     const exits: boolean[] = [];
     const tui = new tuiMod.AgentTui({

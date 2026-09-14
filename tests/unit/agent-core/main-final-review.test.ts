@@ -18,6 +18,7 @@ describe("Agent Core Main Final Review Contracts", () => {
     const files = await import("../../../agent-core/main/files.ts");
     const grep = await import("../../../agent-core/main/grep.ts");
     const fileOps = await import("../../../agent-core/main/file-ops.ts");
+    const output = await import("../../../agent-core/tool-output.ts");
     
     assert.deepEqual(
       main.traceWriteDisposition({ ok: false, persisted: false, retryable: true } as TraceWriteFailure),
@@ -40,9 +41,9 @@ describe("Agent Core Main Final Review Contracts", () => {
     const firstShutdown = main.shutdownAgentCore({ reason: "final-review", timeoutMs: 1 });
     assert.equal(firstShutdown, main.shutdownAgentCore({ reason: "final-review-repeat", timeoutMs: 1 }));
     await firstShutdown;
-    const boundedBody = await main.readBoundedHttpBody(
+    const boundedBody = await output.readBoundedResponseBody(
       new Response("x".repeat(1024), { headers: { "content-type": "text/plain" } }),
-      64,
+      { maxBytes: 64 },
     );
     assert.equal(boundedBody.truncated, true);
     assert.ok(Buffer.byteLength(boundedBody.text, "utf8") <= 64);
@@ -62,10 +63,15 @@ describe("Agent Core Main Final Review Contracts", () => {
         assert.equal(result.state, "complete");
         assert.equal(result.truncated, true);
         assert.ok(!result.content.includes("\uFFFD"));
+        assert.ok(Buffer.byteLength(result.content, "utf8") <= 40 * 1024);
         const continuation = result.continuation;
         const offset = Number(typeof continuation === "string" ? continuation.match(/read_file offset (\d+)/)?.[1] : undefined);
-        assert.equal(offset, 40 * 1024 - 1, "continuation must end on a complete UTF-8 boundary");
+        // The continuation derives from the source bytes actually displayed
+        // (prefixes + marker budgeted), not from the raw read length.
+        assert.ok(Number.isSafeInteger(offset) && offset > 0);
         assert.ok(offset < Buffer.byteLength(unicode));
+        // "😀é漢" is 4+2+3 bytes; a boundary lands at repeat offset 0, 4, or 6.
+        assert.ok([0, 4, 6].includes(offset % Buffer.byteLength("😀é漢")), "continuation must end on a complete UTF-8 boundary");
       }
     
       const linePath = join(root, "lines.txt");
@@ -76,10 +82,11 @@ describe("Agent Core Main Final Review Contracts", () => {
       assert.equal(lineResult.truncated, true);
       assert.ok(!lineResult.content.includes("\uFFFD"));
       const lineContinuation = lineResult.continuation;
-      assert.equal(
-        Number(typeof lineContinuation === "string" ? lineContinuation.match(/read_file offset (\d+)/)?.[1] : undefined),
-        40 * 1024 - 1,
+      const lineOffset = Number(
+        typeof lineContinuation === "string" ? lineContinuation.match(/read_file offset (\d+)/)?.[1] : undefined,
       );
+      assert.ok(Number.isSafeInteger(lineOffset) && lineOffset > 0);
+      assert.ok([0, 4, 6].includes(lineOffset % Buffer.byteLength("😀é漢")), "continuation must end on a complete UTF-8 boundary");
     
       writeFileSync(join(root, "scan-a.txt"), "a");
       writeFileSync(join(root, "scan-b.txt"), "b");

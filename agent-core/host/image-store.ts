@@ -146,6 +146,10 @@ export function expandFileImageSource(
 ): { type: "base64"; media_type: string; data: string } | null {
   if (source.type === "base64" && typeof source.data === "string" && typeof source.media_type === "string") {
     if (source.data.length === 0 || source.data.length > MAX_IMAGE_BYTES * 2) return null;
+    // Cap decoded bytes, not encoded chars: the 8 MB encoded ceiling admits
+    // ~6 MB decoded, 50% over the 4 MB file path. Empty decodes are useless.
+    const decodedBytes = Buffer.from(source.data, "base64").byteLength;
+    if (decodedBytes === 0 || decodedBytes > MAX_IMAGE_BYTES) return null;
     return { type: "base64", media_type: source.media_type, data: source.data };
   }
   if (source.type !== "file" || typeof source.name !== "string" || !isSafeImageName(source.name)) return null;

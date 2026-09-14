@@ -11,8 +11,9 @@
  * exactly-once invariant is already enforced here and covered by tests.
  */
 
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
+import { readBoundedRegularFile } from "./main/files.ts";
 import {
   isSupportedProvider,
   parseModelRef,
@@ -35,17 +36,17 @@ export const MAX_SUBAGENT_RUNS = 4;
 export const MAX_SUBAGENT_RUNS_USER = 20;
 /** Children never receive the spawn tool: max spawn depth 1. */
 export const MAX_SUBAGENT_DEPTH = 1;
-/** Bound the parent-written subtask brief kept on the run record. */
+/** Bound the parent-written subtask brief kept on the run record, in string length. */
 export const MAX_SUBAGENT_TASK_CHARS = 8_000;
-/** Bound the child-facing brief (task plus sibling-claim section). */
+/** Bound the child-facing brief (task plus sibling-claim section), in string length. */
 export const MAX_SUBAGENT_BRIEF_CHARS = 12_000;
 /** Bound touched paths carried per run (merge detection, not a full manifest). */
 export const MAX_SUBAGENT_TOUCHED = 200;
-/** Bound one parent-to-child message. */
+/** Bound one parent-to-child message, in string length. */
 export const MAX_SUBAGENT_MESSAGE_CHARS = 8_000;
-/** Bound one child result held for parent fan-in. */
+/** Bound one child result held for parent fan-in, in UTF-8 bytes on both sides of the host boundary (the host clamps identically; the suffix is historical). */
 export const MAX_SUBAGENT_RESULT_CHARS = 32_000;
-/** Bound one child failure diagnostic held for parent fan-in. */
+/** Bound one child failure diagnostic held for parent fan-in, in UTF-8 bytes on both sides of the host boundary (the host clamps identically; the suffix is historical). */
 export const MAX_SUBAGENT_ERROR_CHARS = 4_000;
 /** Per-run turn budget must fit in 1..MAX_SUBAGENT_TURNS. */
 export const MAX_SUBAGENT_TURNS = 200;
@@ -53,6 +54,15 @@ export const MAX_SUBAGENT_TURNS = 200;
 export const MAX_SUBAGENT_CLAIM_PATHS = 20;
 /** Bound queued parent-to-child messages per run (bounded memory; Phase 2 drains). */
 export const MAX_SUBAGENT_INBOX_MSGS = 50;
+/**
+ * Settled-run retention window (#215). Active runs are always retained; the
+ * registry keeps only the N most recently settled records for resume and
+ * result excerpts, and evicts older ones on settle. Beyond the window a run
+ * id is unknown again: resume/message fail closed and the
+ * identical-failed-brief scan no longer sees it. Registry memory stays
+ * bounded by active runs plus N settled records.
+ */
+export const MAX_SETTLED_SUBAGENT_RUNS = 10;
 
 export type SubagentPermissionMode = "always" | "dangerous" | "ask";
 
@@ -177,7 +187,9 @@ export function isWorldlineCandidateEnv(env: NodeJS.ProcessEnv = process.env): b
 
 /** Children never receive `spawn_subagent` (max depth 1); main.ts spreads this into TOOLS. */
 export function visibleSubagentTools(depth: number): Array<Record<string, unknown>> {
-  if (depth >= MAX_SUBAGENT_DEPTH) return SUBAGENT_TOOL_DEFS.filter((d) => d.name !== "spawn_subagent");
+  // Children own a fresh empty registry: they can neither spawn (depth cap)
+  // nor message (no runs exist), so they receive no subagent tools at all.
+  if (depth >= MAX_SUBAGENT_DEPTH) return [];
   return SUBAGENT_TOOL_DEFS.slice();
 }
 
@@ -196,7 +208,7 @@ export const SUBAGENT_SPAWN_RECORD = "subagent_spawn";
 export const SUBAGENT_TASK_VERSION = 1;
 export const SUBAGENT_RESULT_VERSION = 1;
 /** Bound one handoff/result file: the brief is already capped, this is slack for fields. */
-const MAX_SUBAGENT_FILE_BYTES = 64 * 1024;
+export const MAX_SUBAGENT_FILE_BYTES = 64 * 1024;
 
 function subagentFileName(parentTerminalId: string, runId: string, suffix: "task.json" | "result.json"): string | null {
   // Namespaced by parent terminal: bg-N ids are per-process, and the events
@@ -376,10 +388,10 @@ export function writeSubagentTaskFile(
     userRequested: run.userRequested,
     createdAt: run.createdAt,
   });
-  try {
-    writeFileSync(join(eventsDir, name), body, { mode: 0o600 });
-  } catch (err) {
-    return { ok: false, error: `subagent task file write failed: ${err instanceof Error ? err.message : String(err)}` };
+  // Atomic like the approval/inbox writers: the host must see a complete
+  // task file or none, never a torn write. Same name, bytes, and mode.
+  if (!atomicWriteJsonSync(eventsDir, name, body)) {
+    return { ok: false, error: "subagent task file write failed" };
   }
   return { ok: true, file: name };
 }
@@ -464,15 +476,10 @@ export function readSubagentResultFile(
   if (!name || !eventsDir) return { status: "missing" };
   const path = join(eventsDir, name);
   if (!existsSync(path)) return { status: "missing" };
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    return { status: "invalid", error: "subagent result is unreadable" };
-  }
-  if (Buffer.byteLength(raw, "utf8") > MAX_SUBAGENT_FILE_BYTES) {
-    return { status: "invalid", error: "subagent result exceeds its file budget" };
-  }
+  const bounded = readBoundedRegularFile(path, MAX_SUBAGENT_FILE_BYTES);
+  if ("error" in bounded) return { status: "invalid", error: "subagent result is unreadable" };
+  if (bounded.truncated) return { status: "invalid", error: "subagent result exceeds its file budget" };
+  const raw = bounded.text;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -709,7 +716,23 @@ export class SubagentRegistry {
     run.result = scanned.text;
     run.flags = scanned.flags;
     run.error = outcome === "settled" || !error?.trim() ? null : truncateUtf8(error, MAX_SUBAGENT_ERROR_CHARS);
+    // Re-insert so map order is settle order for settled runs; the retention
+    // window below trims the least recently settled first. Active relative
+    // order is unchanged (the settling run leaves the active set).
+    this.runs.delete(runId);
+    this.runs.set(runId, run);
+    this.evictSettledRuns();
     return { ok: true, run };
+  }
+
+  /** Drop settled runs beyond the retention window, least recently settled first. */
+  private evictSettledRuns(): void {
+    const settled: string[] = [];
+    for (const [id, run] of this.runs) {
+      if (run.state !== "active") settled.push(id);
+    }
+    const overflow = settled.length - MAX_SETTLED_SUBAGENT_RUNS;
+    for (let i = 0; i < overflow; i++) this.runs.delete(settled[i]!);
   }
 
   async spawn(req: SubagentSpawnRequest): Promise<{ ok: true; run: SubagentRun } | { ok: false; error: string }> {
@@ -1041,13 +1064,10 @@ export function writeSubagentApprovalRequest(
 export function readSubagentApprovalRequest(
   path: string,
 ): { ok: true; file: SubagentApprovalRequest } | { ok: false; error: string } {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    return { ok: false, error: "unreadable" };
-  }
-  if (Buffer.byteLength(raw, "utf8") > 8192) return { ok: false, error: "oversize" };
+  const bounded = readBoundedRegularFile(path, 8192);
+  if ("error" in bounded) return { ok: false, error: "unreadable" };
+  if (bounded.truncated) return { ok: false, error: "oversize" };
+  const raw = bounded.text;
   let v: unknown;
   try {
     v = JSON.parse(raw);
@@ -1121,13 +1141,9 @@ export function readSubagentInbox(
 ): { version: 1; runId: string; messages: SubagentInboxMessage[] } | null {
   const name = subagentInboxFileName(parentTerminalId, runId);
   if (!name || !eventsDir) return null;
-  let raw: string;
-  try {
-    raw = readFileSync(join(eventsDir, name), "utf8");
-  } catch {
-    return null;
-  }
-  if (Buffer.byteLength(raw, "utf8") > MAX_SUBAGENT_FILE_BYTES) return null;
+  const bounded = readBoundedRegularFile(join(eventsDir, name), MAX_SUBAGENT_FILE_BYTES);
+  if ("error" in bounded || bounded.truncated) return null;
+  const raw = bounded.text;
   let v: unknown;
   try {
     v = JSON.parse(raw);

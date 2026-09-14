@@ -3,9 +3,10 @@
  * glob matching, `@` tag scanning/expansion support, and the glob tool page.
  * Pure over the filesystem; the only retained state is the tag-scan cache.
  */
-import { closeSync, existsSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../../shared/gitignore.ts";
+import { errorCode } from "../../shared/guards.ts";
 import { GREP_NO_MATCHES_PREFIX } from "../stall.ts";
 import { rankFileTags } from "../tui-text.ts";
 import {
@@ -56,6 +57,83 @@ export function gitignoreSkips(rules: GitignoreRules, rel: string, isDir: boolea
 
 export function yieldEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** Largest `.gitignore` honored; larger metadata files are omitted, not truncated. */
+export const IGNORE_FILE_CAP_BYTES = 256 * 1024;
+
+export type RegularFileOpen = { fd: number; size: number; mode: number } | { error: string };
+
+function openSyncNonblocking(abs: string): number {
+  try {
+    return openSync(abs, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch (err) {
+    // Platforms without O_NONBLOCK have no POSIX FIFOs to block on.
+    const code = errorCode(err);
+    if (code === "EINVAL" || code === "ENOSYS" || code === "EOPNOTSUPP") return openSync(abs, "r");
+    throw err;
+  }
+}
+
+/**
+ * Canonical bounded opener (#155): open nonblocking where supported, then
+ * validate the opened descriptor. A pre-open path stat races swaps, so the
+ * type check runs on the fd. Rejects directories, FIFOs, devices, and
+ * sockets without blocking; the caller owns the fd on success.
+ */
+export function openRegularFile(abs: string): RegularFileOpen {
+  let fd: number;
+  try {
+    fd = openSyncNonblocking(abs);
+  } catch (err) {
+    return { error: `error: ${(err as Error).message}` };
+  }
+  let st;
+  try {
+    st = fstatSync(fd);
+  } catch (err) {
+    closeSync(fd);
+    return { error: `error: ${(err as Error).message}` };
+  }
+  if (!st.isFile()) {
+    closeSync(fd);
+    return { error: st.isDirectory() ? "error: path is a directory" : "error: not a regular file" };
+  }
+  return { fd, size: st.size, mode: st.mode };
+}
+
+/** Bounded whole-file text read through the canonical opener. */
+export function readBoundedRegularFile(
+  abs: string,
+  maxBytes: number,
+): { text: string; truncated: boolean } | { error: string } {
+  const opened = openRegularFile(abs);
+  if ("error" in opened) return opened;
+  try {
+    const buf = Buffer.alloc(maxBytes + 1);
+    let pos = 0;
+    while (pos < buf.length) {
+      const n = readSync(opened.fd, buf, pos, buf.length - pos, pos);
+      if (n <= 0) break;
+      pos += n;
+    }
+    return { text: buf.subarray(0, Math.min(pos, maxBytes)).toString("utf8"), truncated: pos > maxBytes };
+  } catch (err) {
+    return { error: `error: ${(err as Error).message}` };
+  } finally {
+    closeSync(opened.fd);
+  }
+}
+
+/**
+ * Bounded `.gitignore` load. Null when absent, non-regular, oversized, or
+ * unreadable: callers omit that directory's rules, matching the previous
+ * unreadable-file behavior without an unbounded blocking read.
+ */
+export function readIgnoreFile(abs: string): string | null {
+  const got = readBoundedRegularFile(abs, IGNORE_FILE_CAP_BYTES);
+  if ("error" in got || got.truncated) return null;
+  return got.text;
 }
 
 export type ConfineResult = { ok: true; abs: string } | { ok: false; error: string };
@@ -150,29 +228,24 @@ export function matchGlob(pattern: string, relPath: string): boolean {
 }
 
 export function fileHasNul(abs: string): boolean {
-  let fd: number | undefined;
+  const opened = openRegularFile(abs);
+  if ("error" in opened) return true;
   try {
-    fd = openSync(abs, "r");
     const buf = Buffer.alloc(4096);
-    const n = readSync(fd, buf, 0, 4096, 0);
-    return buf.subarray(0, n).includes(0);
+    const n = readSync(opened.fd, buf, 0, 4096, 0);
+    return buf.subarray(0, Math.max(0, n)).includes(0);
   } catch {
     return true;
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    closeSync(opened.fd);
   }
 }
 
 function isReadableFile(abs: string): boolean {
-  let fd: number | undefined;
-  try {
-    fd = openSync(abs, "r");
-    return true;
-  } catch {
-    return false;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
+  const opened = openRegularFile(abs);
+  if ("error" in opened) return false;
+  closeSync(opened.fd);
+  return true;
 }
 
 // ---- walk helpers (shared between collectFiles + collectRelativeFiles) ----
@@ -187,7 +260,8 @@ function readDirState(dirReal: string, root: string, gitignore: GitignoreRules):
   const byName = new Map(ents.map((e) => [e.name, e] as const));
   if (byName.has(".gitignore")) {
     try {
-      gitignore.set(posixRel(root, dirReal), parseGitignore(readFileSync(join(dirReal, ".gitignore"), "utf8")));
+      const text = readIgnoreFile(join(dirReal, ".gitignore"));
+      if (text !== null) gitignore.set(posixRel(root, dirReal), parseGitignore(text));
     } catch {
       /* unreadable gitignore */
     }

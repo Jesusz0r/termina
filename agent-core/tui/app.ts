@@ -9,6 +9,37 @@ import { INPUT_PREFIX, boxBorderRow, boxContentRow, clip, displayBudget, graphem
 import { HANDLE_ERROR, MAX_CSI, MAX_HISTORY, MAX_TRANSCRIPT, MAX_TRANSCRIPT_ENTRIES, SPIN, TRANSCRIPT_TRIM_TARGET, TRUNCATION_MARKER, closeSanitize, entryChars, freshMarkdownBoundary, freshSanitizer, parseMarkdown, sanitizeText, toolStatusLabel, transcriptHandleBrand } from "./transcript.ts";
 import type { StyledSpan, ToolTranscriptState, TranscriptEntry, TranscriptHandle, TuiIO, TuiInput } from "./transcript.ts";
 
+/** Composer draft bound: every keystroke re-scans the draft, so cap it. */
+const MAX_DRAFT_BYTES = 256 * 1024;
+
+/** Bracketed-paste staging bound: the run cap plus room to trim from. */
+const MAX_PASTE_BUFFER_BYTES = MAX_DRAFT_BYTES + 64 * 1024;
+
+/** Cap the note spam when input keeps arriving past the draft cap. */
+const DRAFT_CAP_NOTE_MS = 5000;
+
+/**
+ * Tail parses below this stay shortcut-cheap (live viewports never need
+ * larger tails); scrolled-deep budgets build the cached markdown prefix once
+ * so pages slice instead of re-parsing per page.
+ */
+const TAIL_SHORTCUT_BUDGET = 64 * 1024;
+
+/** Trim text to a byte budget on grapheme boundaries. */
+function trimGraphemesToBytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  const out: string[] = [];
+  let used = 0;
+  for (const grapheme of splitGraphemes(text)) {
+    const size = Buffer.byteLength(grapheme, "utf8");
+    if (used + size > maxBytes) break;
+    out.push(grapheme);
+    used += size;
+  }
+  return out.join("");
+}
+
 
 export class AgentTui {
   private readonly out: TuiIO;
@@ -38,7 +69,10 @@ export class AgentTui {
   private esc = 0;
   private csi = "";
   private paste = false;
-  private pasteCR = false;
+  private pasteChunks: string[] = [];
+  private pasteBytes = 0;
+  private pasteTrimmed = false;
+  private capNotedAt = 0;
   private rawInput = false;
   private model = "";
   private effort = "off";
@@ -208,7 +242,12 @@ export class AgentTui {
   }
 
   setDraft(text: string): void {
-    this.chars = splitGraphemes(text);
+    let finalText = text;
+    if (Buffer.byteLength(text, "utf8") > MAX_DRAFT_BYTES) {
+      finalText = trimGraphemesToBytes(text, MAX_DRAFT_BYTES);
+      this.noteDraftCap();
+    }
+    this.chars = splitGraphemes(finalText);
     this.cursor = this.chars.length;
     this.slashIndex = 0;
     this.histIndex = -1;
@@ -373,8 +412,11 @@ export class AgentTui {
 
   private pushText(kind: "plain" | "error", text: string, settled: boolean): void {
     if (!text) return;
-    this.closeStream();
     const clean = closeSanitize(text, freshSanitizer());
+    // Sanitize before opening the entry: escape-only input cleans to nothing
+    // and must not split the active stream or open a blank entry.
+    if (!clean) return;
+    this.closeStream();
     const id = this.nextEntryId++;
     this.entries.push({
       id,
@@ -421,9 +463,6 @@ export class AgentTui {
       const gone = this.entries[idx]!;
       this.entries.splice(idx, 1);
       this.transcriptChars -= entryChars(gone);
-      for (const [handleId, entryId] of [...this.toolHandles]) {
-        if (entryId === gone.id) this.toolHandles.delete(handleId);
-      }
     }
   }
 
@@ -521,7 +560,9 @@ export class AgentTui {
     const start = this.unfinishedStart(entry);
     // A truncation resets prefix metadata. Do not eagerly rebuild hundreds of
     // thousands of off-screen markdown characters just to paint the live tail.
-    if (entry.mdPrefixLen === 0 && start > maxChars) {
+    // But a scrolled-deep budget means repeated tail paints: past the live
+    // range, build the cached prefix once so pages slice instead of re-parse.
+    if (entry.mdPrefixLen === 0 && start > maxChars && maxChars < TAIL_SHORTCUT_BUDGET) {
       const tail = sourceTail(entry.text, maxChars);
       const scanned = { n: 0 };
       const spans = parseMarkdown(tail.text, scanned);
@@ -666,6 +707,13 @@ export class AgentTui {
       this.inp.setRawMode?.(true);
       this.inp.resume?.();
     } catch {
+      // A failure between raw mode and resume must not strand the terminal:
+      // restore cooked mode exactly like stop() does.
+      try {
+        this.inp.setRawMode?.(false);
+      } catch {
+        /* restore best-effort */
+      }
       return false;
     }
     this.started = true;
@@ -1036,18 +1084,15 @@ export class AgentTui {
       return;
     }
     if (this.paste) {
-      if (ch === "\r") {
-        this.insert("\n");
-        this.pasteCR = true;
-        return;
+      // Buffer the paste and insert once at the terminator: per-character
+      // insertion re-segments the whole draft, which is O(n^2) for pastes.
+      const size = Buffer.byteLength(ch, "utf8");
+      if (this.pasteBytes + size <= MAX_PASTE_BUFFER_BYTES) {
+        this.pasteChunks.push(ch);
+        this.pasteBytes += size;
+      } else {
+        this.pasteTrimmed = true;
       }
-      if (ch === "\n") {
-        if (!this.pasteCR) this.insert("\n");
-        this.pasteCR = false;
-        return;
-      }
-      this.pasteCR = false;
-      if (ch === "\t" || ch >= " ") this.insert(ch);
       return;
     }
     if (ch === "\r") {
@@ -1138,8 +1183,10 @@ export class AgentTui {
         }
       }
       const next = completeSlashLine(text, this.commands, this.modelRows, this.effortRows);
-      this.chars = splitGraphemes(next);
-      this.cursor = this.chars.length;
+      if (next !== text) {
+        this.chars = splitGraphemes(next);
+        this.cursor = this.chars.length;
+      }
       this.slashIndex = 0;
       this.schedule();
       return;
@@ -1181,9 +1228,77 @@ export class AgentTui {
     this.chars.splice(this.cursor, 0, ch);
     const prefix = this.chars.slice(0, this.cursor + 1).join("");
     const rest = this.chars.slice(this.cursor + 1).join("");
+    if (Buffer.byteLength(prefix, "utf8") + Buffer.byteLength(rest, "utf8") > MAX_DRAFT_BYTES) {
+      this.chars.splice(this.cursor, 1);
+      this.noteDraftCap();
+      this.schedule();
+      return;
+    }
     const prefixGs = splitGraphemes(prefix);
     this.chars = [...prefixGs, ...splitGraphemes(rest)];
     this.cursor = prefixGs.length;
+    this.slashIndex = 0;
+    this.histIndex = -1;
+    this.pickerSuppressed = false;
+    this.schedule();
+  }
+
+  /** Insert one bracketed paste: normalize once, then a single resegment. */
+  private flushPaste(): void {
+    const text = this.pasteChunks.join("");
+    const trimmedBuffer = this.pasteTrimmed;
+    this.pasteChunks = [];
+    this.pasteBytes = 0;
+    this.pasteTrimmed = false;
+    if (!text) {
+      if (trimmedBuffer) this.noteDraftCap();
+      return;
+    }
+    this.insertText(text, trimmedBuffer);
+  }
+
+  private noteDraftCap(): void {
+    const now = Date.now();
+    if (now - this.capNotedAt < DRAFT_CAP_NOTE_MS) return;
+    this.capNotedAt = now;
+    this.appendPlain("(draft hit the 256 KiB cap; further input is trimmed)\n");
+  }
+
+  /**
+   * Insert bulk text in O(draft + text): one normalization, one resegment,
+   * with the cursor floored to the grapheme boundary ending the insertion.
+   * Trims to the draft cap with a visible note instead of growing unbounded.
+   */
+  private insertText(text: string, bufferTrimmed: boolean): void {
+    const kept: string[] = [];
+    for (const ch of text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")) {
+      if (ch === "\t" || ch === "\n" || ch >= " ") kept.push(ch);
+    }
+    const before = this.chars.slice(0, this.cursor).join("");
+    const after = this.chars.slice(this.cursor).join("");
+    const room = MAX_DRAFT_BYTES - Buffer.byteLength(before, "utf8") - Buffer.byteLength(after, "utf8");
+    let clean = kept.join("");
+    if (bufferTrimmed || Buffer.byteLength(clean, "utf8") > room) {
+      clean = trimGraphemesToBytes(clean, Math.max(0, room));
+      this.noteDraftCap();
+    }
+    if (!clean) {
+      this.schedule();
+      return;
+    }
+    const combined = before + clean + after;
+    const gs = splitGraphemes(combined);
+    const cutBytes = Buffer.byteLength(before, "utf8") + Buffer.byteLength(clean, "utf8");
+    let used = 0;
+    let cursor = 0;
+    for (const g of gs) {
+      const gb = Buffer.byteLength(g, "utf8");
+      if (used + gb > cutBytes) break;
+      used += gb;
+      cursor++;
+    }
+    this.chars = gs;
+    this.cursor = cursor;
     this.slashIndex = 0;
     this.histIndex = -1;
     this.pickerSuppressed = false;
@@ -1259,12 +1374,17 @@ export class AgentTui {
     if (this.paste) {
       if (params === "201") {
         this.paste = false;
+        this.flushPaste();
         this.schedule();
       } else if (params === "200") this.paste = true;
       return;
     }
     if (final === "~") {
       if (params === "200") this.paste = true;
+      // A standalone paste-end outside a paste is the renderer's out-of-band
+      // "host state changed" signal (sent after image drops; see
+      // src/pty-view.ts), not a stray terminator. Refresh pending host
+      // counts; the draft is untouched.
       else if (params === "201") this.onHostRefresh?.();
       else if (params === "3") {
         if (this.cursor < this.chars.length) this.chars.splice(this.cursor, 1);
@@ -1499,7 +1619,11 @@ export class AgentTui {
     // border. It reads as one textbox separated from the transcript above
     // and the slash menu and title below.
     const inputTop = layout.transcript;
-    const inputShown = displayWrapped.slice(0, layout.input);
+    // Keep the cursor row visible: when the draft wraps taller than the box,
+    // show the window ending at the cursor row instead of the head.
+    const endRow = Math.min(displayWrapped.length, Math.max(displayPos.row + 1, layout.input));
+    const startRow = Math.max(0, endRow - layout.input);
+    const inputShown = displayWrapped.slice(startRow, endRow);
     lines.push(boxBorderRow(cols, "┌", "─", "┐"));
     for (let i = 0; i < layout.input; i++) lines.push(boxContentRow(inputShown[i] ?? "", cols));
     lines.push(boxBorderRow(cols, "└", "─", "┘"));
@@ -1509,7 +1633,6 @@ export class AgentTui {
       const row = c ? formatPickerRow(c.name, c.hint, cols, selected) : "";
       lines.push(clip(row, cols));
     }
-    while (lines.length < rows - layout.header - 2) lines.push(clip("", cols));
     lines.push(clip("─".repeat(Math.max(0, cols)), cols));
     lines.push(clip(title, cols));
     if (lines.length > rows) lines.length = rows;
@@ -1517,10 +1640,10 @@ export class AgentTui {
     const contentTop = inputTop + 1;
     // Content sits inside "│ ": cursor columns shift two cells right, rows
     // one row down. Placeholder caret stays right after "> ". cursorRow is a
-    // 1-based terminal row: the last content row is contentTop + layout.input.
+    // 1-based terminal row within the visible composer window.
     const cursorRow = isInputEmpty
       ? Math.min(rows, Math.max(1, contentTop + 1))
-      : Math.min(rows, Math.max(1, Math.min(contentTop + layout.input, contentTop + displayPos.row + 1)));
+      : Math.min(rows, Math.max(1, contentTop + (displayPos.row - startRow) + 1));
     const cursorCol = isInputEmpty ? 5 : Math.min(cols, Math.max(1, displayPos.col + 3));
     const slashTop = contentTop + layout.input + 1;
     const titleRow = lines.length - layout.header;

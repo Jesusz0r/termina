@@ -20,8 +20,6 @@ export const MAX_HISTORY = 100;
 
 export const MAX_CSI = 32;
 
-const MAX_ESCAPE = 32;
-
 export const TRUNCATION_MARKER = "…[truncated]\n";
 
 export const HANDLE_ERROR = "invalid tool handle\n";
@@ -36,13 +34,13 @@ export type TranscriptHandle = Readonly<{ [transcriptHandleBrand]: number }>;
 export type ToolTranscriptState = "success" | "error" | "cancelled";
 
 
-type SanitizerMode = "ground" | "esc" | "csi" | "osc" | "dcs";
+type SanitizerMode = "ground" | "esc" | "esc2" | "csi" | "osc" | "dcs";
 
-type SanitizerState = { mode: SanitizerMode; n: number; esc: boolean };
+type SanitizerState = { mode: SanitizerMode; esc: boolean };
 
 
 export function freshSanitizer(): SanitizerState {
-  return { mode: "ground", n: 0, esc: false };
+  return { mode: "ground", esc: false };
 }
 
 
@@ -56,7 +54,6 @@ export function sanitizeText(input: string, start: SanitizerState): { text: stri
   let out = "";
   const flushIncomplete = (): void => {
     state.mode = "ground";
-    state.n = 0;
     state.esc = false;
   };
   for (const ch of input) {
@@ -64,48 +61,47 @@ export function sanitizeText(input: string, start: SanitizerState): { text: stri
     if (state.mode === "ground") {
       if (code === 0x1b) {
         state.mode = "esc";
-        state.n = 0;
         continue;
       }
       if (code === 0x9b) {
         state.mode = "csi";
-        state.n = 0;
         continue;
       }
       if (code === 0x9d) {
         state.mode = "osc";
-        state.n = 0;
         continue;
       }
       if (code === 0x90) {
         state.mode = "dcs";
-        state.n = 0;
         continue;
       }
-      if (code === 0x9c || isC1(code) || (code < 0x20 && ch !== "\n" && ch !== "\t")) continue;
+      if (isC1(code) || (code < 0x20 && ch !== "\n" && ch !== "\t")) continue;
       out += ch;
       continue;
     }
     if (state.mode === "esc") {
       if (ch === "[") {
         state.mode = "csi";
-        state.n = 0;
         continue;
       }
       if (ch === "]") {
         state.mode = "osc";
-        state.n = 0;
         continue;
       }
-      if (ch === "P") {
+      if (ch === "P" || ch === "X" || ch === "^" || ch === "_") {
         state.mode = "dcs";
-        state.n = 0;
         continue;
       }
-      if (ch === "\\") {
-        flushIncomplete();
+      // Charset selection (ESC ( F) and its siblings take one follow byte;
+      // without it the designator leaks as text.
+      if (ch === "(" || ch === ")" || ch === "*" || ch === "+" || ch === "-" || ch === "." || ch === "/" || ch === "%" || ch === "#") {
+        state.mode = "esc2";
         continue;
       }
+      flushIncomplete();
+      continue;
+    }
+    if (state.mode === "esc2") {
       flushIncomplete();
       continue;
     }
@@ -115,12 +111,10 @@ export function sanitizeText(input: string, start: SanitizerState): { text: stri
         out += ch;
         continue;
       }
-      state.n += 1;
       if (code >= 0x40 && code <= 0x7e) {
         flushIncomplete();
         continue;
       }
-      if (state.n > MAX_ESCAPE) continue;
       continue;
     }
     if (state.mode === "osc" || state.mode === "dcs") {
@@ -144,8 +138,6 @@ export function sanitizeText(input: string, start: SanitizerState): { text: stri
         out += ch;
         continue;
       }
-      state.n += 1;
-      if (state.n > MAX_ESCAPE) continue;
     }
   }
   return { text: out, state };

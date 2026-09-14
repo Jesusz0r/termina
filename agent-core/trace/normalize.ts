@@ -5,8 +5,8 @@
  * inputs. Split from agent-core/trace.ts (issue #38).
  */
 import { isRecord } from "../../shared/guards.ts";
-import { MAX_ARRAY_ITEMS, MAX_HOST_CONTEXT_FILES, MAX_ID_CHARS, MAX_RECLAIM_TARGETS, MAX_STRING_CHARS, MAX_TOOL_OUTCOMES } from "./schema.ts";
-import type { TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceHostContext, TraceHostContextFile, TraceReclaimEvidence, TraceReclaimTarget, TraceRevisions, TraceRevisionsInput, TraceToolOutcome, TraceUsage, TraceUsageInput } from "./schema.ts";
+import { MAX_ARRAY_ITEMS, MAX_CACHE_MARKER_POSITIONS, MAX_HOST_CONTEXT_FILES, MAX_ID_CHARS, MAX_RECLAIM_TARGETS, MAX_STRING_CHARS, MAX_TOOL_OUTCOMES } from "./schema.ts";
+import type { TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceCriticVerdict, TraceHostContext, TraceHostContextFile, TraceReclaimEvidence, TraceReclaimTarget, TraceRevisions, TraceRevisionsInput, TraceTaskSettledInput, TraceToolOutcome, TraceUsage, TraceUsageInput } from "./schema.ts";
 
 
 export function freezeDeep<T>(value: T): T {
@@ -28,8 +28,9 @@ export function text(value: unknown, name: string, required = false): string | n
     return null;
   }
   if (typeof value !== "string") throw new Error(`${name} must be a string or null`);
-  if (value.length > MAX_STRING_CHARS) throw new Error(`${name} exceeds ${MAX_STRING_CHARS} characters`);
-  if ([...value].some((character) => {
+  const chars = [...value];
+  if (chars.length > MAX_STRING_CHARS) throw new Error(`${name} exceeds ${MAX_STRING_CHARS} characters`);
+  if (chars.some((character) => {
     const code = character.codePointAt(0) ?? 0;
     return code < 0x20 || (code >= 0x7f && code <= 0x9f);
   })) throw new Error(`${name} contains a control character`);
@@ -82,14 +83,14 @@ export function stringArray(value: readonly unknown[] | null | undefined, name: 
   if (value === null || value === undefined) return [];
   if (!Array.isArray(value)) throw new Error(`${name} must be an array`);
   if (value.length > MAX_ARRAY_ITEMS) throw new Error(`${name} exceeds ${MAX_ARRAY_ITEMS} items`);
-  return value.map((item, index) => text(item, `${name}[${index}]`, true)!).filter((item) => item.length > 0);
+  return value.map((item, index) => text(item, `${name}[${index}]`, true)!);
 }
 
 
 function numberArray(value: readonly unknown[] | null | undefined, name: string): number[] | null {
   if (value === null || value === undefined) return null;
   if (!Array.isArray(value)) throw new Error(`${name} must be an array`);
-  if (value.length > 256 || value.some((item) => !Number.isSafeInteger(item) || (item as number) < 0)) return null;
+  if (value.length > MAX_CACHE_MARKER_POSITIONS || value.some((item) => !Number.isSafeInteger(item) || (item as number) < 0)) return null;
   return value.slice() as number[];
 }
 
@@ -118,7 +119,7 @@ function costScope(value: unknown): TraceCostScope | null {
   const protocol = optionalText(value.protocol, "cost scope protocol");
   const model = optionalText(value.model, "cost scope model");
   const route = optionalText(value.route, "cost scope route");
-  const role = value.role === "main" || value.role === "summary" ? value.role : null;
+  const role = value.role === "main" || value.role === "summary" || value.role === "critic" ? value.role : null;
   if (provider === null || protocol === null || model === null || route === null || role === null) return null;
   return freezeDeep({ provider, protocol, model, route, role });
 }
@@ -149,10 +150,16 @@ function missAttribution(value: TraceCacheInput["missAttribution"] | null | unde
       noiseFloorTokens: null,
     });
   }
+  // Parse each list independently: a throwing contributing list must not
+  // discard an otherwise valid missingFields list (or vice versa).
   let contributing: string[] = [];
-  let missingFields: string[] = [];
   try {
     contributing = stringArray(value.contributing as readonly unknown[] | null | undefined, "cache miss contributing");
+  } catch {
+    /* Unknown provider diagnostics remain empty rather than breaking the trace. */
+  }
+  let missingFields: string[] = [];
+  try {
     missingFields = stringArray(value.missingFields as readonly unknown[] | null | undefined, "cache miss missingFields");
   } catch {
     /* Unknown provider diagnostics remain empty rather than breaking the trace. */
@@ -199,8 +206,9 @@ function hostContextFile(value: unknown): TraceHostContextFile | null {
 
 function hostContext(value: unknown): TraceHostContext | null {
   if (!isRecord(value)) return null;
-  const bounded = boundedToolOutput(value);
-  if (!bounded) return null;
+  // boundedToolOutput only returns null for non-records, which the guard above
+  // already excluded.
+  const bounded = boundedToolOutput(value)!;
   const files = Array.isArray(value.files)
     ? value.files.slice(0, MAX_HOST_CONTEXT_FILES)
       .map((item) => hostContextFile(item))
@@ -226,7 +234,7 @@ function toolOutcome(value: unknown): TraceToolOutcome | null {
     toolName: optionalText(value.toolName ?? value.name ?? value.tool, "tool outcome name"),
     toolCallId: optionalText(value.toolCallId ?? value.callId, "tool outcome call id"),
     isError: nullableBoolean(value.isError),
-    bounded: boundedToolOutput(value.bounded ?? value),
+    bounded: boundedToolOutput(value.bounded),
     cancellationScope: optionalText(value.cancellationScope, "tool cancellation scope"),
     continuation: continuation(value.continuation),
     repro: optionalText(value.repro, "tool reproduction"),
@@ -309,13 +317,13 @@ export function pair(value: readonly [unknown, unknown] | null | undefined, name
 
 function policy(value: TraceCachePolicyInput | null | undefined): TraceCachePolicy {
   return freezeDeep({
-    mode: text(value?.mode, "cache policy mode"),
+    mode: optionalText(value?.mode, "cache policy mode"),
     ttlMs: nullableNumber(value?.ttlMs),
-    namespace: text(value?.namespace, "cache policy namespace"),
+    namespace: optionalText(value?.namespace, "cache policy namespace"),
     markerCount: nullableInteger(value?.markerCount),
     markerPositions: numberArray(value?.markerPositions, "cache policy markerPositions"),
     rejected: nullableBoolean(value?.rejected),
-    fallbackReason: text(value?.fallbackReason, "cache policy fallback reason"),
+    fallbackReason: optionalText(value?.fallbackReason, "cache policy fallback reason"),
   });
 }
 
@@ -334,9 +342,9 @@ export function usage(value: TraceUsageInput | null | undefined): TraceUsage {
 export function cost(value: TraceCostInput | null | undefined): TraceCost {
   return freezeDeep({
     usd: nullableNumber(value?.usd),
-    source: text(value?.source, "cost source"),
-    version: text(value?.version, "cost version"),
-    lookedUpAt: text(value?.lookedUpAt, "cost lookup timestamp"),
+    source: optionalText(value?.source, "cost source"),
+    version: optionalText(value?.version, "cost version"),
+    lookedUpAt: optionalText(value?.lookedUpAt, "cost lookup timestamp"),
     knownFields: stringArray(value?.knownFields, "cost knownFields"),
     unknownFields: stringArray(value?.unknownFields, "cost unknownFields"),
     unknownReasons: stringArray(value?.unknownReasons, "cost unknownReasons"),
@@ -354,25 +362,25 @@ export function cache(value: TraceCacheInput | null | undefined): TraceCache {
   const requested = policy(value?.requested);
   const effective = policy(value?.effective);
   return freezeDeep({
-    namespace: text(value?.namespace, "cache namespace"),
+    namespace: optionalText(value?.namespace, "cache namespace"),
     requested,
     effective,
     markerCount: nullableInteger(value?.markerCount),
     markerPositions: numberArray(value?.markerPositions, "cache markerPositions"),
     rejected: nullableBoolean(value?.rejected),
-    fallbackReason: text(value?.fallbackReason, "cache fallback reason"),
-    cacheKeyHash: text(value?.cacheKeyHash, "cache key hash"),
-    modelSettingsHash: text(value?.modelSettingsHash, "model settings hash"),
-    toolsHash: text(value?.toolsHash, "tools hash"),
+    fallbackReason: optionalText(value?.fallbackReason, "cache fallback reason"),
+    cacheKeyHash: optionalText(value?.cacheKeyHash, "cache key hash"),
+    modelSettingsHash: optionalText(value?.modelSettingsHash, "model settings hash"),
+    toolsHash: optionalText(value?.toolsHash, "tools hash"),
     serializedToolsHash: optionalText(value?.serializedToolsHash, "serialized tools hash"),
     serializedToolsBytes: nullableInteger(value?.serializedToolsBytes),
-    stablePrefixHash: text(value?.stablePrefixHash, "stable prefix hash"),
-    reusablePrefixHash: text(value?.reusablePrefixHash, "reusable prefix hash"),
+    stablePrefixHash: optionalText(value?.stablePrefixHash, "stable prefix hash"),
+    reusablePrefixHash: optionalText(value?.reusablePrefixHash, "reusable prefix hash"),
     reusablePrefixItems: nullableInteger(value?.reusablePrefixItems),
     comparedPrefixHash: optionalText(value?.comparedPrefixHash, "compared prefix hash"),
     comparedPrefixItems: nullableInteger(value?.comparedPrefixItems),
-    messagePrefixHash: text(value?.messagePrefixHash, "message prefix hash"),
-    workingSetHash: text(value?.workingSetHash, "working set hash"),
+    messagePrefixHash: optionalText(value?.messagePrefixHash, "message prefix hash"),
+    workingSetHash: optionalText(value?.workingSetHash, "working set hash"),
     workingSetChanged: nullableBoolean(value?.workingSetChanged),
     hostContext: hostContext(value?.hostContext),
     retryPromptIdentical: nullableBoolean(value?.retryPromptIdentical),
@@ -387,5 +395,20 @@ export function revisions(value: TraceRevisionsInput | number | null | undefined
   return freezeDeep({
     count: nullableInteger(value?.count),
     kinds: stringArray(value?.kinds, "revision kinds"),
+  });
+}
+
+
+/** Pre-settle critic verdict (#124); null when the run skipped review. */
+export function criticVerdict(value: TraceTaskSettledInput["critic"]): TraceCriticVerdict | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value)) throw new Error("critic must be an object or null");
+  if (value.verdict !== "pass" && value.verdict !== "fail") throw new Error("critic verdict must be pass or fail");
+  const rounds = nullableInteger(value.rounds);
+  if (rounds === null) throw new Error("critic rounds must be a nonnegative safe integer");
+  return freezeDeep({
+    verdict: value.verdict,
+    rationale: optionalText(value.rationale, "critic rationale"),
+    rounds,
   });
 }

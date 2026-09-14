@@ -7,7 +7,7 @@
 import { errorCode, isRecord } from "../../shared/guards.ts";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { cache, cost, freezeDeep, id, nullableInteger, nullableNumber, optionalText, pair, reclaimEvidence, revisions, stringArray, text, toolOutcomes, usage } from "./normalize.ts";
+import { cache, cost, criticVerdict, freezeDeep, id, nullableInteger, nullableNumber, optionalText, pair, reclaimEvidence, revisions, stringArray, toolOutcomes, usage } from "./normalize.ts";
 import { MAX_ARRAY_ITEMS, MAX_ID_CHARS, MAX_TRACE_INDEX_ENTRIES, TRACE_FILE_PATTERN, TRACE_SCHEMA_VERSION } from "./schema.ts";
 import type { FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptInput, TraceLinkIndex, TraceManifest, TraceManifestLinkIndex, TraceRole, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailureKind } from "./schema.ts";
 
@@ -20,15 +20,22 @@ import type { FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, T
 export function sanitizeProviderError(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const collapsed = value.trim().replace(/\s+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
-  const sliced = collapsed.slice(0, 500).trim();
-  return sliced || null;
+  let sliced = collapsed.slice(0, 500);
+  // Never strand a lead surrogate at the cut; lone surrogates in short
+  // inputs pass through untouched, as before.
+  if (sliced.length === 500 && collapsed.length > 500) {
+    const last = sliced.charCodeAt(499);
+    if (last >= 0xd800 && last <= 0xdbff) sliced = sliced.slice(0, 499);
+  }
+  const trimmed = sliced.trim();
+  return trimmed || null;
 }
 
 
 /** Construct one immutable provider-call attempt without inventing task facts. */
 export function createAttemptRecord(input: TraceAttemptInput): FrozenTraceAttempt {
-  if (input.role !== "main" && input.role !== "summary") {
-    throw new Error("role must be main or summary");
+  if (input.role !== "main" && input.role !== "summary" && input.role !== "critic") {
+    throw new Error("role must be main, summary, or critic");
   }
   const record: TraceAttempt = {
     schemaVersion: TRACE_SCHEMA_VERSION,
@@ -41,14 +48,14 @@ export function createAttemptRecord(input: TraceAttemptInput): FrozenTraceAttemp
     role: input.role,
     provider: id(input.provider, "provider"),
     protocol: id(input.protocol, "protocol"),
-    route: input.route === null || input.route === undefined ? null : text(input.route, "route"),
+    route: optionalText(input.route, "route"),
     model: id(input.model, "model"),
-    taskClass: input.taskClass === null || input.taskClass === undefined ? null : text(input.taskClass, "taskClass"),
-    requestedEffort: input.requestedEffort === null || input.requestedEffort === undefined ? null : text(input.requestedEffort, "requestedEffort"),
-    effectiveEffort: input.effectiveEffort === null || input.effectiveEffort === undefined ? null : text(input.effectiveEffort, "effectiveEffort"),
+    taskClass: optionalText(input.taskClass, "taskClass"),
+    requestedEffort: optionalText(input.requestedEffort, "requestedEffort"),
+    effectiveEffort: optionalText(input.effectiveEffort, "effectiveEffort"),
     status: id(input.status, "status"),
     retryCount: nullableInteger(input.retryCount),
-    fallbackReason: input.fallbackReason === null || input.fallbackReason === undefined ? null : text(input.fallbackReason, "fallbackReason"),
+    fallbackReason: optionalText(input.fallbackReason, "fallbackReason"),
     storageSeqRange: pair(input.storageSeqRange, "storageSeqRange"),
     toolNames: stringArray(input.toolNames, "toolNames"),
     startedAtMs: nullableNumber(input.startedAtMs),
@@ -62,7 +69,7 @@ export function createAttemptRecord(input: TraceAttemptInput): FrozenTraceAttemp
     reclaimEvidence: reclaimEvidence(input.reclaimEvidence),
     revisions: revisions(input.revisions),
     wasteTokens: nullableNumber(input.wasteTokens),
-    wasteCause: input.wasteCause === null || input.wasteCause === undefined ? null : text(input.wasteCause, "wasteCause"),
+    wasteCause: optionalText(input.wasteCause, "wasteCause"),
     providerError: optionalText(sanitizeProviderError(input.providerError), "providerError"),
   };
   return freezeDeep(record);
@@ -79,21 +86,37 @@ export function createTaskSettledRecord(input: TraceTaskSettledInput): FrozenTra
     ? attemptIds.length
     : nullableInteger(input.attemptCount);
   if (attemptCount === null) throw new Error("attemptCount must be a nonnegative safe integer");
+  // Link checks the runtime also enforces (#227): fail at construction with
+  // the same messages instead of persisting an unlinkable settlement. The
+  // runtime keeps its copies for defense in depth (it accepts frozen records
+  // that bypass this factory).
+  const known = new Set(attemptIds);
+  for (const summaryId of summaryAttemptIds) {
+    if (!known.has(summaryId)) throw new Error(`settlement summary does not resolve: ${summaryId}`);
+  }
+  const finalAttemptId = input.finalAttemptId === null || input.finalAttemptId === undefined
+    ? null
+    : id(input.finalAttemptId, "finalAttemptId");
+  if (finalAttemptId !== null && !known.has(finalAttemptId)) {
+    throw new Error(`settlement final attempt does not resolve: ${finalAttemptId}`);
+  }
+  if (attemptCount < attemptIds.length) throw new Error("settlement attemptCount is smaller than attemptIds.length");
   const record: TraceTaskSettled = {
     schemaVersion: TRACE_SCHEMA_VERSION,
     recordType: "task-settled",
     runId: id(input.runId, "runId"),
     taskId: id(input.taskId, "taskId"),
-    taskClass: input.taskClass === null || input.taskClass === undefined ? null : text(input.taskClass, "taskClass"),
+    taskClass: optionalText(input.taskClass, "taskClass"),
     attemptCount,
-    finalAttemptId: input.finalAttemptId === null || input.finalAttemptId === undefined ? null : id(input.finalAttemptId, "finalAttemptId"),
+    finalAttemptId,
     attemptIds,
     summaryAttemptIds,
     outcome: freezeDeep({
-      status: text(input.outcome?.status, "outcome status"),
-      correctness: text(input.outcome?.correctness, "outcome correctness"),
-      criteriaHash: text(input.outcome?.criteriaHash, "outcome criteria hash"),
+      status: optionalText(input.outcome?.status, "outcome status"),
+      correctness: optionalText(input.outcome?.correctness, "outcome correctness"),
+      criteriaHash: optionalText(input.outcome?.criteriaHash, "outcome criteria hash"),
     }),
+    critic: criticVerdict(input.critic),
   };
   return freezeDeep(record);
 }
@@ -215,13 +238,20 @@ export function validTraceLinkIndex(value: unknown): value is TraceLinkIndex {
     value.attempts.length > MAX_TRACE_INDEX_ENTRIES || value.settlements.length > MAX_TRACE_INDEX_ENTRIES ||
     value.attempts.length + value.settlements.length > MAX_TRACE_INDEX_ENTRIES) return false;
   const attemptKeys = new Set<string>();
+  const retainedTurns = new Set<number>();
   for (const item of value.attempts) {
     if (!isRecord(item) || !validExistingId(item.runId) || !validExistingId(item.taskId) || !validExistingId(item.attemptId) ||
-      (item.role !== "main" && item.role !== "summary") || typeof item.retained !== "boolean" ||
+      (item.role !== "main" && item.role !== "summary" && item.role !== "critic") || typeof item.retained !== "boolean" ||
       !validTraceTurn(item.traceTurn) || typeof item.unknown !== "boolean") return false;
     const key = compositeKey(item.runId, item.attemptId);
     if (attemptKeys.has(key)) return false;
     attemptKeys.add(key);
+    // One turn file holds one record: duplicate retained turns would collide
+    // in recordsByTurn and resurrect ghost retained entries.
+    if (item.retained && item.traceTurn !== null) {
+      if (retainedTurns.has(item.traceTurn)) return false;
+      retainedTurns.add(item.traceTurn);
+    }
   }
   const settlementKeys = new Set<string>();
   for (const item of value.settlements) {
@@ -238,6 +268,10 @@ export function validTraceLinkIndex(value: unknown): value is TraceLinkIndex {
     const key = taskKey(item.runId, item.taskId);
     if (settlementKeys.has(key)) return false;
     settlementKeys.add(key);
+    if (item.retained && item.traceTurn !== null) {
+      if (retainedTurns.has(item.traceTurn)) return false;
+      retainedTurns.add(item.traceTurn);
+    }
   }
   return true;
 }
@@ -283,7 +317,7 @@ export async function inspectExisting(directory: string, maxScanFiles: number, m
         const retryOfAttemptId = value.retryOfAttemptId === null || value.retryOfAttemptId === undefined
           ? null
           : validExistingId(value.retryOfAttemptId) ? value.retryOfAttemptId : undefined;
-        if (!validExistingId(value.attemptId) || (value.role !== "main" && value.role !== "summary") ||
+        if (!validExistingId(value.attemptId) || (value.role !== "main" && value.role !== "summary" && value.role !== "critic") ||
           parentAttemptId === undefined || retryOfAttemptId === undefined) {
           malformedRecords++;
           continue;

@@ -4,7 +4,7 @@
  * Owns pure box/wrap/paint math for the transcript viewport and input box.
  * Split from agent-core/tui.ts (issue #38).
  */
-import { cellWidth, cursorRowCol, forEachGrapheme, graphemeCells, splitGraphemes, wrapText } from "../tui-text.ts";
+import { cursorRowCol, forEachGrapheme, graphemeCells, splitGraphemes, wrapText } from "../tui-text.ts";
 import type { StyleId, StyledSpan, TranscriptEntry } from "./transcript.ts";
 
 
@@ -21,11 +21,45 @@ export function graphemeSafeTail(text: string, maxChars: number): string {
   let start = text.length - maxChars;
   const lead = text.charCodeAt(start);
   if (lead >= 0xdc00 && lead <= 0xdfff) start += 1;
-  let slice = text.slice(start);
+  const slice = text.slice(start);
   const gs = splitGraphemes(slice);
   if (gs.length === 0) return "";
-  if (gs.length > 1 && graphemeCells(gs[0]!, 0) === 0) slice = gs.slice(1).join("");
+  // Never split a cluster at the cut: drop an orphaned leading grapheme, but
+  // never empty a non-empty slice over it.
+  if (gs.length > 1) {
+    const first = gs[0]!;
+    if (graphemeCells(first, 0) === 0) return gs.slice(1).join("");
+    const firstCp = first.codePointAt(0) ?? 0;
+    // ZWJ never starts a cluster, so a leading joiner continues cut content.
+    if (firstCp === 0x200d) return gs.slice(1).join("");
+    // Regional indicators pair greedily left to right. An odd trailing run in
+    // the prefix pairs across the cut, orphaning the slice's first indicator.
+    if (firstCp >= 0x1f1e6 && firstCp <= 0x1f1ff && trailingRegionalParity(text, start)) {
+      return slice.slice(2);
+    }
+  }
   return slice;
+}
+
+/** True when an odd run of regional indicators ends at `end`. */
+function trailingRegionalParity(text: string, end: number): boolean {
+  let odd = false;
+  let i = end;
+  while (i > 0) {
+    let cp = text.charCodeAt(i - 1);
+    let width = 1;
+    if (cp >= 0xdc00 && cp <= 0xdfff && i >= 2) {
+      const lead = text.charCodeAt(i - 2);
+      if (lead >= 0xd800 && lead <= 0xdbff) {
+        cp = (lead - 0xd800) * 0x400 + (cp - 0xdc00) + 0x10000;
+        width = 2;
+      }
+    }
+    if (cp < 0x1f1e6 || cp > 0x1f1ff) break;
+    odd = !odd;
+    i -= width;
+  }
+  return odd;
 }
 
 
@@ -134,25 +168,6 @@ export function paintRow(frags: StyledSpan[], cols: number, entry: TranscriptEnt
   if (cells < cols) out += " ".repeat(cols - cells);
   out += "\x1b[0m";
   return out;
-}
-
-
-/** Wrap only a tail big enough to fill the window. Streaming must not rewrap the whole log. */
-export function visibleLines(plain: string, cols: number, rowCount: number, scroll: number): string[] {
-  const colsN = Math.max(1, cols);
-  const rowsN = Math.max(0, rowCount);
-  const scrollN = Math.max(0, scroll);
-  const need = (rowsN + scrollN + 2) * colsN + 2;
-  let slice = plain;
-  if (plain.length > need) {
-    slice = plain.slice(plain.length - need);
-    const gs = splitGraphemes(slice);
-    if (gs[0] && cellWidth(gs[0]) === 0) slice = gs.slice(1).join("");
-  }
-  const wrapped = wrapText(slice, colsN);
-  const end = Math.max(0, wrapped.length - scrollN);
-  const start = Math.max(0, end - rowsN);
-  return wrapped.slice(start, end);
 }
 
 

@@ -309,4 +309,44 @@ describe("Subagent Approval Engine Contract", () => {
     expect(readFileSync(target, "utf8")).toBe("original\n");
     expect(r.output).toMatch(/protected file edit denied/i);
   });
+
+  it("denies mutations when the Mine policy is corrupt or oversize (#218)", async () => {
+    for (const [name, policyBody] of [
+      ["rt-mine-corrupt", "not-json{{{"],
+      ["rt-mine-oversize", JSON.stringify(["x".repeat(70 * 1024)])],
+    ] as const) {
+      const dir = join(root, name);
+      mkdirSync(dir, { recursive: true });
+      const target = join(dir, "mine-target.txt");
+      writeFileSync(target, "original\n");
+      const r = await runChild({
+        name,
+        toolName: "edit",
+        toolArgs: { path: "mine-target.txt", old_text: "original", new_text: "changed" },
+        answerApproval: false,
+        approvalTimeoutMs: 4000,
+        setup: (runDir) => {
+          writeFileSync(join(runDir, "mine-term-rt.json"), policyBody);
+        },
+      });
+      expect(readFileSync(target, "utf8"), name).toBe("original\n");
+      expect(r.output, name).toMatch(/protected file edit denied/i);
+    }
+  });
+
+  it("allows mutations when no Mine policy file exists (#218)", async () => {
+    const dir = join(root, "rt-mine-absent");
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, "mine-target.txt");
+    writeFileSync(target, "original\n");
+    const r = await runChild({
+      name: "rt-mine-absent",
+      toolName: "edit",
+      toolArgs: { path: "mine-target.txt", old_text: "original", new_text: "changed" },
+      answerApproval: false,
+      approvalTimeoutMs: 4000,
+    });
+    expect(readFileSync(target, "utf8")).toBe("changed\n");
+    expect(r.output).not.toMatch(/protected file edit denied/i);
+  });
 });

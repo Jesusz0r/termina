@@ -795,6 +795,26 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       const stamped = requireCore().stampHistoryCache(history);
       assert.equal(allCacheMarkers(stamped).length, 0);
     });
+
+    await test("Anthropic lookback merges consecutive tool runs into one position", () => {
+      const parallelUse = Array.from({ length: 25 }, (_, i) => ({ type: "tool_use", id: `call-${i}`, name: "bash", input: {} }));
+      const history: Array<{ role: string; content: unknown }> = [
+        { role: "user", content: [{ type: "text", text: "old reusable text" }] },
+        { role: "assistant", content: parallelUse },
+      ];
+      const stamped = requireCore().stampHistoryCache(history);
+      // The 25-call run counts as one position, so the text stays reachable.
+      assert.equal(allCacheMarkers(stamped).length, 1);
+      const control: Array<{ role: string; content: unknown }> = [
+        { role: "user", content: [{ type: "text", text: "old reusable text" }] },
+      ];
+      for (let i = 0; i < 10; i++) {
+        control.push({ role: "assistant", content: [{ type: "text", text: `note-${i}` }] });
+        control.push({ role: "assistant", content: [{ type: "thinking", thinking: `thought-${i}` }] });
+      }
+      // Twenty alternating positions with no runs still exhaust the budget.
+      assert.equal(allCacheMarkers(requireCore().stampHistoryCache(control)).length, 0);
+    });
     
     await test("Anthropic direct prefix never exceeds four explicit breakpoints", () => {
       const premarkedTools = [0, 1, 2, 3, 4].map((i) => ({

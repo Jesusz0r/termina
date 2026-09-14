@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -26,6 +26,7 @@ import {
   subagentApprovalTimeoutMs,
   subagentChildTid,
   subagentDepthFromEnv,
+  subagentInboxFileName,
   subagentPathsOverlap,
   subagentResultFileName,
   subagentSpawnSidecarRecord,
@@ -392,9 +393,11 @@ describe("subagents Phase 1 registry", () => {
     expect(clean.text).toBe("just a normal result");
   });
 
-  it("hides spawn from children at depth 1", () => {
+  it("hides subagent tools from children at depth 1", () => {
     expect(visibleSubagentTools(0).map((d) => d.name)).toEqual(["spawn_subagent", "message_subagent"]);
-    expect(visibleSubagentTools(1).map((d) => d.name)).toEqual(["message_subagent"]);
+    // A child owns a fresh empty registry, so message_subagent could only
+    // ever fail with "unknown run" there.
+    expect(visibleSubagentTools(1)).toEqual([]);
   });
 
   it("reads depth from the environment", () => {
@@ -806,5 +809,136 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(readSubagentInbox(dir, "term-7", "bg-404")).toBeNull();
     for (let i = 0; i < 60; i++) appendSubagentInboxMessage(dir, "term-7", "bg-1", `m${i}`);
     expect(readSubagentInbox(dir, "term-7", "bg-1")?.messages.length).toBe(50);
+  });
+
+  it("writes task files atomically with byte-identical content (#222)", async () => {
+    const reg = registry();
+    const spawned = await reg.spawn({ task: "atomic handoff", parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    const dir = events();
+    const written = writeSubagentTaskFile(dir, spawned.run, { parentTerminalId: "term-7", cwd: "/proj" });
+    expect(written.ok).toBe(true);
+    if (!written.ok) return;
+    expect(written.file).toBe("subagent-term-7-bg-1.task.json");
+    const { readFileSync: read } = await import("node:fs");
+    const back = parseSubagentTaskFile(JSON.parse(read(join(dir, written.file), "utf8")));
+    expect(back.ok).toBe(true);
+    // No temp leftovers: the write landed via tmp+rename.
+    expect(readdirSync(dir).filter((n) => n.endsWith(".tmp")).length).toBe(0);
+    expect(readdirSync(dir).filter((n) => n === written.file).length).toBe(1);
+  });
+
+  it("caps handoff reads before parsing (#222)", async () => {
+    const reg = registry();
+    const dir = events();
+    const spawned = await reg.spawn({ task: "t", parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    const runId = spawned.run.id;
+    // Oversize result file: rejected without slurping.
+    writeResult(dir, "term-7", runId, "x".repeat(70 * 1024));
+    const oversize = readSubagentResultFile(dir, "term-7", runId);
+    expect(oversize.status).toBe("invalid");
+    if (oversize.status !== "invalid") return;
+    expect(oversize.error).toMatch(/file budget/);
+    expect(reconcileSubagentRuns(dir, "term-7", reg)).toEqual([]);
+    expect(reg.get(runId)?.state).toBe("active");
+    // Oversize approval request.
+    const apprPath = join(dir, "subagent-term-7-bg-1.approval-big.json");
+    writeFileSync(apprPath, "y".repeat(9000));
+    expect(readSubagentApprovalRequest(apprPath)).toEqual({ ok: false, error: "oversize" });
+    // Oversize inbox.
+    const inboxName = subagentInboxFileName("term-7", "bg-1");
+    expect(inboxName).not.toBeNull();
+    writeFileSync(join(dir, inboxName!), "z".repeat(70 * 1024));
+    expect(readSubagentInbox(dir, "term-7", "bg-1")).toBeNull();
+  });
+
+  it("enforces result caps in bytes and task caps in chars (#222)", async () => {
+    const reg = registry();
+    // 32K e-acute: 32K chars but 64K bytes -> rejected under the byte unit.
+    const wide = await reg.spawn({ task: "wide", parent });
+    expect(wide.ok).toBe(true);
+    if (!wide.ok) return;
+    expect(reg.settleRun(wide.run.id, "é".repeat(32_000)).ok).toBe(false);
+    // 8K e-acute task: 8K chars but 16K bytes -> accepted under the char unit.
+    const taskWide = await reg.spawn({ task: "é".repeat(8000), parent });
+    expect(taskWide.ok).toBe(true);
+  });
+});
+
+describe("subagent settled retention window (#215)", () => {
+  it("evicts settled runs beyond the window, least recently settled first", async () => {
+    const reg = registry();
+    const ids: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      const spawned = await reg.spawn({ task: `task-${i}`, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      ids.push(spawned.run.id);
+      expect(reg.settleRun(spawned.run.id, `result-${i}`).ok).toBe(true);
+    }
+    // 25 settled, window of 10: the first 15 are evicted, the last 10 kept.
+    const retained = ids.filter((id) => reg.get(id) !== undefined);
+    expect(retained).toHaveLength(10);
+    expect(retained).toEqual(ids.slice(15));
+    expect(reg.activeRuns()).toHaveLength(0);
+  });
+
+  it("never evicts active runs", async () => {
+    const reg = registry();
+    const active: string[] = [];
+    for (let i = 0; i < MAX_SUBAGENT_RUNS; i++) {
+      const spawned = await reg.spawn({ task: `active-${i}`, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      active.push(spawned.run.id);
+    }
+    for (let i = 0; i < 15; i++) {
+      const spawned = await reg.spawn({ task: `churn-${i}`, userRequested: true, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      expect(reg.settleRun(spawned.run.id, `result-${i}`).ok).toBe(true);
+    }
+    expect(reg.activeRuns().map((r) => r.id).sort()).toEqual(active.slice().sort());
+    for (const id of active) expect(reg.get(id)?.state).toBe("active");
+  });
+
+  it("resumes in-window runs and fails closed past the window", async () => {
+    const reg = registry();
+    const first = await reg.spawn({ task: "original brief", parent });
+    if (!first.ok) throw new Error(first.error);
+    expect(reg.settleRun(first.run.id, "original result").ok).toBe(true);
+    // Push the first run out of the window with settled churn.
+    for (let i = 0; i < 12; i++) {
+      const spawned = await reg.spawn({ task: `churn-${i}`, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      expect(reg.settleRun(spawned.run.id, `result-${i}`).ok).toBe(true);
+    }
+    const evicted = await reg.spawn({ task: "follow-up", resume: first.run.id, parent });
+    expect(evicted.ok).toBe(false);
+    if (evicted.ok) throw new Error("expected unknown-run failure");
+    expect(evicted.error).toMatch(/unknown subagent run/);
+    // The most recent run is still resumable.
+    const recent = await reg.spawn({ task: "another", parent });
+    if (!recent.ok) throw new Error(recent.error);
+    expect(reg.settleRun(recent.run.id, "recent result").ok).toBe(true);
+    const resumed = await reg.spawn({ task: "follow-up", resume: recent.run.id, parent });
+    expect(resumed.ok).toBe(true);
+  });
+
+  it("forgets identical-failed briefs past the window", async () => {
+    const reg = registry();
+    const failed = await reg.spawn({ task: "doomed brief", parent });
+    if (!failed.ok) throw new Error(failed.error);
+    expect(reg.settleRun(failed.run.id, "", "failed", "boom").ok).toBe(true);
+    const blocked = await reg.spawn({ task: "doomed brief", parent });
+    expect(blocked.ok).toBe(false);
+    for (let i = 0; i < 12; i++) {
+      const spawned = await reg.spawn({ task: `churn-${i}`, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      expect(reg.settleRun(spawned.run.id, `result-${i}`).ok).toBe(true);
+    }
+    // Evicted: the guard no longer sees the old failure.
+    const retry = await reg.spawn({ task: "doomed brief", parent });
+    expect(retry.ok).toBe(true);
   });
 });

@@ -50,6 +50,12 @@ type BoundedOutcomeMetadata = Pick<
 export interface ToolOutcome {
   result: Record<string, unknown>;
   isError: boolean;
+  /**
+   * False when the tool never executed (denied, interrupted beforehand, or
+   * unknown). Absent means executed; the settle gate treats absent as true
+   * so older producers stay valid.
+   */
+  executed?: boolean;
   /** Preserve bounded MCP accounting through the generic tool boundary. */
   bounded?: BoundedOutcomeMetadata;
   cancellationScope?: McpCancellationScope;

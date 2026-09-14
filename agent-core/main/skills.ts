@@ -2,10 +2,10 @@
  * Skills and instruction blocks: SKILL.md discovery, the skill index page,
  * and the project/user AGENTS.md wrappers. Stateless between calls.
  */
-import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { formatSkillIndex as formatCompactSkillIndex, type SkillIndexSkill } from "../skill-index.ts";
-import { GREP_VISIT_CAP, classifyWalkPath, fileHasNul, sortUtf8 } from "./files.ts";
+import { GREP_VISIT_CAP, classifyWalkPath, fileHasNul, readBoundedRegularFile, sortUtf8 } from "./files.ts";
 
 export type Skill = SkillIndexSkill;
 
@@ -14,8 +14,9 @@ const PROJECT_AGENTS_CAP = 24_576;
 export const SKILL_XML_CAP = 8_192;
 
 function parseFrontmatter(text: string): Record<string, string> {
-  if (!text.startsWith("---")) return {};
-  const rest = text.startsWith("---\n") || text.startsWith("---\r\n") ? text.slice(text.indexOf("\n") + 1) : text.slice(3);
+  const normalized = text.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---")) return {};
+  const rest = normalized.startsWith("---\n") ? normalized.slice(normalized.indexOf("\n") + 1) : normalized.slice(3);
   const end = rest.search(/\n---(?:\n|$)/);
   if (end < 0) return {};
   const block = rest.slice(0, end);
@@ -83,19 +84,9 @@ export function scanSkills(dirs: string[]): { skills: Skill[]; capped: boolean }
     if (walked.capped) capped = true;
     for (const abs of walked.files) {
       if (fileHasNul(abs)) continue;
-      let text: string;
-      try {
-        const fd = openSync(abs, "r");
-        try {
-          const buf = Buffer.alloc(8192);
-          const n = readSync(fd, buf, 0, 8192, 0);
-          text = buf.subarray(0, n).toString("utf8");
-        } finally {
-          closeSync(fd);
-        }
-      } catch {
-        continue;
-      }
+      const head = readBoundedRegularFile(abs, 8192);
+      if ("error" in head) continue;
+      const text = head.text;
       const fm = parseFrontmatter(text);
       if (fm["disable-model-invocation"] === "true") continue;
       const name = (fm.name || basename(dirname(abs))).trim();

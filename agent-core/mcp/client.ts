@@ -5,6 +5,7 @@
  * Split from agent-core/mcp.ts (issue #38).
  */
 import { resolvedHostError } from "../main/url.ts";
+import { policyRequest, type PolicyHttpResponse } from "../main/policy-fetch.ts";
 import { type CompletionState } from "../tool-output.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { MAX_MCP_SERVERS, MCP_CALL_MS, MCP_HANDSHAKE_MS, MCP_HTTP_BODY_BYTES, MCP_PROTOCOL, mcpHttpUrlError, parseHeaderMap } from "./config.ts";
@@ -216,55 +217,39 @@ function parseSseRpc(text: string, id: number): RpcMsg {
 }
 
 
-async function readCappedBody(res: Response, max: number, name: string): Promise<string> {
+/**
+ * Stream-based counterpart to readBoundedResponseBody (tool-output.ts, #210):
+ * MCP HTTP runs on node:http, whose responses expose a stream rather than a
+ * fetch body reader. Same fail-closed contract in throwing form: declared or
+ * observed oversize and invalid UTF-8 throw instead of returning partial text.
+ */
+async function readCappedBody(res: PolicyHttpResponse, max: number, name: string): Promise<string> {
   const declared = res.headers.get("content-length")?.trim() ?? "";
   const declaredBytes = /^\d+$/.test(declared) ? Number(declared) : null;
   if (declaredBytes !== null && !Number.isSafeInteger(declaredBytes)) {
     throw new Error(`mcp ${name} response body cannot be bounded`);
   }
   if (declaredBytes !== null && declaredBytes > max) {
-    try {
-      await res.body?.cancel(`mcp ${name} response too large`);
-    } catch {
-      /* The size error remains authoritative. */
-    }
+    res.cancel();
     throw new Error(`mcp ${name} response too large`);
   }
-  if (!res.body) {
-    // A body convenience method can allocate without regard to Content-Length.
-    // Only a body that is provably empty is safe when no stream is exposed.
-    if (declaredBytes === 0 || res.status === 204 || res.status === 205 || res.status === 304) return "";
-    throw new Error(`mcp ${name} response body cannot be bounded`);
-  }
-
-  const reader = res.body.getReader();
   const chunks: Buffer[] = [];
   let used = 0;
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!(value instanceof Uint8Array)) throw new Error(`mcp ${name} response returned non-byte data`);
-      if (used + value.byteLength > max) {
-        try {
-          await reader.cancel(`mcp ${name} response too large`);
-        } catch {
-          /* The size error remains authoritative. */
-        }
+    for await (const chunk of res.body) {
+      const bytes = (chunk as Uint8Array).byteLength;
+      if (used + bytes > max) {
         throw new Error(`mcp ${name} response too large`);
       }
-      chunks.push(Buffer.from(value));
-      used += value.byteLength;
+      chunks.push(Buffer.from(chunk as Uint8Array));
+      used += bytes;
     }
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {
-      /* A cancelled or failed reader may already be detached. */
-    }
+  } catch (err) {
+    res.cancel();
+    throw err;
   }
-  // Do not require Content-Length to equal decoded stream bytes: fetch may
-  // transparently decompress a response while preserving its wire length.
+  // Do not require Content-Length to equal decoded stream bytes: decoding
+  // may expand or shrink the wire length while the header stays wire-sized.
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, used));
   } catch {
@@ -315,12 +300,12 @@ class McpHttp implements McpConn {
       this.kill(new Error(`mcp ${this.name} timed out`));
     }, timeoutMs);
     try {
-      const res = await fetch(this.url, {
+      const res = await policyRequest({
+        url: this.url,
         method: "POST",
         headers: this.headers(),
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
         signal: ac.signal,
-        redirect: "manual",
       });
       const sid = res.headers.get("mcp-session-id");
       if (sid && /^[\x21-\x7E]{1,128}$/.test(sid)) this.sessionId = sid;
@@ -333,7 +318,7 @@ class McpHttp implements McpConn {
         throw new Error(`mcp ${this.name} HTTP ${res.status}`);
       }
       const text = await readCappedBody(res, MCP_HTTP_BODY_BYTES, this.name);
-      if (!res.ok) throw new Error(`mcp ${this.name} HTTP ${res.status}`);
+      if (res.status < 200 || res.status >= 300) throw new Error(`mcp ${this.name} HTTP ${res.status}`);
       const ctype = res.headers.get("content-type") ?? "";
       const msg = ctype.includes("text/event-stream") ? parseSseRpc(text, id) : (JSON.parse(text) as RpcMsg);
       if (msg.error) throw rpcError(this.name, msg.error);
@@ -352,21 +337,17 @@ class McpHttp implements McpConn {
     if (this.dead) return;
     const ac = new AbortController();
     this.inflight.add(ac);
-    void fetch(this.url, {
+    void policyRequest({
+      url: this.url,
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({ jsonrpc: "2.0", method, params }),
       signal: ac.signal,
-      redirect: "manual",
     })
-      .then(async (res) => {
+      .then((res) => {
         // Notifications have no result to parse. Cancel the response stream so
         // a server cannot leave an unread or endless body attached to the session.
-        try {
-          await res.body?.cancel("MCP notification response is not consumed");
-        } catch {
-          /* ignore notify cleanup failures */
-        }
+        res.cancel();
       })
       .catch(() => {
         /* ignore notify failures */
@@ -504,7 +485,9 @@ export async function startMcp(
       } catch {
         return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: error: invalid URL` };
       }
-      const resolved = await resolvedHostError(hopHost);
+      // Startup shares the handshake deadline: a stuck resolver must not
+      // delay MCP setup past it, and late answers are ignored (#159).
+      const resolved = await resolvedHostError(hopHost, { signal: AbortSignal.timeout(MCP_HANDSHAKE_MS) });
       if (resolved) {
         return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${resolved}` };
       }

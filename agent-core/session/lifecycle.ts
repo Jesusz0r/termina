@@ -12,7 +12,7 @@ import { basename, join } from "node:path";
 import { createCurrentDir, createSessionBundleWithAdmission, currentHasContent, listCurrentSegments, recoverActiveSegment, renameCurrentUnique, retainUnboundCleanup } from "./bundles.ts";
 import { anchoredChildPath, fsyncDirectory, openDirectoryAnchor, validateDirectoryAnchor } from "./descriptors.ts";
 import type { DirectoryAnchor } from "./descriptors.ts";
-import { ACTIVE_NAME, ARCHIVE_PREFIX, BAD_PREFIX, CURRENT_DIR, MAX_SESSION_RECORD_BYTES, MAX_SESSION_SEGMENT_BYTES, READ_CHUNK, errMsg, inspectEntry, isCoreSessionId, parseSessionBundlePath, partFileName, sessionBundleLimit, yieldToEventLoop } from "./primitives.ts";
+import { ACTIVE_NAME, ARCHIVE_PREFIX, BAD_PREFIX, CURRENT_DIR, MAX_SESSION_BUNDLE_BYTES, MAX_SESSION_RECORD_BYTES, MAX_SESSION_SEGMENT_BYTES, READ_CHUNK, errMsg, inspectEntry, isCoreSessionId, parseSessionBundlePath, partFileName, sessionBundleLimit, yieldToEventLoop } from "./primitives.ts";
 import type { EmptySessionBundleInspection, LogicalSessionEntry, SessionBundlePaths, SessionOperationOptions, SessionResult, SessionTestHooks } from "./primitives.ts";
 
 
@@ -332,6 +332,9 @@ export class SessionWriter {
   readonly currentDir: string;
   private fd: number | null = null;
   private activeBytes = 0;
+  /** Sealed part bytes; with activeBytes this is the replayable aggregate. */
+  private sealedBytes = 0;
+  private bundleLimit = MAX_SESSION_BUNDLE_BYTES;
   private nextPart = 1;
   private lastStorageSeq: number;
   private poisoned = false;
@@ -352,7 +355,7 @@ export class SessionWriter {
   static open(
     sessionFile: string,
     lastStorageSeq: number,
-    options?: Pick<SessionOperationOptions, "testHooks">,
+    options?: Pick<SessionOperationOptions, "testHooks" | "testOnlyMaxBundleBytes">,
   ): SessionResult<{ writer: SessionWriter }> {
     if (!Number.isInteger(lastStorageSeq) || lastStorageSeq < 0) return { ok: false, error: "invalid lastStorageSeq" };
     const controls = sessionBundleLimit(options);
@@ -367,6 +370,8 @@ export class SessionWriter {
     const repaired = discardIncompleteActiveTail(ensured.sessionFile);
     if (!repaired.ok) return repaired;
     const writer = new SessionWriter(ensured.sessionFile, ensured.currentDir, lastStorageSeq, options?.testHooks?.beforeSegmentRollRename);
+    writer.bundleLimit = controls.limit;
+    writer.sealedBytes = recovered.parts.reduce((sum, part) => sum + part.size, 0);
     writer.activeBytes = repaired.size;
     writer.nextPart = recovered.parts.length > 0 ? recovered.parts[recovered.parts.length - 1]!.n + 1 : 1;
     try {
@@ -381,6 +386,11 @@ export class SessionWriter {
 
   get activeSize(): number {
     return this.activeBytes;
+  }
+
+  /** Bytes the writer has acknowledged across all current segments. */
+  get aggregateSize(): number {
+    return this.sealedBytes + this.activeBytes;
   }
 
   close(): void {
@@ -439,6 +449,7 @@ export class SessionWriter {
     const activated = fsyncDirectory(this.currentDir);
     if (!activated.ok) return activated;
     this.nextPart += 1;
+    this.sealedBytes += this.activeBytes;
     this.activeBytes = 0;
     return this.reopenActive();
   }
@@ -453,6 +464,17 @@ export class SessionWriter {
     }
     const encoded = encodeRecord(record);
     if (!encoded.ok) return encoded;
+    // Aggregate admission (#161): the replay cap covers every current
+    // segment, so the writer must too. Reject a crossing append before
+    // rollover or write; the acknowledged prefix stays replayable and the
+    // writer stays usable (a smaller record may still fit — no poison).
+    const retained = this.sealedBytes + this.activeBytes;
+    if (retained + encoded.line.length > this.bundleLimit) {
+      return {
+        ok: false,
+        error: `session bundle exceeds MAX_SESSION_BUNDLE_BYTES (${retained + encoded.line.length} bytes); append rejected before mutation`,
+      };
+    }
     if (this.activeBytes + encoded.line.length > MAX_SESSION_SEGMENT_BYTES) {
       const rolled = this.roll();
       if (!rolled.ok) return rolled;

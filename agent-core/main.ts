@@ -45,7 +45,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   readdirSync,
-  readFileSync,
   rmSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -174,6 +173,7 @@ import {
   BoundedTextAccumulator,
   boundedToolResult,
   logicalToolText,
+  readBoundedResponseBody,
   type BoundedText,
   type CompletionState,
   type ToolTextResult,
@@ -183,10 +183,12 @@ import {
   freezeCwd,
   globFiles,
   listTaggedFiles,
+  readBoundedRegularFile,
   shellQuote,
 } from "./main/files.ts";
 import { isDirectRunFrom, trustedPath } from "./main/env.ts";
-import { outboundUrlError, resolvedHostError } from "./main/url.ts";
+import { DNS_LOOKUP_ABORTED, DNS_LOOKUP_TIMED_OUT, dnsAbortError, outboundUrlError, resolvedHostError } from "./main/url.ts";
+import { policyRequest } from "./main/policy-fetch.ts";
 import { grepFiles } from "./main/grep.ts";
 import {
   editProjectFile,
@@ -221,6 +223,18 @@ import {
   type ToolUse,
 } from "./main/tools.ts";
 import { createFrontMatter } from "./main/front-matter.ts";
+import {
+  buildCriticPrompt,
+  CRITIC_SYSTEM_PROMPT,
+  gateEditCount,
+  needsCriticReview,
+  parseCriticVerdict,
+  recordGateObservation,
+  settleGateVerdict,
+  summarizeChangesForCritic,
+  summarizeCheckOutcomes,
+  type GateToolObservation,
+} from "./main/settle-gate.ts";
 import { renderHistoryTranscript, type ContentBlock } from "./main/history-view.ts";
 import { shouldAutoOpenLogin } from "./main/login-hint.ts";
 import {
@@ -245,7 +259,9 @@ import {
   writeSubagentAckFile,
   writeSubagentApprovalRequest,
   writeSubagentTaskFile,
+  MAX_SUBAGENT_FILE_BYTES,
   MAX_SUBAGENT_RESULT_CHARS,
+  type SubagentPermissionMode,
   type SubagentTaskFile,
 } from "./subagents.ts";
 import {
@@ -263,6 +279,7 @@ import {
   type TraceAttemptInput,
   type TraceCacheInput,
   type TraceCostInput as TraceRecordCostInput,
+  type TraceCriticVerdict,
   type TraceRuntime,
   type TraceWriteOutcome,
 } from "./trace.ts";
@@ -687,7 +704,7 @@ type TraceTaskState = {
 type TraceAttemptState = {
   task: TraceTaskState;
   attemptId: string;
-  role: "main" | "summary";
+  role: "main" | "summary" | "critic";
   provider: ProviderId;
   protocol: string;
   model: string;
@@ -729,12 +746,14 @@ function beginTraceTask(): TraceTaskState {
 }
 
 function beginTraceAttempt(
-  role: "main" | "summary",
+  role: "main" | "summary" | "critic",
   opts: {
     parentAttemptId?: string | null;
     retryOfAttemptId?: string | null;
     fallbackReason?: string | null;
     retryCount?: number;
+    provider?: ProviderId;
+    model?: string;
   } = {},
 ): TraceAttemptState | null {
   const task = activeTraceTask;
@@ -743,15 +762,15 @@ function beginTraceAttempt(
     ? role === "summary" ? task.lastMainAttemptId : task.lastMainAttemptId
     : opts.parentAttemptId;
   const retryOfAttemptId = opts.retryOfAttemptId ?? null;
+  const provider = opts.provider ?? (role === "main" ? route.provider : summaryRoute.provider);
+  const model = opts.model ?? (role === "main" ? route.model : summaryRoute.model);
   const attempt: TraceAttemptState = {
     task,
     attemptId: `attempt-${randomUUID()}`,
     role,
-    provider: role === "summary" ? summaryRoute.provider : route.provider,
-    protocol: role === "summary"
-      ? providerProtocol(summaryRoute.provider, summaryRoute.model)
-      : providerProtocol(route.provider, route.model),
-    model: role === "summary" ? summaryRoute.model : route.model,
+    provider,
+    protocol: providerProtocol(provider, model),
+    model,
     parentAttemptId: parentAttemptId ?? null,
     retryOfAttemptId,
     retryCount: Number.isSafeInteger(opts.retryCount) && (opts.retryCount as number) >= 0 ? opts.retryCount as number : retryOfAttemptId ? 1 : 0,
@@ -812,7 +831,7 @@ async function closeTraceRuntime(): Promise<boolean> {
 
 function traceCachePolicyInput(
   cache: TraceCacheDiagnostics,
-  role: "main" | "summary",
+  role: "main" | "summary" | "critic",
   rejected: boolean,
   effective: boolean,
 ): TraceCacheInput["requested"] {
@@ -906,10 +925,10 @@ async function writeTraceAttempt(
     route: `${attempt.provider}/${attempt.protocol}`,
     model: attempt.model,
     taskClass: attempt.task.taskClass,
-    requestedEffort: attempt.role === "summary" ? "off" : effortWanted,
-    effectiveEffort: attempt.role === "summary"
-      ? effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off", providerProtocol(summaryRoute.provider, summaryRoute.model))
-      : effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
+    requestedEffort: attempt.role === "main" ? effortWanted : "off",
+    effectiveEffort: attempt.role === "main"
+      ? effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model))
+      : effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off", providerProtocol(summaryRoute.provider, summaryRoute.model)),
     status: fields.status,
     retryCount: attempt.retryCount,
     fallbackReason: attempt.fallbackReason,
@@ -971,7 +990,7 @@ async function writeTraceAttempt(
   }
 }
 
-async function settleTraceTask(status: string): Promise<void> {
+async function settleTraceTask(status: string, critic: TraceCriticVerdict | null = null): Promise<void> {
   const task = activeTraceTask;
   if (!task || task.settled) return;
   task.settled = true;
@@ -990,6 +1009,7 @@ async function settleTraceTask(status: string): Promise<void> {
       attemptIds: task.attemptIds,
       summaryAttemptIds: task.summaryAttemptIds,
       outcome: { status, correctness: null, criteriaHash: task.criteriaHash },
+      critic,
     }));
   } catch (error) {
     sidecar.logEvent({ t: "trace_write_failure", kind: "write-failure", persisted: false, error: error instanceof Error ? error.message : String(error) });
@@ -1244,6 +1264,44 @@ async function writeSummaryTrace(opts: {
   });
 }
 
+/**
+ * Critic-attempt records (#124). The attempt role is "critic"; the cost
+ * scope stays "summary" because the review rides the cheap lane (the same
+ * lane summarize bills), even on the main-route fallback.
+ */
+async function writeCriticTrace(opts: {
+  status: string;
+  usage: Usage | null;
+  started: number;
+  attempt?: TraceAttemptState | null;
+  cache?: TraceCacheDiagnostics | null;
+  ttftMs?: number | null;
+}): Promise<void> {
+  await writeTraceAttempt(opts.attempt ?? null, {
+    status: opts.status,
+    storageSeqRange: null,
+    toolNames: [],
+    usage: opts.usage,
+    usd: null,
+    ttftMs: opts.ttftMs ?? null,
+    turnMs: opts.attempt?.ended !== null && opts.attempt?.ended !== undefined
+      ? Math.max(0, opts.attempt.ended - opts.attempt.started)
+      : Date.now() - opts.started,
+    revisions: 0,
+    revisionKinds: [],
+    wasteTokens: null,
+    wasteCause: null,
+    cache: opts.cache ?? null,
+    cost: traceCostForUsage(
+      opts.usage,
+      opts.attempt?.provider ?? summaryRoute.provider,
+      opts.attempt?.model ?? summaryRoute.model,
+      "summary",
+      opts.cache ?? null,
+    ),
+  });
+}
+
 async function writeMainTrace(opts: {
   status: string;
   seqBefore: number;
@@ -1320,6 +1378,10 @@ function closeSessionWriter(): void {
 }
 
 function openSessionWriter(): void {
+  if (testOnlyOpenSessionWriterOverride) {
+    testOnlyOpenSessionWriterOverride();
+    return;
+  }
   closeSessionWriter();
   if (!sessionFile) return;
   const opened = SessionWriter.open(sessionFile, storageSeq);
@@ -1568,134 +1630,135 @@ export async function fetchUrl(
     isError: true,
     repro,
   });
-  let current = url;
-  for (let hop = 0; hop <= FETCH_REDIRECT_CAP; hop++) {
-    const bad = fetchUrlError(current);
-    if (bad) return fail(bad);
-    let hopHost: string;
-    try {
-      hopHost = new URL(current).hostname;
-    } catch {
-      return fail("error: invalid URL");
-    }
-    const resolved = await resolvedHostError(hopHost);
-    if (resolved) return fail(resolved);
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeoutMs);
-    const poll = setInterval(() => {
-      if (shouldStop()) ac.abort();
-    }, 50);
+  // One operation deadline for DNS, connect, TLS, redirects, and body: the
+  // abort below races the resolve precheck as well as the socket (#159).
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  const poll = setInterval(() => {
     if (shouldStop()) ac.abort();
-    try {
-      const res = await fetch(current, {
-        method: "GET",
-        redirect: "manual",
-        signal: ac.signal,
-        headers: { accept: "text/*, application/json, application/xml;q=0.9, */*;q=0.1" },
-      });
-      if (res.status >= 300 && res.status < 400) {
-        const loc = res.headers.get("location");
-        try {
-          await res.body?.cancel();
-        } catch {
-          /* best effort: redirect bodies are never retained */
-        }
-        if (!loc) return fail("error: redirect without location");
-        try {
-          current = new URL(loc, current).href;
-        } catch {
-          return fail("error: invalid redirect location");
-        }
-        continue;
+  }, 50);
+  if (shouldStop()) ac.abort();
+  try {
+    let current = url;
+    for (let hop = 0; hop <= FETCH_REDIRECT_CAP; hop++) {
+      const bad = fetchUrlError(current);
+      if (bad) return fail(bad);
+      let hopHost: string;
+      try {
+        hopHost = new URL(current).hostname;
+      } catch {
+        return fail("error: invalid URL");
       }
-      if (!res.ok) {
-        const detailAccumulator = new BoundedTextAccumulator({ maxBytes: 2 * 1024, direction: "head", marker: "" });
-        let detailSeen = 0;
-        if (res.body) {
-          const reader = res.body.getReader();
+      try {
+        // An already-requested stop fails before DNS, never after it.
+        if (shouldStop()) throw dnsAbortError();
+        const resolved = await resolvedHostError(hopHost, { signal: ac.signal });
+        if (resolved === DNS_LOOKUP_ABORTED || resolved === DNS_LOOKUP_TIMED_OUT) throw dnsAbortError();
+        if (resolved) return fail(resolved);
+        const res = await policyRequest({
+          url: current,
+          method: "GET",
+          headers: { accept: "text/*, application/json, application/xml;q=0.9, */*;q=0.1" },
+          signal: ac.signal,
+        });
+        if (res.status >= 300 && res.status < 400) {
+          res.cancel();
+          const loc = res.headers.get("location");
+          if (!loc) return fail("error: redirect without location");
           try {
-            for (;;) {
-              const next = await reader.read();
-              if (next.done) break;
-              detailAccumulator.push(next.value);
-              detailSeen += next.value.byteLength;
+            current = new URL(loc, current).href;
+          } catch {
+            return fail("error: invalid redirect location");
+          }
+          continue;
+        }
+        if (res.status < 200 || res.status >= 300) {
+          const detailAccumulator = new BoundedTextAccumulator({ maxBytes: 2 * 1024, direction: "head", marker: "" });
+          let detailSeen = 0;
+          try {
+            for await (const chunk of res.body) {
+              const bytes = chunk as Uint8Array;
+              detailAccumulator.push(bytes);
+              detailSeen += bytes.byteLength;
               if (detailSeen > 2 * 1024) {
-                await reader.cancel();
+                res.cancel();
                 break;
               }
             }
-          } finally {
-            reader.releaseLock();
+          } catch (err) {
+            // A decoding or socket error mid-body must still release the
+            // connection; the outer catch maps the failure.
+            res.cancel();
+            throw err;
           }
+          const detailResult = detailAccumulator.finish();
+          const detail = detailResult.text.trim();
+          const errorBody = `error: HTTP ${res.status}${detail ? `: ${detail}` : ""}`;
+          if (detailResult.truncated) {
+            return logicalToolText(errorBody, {
+              maxBytes: FETCH_CAP_BYTES,
+              state: "failed",
+              isError: true,
+              forceMarker: true,
+              marker: continuation,
+              continuation,
+              repro,
+            });
+          }
+          return fail(errorBody);
         }
-        const detailResult = detailAccumulator.finish();
-        const detail = detailResult.text.trim();
-        const errorBody = `error: HTTP ${res.status}${detail ? `: ${detail}` : ""}`;
-        if (detailResult.truncated) {
-          return logicalToolText(errorBody, {
-            maxBytes: FETCH_CAP_BYTES,
-            state: "failed",
-            isError: true,
-            forceMarker: true,
-            marker: continuation,
-            continuation,
-            repro,
-          });
-        }
-        return fail(errorBody);
-      }
-      const body = new BoundedTextAccumulator({ maxBytes: FETCH_CAP_BYTES, direction: "head", marker: "" });
-      let sourceTruncated = false;
-      let bodySeen = 0;
-      if (res.body) {
-        const reader = res.body.getReader();
+        const body = new BoundedTextAccumulator({ maxBytes: FETCH_CAP_BYTES, direction: "head", marker: "" });
+        let sourceTruncated = false;
+        let bodySeen = 0;
         try {
-          for (;;) {
-            const next = await reader.read();
-            if (next.done) break;
-            body.push(next.value);
-            bodySeen += next.value.byteLength;
+          for await (const chunk of res.body) {
+            const bytes = chunk as Uint8Array;
+            body.push(bytes);
+            bodySeen += bytes.byteLength;
             if (bodySeen > FETCH_CAP_BYTES) {
               sourceTruncated = true;
-              await reader.cancel();
+              res.cancel();
               break;
             }
           }
-        } finally {
-          reader.releaseLock();
+        } catch (err) {
+          // A decoding or socket error mid-body must still release the
+          // connection; the outer catch maps the failure.
+          res.cancel();
+          throw err;
         }
+        const bodyResult = body.finish();
+        const result = logicalToolText(bodyResult.text, {
+          maxBytes: FETCH_CAP_BYTES,
+          state: "complete",
+          isError: false,
+          forceMarker: sourceTruncated || bodyResult.truncated,
+          marker: continuation,
+          continuation: sourceTruncated || bodyResult.truncated ? continuation : null,
+          repro,
+        });
+        return Object.freeze({
+          ...result,
+          inputBytes: bodyResult.inputBytes,
+          retainedBytes: bodyResult.retainedBytes,
+          omittedBytes: bodyResult.omittedBytes,
+          truncated: result.truncated || sourceTruncated || bodyResult.truncated,
+        });
+      } catch (err) {
+        const stopRequested = shouldStop();
+        const msg = stopCallbackFailed
+          ? "error: stop callback failed"
+          : (err as Error).name === "AbortError" || /aborted/i.test((err as Error).message)
+          ? stopRequested ? "error: interrupted" : "error: timed out"
+          : `error: ${(err as Error).message}`;
+        return fail(msg, stopCallbackFailed ? "failed" : stopRequested ? "interrupted" : /timed out/i.test(msg) ? "timeout" : "failed");
       }
-      const bodyResult = body.finish();
-      const result = logicalToolText(bodyResult.text, {
-        maxBytes: FETCH_CAP_BYTES,
-        state: "complete",
-        isError: false,
-        forceMarker: sourceTruncated || bodyResult.truncated,
-        marker: continuation,
-        continuation: sourceTruncated || bodyResult.truncated ? continuation : null,
-        repro,
-      });
-      return Object.freeze({
-        ...result,
-        inputBytes: bodyResult.inputBytes,
-        retainedBytes: bodyResult.retainedBytes,
-        omittedBytes: bodyResult.omittedBytes,
-        truncated: result.truncated || sourceTruncated || bodyResult.truncated,
-      });
-    } catch (err) {
-      const stopRequested = shouldStop();
-      const msg = stopCallbackFailed
-        ? "error: stop callback failed"
-        : (err as Error).name === "AbortError" || /aborted/i.test((err as Error).message)
-        ? stopRequested ? "error: interrupted" : "error: timed out"
-        : `error: ${(err as Error).message}`;
-      return fail(msg, stopCallbackFailed ? "failed" : stopRequested ? "interrupted" : /timed out/i.test(msg) ? "timeout" : "failed");
-    } finally {
-      clearTimeout(timer);
-      clearInterval(poll);
     }
+    return fail("error: too many redirects");
+  } finally {
+    clearTimeout(timer);
+    clearInterval(poll);
   }
-  return fail("error: too many redirects");
 }
 
 let permissionMode: PermissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
@@ -1826,6 +1889,11 @@ function stopSubagentApprovalTimer(): void {
  * parents (no picker surface) resolve to a fast deny ack instead of
  * making the child hang the full timeout.
  */
+/** A picker prompt is only valid for a live run; settled runs must not be asked about. */
+export function isLiveSubagentRun(run: { state: string } | undefined): boolean {
+  return run?.state === "active";
+}
+
 function pollSubagentApprovals(): void {
   if (!eventsDir || !terminalId || subagentRegistry.activeRuns().length === 0) return;
   let names: string[];
@@ -1845,7 +1913,7 @@ function pollSubagentApprovals(): void {
     const run = subagentRegistry.get(runId);
     const req = readSubagentApprovalRequest(join(eventsDir, name));
     const fresh = req.ok && Date.now() - req.file.createdAt < timeout;
-    if (!run || run.state !== "active" || !fresh) {
+    if (!isLiveSubagentRun(run) || !fresh) {
       try {
         rmSync(join(eventsDir, name));
       } catch {
@@ -1874,6 +1942,19 @@ function pollSubagentApprovals(): void {
       // outlived the child's wait. Asking about a dead request wastes
       // attention and writes an orphan ack.
       if (Date.now() - createdAt >= timeout) {
+        try {
+          rmSync(join(eventsDir, name));
+        } catch {
+          /* Dead letter stays for the startup sweep. */
+        }
+        pendingSubagentApprovals.delete(key);
+        return false;
+      }
+      // Re-check liveness too: the run may have settled while queued. A
+      // picker for a dead run would write an orphan ack for a child that is
+      // no longer waiting.
+      const live = subagentRegistry.get(runId);
+      if (!isLiveSubagentRun(live)) {
         try {
           rmSync(join(eventsDir, name));
         } catch {
@@ -1938,7 +2019,12 @@ async function confirmProtectedMutationNow(inputPath: string | undefined): Promi
   // A headless child enforces its parent's Mine marks: user-owned files stay
   // off-limits across the process boundary with no channel to widen them.
   const policyTid = activeSubagent ? activeSubagent.task.parentTerminalId : terminalId;
-  if (!readProtectedPaths(eventsDir, policyTid).has(target) || protectedTaskApprovals.has(target)) return true;
+  if (protectedTaskApprovals.has(target)) return true;
+  const protectedPaths = readProtectedPaths(eventsDir, policyTid);
+  // Fail closed: an unreadable policy denies the mutation (#218). Only a
+  // missing policy file reads as empty (allowed).
+  if (protectedPaths === null) return false;
+  if (!protectedPaths.has(target)) return true;
   const label = relative(canonicalCwd, target) || target;
   if (activeSubagent && !surface?.active()) return requestParentApproval("protected", label);
   if (!surface?.active()) return false;
@@ -1961,24 +2047,25 @@ async function confirmProtectedMutation(inputPath: string | undefined): Promise<
 }
 
 async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolOutcome> {
-  if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
-  if (!clientTools.some((tool) => tool.name === use.name)) return done(use, `error: unknown tool ${use.name}`, true);
+  const notExecuted = (text: string): ToolOutcome => ({ ...done(use, text, true), executed: false });
+  if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
+  if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
     return done(use, got);
   }
   if (use.name === "write_file") {
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
-      if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
-      if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
+      if (!(await confirmProtectedMutation(use.input.path))) return notExecuted("error: protected file edit denied");
+      if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
       const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
       return done(use, got.content, got.isError);
     });
   }
   if (use.name === "edit") {
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
-      if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
-      if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
+      if (!(await confirmProtectedMutation(use.input.path))) return notExecuted("error: protected file edit denied");
+      if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
       const got = editProjectFile(
         canonicalCwd,
         use.input.path,
@@ -2006,8 +2093,8 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   }
   if (use.name === "bash") {
     const command = use.input.command ?? "";
-    if (!(await confirmBash(command))) return done(use, "error: bash denied", true);
-    if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
+    if (!(await confirmBash(command))) return notExecuted("error: bash denied");
+    if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
     const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
     return done(use, got);
   }
@@ -2314,8 +2401,18 @@ export function stampHistoryCache(
     const blocks = m.content as Array<Record<string, unknown>>;
     for (let j = blocks.length - 1; j >= 0; j--) {
       const b = blocks[j]!;
-      if (lookback <= 0) return messages;
-      lookback--;
+      const bType = typeof b.type === "string" ? b.type : "";
+      // Anthropic merges a run of consecutive tool_use blocks (and likewise
+      // tool_result) into one lookback position, so only the run's far edge
+      // consumes the budget. See "20-block lookback window" in the prompt
+      // caching docs: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+      const prev = j > 0 ? blocks[j - 1] : null;
+      const prevType = prev && typeof prev.type === "string" ? prev.type : "";
+      const continuesRun = (bType === "tool_use" || bType === "tool_result") && prevType === bType;
+      if (!continuesRun) {
+        if (lookback <= 0) return messages;
+        lookback--;
+      }
       if (typeof b.type !== "string" || !HISTORY_CACHE_BLOCKS.has(b.type)) continue;
       if (Object.prototype.hasOwnProperty.call(b, "cache_control")) return messages;
       const next = messages.slice();
@@ -2436,11 +2533,6 @@ interface Message {
 }
 
 const history: Message[] = [];
-
-export function placeStreamBlock<T>(slots: Array<T | undefined>, index: unknown, block: T): void {
-  if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index > 10_000) return;
-  slots[index] = block;
-}
 
 export function compactStreamBlocks<T>(slots: Array<T | undefined>): T[] {
   return slots.filter((b): b is T => b !== undefined);
@@ -3051,7 +3143,7 @@ async function providerPost(
       if (nextTurnState) codexTurnState = nextTurnState;
     }
     if (res.status === 401) {
-      await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES);
+      await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES });
       if (auth.kind === "oauth" && !replayed) {
         await onRetry?.({ status: 401, kind: "oauth-refresh", retryCount: retries + 1 });
         const refreshed = await refreshOauth(providerId, signal);
@@ -3063,7 +3155,7 @@ async function providerPost(
     }
     const wait = retryAfter(res.status, res.headers, retries);
     if (wait != null) {
-      await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES);
+      await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES });
       retries++;
       await onRetry?.({ status: res.status, kind: "retryable-status", retryCount: retries });
       await sleep(wait, signal);
@@ -3093,7 +3185,14 @@ async function rotateProviderRetryAttempt(
     toolNames: [],
     usage: null,
     usd: null,
-    cost: traceCostForUsage(null, attempt.provider, attempt.model, attempt.role, cache),
+    cost: traceCostForUsage(
+      null,
+      attempt.provider,
+      attempt.model,
+      // Critic reviews ride the cheap lane; bill them on the summary scope.
+      attempt.role === "critic" ? "summary" : attempt.role,
+      cache,
+    ),
     ttftMs: null,
     turnMs: Math.max(0, ended - attempt.started),
     revisions,
@@ -3107,6 +3206,8 @@ async function rotateProviderRetryAttempt(
     retryOfAttemptId: attempt.attemptId,
     fallbackReason: reason,
     retryCount: event.retryCount,
+    provider: attempt.provider,
+    model: attempt.model,
   });
 }
 
@@ -3148,53 +3249,8 @@ export function providerReportedUsd(usage: Pick<Usage, "reportedUsd"> | null): n
 const PROVIDER_BODY_CAP_BYTES = 256 * 1024;
 const PROVIDER_ERROR_BODY_CAP_BYTES = 64 * 1024;
 
-/** Read a response body through the shared UTF-8 bounded accumulator. */
-export async function readBoundedHttpBody(
-  res: Response,
-  maxBytes = PROVIDER_BODY_CAP_BYTES,
-): Promise<BoundedText> {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
-    throw new Error("response body bound must be a non-negative safe integer");
-  }
-  const marker = "[response body truncated]";
-  if (!res.body) {
-    const declared = Number(res.headers.get("content-length")?.trim() ?? "");
-    if (Number.isFinite(declared) && declared > maxBytes) {
-      return boundedToolResult("", {
-        maxBytes,
-        marker: "[response body exceeds bound]",
-        state: "failed",
-        isError: true,
-      });
-    }
-    return boundedToolResult("", { maxBytes, marker, state: "complete", isError: false });
-  }
-  const accumulator = new BoundedTextAccumulator({ maxBytes, marker });
-  const reader = res.body.getReader();
-  let sourceBytes = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      sourceBytes += value.byteLength;
-      accumulator.push(value);
-      if (sourceBytes > maxBytes) {
-        try {
-          await reader.cancel();
-        } catch {
-          /* The body is already bounded; cancellation is best effort. */
-        }
-        break;
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return accumulator.finish("complete");
-}
-
 async function readBoundedJson(res: Response, maxBytes = PROVIDER_BODY_CAP_BYTES): Promise<unknown> {
-  const body = await readBoundedHttpBody(res, maxBytes);
+  const body = await readBoundedResponseBody(res, { maxBytes });
   if (body.state !== "complete" || body.truncated) {
     throw new Error(`response JSON exceeded ${maxBytes} bytes`);
   }
@@ -3272,7 +3328,7 @@ function failProviderStream(
 }
 
 async function apiFailure(res: Response, hint = ""): Promise<never> {
-  const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
+  const detail = (await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES })).text.slice(0, 300);
   throw new Error(`API ${res.status}${detail ? `: ${detail}` : ""}${hint}`);
 }
 
@@ -3488,8 +3544,9 @@ async function completeText(
   system: string,
   prompt: string,
   signal: AbortSignal | undefined,
+  opts?: { traceRole?: "summary" | "critic" },
 ): Promise<{ text: string; usage: Usage | null; ttftMs: number | null; cache: TraceCacheDiagnostics | null; traceAttempt: TraceAttemptState | null }> {
-  let attempt = beginTraceAttempt("summary");
+  let attempt = beginTraceAttempt(opts?.traceRole ?? "summary", { provider: providerId, model });
   let summaryCache: TraceCacheDiagnostics | null = null;
   const onRetry: ProviderRetryHook = async (event, cache) => {
     summaryCache = cache ?? summaryCache;
@@ -3657,7 +3714,7 @@ async function callModel(
   let optionalCacheFallbackUsed = false;
   let res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true, cacheIdentity, onRetry);
   if (!res.ok || !res.body) {
-    const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
+    const detail = (await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES })).text.slice(0, 300);
     // Check the cheap preconditions first: the full-body serialization below
     // only runs when this is actually a 400 about cache fields.
     const fallbackCandidate = res.status === 400 && /prompt_cache_(?:breakpoint|options)/i.test(detail);
@@ -3722,7 +3779,7 @@ async function callModel(
     }
   }
   if (!res.ok || !res.body) {
-    const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
+    const detail = (await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES })).text.slice(0, 300);
     throw new Error(`API ${res.status}: ${detail}`);
   }
 
@@ -4307,7 +4364,7 @@ async function loadRates(): Promise<boolean> {
   try {
     const res = await fetch(RATE_CATALOG_URL, { signal: controller.signal });
     if (!res.ok) return false;
-    const body = await readBoundedHttpBody(res, RATE_CATALOG_BODY_CAP_BYTES);
+    const body = await readBoundedResponseBody(res, { maxBytes: RATE_CATALOG_BODY_CAP_BYTES });
     if (body.state !== "complete" || body.truncated) return false;
     let parsed: unknown;
     try {
@@ -4621,6 +4678,20 @@ function lastAssistantText(): string {
  * line on stdout, and exit. Stdout keeps the full `-p`-style transcript;
  * the host takes the LAST framed line, so model text cannot collide with it.
  */
+
+/**
+ * Child permission mode (#206): the validated task file carries ask/dangerous
+ * faithfully; `always` additionally requires the host bridge
+ * (TERMINA_CORE_APPROVE=all), so a forged task file alone cannot grant it.
+ */
+export function resolveSubagentPermissionMode(
+  taskMode: SubagentPermissionMode,
+  approveEnv: string | undefined,
+): PermissionMode {
+  if (taskMode === "always") return approveEnv === "all" ? "always" : "ask";
+  return taskMode;
+}
+
 async function runSubagentTask(taskPath: string): Promise<never> {
   const fail = async (message: string): Promise<never> => {
     process.stderr.write(`agent-core: subagent task failed: ${message}\n`);
@@ -4632,12 +4703,11 @@ async function runSubagentTask(taskPath: string): Promise<never> {
     process.exit(2);
   };
   if (!taskPath) await fail("missing task file path");
+  const taskRead = readBoundedRegularFile(taskPath, MAX_SUBAGENT_FILE_BYTES);
   let raw: string;
-  try {
-    raw = readFileSync(taskPath, "utf8");
-  } catch (err) {
-    await fail(`cannot read task file: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  if ("error" in taskRead) await fail(`cannot read task file: ${taskRead.error}`);
+  else if (taskRead.truncated) await fail("task file exceeds its budget");
+  else raw = taskRead.text;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw!);
@@ -4649,6 +4719,7 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   const task = (checked as { ok: true; file: SubagentTaskFile }).file;
   route = { provider: task.provider, model: task.model };
   effortWanted = task.effort;
+  permissionMode = resolveSubagentPermissionMode(task.permissionMode, process.env.TERMINA_CORE_APPROVE);
   if (!process.env.TERMINA_CORE_SUMMARY_MODEL) {
     summaryRoute = parseModelRef(DEFAULT_MODELS[task.provider].summary, task.provider);
   }
@@ -4698,6 +4769,14 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   process.stdout.write(`${formatSubagentResultFrame(frame)}\n`);
   await shutdownAgentCore({ reason: "subagent" });
   process.exit(frame.ok ? 0 : 1);
+}
+
+/** Images carried into one run: pending claims first, then startup extras. */
+export const RUN_IMAGE_CAP = 4;
+
+/** Images dropped by the run cap (#222): pending claims come first, so a full claim evicts startup extras. */
+export function droppedRunImageCount(loadedCount: number, extrasCount: number): number {
+  return Math.max(0, loadedCount + extrasCount - RUN_IMAGE_CAP);
 }
 
 async function runPrompt(prompt: string, extraImages: Array<{ name: string; mediaType: string }> = []): Promise<void> {
@@ -4798,7 +4877,13 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   const extras = extraImages
     .map((ref) => loadImageFromRoots(ref, imageRoots))
     .filter((img): img is NonNullable<typeof img> => img !== null);
-  const allImages = [...loaded, ...extras].slice(0, 4);
+  const allImages = [...loaded, ...extras].slice(0, RUN_IMAGE_CAP);
+  const droppedImages = droppedRunImageCount(loaded.length, extras.length);
+  if (droppedImages > 0) {
+    // Pending claims come first, so a full claim silently evicts structured
+    // startup images. Say so instead of dropping them without a trace.
+    out(`(note: dropped ${droppedImages} image${droppedImages === 1 ? "" : "s"} over the ${RUN_IMAGE_CAP}-image cap)\n`);
+  }
   const persistedImages = persistLoadedImages(sessionFile, allImages);
   if (!persistedImages.ok) {
     cancelPreflight();
@@ -4912,6 +4997,12 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let taskFailure: string | null = null;
   let taskOutcomeStatus = "success";
   let toolErrorObserved = false;
+  const gateObservations: GateToolObservation[] = [];
+  let gateNudged = false;
+  let lastAssistantText = "";
+  let criticRounds = 0;
+  let criticExtraRoundUsed = false;
+  let criticVerdict: TraceCriticVerdict | null = null;
   let retriedOverflow = false;
   let retriedProviderTermination = false;
   let terminatedDiagnostics: string | null = null;
@@ -5053,7 +5144,9 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       assistantMsg.sseq = persist({ type: "message", message: { role: "assistant", content: result.blocks } });
       history.push(assistantMsg);
       syncIndicators();
-      const plan = planTextIfChanged(visibleAssistantText(result.blocks), lastPlanText);
+      const assistantText = visibleAssistantText(result.blocks);
+      lastAssistantText = assistantText;
+      const plan = planTextIfChanged(assistantText, lastPlanText);
       if (plan) {
         lastPlanText = plan;
         sidecar.logEvent({ t: "plan", text: plan });
@@ -5126,6 +5219,105 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           resumePaused = true;
           continue;
         }
+        if (!interrupted && taskOutcomeStatus === "success") {
+          const verdict = settleGateVerdict(
+            { observations: gateObservations, finalText: lastAssistantText },
+            gateNudged,
+          );
+          if (verdict.decision === "nudge") {
+            gateNudged = true;
+            pushMessage("user", verdict.nudge);
+            out(`\n(settle gate: ${verdict.detail})\n`);
+            continue;
+          }
+          if (verdict.decision === "fail") {
+            taskOutcomeStatus = "failure";
+            taskFailure = `settle gate: ${verdict.detail}`;
+            out(`\n(settle gate: ${verdict.detail})\n`);
+            break;
+          }
+          // Critic pass (#124): gate-green, non-trivial runs get one reviewer
+          // call over the request + tool-observed changes + report + checks.
+          // A fail verdict buys exactly one more work round; the second
+          // verdict is recorded but never triggers another round. Check
+          // observations accumulate, so an extra round cannot re-trip the
+          // gate on already-observed checks (stale checks are the critic's
+          // call to flag, not the gate's).
+          const editCount = gateEditCount(gateObservations);
+          if (
+            needsCriticReview({ editCount, modelTurns }) &&
+            (criticRounds === 0 || (criticRounds === 1 && criticExtraRoundUsed))
+          ) {
+            const criticStarted = Date.now();
+            currentAbort ??= new AbortController();
+            const criticPrompt = buildCriticPrompt({
+              request: taggedPrompt,
+              changes: summarizeChangesForCritic(gateObservations),
+              report: lastAssistantText,
+              checks: summarizeCheckOutcomes(gateObservations),
+            });
+            let folded: Awaited<ReturnType<typeof completeText>> | null = null;
+            try {
+              try {
+                folded = await completeText(
+                  summaryRoute.provider,
+                  summaryRoute.model,
+                  CRITIC_SYSTEM_PROMPT,
+                  criticPrompt,
+                  currentAbort.signal,
+                  { traceRole: "critic" },
+                );
+              } catch (err) {
+                // Cheap-lane credentials can lapse while the main route still
+                // works; retry once on the current model, mirroring summarize.
+                if (summaryRoute.provider === route.provider && summaryRoute.model === route.model) throw err;
+                folded = await completeText(
+                  route.provider,
+                  route.model,
+                  CRITIC_SYSTEM_PROMPT,
+                  criticPrompt,
+                  currentAbort.signal,
+                  { traceRole: "critic" },
+                );
+              }
+            } catch (err) {
+              // completeText owns provider-error persistence; the run still
+              // settles. A dead reviewer must not burn a work round.
+              criticRounds += 1;
+              const reason = sanitizeProviderError(err instanceof Error ? err.message : String(err)) ?? "unknown error";
+              criticVerdict = { verdict: "pass", rationale: `critic unavailable: ${reason.slice(0, 200)}`, rounds: criticRounds };
+              if (!interrupted) out(`\n(critic review failed: ${(err as Error).message})\n`);
+            }
+            if (folded) {
+              criticRounds += 1;
+              if (folded.usage) {
+                accumulateUsage(folded.usage);
+                lastUsd = null;
+                syncIndicators();
+              }
+              await writeCriticTrace({
+                status: "ok",
+                usage: folded.usage,
+                started: criticStarted,
+                attempt: folded.traceAttempt,
+                cache: folded.cache,
+                ttftMs: folded.ttftMs,
+              });
+              const parsed = parseCriticVerdict(folded.text);
+              criticVerdict = { verdict: parsed.verdict, rationale: parsed.rationale, rounds: criticRounds };
+              if (parsed.verdict === "fail" && !criticExtraRoundUsed) {
+                criticExtraRoundUsed = true;
+                pushMessage(
+                  "user",
+                  `Critic review found a problem with this change:\n${parsed.rationale ?? "(no rationale given)"}\n` +
+                    "Address the critique with minimal additional changes, then finish.",
+                );
+                out("\n(critic: change needs work — one more round)\n");
+                continue;
+              }
+            }
+          }
+        }
         break;
       }
       const outcomes: ToolOutcome[] = [];
@@ -5166,6 +5358,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           const item = settled[ci]!;
           if (item.status === "fulfilled") {
             const outcome = item.value;
+            const entry = wave[ci]!;
+            if (!inputErrors[entry.index] && entry.duplicateOf === undefined) {
+              recordGateObservation(gateObservations, chunk[ci]!, outcome);
+            }
             if (outcome.isError || (outcome.bounded?.state !== undefined && outcome.bounded.state !== "complete")) {
               toolErrorObserved = true;
             }
@@ -5286,6 +5482,15 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     taskOutcomeStatus = "failure";
     taskFailure ??= "tool error";
   }
+  if (!interrupted && !storageFailure && taskOutcomeStatus === "success") {
+    // Final enforcement for loop exits that bypassed the in-loop nudge
+    // (e.g. the subagent turn-budget break). No grace turn remains here.
+    const verdict = settleGateVerdict({ observations: gateObservations, finalText: lastAssistantText }, true);
+    if (verdict.decision !== "pass") {
+      taskOutcomeStatus = "failure";
+      taskFailure = `settle gate: ${verdict.detail}`;
+    }
+  }
   sidecar.logEvent({
     t: "agent_settled",
     runId: traceTask.runId,
@@ -5311,7 +5516,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       error: ack && typeof ack.error === "string" ? ack.error : null,
     });
   }
-  await settleTraceTask(taskOutcomeStatus);
+  await settleTraceTask(taskOutcomeStatus, criticVerdict);
   // Keep the engine busy until checkpointing and trace settlement finish. A
   // second prompt must not replace `activeTraceTask` while this task's
   // task-settled record is still being written.
@@ -5375,6 +5580,7 @@ async function resumeSession(): Promise<SessionResult> {
 async function resumeSessionBody(overrides?: {
   sessionFile?: string | null;
   openWriter?: () => void;
+  testOnlyMaxBundleBytes?: number;
 }): Promise<SessionResult> {
   const file = overrides?.sessionFile !== undefined ? overrides.sessionFile : sessionFile;
   const open = overrides?.openWriter ?? openSessionWriter;
@@ -5387,8 +5593,20 @@ async function resumeSessionBody(overrides?: {
     streamPrepared = false;
     return { ok: true };
   }
-  const replayed = await replaySessionBundle(file);
+  const replayed = await replaySessionBundle(
+    file,
+    overrides?.testOnlyMaxBundleBytes === undefined
+      ? undefined
+      : { testOnlyMaxBundleBytes: overrides.testOnlyMaxBundleBytes },
+  );
   if (!replayed.ok) {
+    if (replayed.error.includes("MAX_SESSION_BUNDLE_BYTES")) {
+      // Capacity exhaustion is not corruption (#161): keep the acknowledged
+      // bundle in place so nothing is lost, and let /resume retry. Starting
+      // a fresh session archives this bundle aside for later inspection.
+      abortResumeKeepBundle(`(resume failed: ${replayed.error}; the bundle is kept — start a new session to archive it)`);
+      return { ok: false, error: replayed.error };
+    }
     abortResume(`(resume failed: ${replayed.error})`, file);
     return { ok: false, error: replayed.error };
   }
@@ -5447,6 +5665,7 @@ async function resumeSessionBody(overrides?: {
 export type ResumeTestOverrides = {
   sessionFile?: string | null;
   openWriter?: () => void;
+  testOnlyMaxBundleBytes?: number;
 };
 
 /** Test seam: drive the resume path against a temp bundle with an injected writer. */
@@ -5457,6 +5676,33 @@ export async function testOnlyResumeSessionBody(overrides?: ResumeTestOverrides)
 /** Test seam: inspect the resume view so tests can confirm /resume can retry. */
 export function testOnlyResumeState(): { historyLength: number; storageSeq: number; streamPrepared: boolean } {
   return { historyLength: history.length, storageSeq, streamPrepared };
+}
+
+/** Live-view reset shared by /clear success and its writer-open failure path. */
+function resetLiveSessionState(): void {
+  storageSeq = 0;
+  history.length = 0;
+  lastHandoff = null;
+  clearSubagentApprovals();
+  rotateCacheSession();
+  sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
+  lastUsd = null;
+  permissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
+  postRevision = false;
+  revisions = 0;
+  revisionKinds = [];
+}
+
+/** Test seam: fail the next session-writer open (covers /clear recovery). */
+let testOnlyOpenSessionWriterOverride: (() => void) | null = null;
+
+export function testOnlySetOpenSessionWriterOverride(fn: (() => void) | null): void {
+  testOnlyOpenSessionWriterOverride = fn;
+}
+
+/** Test seam: drive one input line through the command router. */
+export function testOnlyDispatchLine(line: string): void {
+  dispatchLine(line);
 }
 
 // ---- terminal surface ----
@@ -6208,26 +6454,22 @@ function dispatchLine(line: string): void {
         showPrompt();
         return;
       }
-      storageSeq = 0;
       try {
         openSessionWriter();
       } catch (err) {
-        out(`(could not start a fresh session: ${err instanceof Error ? err.message : String(err)})\n`);
+        // The old view is archived, but there is no live writer: reset to a
+        // coherent not-prepared state instead of keeping orphaned history
+        // with sequence 0. The next prompt re-prepares (retrying the open)
+        // rather than running writerless or reusing sequence numbers.
+        resetLiveSessionState();
+        streamPrepared = false;
+        syncIndicators();
+        out(`(could not start a fresh session: ${err instanceof Error ? err.message : String(err)}; retry with /clear or send a prompt)\n`);
         showPrompt();
         return;
       }
     }
-    storageSeq = 0;
-    history.length = 0;
-    lastHandoff = null;
-    clearSubagentApprovals();
-    rotateCacheSession();
-    sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
-    lastUsd = null;
-    permissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
-    postRevision = false;
-    revisions = 0;
-    revisionKinds = [];
+    resetLiveSessionState();
     streamPrepared = true;
     syncIndicators();
     out("(session cleared)\n");

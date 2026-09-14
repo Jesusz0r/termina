@@ -24,7 +24,11 @@ export const LINK_INDEX_FILE = "trace-index.json";
 
 export const MAX_ID_CHARS = 512;
 
+/** Max code points per trace text field. */
 export const MAX_STRING_CHARS = 16_384;
+
+/** Max entries in one cache marker-position list. */
+export const MAX_CACHE_MARKER_POSITIONS = 256;
 
 export const MAX_ARRAY_ITEMS = 4_096;
 
@@ -39,7 +43,7 @@ export const MAX_RECLAIM_TARGETS = 256;
 export const MAX_HOST_CONTEXT_FILES = 16;
 
 
-export type TraceRole = "main" | "summary";
+export type TraceRole = "main" | "summary" | "critic";
 
 
 export interface TraceUsage {
@@ -310,6 +314,14 @@ export interface TraceTaskOutcome {
 }
 
 
+/** Pre-settle reviewer verdict (#124). Null when the run skipped review. */
+export interface TraceCriticVerdict {
+  readonly verdict: "pass" | "fail";
+  readonly rationale: string | null;
+  readonly rounds: number;
+}
+
+
 export interface TraceTaskSettled {
   readonly schemaVersion: typeof TRACE_SCHEMA_VERSION;
   readonly recordType: "task-settled";
@@ -321,6 +333,7 @@ export interface TraceTaskSettled {
   readonly attemptIds: readonly string[];
   readonly summaryAttemptIds: readonly string[];
   readonly outcome: TraceTaskOutcome;
+  readonly critic: TraceCriticVerdict | null;
 }
 
 
@@ -458,6 +471,11 @@ export interface TraceTaskSettledInput {
     readonly status?: unknown;
     readonly correctness?: unknown;
     readonly criteriaHash?: unknown;
+  } | null;
+  readonly critic?: {
+    readonly verdict?: unknown;
+    readonly rationale?: unknown;
+    readonly rounds?: unknown;
   } | null;
 }
 
