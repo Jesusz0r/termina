@@ -4,6 +4,7 @@
  * holder; lifecycle and IPC stay in main.
  */
 import { PtyTerminal } from "./pty-terminal.js";
+import { BracketedPasteModeTracker } from "./pty-bracketed-paste.js";
 import type { RunRecord } from "./worldlines/index.js";
 import type {
   ModifiedFile,
@@ -95,6 +96,17 @@ export class AgentTerminalInstance {
   pendingPrompt: { file: string; text: string; images: number } | null = null;
   /** The open run record of this terminal, or null. */
   currentRun: RunRecord | null = null;
+  /** DECSET 2004 as last seen on this PTY's output. Restored on renderer attach. */
+  private readonly bracketedPaste = new BracketedPasteModeTracker();
+
+  get bracketedPasteMode(): boolean {
+    return this.bracketedPaste.enabled;
+  }
+
+  /** Advance tracked DECSET 2004 from one successfully queued PTY quantum. */
+  notePtyOutput(data: string): void {
+    this.bracketedPaste.feed(data);
+  }
 
   constructor(
     id: string,

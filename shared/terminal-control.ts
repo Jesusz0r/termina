@@ -2,6 +2,9 @@
 
 export const SHOW_THINKING_CSI = "\x1b[?9001h";
 export const HIDE_THINKING_CSI = "\x1b[?9001l";
+/** Bracketed paste (DECSET 2004). Written to xterm on attach; never forged at paste. */
+export const BRACKETED_PASTE_ENABLE_CSI = "\x1b[?2004h";
+export const BRACKETED_PASTE_DISABLE_CSI = "\x1b[?2004l";
 const HIDE_THINKING_ARG = "--hide-thinking";
 
 export function thinkingStartupArgs(showThinking: boolean): string[] {

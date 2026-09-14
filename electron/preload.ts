@@ -53,6 +53,7 @@ const bridge: TerminaBridge = {
   // ---- push events ----
   onPtyData: (cb) => bindPushEvent("pty:data", cb),
   onPtyExit: (cb) => bindPushEvent("pty:exit", cb),
+  onPtyModes: (cb) => bindPushEvent("pty:modes", cb),
   onMenuCommand: (cb) => bindPushEvent("menu:command", cb),
   onToolTarget: (cb) => bindPushEvent("tool:target", cb),
   onFileChanged: (cb) => bindPushEvent("file:changed", cb),

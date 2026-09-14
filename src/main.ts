@@ -2395,6 +2395,12 @@ function renderAcceptedPtyRecords(
   }
 }
 
+window.termina.onPtyModes(({ id, generation, bracketedPasteMode }) => {
+  const pane = panes.get(id);
+  if (!pane || pane.error || pane.generation !== generation) return;
+  pane.view.setBracketedPasteMode(bracketedPasteMode);
+});
+
 window.termina.onPtyData(({ id, generation, windowGeneration, rendererGeneration, sequence, data }) => {
   const pane = panes.get(id);
   if (!pane || pane.error || pane.generation !== generation) return;
