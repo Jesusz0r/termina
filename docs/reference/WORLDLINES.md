@@ -1457,8 +1457,9 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
   refs, config, hooks, and worktree metadata while preserving read-only object
   access.
 - Block signals and process inspection outside the candidate group.
-- Deny candidate network except the active model provider and deny all Verify
-  network without an explicit evidence grant.
+- Assert live candidates keep network access for the model provider (a
+  per-provider allowlist is not expressible in the profile language) and
+  deny all evidence and candidate-Verify network.
 - Give A and B independent Git indexes, refs, runtime files, homes, caches,
   sessions, and temporary directories.
 - Enforce memory, CPU time, file-size, process-count, output, and free-space
