@@ -3723,6 +3723,8 @@ class TerminaApp {
   ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     const owner = this.terminals.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
+    const dispatchOwnerId = this.projectOfTerminal(ownerId)?.id;
+    if (this.disposed || this.projectIsSwitching(dispatchOwnerId)) return { ok: false, error: "the project is changing" };
     const rendererTarget = this.captureRendererSendTarget();
     if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — ask the agent for a plan first" };
     const ownerWs = this.workspaceOfTerminal(owner);
@@ -3758,6 +3760,11 @@ class TerminaApp {
       } finally {
         this.releaseWriteLease(ownerWs.id, dispatchWriter);
       }
+    }
+    // The pick and flush above await: re-verify the project did not start
+    // closing before spawning workers into it.
+    if (this.disposed || this.projectIsSwitching(this.projectOfTerminal(ownerId)?.id)) {
+      return { ok: false, error: "the project is changing" };
     }
     const jobs = chosen.map((task) => ({ task, id: this.allocateTerminalId() }));
     try {
@@ -7580,6 +7587,14 @@ class TerminaApp {
         }
       }
       try {
+        // A New Terminal landing after closeProjectOnce snapshots its ids is
+        // never closed and runs degraded: refuse creation into a switching
+        // project. Restore/promotion/candidate creation bypass this IPC gate
+        // internally and legitimately run while switching.
+        const createTarget = (projectId ? this.projects.get(projectId) : undefined) ?? this.project();
+        if (this.disposed || (createTarget && this.projectIsSwitching(createTarget.id))) {
+          return { ok: false, error: "the project is changing" };
+        }
         const t = await this.createTerminal(undefined, { type, shell, engine, fromTerminalId, projectId });
         return { ok: true, id: t.id };
       } catch (err) {
