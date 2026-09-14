@@ -11,6 +11,7 @@ import { build } from "esbuild";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { disposeSpikeResources } from "./spikes/owned-fixtures.ts";
 
 const rawArgs = process.argv.slice(2);
 const args = rawArgs[0] === "--" ? rawArgs.slice(1) : rawArgs;
@@ -27,6 +28,25 @@ const log = (msg) => {
   lines.push(String(msg));
   console.log(msg);
 };
+
+// Spikes register fixture roots and raw children in the shared teardown
+// registry; the runner owns disposal on every exit path, including
+// interruption, so a failed spike leaks neither.
+let teardownDone = false;
+const teardownOwnedSpikeResources = async () => {
+  if (teardownDone) return;
+  teardownDone = true;
+  try {
+    await disposeSpikeResources();
+  } catch (error) {
+    console.error(`spike teardown failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    void teardownOwnedSpikeResources().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  });
+}
 
 try {
   await build({
@@ -50,6 +70,7 @@ try {
   process.exitCode = 1;
 } finally {
   if (saveTo) writeFileSync(saveTo, lines.join("\n") + "\n", "utf8");
+  await teardownOwnedSpikeResources();
   rmSync(join(outfile, ".."), { recursive: true, force: true });
 }
 // Exit explicitly: the snapshot core child would keep the loop alive.

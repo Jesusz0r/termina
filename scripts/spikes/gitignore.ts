@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { matchGitignore, parseGitignore, ProjectWatcher, type GitignoreRules } from "../../electron/watcher.js";
+import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,7 +81,7 @@ export default async function run(log: (msg: string) => void) {
 
   // ---- watcher lifecycle ----
 
-  const stoppedWork = mkdtempSync(join(tmpdir(), "termina-gitignore-stop-"));
+  const stoppedWork = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "termina-gitignore-stop-")));
   writeFileSync(join(stoppedWork, "seed.txt"), "seed");
   const stoppedWatcher = new ProjectWatcher(stoppedWork);
   stoppedWatcher.start();
@@ -91,7 +92,7 @@ export default async function run(log: (msg: string) => void) {
 
   // ---- live watcher ----
 
-  const work = mkdtempSync(join(tmpdir(), "termina-gitignore-"));
+  const work = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "termina-gitignore-")));
   const watcher = new ProjectWatcher(work);
   const seen = new Set<string>();
   watcher.onChange = (change) => { seen.add(change.relPath); };
