@@ -81,6 +81,7 @@ const PASS_THROUGH: AllowedPassThrough[] = [
   { file: "src/main.ts", method: "pasteTerminal", reason: "pty-view try/catch" },
   { file: "src/main.ts", method: "dropTerminalFiles", reason: "pty-view try/catch" },
   { file: "src/main.ts", method: "detectTest", reason: "worldline-project-state catch" },
+  { file: "src/main.ts", method: "getPreferences", reason: "loadPreferencesWithRetry try/catch" },
   { file: "src/editor.ts", method: "openFile", reason: "throws to catching callers" },
 ];
 
@@ -147,6 +148,10 @@ describe("renderer IPC rejection handling (refs #217 item 1)", () => {
     expect(renderer).toContain("void ensureProjectEditor(view).openFile(p.path, { preview: true, owner }).catch((err) => {");
     expect(renderer).toContain("void ensureProjectEditor(view).openFile(target.path, { preview: true, owner }).catch((err) => {");
     expect(renderer).toContain("await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });");
+
+    const prefsBoot = readFileSync(new URL("../../../src/preferences-boot.ts", import.meta.url), "utf8");
+    expect(prefsBoot).toContain("await getPreferences()");
+    expect(prefsBoot).toMatch(/try \{\s*return \{ ok: true, preferences: normalizeAppPreferences\(await getPreferences\(\)\) \};/);
   });
 
   it("pins the highest-risk fixes: protocols, keystrokes, and jump fetch", () => {
