@@ -59,6 +59,26 @@ function previewLine(text: string): string {
 }
 
 /**
+ * Convert a ripgrep UTF-8 byte offset into a 1-based UTF-16 editor column
+ * using the matched line text. Ripgrep counts bytes; Monaco and the JS
+ * fallback count UTF-16 code units, so multibyte text before the match
+ * would otherwise navigate to the wrong column. Null when the offset is
+ * not an integer, runs past the line, or splits a code point.
+ */
+function byteOffsetToColumn(lineText: string, byteOffset: number): number | null {
+  if (!Number.isInteger(byteOffset) || byteOffset < 0) return null;
+  let bytes = 0;
+  let i = 0;
+  while (i < lineText.length && bytes < byteOffset) {
+    const codePoint = lineText.codePointAt(i)!;
+    bytes += codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
+    i += codePoint > 0xffff ? 2 : 1;
+  }
+  if (bytes !== byteOffset) return null;
+  return i + 1;
+}
+
+/**
  * Parse one `rg --json` output line into a hit. Binary matches (base64 byte
  * payloads) and paths escaping the root yield null.
  */
@@ -80,16 +100,19 @@ export function parseRipgrepJsonLine(line: string, root: string): ContentHit | n
   const first = submatches.length > 0 && isRecord(submatches[0]) && typeof submatches[0].start === "number"
     ? submatches[0].start
     : 0;
+  const column = byteOffsetToColumn(lineText, first);
+  if (column === null) return null;
   const abs = isAbsolute(pathText) ? pathText : join(root, pathText);
   const rel = relative(root, abs);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
-  return { relPath: rel, line: lineNumber, column: first + 1, text: previewLine(lineText) };
+  return { relPath: rel, line: lineNumber, column, text: previewLine(lineText) };
 }
 
 /**
  * Resolve a ripgrep binary from PATH. Absolute entries only, and never from
  * inside the searched root: a project must not be able to plant the binary
- * main executes.
+ * main executes. Both the PATH directory and the final executable target
+ * (after leaf symlinks) are validated against the canonical root.
  */
 export function findRipgrep(root: string): string | null {
   const bin = process.platform === "win32" ? "rg.exe" : "rg";
@@ -110,11 +133,24 @@ export function findRipgrep(root: string): string | null {
     }
     const under = relative(canonRoot, realDir);
     if (under === "" || (!under.startsWith("..") && !isAbsolute(under))) continue;
+    const candidate = join(realDir, bin);
     try {
-      if (statSync(join(realDir, bin)).isFile()) return join(realDir, bin);
+      if (!statSync(candidate).isFile()) continue;
     } catch {
       continue;
     }
+    // The directory check above is not enough: the leaf itself may be a
+    // symlink into the searched project. Canonicalize the final executable
+    // and apply the same never-from-inside policy to its target.
+    let realBin: string;
+    try {
+      realBin = realpathSync(candidate);
+    } catch {
+      continue;
+    }
+    const targetUnder = relative(canonRoot, realBin);
+    if (targetUnder === "" || (!targetUnder.startsWith("..") && !isAbsolute(targetUnder))) continue;
+    return realBin;
   }
   return null;
 }
