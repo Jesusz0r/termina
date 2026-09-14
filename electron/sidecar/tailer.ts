@@ -154,10 +154,12 @@ async function durableAtomicWrite(path: string, content: string): Promise<void> 
  * window of one event, which non-idempotent consumers such as run-state
  * resets depend on), so rename atomicity — not sync durability — is the
  * load-bearing property here: an app crash sees the old or the new complete
- * cursor via the surviving page cache, while an OS crash is
- * recycle-equivalent (tmp wiped or stale) and handled by launch-scope
- * validation. Skipping the two fsyncs lifts drain throughput from ~91
- * events/s toward the syscall floor without widening the redelivery window.
+ * cursor via the surviving page cache, while an OS crash may additionally
+ * replay the unflushed dirty window (duplication-bounded, never corrupting:
+ * consumers degrade to duplicate dots/runs; wiped tmp recovers clean).
+ * Skipping the two fsyncs lifts drain throughput from ~91
+ * events/s toward the syscall floor without widening the app-crash
+ * redelivery window.
  * Markers and anchors stay fully durable: they are written rarely.
  */
 async function atomicWriteFile(path: string, content: string): Promise<void> {
@@ -730,6 +732,14 @@ export class SidecarTailer {
         void this.clearQuarantineMarker(id);
         void this.clearBackpressureMarker(id, generation);
       }
+    } else if (existsSync(this.quarantinePath(id))) {
+      // A stale previous-launch marker gates the writer (which refuses all
+      // appends beside any marker file) even though this lifecycle ignores
+      // it for inheritance. Sweep the residue so the recycled terminal's
+      // producer can append; a persisting race re-quarantines at once with
+      // a fresh live-bound marker. Live markers and re-quarantined
+      // lifecycles never reach this branch, so no fresh marker is raced.
+      void this.clearQuarantineMarker(id);
     }
     void this.checkBacklog(id, undefined, generation);
     const resumeTimer = this.resumeTimers.get(id);

@@ -364,9 +364,9 @@ describe("Wave 1 quarantine launch-scope regressions", () => {
           { bridgeId: "new-bridge", seq: 1 },
           { bridgeId: "new-bridge", seq: 2 },
         ]);
-        // Stale markers are ignored, not swept: the file remains but gates nothing.
-        const names = await readdir(eventsDir);
-        expect(names.filter((name) => name === `.quarantine-${id}`)).toHaveLength(1);
+        // Stale markers are ignored for inheritance and swept so they gate
+        // nothing (the writer refuses all appends beside any marker file).
+        await waitFor(() => !existsSync(join(eventsDir, `.quarantine-${id}`)), 5000, "stale marker was not swept at watch");
       } finally {
         tailer.stop();
       }
@@ -395,6 +395,46 @@ describe("Wave 1 quarantine launch-scope regressions", () => {
         await appendFile(join(eventsDir, `${id}.jsonl`), line("new-bridge", 1, "session_ready"));
         await waitFor(() => received.length === 1, 10000, "recycled terminal did not go live");
         expect(tailer.isPaused(id)).toBe(false);
+        await waitFor(() => !existsSync(join(eventsDir, `.quarantine-${id}`)), 5000, "dead-producer marker was not swept at watch");
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("recycled terminal's writer appends past a swept stale marker (refs #184)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-recyclewriter-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-recyclewriter";
+    try {
+      // Stale previous-launch residue: unbound marker + sealed segment. The
+      // writer refuses all appends beside any marker file, so the recycled
+      // terminal would go live but deaf unless watch() sweeps the residue.
+      await writeStaleLaunch(id, eventsDir, { reason: "stale previous-launch marker" });
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      const received: Array<{ bridgeId: string; seq: number }> = [];
+      tailer.onEvent = (_terminalId, event) => {
+        received.push({ bridgeId: event.bridgeId, seq: event.seq });
+        return true;
+      };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        expect(tailer.isPaused(id)).toBe(false);
+        await waitFor(() => !existsSync(join(eventsDir, `.quarantine-${id}`)), 5000, "stale marker was not swept at watch");
+        const writer = createSidecarWriter({ eventsDir, terminalId: id, bridgeId: "w2" });
+        writer.logEvent({ t: "session_ready", ok: true });
+        writer.logEvent({ t: "agent_start" });
+        expect(writer.isWriteStopped()).toBe(false);
+        await waitFor(() => received.length === 2, 10000, "recycled writer appends were not delivered");
+        expect(received).toEqual([
+          { bridgeId: "w2", seq: 1 },
+          { bridgeId: "w2", seq: 2 },
+        ]);
+        expect(writer.isWriteStopped()).toBe(false);
       } finally {
         tailer.stop();
       }
