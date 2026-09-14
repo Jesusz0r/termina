@@ -100,6 +100,16 @@ export class CoreClient {
     return tail ? new Error(`${err.message}\ncore stderr (tail): ${tail}`) : err;
   }
 
+  /** Protocol replies that cannot be matched to a request fail the oldest
+   *  pending op on this child. With a single in-flight slot, that unblocks
+   *  the queue without a second recovery path. */
+  private failOldestPending(process: CoreProcess, err: Error): void {
+    const first = [...this.pending.entries()].find(([, pending]) => pending.process === process);
+    if (!first) return;
+    this.pending.delete(first[0]);
+    first[1].reject(this.withProcessStderr(err, process));
+  }
+
   private ensure(): CoreProcess {
     if (this.process) return this.process;
     const child = spawn(resolveCoreBin(), [], { stdio: ["pipe", "pipe", "pipe"] });
@@ -122,7 +132,9 @@ export class CoreClient {
           try {
             this.handleMessage(process, JSON.parse(line));
           } catch {
-            /* malformed line — skip */
+            // Same recovery as an id-less `error`: the queue is single-flight,
+            // so fail the in-flight request instead of stalling until timeout.
+            this.failOldestPending(process, new Error("snapshot core returned a malformed protocol line"));
           }
         }
         nl = process.buffer.indexOf("\n");
@@ -177,11 +189,7 @@ export class CoreClient {
     // A core-side parse failure replies without a request id. The queue
     // holds one request at a time: fail it.
     if (msg.op === "error" && !msg.requestId) {
-      const first = [...this.pending.entries()].find(([, pending]) => pending.process === process);
-      if (first) {
-        this.pending.delete(first[0]);
-        first[1].reject(this.withProcessStderr(new Error(msg.error ?? "snapshot core could not parse the request"), process));
-      }
+      this.failOldestPending(process, new Error(msg.error ?? "snapshot core could not parse the request"));
       return;
     }
     if (!msg.requestId) return;

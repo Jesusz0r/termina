@@ -132,4 +132,13 @@ describe("Electron CoreClient Bounded Queue & Stderr Isolation", () => {
 
     expect(await within(core.request({ op: "ok" }), "request after protocol failure")).toEqual({ value: "later request completed" });
   });
+
+  it("rejects the in-flight request on a malformed protocol line without waiting for the timeout", async () => {
+    const core = createClient("tests/unit/electron/fixtures/core-client-stderr-shim.ts");
+    const first = core.request({ op: "malformed-line" });
+    const second = core.request({ op: "ok" });
+    await expect(within(first, "malformed protocol line")).rejects.toThrow(/malformed protocol line/);
+    expect(await within(second, "request after malformed protocol line")).toEqual({ value: "later request completed" });
+    expect(core.queueStats()).toEqual({ items: 0, bytes: 0, inFlight: 0, inFlightBytes: 0 });
+  });
 });

@@ -171,4 +171,31 @@ describe("CoreClient retiring-child lifecycle (issue #154)", () => {
       client.dispose();
     }
   });
+
+  it("rejects the in-flight request on a malformed protocol line without waiting for the timeout", async () => {
+    const client = new CoreClient();
+    try {
+      const first = client.request({ op: "first" });
+      const second = client.request({ op: "second" });
+      expect(children.length).toBe(1);
+      const child = children[0]!;
+      expect(child.writtenLines().length).toBe(1);
+
+      // Inject garbage on the live child's stdout. The ten-minute timer must
+      // not be the recovery: fail the in-flight request immediately, then
+      // dispatch the queued op on the same child.
+      child.stdout.emit("data", "not-json{\n");
+      await expect(first).rejects.toThrow(/malformed protocol line/);
+      expect(child.killCalls).toBe(0);
+      expect(children.length).toBe(1);
+      expect(child.writtenLines().length).toBe(2);
+
+      const secondId = requestIdOf(child.writtenLines()[1]!);
+      child.stdout.emit("data", `${JSON.stringify({ op: "second-result", requestId: secondId, ok: true, state: { value: "second" } })}\n`);
+      await expect(second).resolves.toEqual({ value: "second" });
+      expect(client.queueStats()).toEqual({ items: 0, bytes: 0, inFlight: 0, inFlightBytes: 0 });
+    } finally {
+      client.dispose();
+    }
+  });
 });
