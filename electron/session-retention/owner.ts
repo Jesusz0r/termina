@@ -59,7 +59,18 @@ export class SessionRetentionOwner {
   /** Re-open the descriptor-bound root because issued capabilities expire on restart. */
   private async rootBinding(): Promise<RetainedRootBinding> {
     this.rootBindingPromise ??= bindRetainedRoot(this.rootPath, this.testHooks?.beforeRootBinding);
-    const bound = await this.rootBindingPromise;
+    const pending = this.rootBindingPromise;
+    let bound: RetainedRootBinding;
+    try {
+      bound = await pending;
+    } catch (error) {
+      // A failed initial binding must not poison this owner: clear only the
+      // matching promise so a later call retries through the canonical cache
+      // (which already evicts failures). A newer binding is never cleared by
+      // an older rejection, and successes stay memoized.
+      if (this.rootBindingPromise === pending) this.rootBindingPromise = null;
+      throw error;
+    }
     try {
       const identity = await boundPromotionOpenDirectory({
         path: bound.path,

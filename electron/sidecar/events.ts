@@ -48,8 +48,22 @@ export const SIDECAR_VERIFY_MAX_READS = 4096;
 
 /** A missing sequence is never guessed closed. After this bounded
  * retry budget the terminal is quarantined instead of allowing a later
- * source to overtake it forever. */
+ * source to overtake it forever.
+ *
+ * The budget counts tail passes, not wall time: ~1 s when watcher-driven
+ * (10 ms debounce per wake) versus ~24 s when poll-driven (300 ms cadence).
+ * Quarantine timing varies accordingly; pass-counting is kept because the
+ * gap can only close by observing new bytes, which is itself pass-driven. */
 export const SIDECAR_MAX_SEQUENCE_GAP_POLLS = 80;
+
+/** Inbound tool-edit preview contract (consumer side; never trusts the
+ * producer's own bounding). A hostile complete record is capped at 8 MiB,
+ * so these bounds stop megabyte retention and IPC forwarding. */
+export const SIDECAR_TOOL_EDIT_ELEMENTS = 65536;
+
+export const SIDECAR_TOOL_EDIT_FIELD_BYTES = 128 * 1024;
+
+export const SIDECAR_TOOL_EDIT_TOTAL_BYTES = 512 * 1024;
 
 
 export type ToolEdits = Array<{ oldText?: string; newText?: string }>;

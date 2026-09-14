@@ -5,6 +5,7 @@
  * persistence. Split from electron/session-retention.ts (issue #38).
  */
 import { isCoreSessionId } from "../../agent-core/session.js";
+import { isRecord } from "../../shared/guards.js";
 import { RETAINED_SESSION_ADMISSION_LOCK } from "../../shared/session-retention-lock.js";
 import { boundPromotionWriteJsonFile } from "../worldline-git.js";
 import { type BigIntStats } from "node:fs";
@@ -79,7 +80,11 @@ function validLedgerEntry(value: unknown): value is RetainedLedgerEntry {
   if (!claimMatch || !isCoreSessionId(claimMatch[1]!)) return false;
   if (record.destinationKind !== "bundle" && record.destinationKind !== "staging") return false;
   if (record.destination !== undefined) {
-    const destination = record.destination as Record<string, unknown>;
+    // A present nested destination must be a record before any field is
+    // dereferenced: JSON null (or any other non-record) here is malformed
+    // cache data, rejected so the loader rebuilds from measured evidence.
+    if (!isRecord(record.destination)) return false;
+    const destination = record.destination;
     if (typeof destination.name !== "string" || destination.name !== claimMatch[1]) return false;
     if (destination.kind !== record.destinationKind || !validIdentity(destination.identity) || !validUsage(destination.usage) || typeof destination.proof !== "string" || !/^[0-9a-f]{64}$/.test(destination.proof) || typeof destination.discardable !== "boolean") return false;
   }
