@@ -99,10 +99,11 @@ pub(crate) fn op_promotion_bound_copy_file(req: &Value) -> Result<Value, String>
     if !promotion_expected_matches(&source_expected, observed_source.as_ref()) {
         return Err("promotion copy source changed before reading".to_string());
     }
+    promotion_test_pause(req, "promotion-copy-source-observed")?;
     let source_file = open_at(
         source_parent.as_raw_fd(),
         source_name,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
     )
     .map_err(|error| format!("open promotion copy source failed: {error}"))?;
     let source_stat = stat_file(&source_file)
