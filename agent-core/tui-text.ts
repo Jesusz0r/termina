@@ -392,7 +392,8 @@ export function isWideCode(cp: number): boolean {
   if (cp >= 0x3040 && cp <= 0x33ff) return true;
   if (cp >= 0x1f1e6 && cp <= 0x1f1ff) return true;
   // CJK Extension B-F (plane 2 ideographs, incl. unassigned gaps) and Tangut.
-  if (cp >= 0x20000 && cp <= 0x2ceaf) return true;
+  // Extension F ends at U+2EBE0; stopping at U+2CEAF would cover only B-E.
+  if (cp >= 0x20000 && cp <= 0x2ebe0) return true;
   if (cp >= 0x17000 && cp <= 0x187ff) return true;
   return false;
 }

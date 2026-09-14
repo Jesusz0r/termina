@@ -41,6 +41,8 @@ describe("TUI text hardening (#227)", () => {
     expect(cellWidth("a\u200Cb")).toBe(2);
     expect(isWideCode(0x20000)).toBe(true);
     expect(isWideCode(0x2ceaf)).toBe(true);
+    expect(isWideCode(0x2ceb0)).toBe(true);
+    expect(isWideCode(0x2ebe0)).toBe(true);
     expect(isWideCode(0x17000)).toBe(true);
     expect(isWideCode(0x187ff)).toBe(true);
     expect(isWideCode(0x4e00)).toBe(true);
