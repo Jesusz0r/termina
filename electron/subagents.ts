@@ -45,8 +45,6 @@ export const MAX_SUBAGENT_HOST_CHILDREN_USER = MAX_SUBAGENT_RUNS_USER;
 export const SUBAGENT_MAX_ATTEMPTS = 3;
 /** Backoff between failed launches (attempts 2 and 3); never replay started work. */
 export const SUBAGENT_RETRY_BACKOFF_MS = [1000, 2000];
-/** Wall clock per attempt before the child is killed as timed out. */
-export const SUBAGENT_WALL_TIMEOUT_MS = 10 * 60_000;
 /** Stdout cap: transcript plus one framed line; the host takes the last frame. */
 export const SUBAGENT_STDOUT_CAP_BYTES = 256 * 1024;
 /** Stderr is evidence only, kept small. */
@@ -105,8 +103,6 @@ export type SubagentLauncher = (
 
 export interface SubagentHostOptions {
   launch?: SubagentLauncher;
-  /** Override for tests. */
-  wallMs?: number;
   maxChildren?: number;
   maxAttempts?: number;
   backoffMs?: number[];
@@ -124,9 +120,8 @@ interface HostRun {
   /** Canonical absolute claim paths, one per task.paths entry, fixed at admission. */
   claims: string[];
   attempts: number;
-  stop: { kind: "kill"; reason: string } | { kind: "timeout" } | null;
+  stop: { kind: "kill"; reason: string } | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
-  wallTimer: ReturnType<typeof setTimeout> | null;
   child: SubagentChild | null;
   stdout: string;
   stdoutTruncated: boolean;
@@ -217,7 +212,6 @@ export class SubagentHost {
   /** Settled runs' session bundles for resume (bounded, keyed by parent/run). */
   private pastSessions = new Map<string, string>();
   private readonly launch: SubagentLauncher;
-  private readonly wallMs: number;
   private readonly maxChildren: number;
   private readonly maxAttempts: number;
   private readonly backoffMs: number[];
@@ -229,7 +223,6 @@ export class SubagentHost {
     opts: SubagentHostOptions = {},
   ) {
     this.launch = opts.launch ?? defaultLauncher;
-    this.wallMs = opts.wallMs ?? SUBAGENT_WALL_TIMEOUT_MS;
     this.maxChildren = opts.maxChildren ?? MAX_SUBAGENT_HOST_CHILDREN;
     this.maxAttempts = opts.maxAttempts ?? SUBAGENT_MAX_ATTEMPTS;
     this.backoffMs = opts.backoffMs ?? SUBAGENT_RETRY_BACKOFF_MS;
@@ -296,15 +289,11 @@ export class SubagentHost {
       void this.finishKilled(run, reason);
       return true;
     }
-    if (run.wallTimer) {
-      clearTimeout(run.wallTimer);
-      run.wallTimer = null;
-    }
     this.terminateChild(run);
     return true;
   }
 
-  /** Both explicit cancellation and wall timeout use the same bounded stop. */
+  /** Explicit cancellation uses a bounded stop: SIGTERM, then SIGKILL. */
   private terminateChild(run: HostRun): void {
     const child = run.child;
     if (!child) return;
@@ -501,7 +490,6 @@ export class SubagentHost {
       attempts: 0,
       stop: null,
       retryTimer: null,
-      wallTimer: null,
       child: null,
       stdout: "",
       stdoutTruncated: false,
@@ -671,12 +659,6 @@ export class SubagentHost {
       const next = appendCapped(run.stderr, chunk, SUBAGENT_STDERR_CAP_BYTES);
       run.stderr = next.text;
     });
-    run.wallTimer = setTimeout(() => {
-      run.wallTimer = null;
-      if (run.settled || !run.child) return;
-      run.stop = { kind: "timeout" };
-      this.terminateChild(run);
-    }, this.wallMs);
     child.onExit((code, signal) => {
       void this.onChildExit(run, code, signal);
     });
@@ -684,9 +666,7 @@ export class SubagentHost {
 
   private async onChildExit(run: HostRun, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     if (run.settled) return;
-    if (run.wallTimer) clearTimeout(run.wallTimer);
     if (run.retryTimer) clearTimeout(run.retryTimer);
-    run.wallTimer = null;
     run.retryTimer = null;
     run.child = null;
     if (run.stop?.kind === "kill") {
@@ -708,10 +688,6 @@ export class SubagentHost {
     // Once spawned, the child may have performed side effects even if the
     // sidecar tailer has not observed agent_start yet. Never replay implicitly.
     const recovery = "not restarted: work may already have executed; inspect the project and explicitly resume if needed";
-    if (run.stop?.kind === "timeout") {
-      await this.finishKilled(run, `wall timeout exceeded; ${recovery}`);
-      return;
-    }
     const reason = signal ? `crashed (${signal})` : code === 0 ? "child exited without a result frame" : `exit ${code ?? "?"}`;
     await this.finishFailed(run.parentTerminalId, run.runId, run.task, `${reason}${run.stderr ? `: ${tailLines(run.stderr, 3)}` : ""}; ${recovery}`);
   }
@@ -803,10 +779,6 @@ export class SubagentHost {
     if (run.retryTimer) {
       clearTimeout(run.retryTimer);
       run.retryTimer = null;
-    }
-    if (run.wallTimer) {
-      clearTimeout(run.wallTimer);
-      run.wallTimer = null;
     }
     this.runs.delete(run.key);
     this.streams.delete(run.childTid);
@@ -907,7 +879,7 @@ export class SubagentHost {
       lines.push(`${outcome === "killed" ? "Reason" : "Error"}: ${error.slice(0, 1000)}`);
       // A failed identical brief will fail identically: rewrite the task or
       // dismiss the run instead of respawning it unchanged. Killed runs
-      // (timeouts) are exempt: retrying with an adjusted budget is legitimate.
+      // are exempt: the user cancelled, so a rewritten retry is legitimate.
       if (outcome === "failed") {
         lines.push("", "Do not respawn this exact brief. Rewrite the task or dismiss the run.");
       }

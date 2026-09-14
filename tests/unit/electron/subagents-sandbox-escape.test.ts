@@ -41,7 +41,6 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
     model: "claude-sonnet-4-5",
     protocol: "anthropic-messages",
     effort: "off",
-    maxTurns: 10,
     paths: [],
     permissionMode: "ask",
     parentTerminalId: "term-7",

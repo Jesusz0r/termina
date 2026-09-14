@@ -9,10 +9,8 @@ describe("tool batch admission and ordering", () => {
     expect(toolInputError(call("spawn_subagent", {}), SUBAGENT_TOOL_DEFS)).toContain("task is required");
     expect(toolInputError(call("spawn_subagent", { task: 12 }), SUBAGENT_TOOL_DEFS)).toContain("task must be string");
     expect(toolInputError(call("spawn_subagent", { task: "review", paths: ["ok", false] }), SUBAGENT_TOOL_DEFS)).toContain("paths[1]");
-    expect(toolInputError(call("spawn_subagent", { task: "review", budget: { maxTurns: "2" } }), SUBAGENT_TOOL_DEFS)).toContain("maxTurns");
-    expect(toolInputError(call("spawn_subagent", { task: "review", budget: { maxTurns: Infinity } }), SUBAGENT_TOOL_DEFS)).toContain("maxTurns");
-    expect(toolInputError(call("spawn_subagent", { task: "review", budget: { turns: 2 } }), SUBAGENT_TOOL_DEFS)).toContain("not a supported argument");
-    expect(toolInputError(call("spawn_subagent", { task: "review", budget: { maxTurns: 2 }, paths: [] }), SUBAGENT_TOOL_DEFS)).toBeNull();
+    expect(toolInputError(call("spawn_subagent", { task: "review", budget: { maxTurns: 2 } }), SUBAGENT_TOOL_DEFS)).toContain("not a supported argument");
+    expect(toolInputError(call("spawn_subagent", { task: "review", paths: [] }), SUBAGENT_TOOL_DEFS)).toBeNull();
     // Server-defined schemas are not reinterpreted by this built-in validator.
     expect(toolInputError(call("mcp_external", { anything: true }), SUBAGENT_TOOL_DEFS)).toBeNull();
   });

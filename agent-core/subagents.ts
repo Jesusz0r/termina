@@ -48,8 +48,6 @@ export const MAX_SUBAGENT_MESSAGE_CHARS = 8_000;
 export const MAX_SUBAGENT_RESULT_CHARS = 32_000;
 /** Bound one child failure diagnostic held for parent fan-in, in UTF-8 bytes on both sides of the host boundary (the host clamps identically; the suffix is historical). */
 export const MAX_SUBAGENT_ERROR_CHARS = 4_000;
-/** Per-run turn budget must fit in 1..MAX_SUBAGENT_TURNS. */
-export const MAX_SUBAGENT_TURNS = 200;
 /** Cap claimed paths per spawn so one run cannot reserve the tree. */
 export const MAX_SUBAGENT_CLAIM_PATHS = 20;
 /** Bound queued parent-to-child messages per run (bounded memory; Phase 2 drains). */
@@ -81,8 +79,6 @@ export interface SubagentSpawnRequest {
   task: string;
   model?: string;
   effort?: string;
-  /** Raw provider JSON: validated here so malformed input fails closed instead of silently defaulting. */
-  budget?: unknown;
   /** Raw provider JSON: validated here so a malformed claim errors instead of silently dropping lease protection. */
   paths?: unknown;
   /**
@@ -108,7 +104,6 @@ export interface SubagentRun {
   permissionMode: SubagentPermissionMode;
   depth: number;
   paths: string[];
-  maxTurns: number;
   /** Settled sibling run this run continues, if any. */
   resumeRunId: string | null;
   /** True when the user explicitly requested this fan-out (manual bypass). */
@@ -142,11 +137,6 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
         effort: { type: "string" },
         resume: { type: "string" },
         user_requested: { type: "boolean" },
-        budget: {
-          type: "object",
-          additionalProperties: false,
-          properties: { maxTurns: { type: "number" } },
-        },
         paths: { type: "array", items: { type: "string" } },
       },
       required: ["task"],
@@ -241,7 +231,6 @@ export interface SubagentTaskFile {
   model: string;
   protocol: ProviderProtocol;
   effort: EffortLevel;
-  maxTurns: number;
   paths: string[];
   permissionMode: SubagentPermissionMode;
   parentTerminalId: string;
@@ -305,9 +294,8 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
   if (typeof v.effort !== "string" || !(EFFORT_LEVELS as readonly string[]).includes(v.effort)) {
     return { ok: false, error: "subagent task file has a bad effort" };
   }
-  if (!Number.isInteger(v.maxTurns) || (v.maxTurns as number) < 1 || (v.maxTurns as number) > MAX_SUBAGENT_TURNS) {
-    return { ok: false, error: "subagent task file has a bad turn budget" };
-  }
+  // Older builds wrote maxTurns. Ignore it: children follow the same stop
+  // rules as the parent (user stop, natural finish, provider limits).
   if (!Array.isArray(v.paths) || v.paths.length > MAX_SUBAGENT_CLAIM_PATHS) {
     return { ok: false, error: "subagent task file has bad paths" };
   }
@@ -342,7 +330,6 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
       model: v.model,
       protocol: (typeof v.protocol === "string" ? v.protocol : configuredProviderProtocol(v.provider, v.model)) as ProviderProtocol,
       effort: v.effort as EffortLevel,
-      maxTurns: v.maxTurns as number,
       paths,
       permissionMode: v.permissionMode,
       parentTerminalId: v.parentTerminalId,
@@ -379,7 +366,6 @@ export function writeSubagentTaskFile(
     model: run.model,
     protocol: run.protocol,
     effort: run.effort,
-    maxTurns: run.maxTurns,
     paths: run.paths,
     permissionMode: run.permissionMode,
     parentTerminalId: opts.parentTerminalId,
@@ -778,19 +764,6 @@ export class SubagentRegistry {
         }
       }
     }
-    let maxTurns = 50;
-    if (req.budget !== undefined) {
-      if (typeof req.budget !== "object" || req.budget === null || Array.isArray(req.budget)) {
-        return { ok: false, error: "spawn_subagent budget must be an object" };
-      }
-      const n = (req.budget as { maxTurns?: unknown }).maxTurns;
-      if (n !== undefined) {
-        if (!Number.isInteger(n) || (n as number) < 1 || (n as number) > MAX_SUBAGENT_TURNS) {
-          return { ok: false, error: `spawn_subagent budget.maxTurns must be an integer in 1..${MAX_SUBAGENT_TURNS}` };
-        }
-        maxTurns = n as number;
-      }
-    }
     const paths: string[] = [];
     if (req.paths !== undefined) {
       if (!Array.isArray(req.paths)) return { ok: false, error: "spawn_subagent paths must be an array" };
@@ -862,7 +835,6 @@ export class SubagentRegistry {
       permissionMode: parent.permissionMode,
       depth: parent.depth + 1,
       paths,
-      maxTurns,
       state: "active",
       inbox: [],
       result: null,

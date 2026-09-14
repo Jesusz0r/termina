@@ -83,7 +83,6 @@ describe("Subagent Approval Engine Contract", () => {
         model: "claude-sonnet-4-5",
         protocol: "anthropic-messages",
         effort: "off",
-        maxTurns: 5,
         paths: [],
         permissionMode: "ask",
         parentTerminalId: parentTid,
@@ -207,9 +206,11 @@ describe("Subagent Approval Engine Contract", () => {
       answerApproval: false,
       approvalTimeoutMs: 4000,
     });
-    expect(r.exit).toBe(1);
+    expect(r.exit).toBe(0);
     expect(existsSync(sentinel)).toBe(false);
     expect(r.output).toMatch(/bash denied/i);
+    expect(r.output).toContain("SUBAGENT_RESULT");
+    expect(r.output).toContain('"ok":true');
   });
 
   it("includes sibling claims in later spawns' briefs", async () => {

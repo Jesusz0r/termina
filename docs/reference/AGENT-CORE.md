@@ -77,12 +77,12 @@ for Google, 500,000 for xAI, and 128,000 for unknown providers
 (`UNKNOWN_CONTEXT_FLOOR`). Anthropic Haiku uses 200,000. A live model
 catalog can provide another value. There is no
 1,000,000-token run cap. Context reclamation is driven by the window's
-high-water mark, not a fixed token total. A logical run has no turn-count,
-tool-call, or wall-clock fuse, and does not re-open a finished answer for
-verification or review. Stall detection stops unproductive loops. Five
-consecutive server-tool `pause_turn` continuations still stop a wedged
-provider stream; a client tool turn resets that streak. A natural final
-answer ends the run.
+high-water mark, not a fixed token total. A logical run — parent or spawned
+subagent — has no turn-count, tool-call, or wall-clock fuse, and does not
+re-open a finished answer for verification or review. Stall detection stops
+unproductive loops. Five consecutive server-tool `pause_turn` continuations
+still stop a wedged provider stream; a client tool turn resets that streak.
+A natural final answer ends the run.
 
 ## P2 — Separate reclamation from summarization
 
@@ -259,10 +259,10 @@ footprint, not these numbers.
   admission. Recovery is appended after results, or nested inside a result when
   a server tool is unresolved, preserving the provider's continuation rules.
 - A spawned subagent is never automatically restarted after failure, crash, or
-  timeout: it may already have changed files. Only synchronous pre-child launch
-  failures retry (three attempts total). Explicit resume retains the prior
-  session. Cancellation and wall timeout both escalate from SIGTERM to SIGKILL
-  after five seconds; claims remain held until the child has closed.
+  cancellation: it may already have changed files. Only synchronous pre-child
+  launch failures retry (three attempts total). Explicit resume retains the
+  prior session. Cancellation escalates from SIGTERM to SIGKILL after five
+  seconds; claims remain held until the child has closed.
 
 Regression coverage: `stall-tracker.test.ts`, `tool-dispatch.test.ts`,
 `main-tool-loop.test.ts`, `provider-tool-args.test.ts`, and

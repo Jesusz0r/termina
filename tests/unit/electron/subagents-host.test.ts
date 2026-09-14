@@ -63,7 +63,6 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
     model: "claude-sonnet-4-5",
     protocol: "anthropic-messages",
     effort: "off",
-    maxTurns: 10,
     paths: [],
     permissionMode: "ask",
     parentTerminalId: "term-7",
@@ -75,7 +74,6 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
 }
 
 function setup(opts: {
-  wallMs?: number;
   maxAttempts?: number;
   maxChildren?: number;
   backoffMs?: number[];
@@ -273,10 +271,12 @@ describe("SubagentHost", () => {
     expect(s.readResult().outcome).toBe(launchFailures === 2 ? "settled" : "failed");
   });
 
-  it("escalates wall timeout when SIGTERM is ignored, without releasing or replaying a live child", async () => {
-    const s = setup({ wallMs: 20 });
+  it("escalates kill when SIGTERM is ignored, without releasing or replaying a live child", async () => {
+    const s = setup();
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.host.kill("term-7", "bg-1", "parent cancelled")).toBe(true);
+    expect(s.procs[0]!.kills).toContain("group:SIGTERM");
     await until(() => s.procs[0]!.kills.includes("group:SIGKILL"), 7000);
     expect(s.host.activeCount()).toBe(1);
     expect(existsSync(s.resultFile)).toBe(false);
@@ -301,18 +301,6 @@ describe("SubagentHost", () => {
     expect(s.host.kill("term-7", "bg-404", "missing")).toBe(false);
   });
 
-  it("times out hanging children", async () => {
-    const s = setup({ wallMs: 40 });
-    s.writeTask();
-    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
-    // Wall timer fires; the fake dies only when told, like a real SIGTERM.
-    await until(() => s.procs[0]!.kills.includes("group:SIGTERM"), 5000);
-    s.procs[0]!.exit(null, "SIGTERM");
-    await until(() => existsSync(s.resultFile), 5000);
-    const body = s.readResult();
-    expect(body.outcome).toBe("killed");
-  });
-
   it("runs a real engine child to a failed result", async () => {
     const dir = tmp();
     const notes: string[] = [];
@@ -335,7 +323,6 @@ describe("SubagentHost", () => {
         autoApproveAllowedFor: () => false,
       },
       {
-        wallMs: 20000,
         maxAttempts: 1,
         launch: (_cmd, _args, opts) => {
           const child = spawn(
@@ -357,13 +344,12 @@ describe("SubagentHost", () => {
         },
       },
     );
-    // Valid shape, impossible model: the engine boots, fails the run, and
-    // the host records the failure (or the wall clock kills it first).
+    // Valid shape, impossible model: the engine boots and fails the run.
     writeFileSync(join(dir, name), JSON.stringify(validTask({ model: "definitely-not-a-real-model-xyz", cwd: dir })), { mode: 0o600 });
     await realHost.handleSpawn("term-7", "bg-1", name);
     await until(() => existsSync(join(dir, "subagent-term-7-bg-1.result.json")), 45000);
     const body = JSON.parse(readFileSync(join(dir, "subagent-term-7-bg-1.result.json"), "utf8"));
-    expect(["failed", "killed"]).toContain(body.outcome);
+    expect(body.outcome).toBe("failed");
     expect(notes.length).toBe(1);
   }, 60000);
 

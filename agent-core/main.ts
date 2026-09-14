@@ -412,7 +412,7 @@ export function parseSubagentTaskFlag(argv: string[]): string | null {
 }
 
 /** Active headless child run. Null everywhere except `--subagent-task`. */
-let activeSubagent: { task: SubagentTaskFile; turns: number; partial: boolean; inboxSeq: number } | null = null;
+let activeSubagent: { task: SubagentTaskFile; inboxSeq: number } | null = null;
 /** Last settled run outcome, for the subagent result frame. Set at the single settle point. */
 let lastRunOutcome: { status: string; failure: string | null } | null = null;
 
@@ -2058,13 +2058,12 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     if (parentTruncated) {
       return done(use, "error: parent turn hit the output limit, so the brief may be truncated — re-issue spawn_subagent with the complete brief", true);
     }
-    // Forward budget/paths/user_requested raw: the registry validates them so
+    // Forward paths/user_requested raw: the registry validates them so
     // malformed input fails closed instead of silently dropping protection.
     const got = await subagentRegistry.spawn({
       task: String(use.input.task ?? ""),
       ...(use.input.model === undefined ? {} : { model: String(use.input.model) }),
       ...(use.input.effort === undefined ? {} : { effort: String(use.input.effort) }),
-      ...(use.input.budget === undefined ? {} : { budget: use.input.budget }),
       ...(use.input.paths === undefined ? {} : { paths: use.input.paths }),
       ...(use.input.resume === undefined ? {} : { resume: use.input.resume }),
       ...(use.input.user_requested === undefined ? {} : { userRequested: use.input.user_requested }),
@@ -4672,7 +4671,7 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   if (!process.env.TERMINA_CORE_SUMMARY_MODEL) {
     summaryRoute = parseModelRef(DEFAULT_MODELS[task.provider].summary, task.provider);
   }
-  activeSubagent = { task, turns: 0, partial: false, inboxSeq: 0 };
+  activeSubagent = { task, inboxSeq: 0 };
   lastRunOutcome = null;
   const roleLine = task.resumeRunId
     ? `[Subagent ${task.runId}: continuing ${task.resumeRunId}. Its session history is replayed above; treat the brief below as a follow-up, not a fresh task. Your final reply is delivered to your parent as the run result.`
@@ -4709,10 +4708,7 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   const frame = outcome && outcome.status === "success"
     ? {
       ok: true as const,
-      result: truncateUtf8(
-        `${activeSubagent.partial ? `[partial: turn budget reached after ${activeSubagent.turns} model turns]\n\n` : ""}${lastAssistantText()}`,
-        MAX_SUBAGENT_RESULT_CHARS,
-      ),
+      result: truncateUtf8(lastAssistantText(), MAX_SUBAGENT_RESULT_CHARS),
     }
     : { ok: false as const, error: outcome?.failure ?? "no settlement" };
   process.stdout.write(`${formatSubagentResultFrame(frame)}\n`);
@@ -5059,7 +5055,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         });
         throw new Error(admissionError);
       }
-      if (activeSubagent) activeSubagent.turns += 1;
       const sys = frontMatter.systemPrompt();
       if (!result.usage) resetUsageContinuity();
       const waste = result.usage
@@ -5093,18 +5088,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
       );
-      if (activeSubagent && uses.length > 0 && !interrupted && activeSubagent.turns >= activeSubagent.task.maxTurns) {
-        // Turn budget trip: answer the open calls so the persisted session
-        // stays well-formed, mark partial, and settle. The child session is
-        // disposable; the marking tells the parent what happened.
-        activeSubagent.partial = true;
-        out(`\n(subagent turn budget reached after ${activeSubagent.turns} model turns; settling partial)\n`);
-        pushMessage(
-          "user",
-          uses.map((u) => done(u, "(subagent turn budget reached; settle with what you have)", true).result as ContentBlock),
-        );
-        break;
-      }
       if (uses.length === 0) {
         const pauseTurn = result.stopReason === "pause_turn" && !interrupted;
         const pauseLimitReached = pauseTurn && pauseTurnContinuations >= MAX_PAUSE_TURN_CONTINUATIONS;

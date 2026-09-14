@@ -70,7 +70,6 @@ async function runChild(opts: {
       model: "gpt-5.6-sol",
       protocol: "openai-responses",
       effort: "medium",
-      maxTurns: 10,
       paths: [],
       permissionMode: opts.taskMode,
       parentTerminalId: parentTid,

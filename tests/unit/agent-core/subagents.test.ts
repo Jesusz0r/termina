@@ -117,21 +117,8 @@ describe("subagents Phase 1 registry", () => {
     if (!got.ok) expect(got.error).toMatch(/\/login/);
   });
 
-  it("validates the turn budget", async () => {
+  it("rejects malformed paths instead of silently dropping them", async () => {
     const reg = registry();
-    expect((await reg.spawn({ task: "t", budget: { maxTurns: 0 }, parent })).ok).toBe(false);
-    expect((await reg.spawn({ task: "t", budget: { maxTurns: 1.5 }, parent })).ok).toBe(false);
-    expect((await reg.spawn({ task: "t", budget: { maxTurns: 1000 }, parent })).ok).toBe(false);
-    const good = await reg.spawn({ task: "t", budget: { maxTurns: 10 }, parent });
-    expect(good.ok).toBe(true);
-    if (good.ok) expect(good.run.maxTurns).toBe(10);
-  });
-
-  it("rejects malformed budget and paths instead of silently dropping them", async () => {
-    const reg = registry();
-    expect((await reg.spawn({ task: "t", budget: "10", parent })).ok).toBe(false);
-    expect((await reg.spawn({ task: "t", budget: [10], parent })).ok).toBe(false);
-    expect((await reg.spawn({ task: "t", budget: { maxTurns: "10" }, parent })).ok).toBe(false);
     expect((await reg.spawn({ task: "t", paths: "src/a.ts", parent })).ok).toBe(false);
     expect((await reg.spawn({ task: "t", paths: [42], parent })).ok).toBe(false);
     expect((await reg.spawn({ task: "t", model: "/foo", parent })).ok).toBe(false);
@@ -516,7 +503,6 @@ describe("subagents Phase 2 handoff contract", () => {
       model: "claude-sonnet-4-5",
       protocol: "anthropic-messages",
       effort: "off",
-      maxTurns: 10,
       paths: [],
       permissionMode: "ask",
       parentTerminalId: "term-7",
@@ -542,7 +528,9 @@ describe("subagents Phase 2 handoff contract", () => {
     if (!written.ok) return;
     expect(written.file).toBe("subagent-term-7-bg-1.task.json");
     const { readFileSync: read } = await import("node:fs");
-    const parsed = parseSubagentTaskFile(JSON.parse(read(join(dir, written.file), "utf8")));
+    const raw = JSON.parse(read(join(dir, written.file), "utf8"));
+    expect(raw.maxTurns).toBeUndefined();
+    const parsed = parseSubagentTaskFile(raw);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.file.runId).toBe("bg-1");
@@ -685,7 +673,6 @@ describe("subagents Phase 2 handoff contract", () => {
       model: "claude-sonnet-4-5",
       protocol: "anthropic-messages",
       effort: "off",
-      maxTurns: 10,
       paths: [],
       permissionMode: "ask",
       parentTerminalId: "term-7",
@@ -700,6 +687,8 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(flagged.ok).toBe(true);
     if (flagged.ok) expect(flagged.file.userRequested).toBe(true);
     expect(parseSubagentTaskFile({ ...base, userRequested: "true" }).ok).toBe(false);
+    const leftoverBudget = parseSubagentTaskFile({ ...base, maxTurns: 10 });
+    expect(leftoverBudget.ok).toBe(true);
   });
 
   it("frames results on one line and rejects garbage", () => {
