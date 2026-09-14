@@ -198,6 +198,7 @@ import {
   fileMutationKey,
   isReplaceAll,
   readProjectFile,
+  readProjectFiles,
   withFileMutation,
   writeProjectFile,
 } from "./main/file-ops.ts";
@@ -2010,6 +2011,10 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
   if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
   if (use.name === "read_file") {
+    if (use.input.paths !== undefined) {
+      const got = readProjectFiles(canonicalCwd, use.input, frontMatter.allowPaths);
+      return done(use, got);
+    }
     const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
     return done(use, got);
   }
@@ -2149,17 +2154,18 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "read_file",
     description:
-      "Read a text file relative to the working directory. Each line is prefixed with its 1-based line number and a pipe (N|content); those prefixes are display-only — never copy them into edit old_text. Caps near 40 KB of file bytes. Optional start_line and end_line (inclusive). Pass offset (bytes) only to continue a truncated read; do not combine with start_line. A directory path lists that directory.",
+      "Read a text file relative to the working directory. Each line is prefixed with its 1-based line number and a pipe (N|content); those prefixes are display-only — never copy them into edit old_text. Caps near 40 KB of file bytes. Optional start_line and end_line (inclusive). Pass offset (bytes) only to continue a truncated read; do not combine with start_line. A directory path lists that directory. Pass paths (up to 10) to read several files in one bounded 40 KB result; omitted tail files are named — read them explicitly. Use path or paths, not both; offset/start_line/end_line apply to path only.",
     input_schema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: { type: "string", description: "File or directory path relative to the working directory." },
+        paths: { type: "array", description: "Up to 10 file paths for one bounded batch read.", items: { type: "string" } },
         offset: { type: "number", description: "Byte offset to continue a truncated read. Do not combine with start_line." },
         start_line: { type: "number", description: "1-based inclusive start line." },
         end_line: { type: "number", description: "1-based inclusive end line." },
       },
-      required: ["path"],
+      required: [],
     },
   },
   {

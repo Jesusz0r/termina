@@ -596,6 +596,92 @@ export function readProjectFile(
   return got;
 }
 
+/** Maximum files in one batched `read_file` call. One shared bound stays small. */
+export const READ_BATCH_CAP = 10;
+
+/**
+ * Batched `read_file`: one bounded result for up to READ_BATCH_CAP files.
+ * Composes the single-file reader, so jail confinement, numbering, and
+ * per-file truncation stay canonical. Sections are whole-file atomic: the
+ * result keeps an order-stable prefix that fits READ_CAP_BYTES and names
+ * omitted tail files with an explicit re-read hint. Per-file failures render
+ * inline; the call only fails when every included file failed.
+ */
+export function readProjectFiles(
+  cwd: string,
+  input: { path?: unknown; paths?: unknown; offset?: unknown; start_line?: unknown; end_line?: unknown },
+  allow?: ReadonlySet<string>,
+): ToolTextResult {
+  const fail = (content: string): ToolTextResult => logicalToolText(content, {
+    maxBytes: READ_CAP_BYTES,
+    state: "failed",
+    isError: true,
+  });
+  if (!Array.isArray(input.paths)) return fail("error: paths must be an array of strings");
+  if (input.paths.length < 1) return fail("error: paths must list at least one file");
+  if (input.paths.length > READ_BATCH_CAP) return fail(`error: paths caps at ${READ_BATCH_CAP} files per call`);
+  if (typeof input.path === "string" && input.path !== "") return fail("error: use path or paths, not both");
+  if (input.offset !== undefined && input.offset !== null && input.offset !== "") {
+    return fail("error: offset applies to a single path; omit it with paths");
+  }
+  if ((input.start_line !== undefined && input.start_line !== null && input.start_line !== "") ||
+    (input.end_line !== undefined && input.end_line !== null && input.end_line !== "")) {
+    return fail("error: start_line/end_line apply to a single path; omit them with paths");
+  }
+  const seen = new Set<string>();
+  for (const entry of input.paths) {
+    if (typeof entry !== "string" || entry === "") return fail("error: every paths entry must be a non-empty string");
+    if (entry.length > 1024) return fail("error: every paths entry must be under 1024 chars");
+    if (seen.has(entry)) return fail(`error: duplicate path in paths: ${entry}`);
+    seen.add(entry);
+  }
+  const paths = input.paths as string[];
+  if (paths.length === 1) return readProjectFile(cwd, { path: paths[0] }, allow);
+  const sections: string[] = [];
+  const failed: boolean[] = [];
+  for (const rel of paths) {
+    const got = readProjectFile(cwd, { path: rel }, allow);
+    sections.push(`<file path="${xmlSafe(rel)}">\n${got.content}\n</file>`);
+    failed.push(got.isError);
+  }
+  const included: string[] = [];
+  const omitted: string[] = [];
+  let used = 0;
+  for (let i = 0; i < sections.length; i++) {
+    const sec = sections[i]!;
+    const need = Buffer.byteLength(sec, "utf8") + (included.length > 0 ? 1 : 0);
+    if (included.length === 0 || used + need <= READ_CAP_BYTES) {
+      included.push(sec);
+      used += need;
+    } else {
+      omitted.push(paths[i]!);
+    }
+  }
+  const body = included.join("\n");
+  const repro = `read_file(${paths.length} paths)`;
+  const allFailed = failed.slice(0, included.length).every(Boolean) && omitted.length === 0;
+  if (omitted.length > 0) {
+    const names = omitted.map((p) => JSON.stringify(p)).join(", ");
+    const marker = `[batch truncated at ${READ_CAP_BYTES} bytes — ${omitted.length} file(s) omitted: ${names} — read_file each omitted path explicitly]`;
+    const continuation = `Read the omitted paths explicitly with read_file: ${names}. Use one path per call or a smaller batch.`;
+    return logicalToolText(body, {
+      maxBytes: READ_CAP_BYTES,
+      state: allFailed ? "failed" : "complete",
+      isError: allFailed,
+      forceMarker: true,
+      marker,
+      continuation,
+      repro,
+    });
+  }
+  return logicalToolText(body, {
+    maxBytes: READ_CAP_BYTES,
+    state: allFailed ? "failed" : "complete",
+    isError: allFailed,
+    repro,
+  });
+}
+
 function atomicWrite(path: string, content: string, mode?: number): void {
   const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
   try {

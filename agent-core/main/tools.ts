@@ -18,6 +18,7 @@ export interface ToolUse {
   name: string;
   input: {
     path?: string;
+    paths?: unknown;
     command?: string;
     content?: string;
     offset?: unknown;
@@ -127,7 +128,10 @@ export function reproFor(use: ToolUse): string | undefined {
   // must not throw while we are trying to report their validation failure.
   const text = (key: string): string => typeof use.input[key] === "string" ? use.input[key] as string : "";
   if (use.name === "bash") return `bash ${shellQuote(text("command"))}`;
-  if (use.name === "read_file") return `read_file(${JSON.stringify(text("path"))})`;
+  if (use.name === "read_file") {
+    if (Array.isArray(use.input.paths)) return `read_file(${(use.input.paths as unknown[]).length} paths)`;
+    return `read_file(${JSON.stringify(text("path"))})`;
+  }
   if (use.name === "edit") return `edit(${JSON.stringify(text("path"))})`;
   if (use.name === "grep") return `grep ${shellQuote(text("pattern"))}`;
   if (use.name === "glob") return `glob ${shellQuote(text("pattern"))}`;
@@ -161,7 +165,12 @@ export function sidecarStartFor(use: {
 
 export function formatToolAnnounce(use: ToolUse): string {
   let detail = "";
-  if (use.name === "edit" || use.name === "write_file" || use.name === "read_file") detail = use.input.path ?? "";
+  if (use.name === "edit" || use.name === "write_file") detail = use.input.path ?? "";
+  else if (use.name === "read_file") {
+    detail = Array.isArray(use.input.paths)
+      ? `${(use.input.paths as unknown[]).length} paths`
+      : use.input.path ?? "";
+  }
   else if (use.name === "bash") detail = `$ ${use.input.command ?? ""}`;
   else if (use.name === "grep") detail = use.input.pattern ?? "";
   else if (use.name === "glob") detail = use.input.pattern ?? "";
@@ -206,7 +215,11 @@ export function formatToolFollowup(use: ToolUse, outcome: { result: Record<strin
 }
 
 export function toolTranscriptDetail(use: ToolUse): string {
-  if (use.name === "edit" || use.name === "write_file" || use.name === "read_file") return use.input.path ?? "";
+  if (use.name === "edit" || use.name === "write_file") return use.input.path ?? "";
+  if (use.name === "read_file") {
+    if (Array.isArray(use.input.paths)) return `${(use.input.paths as unknown[]).length} paths`;
+    return use.input.path ?? "";
+  }
   if (use.name === "bash") return use.input.command ?? "";
   if (use.name === "grep" || use.name === "glob") return use.input.pattern ?? "";
   if (use.name === "fetch") return String(use.input.url ?? "");
