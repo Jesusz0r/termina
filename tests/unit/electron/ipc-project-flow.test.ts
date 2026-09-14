@@ -291,7 +291,9 @@ check("project close and quit share the unsaved-buffer gate", main.includes("asy
   && renderer.includes("editor.flushAll()")
   && preload.includes("onUnsavedConfirm")
   && types.includes("onUnsavedConfirm")
-  && main.includes("const flush = await this.flushDirtyModels(`dispatch:${ownerId}`")
+  && main.includes("const dispatchWriter = `dispatch:${ownerId}`")
+  && main.includes("acquireWriteLease(ownerWs.id, dispatchWriter")
+  && main.includes("flushDirtyModels(dispatchWriter, ownerWs.id")
   && main.includes("const flush = await this.flushDirtyModels(leaseRequester, ws.id"));
 
 assert.equal(checks.length, 27);
