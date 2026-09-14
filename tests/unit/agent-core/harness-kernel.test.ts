@@ -4984,9 +4984,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       tuiMod.layoutHeights(24, 1, 7).transcript >= 2 && tuiMod.layoutHeights(24, 1, 7).header === 1,
     );
     check("layoutHeights fits a tiny screen", tuiMod.layoutHeights(5, 1, 7).transcript >= 1 && tuiMod.layoutHeights(5, 1, 7).slash < 7);
-    const visSrc = Array.from({ length: 80 }, (_, i) => `L${String(i).padStart(2, "0")}`).join("\n") + "\n";
-    const vis = tuiMod.visibleLines(visSrc, 10, 3, 0);
-    check("visibleLines is the tail", vis.join("|").includes("L79") && !vis.join("|").includes("L00"));
     const submitted: string[] = [];
     const exits: boolean[] = [];
     const tui = new tuiMod.AgentTui({

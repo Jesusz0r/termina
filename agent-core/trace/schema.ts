@@ -24,7 +24,11 @@ export const LINK_INDEX_FILE = "trace-index.json";
 
 export const MAX_ID_CHARS = 512;
 
+/** Max code points per trace text field. */
 export const MAX_STRING_CHARS = 16_384;
+
+/** Max entries in one cache marker-position list. */
+export const MAX_CACHE_MARKER_POSITIONS = 256;
 
 export const MAX_ARRAY_ITEMS = 4_096;
 

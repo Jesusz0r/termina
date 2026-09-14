@@ -367,6 +367,9 @@ export function isCombiningCode(cp: number): boolean {
     (cp >= 0x20d0 && cp <= 0x20ff) ||
     (cp >= 0xfe20 && cp <= 0xfe2f) ||
     cp === 0x200d ||
+    // Zero-width format controls render nothing on their own.
+    cp === 0x200b ||
+    cp === 0x200c ||
     (cp >= 0xfe00 && cp <= 0xfe0f) ||
     (cp >= 0xe0100 && cp <= 0xe01ef)
   );
@@ -388,6 +391,9 @@ export function isWideCode(cp: number): boolean {
   if (cp >= 0x3000 && cp <= 0x303e) return true;
   if (cp >= 0x3040 && cp <= 0x33ff) return true;
   if (cp >= 0x1f1e6 && cp <= 0x1f1ff) return true;
+  // CJK Extension B-F (plane 2 ideographs, incl. unassigned gaps) and Tangut.
+  if (cp >= 0x20000 && cp <= 0x2ceaf) return true;
+  if (cp >= 0x17000 && cp <= 0x187ff) return true;
   return false;
 }
 

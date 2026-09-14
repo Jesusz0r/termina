@@ -6,7 +6,7 @@
  */
 import { syncDirectoryAsync } from "../../shared/fsync.ts";
 import { errorCode, isRecord } from "../../shared/guards.ts";
-import { mkdir, open as openFile, readFile, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, open as openFile, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { freezeDeep } from "./normalize.ts";
 import { compositeKey, countTurnFiles, createAttemptRecord, createTaskSettledRecord, emptyExistingScan, emptyManifestLinkIndex, freezeManifest, inspectExisting, newestTurnFiles, nonnegativeCounter, normalizeNamespace, processAlive, retryableFailureKind, stableError, taskKey, timestamp, traceTurnFromName, validPriorManifest, validTraceLinkIndex } from "./records.ts";
@@ -182,6 +182,8 @@ export class TraceRuntime {
   close(): Promise<TraceManifestOutcome> {
     if (this.closePromise !== null) return this.closePromise;
     this.closed = true;
+    // queueTail never rejects (every assignment maps both outcomes to
+    // undefined), so close only handles the fulfilled chain.
     const closeRun = this.queueTail.then(async () => {
       await this.ready;
       let result: TraceManifestOutcome;
@@ -194,11 +196,6 @@ export class TraceRuntime {
       await this.releaseLock();
       this.initialized = false;
       return result;
-    }, async (error) => {
-      await this.ready;
-      await this.releaseLock();
-      this.initialized = false;
-      return this.manifestFailure(stableError(error), "closed");
     });
     this.queueTail = closeRun.then(() => undefined, () => undefined);
     this.closePromise = closeRun;
@@ -219,6 +216,7 @@ export class TraceRuntime {
     };
     let existing = emptyExistingScan();
     let startupError: string | null = null;
+    let fatalStartupError = false;
     let priorManifest: TraceManifest | null = null;
     let priorManifestError: string | null = null;
     let priorIndex: TraceLinkIndex | null = null;
@@ -236,6 +234,10 @@ export class TraceRuntime {
       const lock = await this.acquireLock();
       if (!lock.ok) throw new Error(lock.error);
       lockAcquired = true;
+      // Reap crashed atomic-write temps (ours only: the lock excludes live
+      // writers, and tmp names are never read). Runs on every startup, so
+      // reset startups are covered too. Best effort: leftovers are inert.
+      await this.sweepCrashTemps().catch(() => undefined);
       const previous = await this.readPreviousManifest();
       priorManifest = previous.manifest;
       priorManifestError = previous.error;
@@ -310,7 +312,12 @@ export class TraceRuntime {
       const manifestResult = await this.persistManifest();
       if (!manifestResult.ok) startupError ??= manifestResult.error;
     } catch (error) {
+      // Directory creation and lock acquisition are fatal: without them no
+      // write can be safe. Reset and persist failures above stay degraded
+      // (recorded on the startup result) so one stale file cannot brick the
+      // runtime; every write retries persistence anyway.
       startupError = stableError(error);
+      fatalStartupError = true;
       this.manifestValue = this.emptyManifest(resetState, startupError, {
         retainedRecords: 0,
         omittedRecords: resetState.omittedRecords,
@@ -329,7 +336,7 @@ export class TraceRuntime {
         preexistingScanOmittedRecords: existing.scanOmittedRecords,
       });
     }
-    if (startupError !== null) {
+    if (fatalStartupError) {
       this.initialized = false;
       if (lockAcquired) await this.releaseLock();
     }
@@ -347,6 +354,33 @@ export class TraceRuntime {
     };
     this.startupResult = freezeDeep(startup);
     return this.startupResult;
+  }
+
+  private async sweepCrashTemps(): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(this.directory);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (
+        !/^turn-\d+\.json\.tmp-/.test(name) &&
+        !/^(trace-manifest|trace-index)\.json\.tmp-/.test(name)
+      ) {
+        continue;
+      }
+      try {
+        await unlink(join(this.directory, name));
+      } catch {
+        /* leave it for the next startup */
+      }
+    }
+    try {
+      await syncDirectoryAsync(this.directory);
+    } catch {
+      /* best effort */
+    }
   }
 
   private async readPreviousManifest(): Promise<{ manifest: TraceManifest | null; error: string | null }> {
@@ -681,7 +715,8 @@ export class TraceRuntime {
     const key = compositeKey(runId, attemptId);
     const current = this.attempts.get(key);
     if (current !== undefined) {
-      if (current.taskId !== taskId) return false;
+      // All callers guard on absence and check task identity themselves, so a
+      // cross-task id collision can never reach a mismatch return here.
       if (current.unknown) current.role = role;
       return current.role === role || current.unknown;
     }
@@ -1096,7 +1131,10 @@ export class TraceRuntime {
 
   private async persistLinkIndex(updatedAt = timestamp(this.now)): Promise<{ ok: true } | { ok: false; kind: "index-write-failure" | "index-full"; error: string }> {
     const capacity = this.reserveLinkIndexCapacity(null, updatedAt);
-    if (!capacity.ok) return { ...capacity, kind: "index-full" };
+    if (!capacity.ok) {
+      this.recordIndexFailure(capacity.error);
+      return { ...capacity, kind: "index-full" };
+    }
     if (!this.initialized && this.lockHandle === null) {
       return { ok: false, kind: "index-write-failure", error: "trace runtime is not initialized" };
     }
@@ -1108,9 +1146,9 @@ export class TraceRuntime {
       return { ok: false, kind: "index-write-failure", error: stableError(error) };
     }
     if (Buffer.byteLength(json, "utf8") > MAX_TRACE_INDEX_BYTES) {
-      this.linkIndexError = `trace link index exceeds ${MAX_TRACE_INDEX_BYTES} bytes`;
-      this.refreshManifestLinkIndex(this.linkIndexError);
-      return { ok: false, kind: "index-full", error: this.linkIndexError };
+      const fullError = `trace link index exceeds ${MAX_TRACE_INDEX_BYTES} bytes`;
+      this.recordIndexFailure(fullError);
+      return { ok: false, kind: "index-full", error: fullError };
     }
     const result = await atomicWrite(this.indexPath, json);
     if (!result.ok) {
@@ -1172,6 +1210,13 @@ export class TraceRuntime {
   }
 
   private queueFailure(record: FrozenTraceAttempt | FrozenTraceTaskSettled | null = null): TraceWriteFailure {
+    // Synchronous overflow path: account immediately; the next manifest
+    // persist (or close) flushes the counter durably.
+    this.manifestValue = freezeDeep({
+      ...this.manifestValue,
+      writeFailures: this.manifestValue.writeFailures + 1,
+      updatedAt: timestamp(this.now),
+    });
     return this.writeFailure("queue-full", "trace write queue is full", record);
   }
 
@@ -1191,8 +1236,13 @@ export class TraceRuntime {
       const key = compositeKey(record.runId, record.attemptId);
       const existingAttempt = this.attempts.get(key);
       if (existingAttempt !== undefined) {
-        if (!existingAttempt.unknown || existingAttempt.taskId !== record.taskId || existingAttempt.role !== record.role) {
+        if (!existingAttempt.unknown || existingAttempt.taskId !== record.taskId) {
           return this.writeFailure("duplicate-attempt", `attemptId already exists: ${record.attemptId}`, record);
+        }
+        // A settlement-first placeholder guessed the role from its link lists.
+        // When the real attempt disagrees, the link (not the attempt) is bad.
+        if (existingAttempt.role !== record.role) {
+          return this.writeFailure("invalid-link", `attempt role does not match its settlement link: ${record.attemptId}`, record);
         }
       }
       for (const parentId of [record.parentAttemptId, record.retryOfAttemptId]) {
@@ -1333,7 +1383,10 @@ export class TraceRuntime {
     }
     const indexUpdatedAt = timestamp(this.now);
     const capacity = this.reserveLinkIndexCapacity(record, indexUpdatedAt);
-    if (!capacity.ok) return this.writeFailure("index-full", capacity.error, record);
+    if (!capacity.ok) {
+      this.recordIndexFailure(capacity.error);
+      return this.writeFailure("index-full", capacity.error, record);
+    }
     const traceTurn = this.nextTraceTurn;
     const path = join(this.directory, `turn-${traceTurn}.json`);
     const result = await atomicWrite(path, json);
@@ -1363,14 +1416,10 @@ export class TraceRuntime {
     initialError: string | null = null,
     initialKind: "write-failure" | null = null,
   ): Promise<TraceWriteOutcome> {
-    const indexResult = await this.persistLinkIndex(indexUpdatedAt);
-    if (!indexResult.ok) {
-      const manifestResult = await this.persistManifest();
-      const detail = [initialError, indexResult.error, manifestResult.ok ? null : manifestResult.error]
-        .filter((value): value is string => value !== null)
-        .join("; ");
-      return this.writeFailure(initialKind ?? indexResult.kind, detail || "trace link index write failed", record, path, traceTurn, true);
-    }
+    // Retention runs before the single index persist: persisting first and
+    // re-persisting after retention would serialize the whole link index
+    // twice per write for a snapshot that crash recovery rebuilds anyway
+    // (startup reconciles retained turns against the turn files present).
     const retention = await this.applyRetention();
     const retainedIndex = await this.persistLinkIndex(indexUpdatedAt);
     const manifestResult = await this.persistManifest();

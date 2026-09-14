@@ -18,6 +18,13 @@ const MAX_PASTE_BUFFER_BYTES = MAX_DRAFT_BYTES + 64 * 1024;
 /** Cap the note spam when input keeps arriving past the draft cap. */
 const DRAFT_CAP_NOTE_MS = 5000;
 
+/**
+ * Tail parses below this stay shortcut-cheap (live viewports never need
+ * larger tails); scrolled-deep budgets build the cached markdown prefix once
+ * so pages slice instead of re-parsing per page.
+ */
+const TAIL_SHORTCUT_BUDGET = 64 * 1024;
+
 /** Trim text to a byte budget on grapheme boundaries. */
 function trimGraphemesToBytes(text: string, maxBytes: number): string {
   if (maxBytes <= 0) return "";
@@ -405,8 +412,11 @@ export class AgentTui {
 
   private pushText(kind: "plain" | "error", text: string, settled: boolean): void {
     if (!text) return;
-    this.closeStream();
     const clean = closeSanitize(text, freshSanitizer());
+    // Sanitize before opening the entry: escape-only input cleans to nothing
+    // and must not split the active stream or open a blank entry.
+    if (!clean) return;
+    this.closeStream();
     const id = this.nextEntryId++;
     this.entries.push({
       id,
@@ -453,9 +463,6 @@ export class AgentTui {
       const gone = this.entries[idx]!;
       this.entries.splice(idx, 1);
       this.transcriptChars -= entryChars(gone);
-      for (const [handleId, entryId] of [...this.toolHandles]) {
-        if (entryId === gone.id) this.toolHandles.delete(handleId);
-      }
     }
   }
 
@@ -553,7 +560,9 @@ export class AgentTui {
     const start = this.unfinishedStart(entry);
     // A truncation resets prefix metadata. Do not eagerly rebuild hundreds of
     // thousands of off-screen markdown characters just to paint the live tail.
-    if (entry.mdPrefixLen === 0 && start > maxChars) {
+    // But a scrolled-deep budget means repeated tail paints: past the live
+    // range, build the cached prefix once so pages slice instead of re-parse.
+    if (entry.mdPrefixLen === 0 && start > maxChars && maxChars < TAIL_SHORTCUT_BUDGET) {
       const tail = sourceTail(entry.text, maxChars);
       const scanned = { n: 0 };
       const spans = parseMarkdown(tail.text, scanned);
@@ -698,6 +707,13 @@ export class AgentTui {
       this.inp.setRawMode?.(true);
       this.inp.resume?.();
     } catch {
+      // A failure between raw mode and resume must not strand the terminal:
+      // restore cooked mode exactly like stop() does.
+      try {
+        this.inp.setRawMode?.(false);
+      } catch {
+        /* restore best-effort */
+      }
       return false;
     }
     this.started = true;
@@ -1167,8 +1183,10 @@ export class AgentTui {
         }
       }
       const next = completeSlashLine(text, this.commands, this.modelRows, this.effortRows);
-      this.chars = splitGraphemes(next);
-      this.cursor = this.chars.length;
+      if (next !== text) {
+        this.chars = splitGraphemes(next);
+        this.cursor = this.chars.length;
+      }
       this.slashIndex = 0;
       this.schedule();
       return;
@@ -1363,6 +1381,10 @@ export class AgentTui {
     }
     if (final === "~") {
       if (params === "200") this.paste = true;
+      // A standalone paste-end outside a paste is the renderer's out-of-band
+      // "host state changed" signal (sent after image drops; see
+      // src/pty-view.ts), not a stray terminator. Refresh pending host
+      // counts; the draft is untouched.
       else if (params === "201") this.onHostRefresh?.();
       else if (params === "3") {
         if (this.cursor < this.chars.length) this.chars.splice(this.cursor, 1);
@@ -1597,7 +1619,11 @@ export class AgentTui {
     // border. It reads as one textbox separated from the transcript above
     // and the slash menu and title below.
     const inputTop = layout.transcript;
-    const inputShown = displayWrapped.slice(0, layout.input);
+    // Keep the cursor row visible: when the draft wraps taller than the box,
+    // show the window ending at the cursor row instead of the head.
+    const endRow = Math.min(displayWrapped.length, Math.max(displayPos.row + 1, layout.input));
+    const startRow = Math.max(0, endRow - layout.input);
+    const inputShown = displayWrapped.slice(startRow, endRow);
     lines.push(boxBorderRow(cols, "┌", "─", "┐"));
     for (let i = 0; i < layout.input; i++) lines.push(boxContentRow(inputShown[i] ?? "", cols));
     lines.push(boxBorderRow(cols, "└", "─", "┘"));
@@ -1607,7 +1633,6 @@ export class AgentTui {
       const row = c ? formatPickerRow(c.name, c.hint, cols, selected) : "";
       lines.push(clip(row, cols));
     }
-    while (lines.length < rows - layout.header - 2) lines.push(clip("", cols));
     lines.push(clip("─".repeat(Math.max(0, cols)), cols));
     lines.push(clip(title, cols));
     if (lines.length > rows) lines.length = rows;
@@ -1615,10 +1640,10 @@ export class AgentTui {
     const contentTop = inputTop + 1;
     // Content sits inside "│ ": cursor columns shift two cells right, rows
     // one row down. Placeholder caret stays right after "> ". cursorRow is a
-    // 1-based terminal row: the last content row is contentTop + layout.input.
+    // 1-based terminal row within the visible composer window.
     const cursorRow = isInputEmpty
       ? Math.min(rows, Math.max(1, contentTop + 1))
-      : Math.min(rows, Math.max(1, Math.min(contentTop + layout.input, contentTop + displayPos.row + 1)));
+      : Math.min(rows, Math.max(1, contentTop + (displayPos.row - startRow) + 1));
     const cursorCol = isInputEmpty ? 5 : Math.min(cols, Math.max(1, displayPos.col + 3));
     const slashTop = contentTop + layout.input + 1;
     const titleRow = lines.length - layout.header;
