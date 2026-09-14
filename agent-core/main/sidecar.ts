@@ -173,14 +173,16 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
   function hasQuarantineSidecar(): boolean {
     return !!eventsDir && !!terminalId && existsSync(join(eventsDir, SIDECAR_QUARANTINE_PREFIX + terminalId));
   }
-  function hasRetainedSidecar(): boolean {
+  /** A mid-flight tailer reclaim chain (drain/final links) blocks rotation.
+   * A lone settled `.retained-` anchor does not: the tailer chains
+   * generations, retiring the older anchor once the newer one is proven. */
+  function hasUnsettledSidecar(): boolean {
     if (!eventsDir || !terminalId) return false;
     try {
       const prefix = "." + terminalId + ".jsonl.";
       return readdirSync(eventsDir).some((name) =>
         name.startsWith(prefix)
-        && (name.includes(".retained-")
-          || name.includes(".draining-")
+        && (name.includes(".draining-")
           || name.includes(".final-"))
       );
     } catch {
@@ -264,11 +266,12 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
         return false;
       }
       if (activeStats.size === 0 || activeStats.size + lineBytes <= SIDECAR_MAX_BYTES) return true;
-      // A retained/unproven inode may continue draining while this active
+      // A mid-flight reclaim chain may still be draining while this active
       // generation has room. Once rotation is required, admission stops at
       // the bounded quarantine boundary instead of creating an overtaking
-      // generation that could lose sequence order.
-      if (hasRetainedSidecar()) {
+      // generation that could lose sequence order. A settled retained anchor
+      // does not block: the tailer chains it once the new generation proves.
+      if (hasUnsettledSidecar()) {
         quarantineAdmission("unproven sidecar generation blocked a safe rotation");
         return false;
       }
@@ -289,7 +292,7 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
         if (!waitForSidecarBackpressure()) return false;
         try { Atomics.wait(sidecarBackpressureCell, 0, 0, 25); } catch { return false; }
         if (hasQuarantineSidecar()) return false;
-        if (hasRetainedSidecar()) {
+        if (hasUnsettledSidecar()) {
           quarantineAdmission("unproven sidecar generation blocked a safe rotation");
           return false;
         }

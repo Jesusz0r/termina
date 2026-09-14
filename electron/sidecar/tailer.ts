@@ -213,6 +213,19 @@ async function readBoundedText(path: string, maxBytes: number): Promise<string> 
 }
 
 
+/** True when a cursor persist would rewrite identical bytes. Selection plus
+ * offsets plus stream ownership all match; skipping the write keeps idle
+ * terminals quiet instead of fsyncing every poll. */
+function sameDurableSidecarCursor(left: DurableSidecarCursor, right: DurableSidecarCursor): boolean {
+  return left.offset === right.offset
+    && (left.bridgeId ?? undefined) === (right.bridgeId ?? undefined)
+    && (left.sequence ?? undefined) === (right.sequence ?? undefined)
+    && (left.sealedSegment ?? undefined) === (right.sealedSegment ?? undefined)
+    && (left.sealedOffset ?? undefined) === (right.sealedOffset ?? undefined)
+    && (left.sealedIdentity ?? undefined) === (right.sealedIdentity ?? undefined);
+}
+
+
 export class SidecarTailer {
   /** Pending scan cursor; durableCursors is advanced only after delivery ack. */
   private offsets = new Map<string, number>();
@@ -228,7 +241,9 @@ export class SidecarTailer {
    * prove that an escaped descriptor will not append after verification. */
   private retainedSegments = new Map<string, string>();
   /** A second link keeps a retired inode observable while an old descriptor
-   *  finishes an append during the unlink syscall. */
+   * finishes an append during the unlink syscall. Set only while a reclaim
+   * chain is mid-flight; cleared once the retained anchor settles (a settled
+   * drain link IS the anchor path, so join() resolution is identical). */
   private segmentDrainPaths = new Map<string, string>();
   private durableCursors = new Map<string, DurableSidecarCursor>();
   private streams = new Map<string, StreamState>();
@@ -248,6 +263,10 @@ export class SidecarTailer {
   /** A segment was reclaimed before its cursor-clear publish completed. */
   private pendingSegmentCursorClears = new Map<string, number>();
   private cursorWrites = new Map<string, Promise<boolean>>();
+  /** Ids whose in-memory durable cursor is proven present on disk. A fresh
+   * watch seeds memory without writing, so the no-op persist skip below must
+   * not treat unmaterialized memory as durable across a restart. */
+  private persistedCursors = new Set<string>();
   private cursorInitializations = new Map<string, Promise<boolean>>();
   private markerStates = new Map<string, MarkerState>();
   private markerCleanups = new Map<string, Promise<void>>();
@@ -526,8 +545,10 @@ export class SidecarTailer {
       || !this.cursorMatchesSegment(cursor.sealedSegment, selectedSource)
       || (cursor.sealedIdentity !== undefined && cursor.sealedIdentity !== segmentIdentity)
     ))) {
+      this.persistedCursors.delete(id);
       this.cursorInitializations.set(id, this.persistCursor(id, initialCursor, generation));
     } else {
+      this.persistedCursors.add(id);
       this.cursorInitializations.delete(id);
     }
     this.streams.delete(id);
@@ -586,6 +607,7 @@ export class SidecarTailer {
     this.retainedSegments.delete(id);
     this.segmentDrainPaths.delete(id);
     this.durableCursors.delete(id);
+    this.persistedCursors.delete(id);
     this.streams.delete(id);
     this.producerPids.delete(id);
     this.expectedProducerPids.delete(id);
@@ -638,6 +660,7 @@ export class SidecarTailer {
     this.retainedSegments.clear();
     this.segmentDrainPaths.clear();
     this.durableCursors.clear();
+    this.persistedCursors.clear();
     this.streams.clear();
     this.producerPids.clear();
     this.expectedProducerPids.clear();
@@ -1067,7 +1090,6 @@ export class SidecarTailer {
     this.segmentEmptyPolls.set(selectedKey, 0);
     this.sealedSegments.set(id, selected);
     this.retainedSegments.set(id, selected);
-    this.segmentDrainPaths.set(id, join(this.dir, selected));
 
     // A prior lifecycle may have left a first drain link, final guard, and
     // retained link to the same inode. Keep one survivor and unlink only the
@@ -1090,14 +1112,20 @@ export class SidecarTailer {
 
     // If the crash happened before the first sealed unlink, the published
     // name is another hard link to this same inode. Remove only that proven
-    // duplicate; a different sealed identity is an unprocessed generation.
+    // duplicate. A different sealed identity is a newer generation beside
+    // our settled anchor: chain it. Keep both; the scheduler drains the
+    // older anchor first by sequence order, and the newer seal's reclaim
+    // retires the older anchor once both generations prove fully drained.
     for (const sealedName of await this.listSealedSegments(id)) {
+      let sealedIdentity: string;
       try {
-        const sealedIdentity = this.fileIdentity(await statFile(join(this.dir, sealedName)));
-        if (sealedIdentity !== identity) {
-          this.quarantine(id, generation, "sealed generation appeared beside a retained anchor");
-          return false;
-        }
+        sealedIdentity = this.fileIdentity(await statFile(join(this.dir, sealedName)));
+      } catch {
+        this.quarantine(id, generation, `sealed generation ${sealedName} could not be reconciled`);
+        return false;
+      }
+      if (sealedIdentity !== identity) continue;
+      try {
         await durableUnlink(join(this.dir, sealedName));
       } catch {
         this.quarantine(id, generation, `sealed generation ${sealedName} could not be reconciled`);
@@ -1113,6 +1141,11 @@ export class SidecarTailer {
       this.quarantine(id, generation, "retained sidecar cursor could not be persisted");
       return false;
     }
+    // The anchor is settled: the only drain link that could exist IS this
+    // anchor path, so join() resolution is identical. Clear it so idle polls
+    // stop re-binding this anchor and the mid-flight guards below only fire
+    // while a reclaim is genuinely in flight.
+    this.segmentDrainPaths.delete(id);
     return selected;
   }
 
@@ -1285,10 +1318,11 @@ export class SidecarTailer {
     while (pending.size > 0) {
       if (!this.isLive(id, generation) || this.quarantined.has(id)) return;
       if (this.segmentDrainPaths.has(id) && [...pending.values()].some((candidate) => !candidate.retained && !candidate.active)) {
-        // A retained identity is already the last safe anchor for an older
-        // canonical generation. A later sealed pathname cannot be admitted
-        // beside it without proving both identities and their order; keep the
-        // sealed bytes and fail closed before any source can overtake it.
+        // A reclaim chain is mid-flight (settled anchors clear their drain
+        // link and chain via bindRetainedAnchor instead). A later sealed
+        // pathname cannot be admitted beside a mid-flight chain without
+        // proving both identities and their order; keep the sealed bytes and
+        // fail closed before any source can overtake it.
         this.quarantine(id, generation, "canonical generation appeared beside a retained identity anchor");
         return;
       }
@@ -1349,8 +1383,9 @@ export class SidecarTailer {
       }
       pending.delete(chosen.name);
       if (this.segmentDrainPaths.has(id) && [...pending.values()].some((candidate) => !candidate.retained && !candidate.active)) {
-        // A second canonical generation beside a retained identity cannot be
-        // ordered or safely discarded. Preserve it and stop admission.
+        // A second canonical generation beside a mid-flight reclaim chain
+        // cannot be ordered or safely discarded. Preserve it and stop
+        // admission. (Settled anchors chain instead of quarantining.)
         this.quarantine(id, generation, "canonical generation appeared beside a retained identity anchor");
         return;
       }
@@ -1787,6 +1822,40 @@ export class SidecarTailer {
         this.segmentEmptyPolls.set(segmentKey, 0);
         return false;
       }
+      // Generation chaining: this newer generation is proven fully drained
+      // (size == offset across two empty polls). Retire a settled older
+      // anchor whose bytes are all delivered-or-skipped. If the older anchor
+      // still has undelivered bytes, wait: normal passes drain it first by
+      // sequence order, and a later pass retries this reclaim.
+      const olderAnchor = this.retainedSegments.get(id);
+      if (olderAnchor !== undefined && olderAnchor !== name) {
+        const olderKey = this.segmentStateKey(id, olderAnchor);
+        let olderSize: number;
+        try {
+          olderSize = (await statFile(join(this.dir, olderAnchor))).size;
+        } catch {
+          this.quarantine(id, generation, `retained sidecar anchor ${olderAnchor} disappeared`);
+          return false;
+        }
+        const olderDrained = olderSize === (this.segmentOffsets.get(olderKey) ?? 0)
+          && !this.segmentPartialRecords.has(olderKey)
+          && !this.segmentOversizedRecords.has(olderKey);
+        if (!olderDrained) return false;
+        try {
+          await durableUnlink(join(this.dir, olderAnchor));
+        } catch {
+          this.quarantine(id, generation, `retained sidecar anchor ${olderAnchor} could not be retired`);
+          return false;
+        }
+        this.segmentOffsets.delete(olderKey);
+        this.segmentIdentities.delete(olderKey);
+        this.segmentPartialRecords.delete(olderKey);
+        this.segmentOversizedRecords.delete(olderKey);
+        this.segmentEmptyPolls.delete(olderKey);
+        this.sequenceGapPolls.delete(olderKey);
+        this.retainedSegments.delete(id);
+        if (this.sealedSegments.get(id) === olderAnchor) this.sealedSegments.delete(id);
+      }
       if (!(await this.persistCursor(id, {
         offset: this.offsets.get(id) ?? 0,
         sealedOffset: after,
@@ -1891,6 +1960,11 @@ export class SidecarTailer {
         sealedSegment: retainedName,
       }, generation))) {
         this.pause(id, generation);
+      } else {
+        // The anchor is settled: the drain link IS the retained path, so
+        // join() resolution is identical. Clear it so idle polls stop
+        // re-binding this anchor until the next rotation lands.
+        this.segmentDrainPaths.delete(id);
       }
       return false;
     } catch {
@@ -2237,10 +2311,12 @@ export class SidecarTailer {
         ...(sealedOffset !== undefined ? { sealedOffset } : {}),
         ...(sealedIdentity ? { sealedIdentity } : {}),
       };
+      if (previous && this.persistedCursors.has(id) && sameDurableSidecarCursor(previous, cursor)) return true;
       try {
         await durableAtomicWrite(this.cursorPath(id), JSON.stringify(cursor));
         if (!this.isLive(id, generation)) return false;
         this.durableCursors.set(id, cursor);
+        this.persistedCursors.add(id);
         return true;
       } catch (error) {
         if (this.isLive(id, generation)) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { appendFile, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as fs from "node:fs";
@@ -175,4 +175,144 @@ describe("Wave 1 sidecar queue dead-letter regressions", () => {
     expect(queue.stats().deadLettered).toBe(0);
     queue.dispose();
   }, 10000);
+});
+
+describe("Wave 1 sidecar anchor chaining regressions", () => {
+  const line = (bridgeId: string, seq: number, t: string): string =>
+    `${JSON.stringify({ bridgeId, seq, t })}\n`;
+  const sealedName = (id: string, tag: string): string =>
+    `.${id}.jsonl.${Date.now().toString(36)}-${process.pid}-${tag}.sealed`;
+
+  it("stays quiet while idle after a rotation settles (refs #183)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-idle-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-idle";
+    const active = join(eventsDir, `${id}.jsonl`);
+    try {
+      await writeFile(active, "");
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      const received: number[] = [];
+      tailer.onEvent = (_terminalId, event) => {
+        received.push(event.seq);
+        return true;
+      };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        await appendFile(active, line("w1", 1, "session_ready") + line("w1", 2, "agent_settled"));
+        await waitFor(() => received.length === 2, 5000, "initial records were not delivered");
+        await rename(active, join(eventsDir, sealedName(id, "idle1")));
+        await writeFile(active, line("w1", 3, "agent_settled"));
+        await waitFor(() => received.length === 3, 10000, "rotated records were not delivered");
+        const settled = async (): Promise<boolean> => {
+          const names = await readdir(eventsDir);
+          return !names.some((name) => name.endsWith(".sealed"))
+            && names.some((name) => name.includes(".retained-"));
+        };
+        const deadline = Date.now() + 10000;
+        while (!(await settled()) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(await settled(), "rotation never settled to a retained anchor").toBe(true);
+        // Let any in-flight pass finish, then measure a 1.5 s idle window.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const wakesBefore = tailer.tailWakeCounts();
+        const cursorBefore = (await stat(join(eventsDir, `.cursor-${id}.json`))).mtimeMs;
+        await new Promise((resolve) => setTimeout(resolve, 1600));
+        expect(tailer.tailWakeCounts()).toEqual(wakesBefore);
+        expect((await stat(join(eventsDir, `.cursor-${id}.json`))).mtimeMs).toBe(cursorBefore);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("survives two successive rotations with one settled anchor (refs #183)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-chain-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-chain";
+    const active = join(eventsDir, `${id}.jsonl`);
+    const settledAnchor = async (): Promise<string | null> => {
+      const names = await readdir(eventsDir);
+      if (names.some((name) => name.endsWith(".sealed"))) return null;
+      const anchors = names.filter((name) => name.includes(".retained-"));
+      return anchors.length === 1 ? anchors[0] : null;
+    };
+    try {
+      await writeFile(active, "");
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      const received: number[] = [];
+      tailer.onEvent = (_terminalId, event) => {
+        received.push(event.seq);
+        return true;
+      };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        await appendFile(active, line("w1", 1, "session_ready") + line("w1", 2, "agent_start"));
+        await waitFor(() => received.length === 2, 5000, "initial records were not delivered");
+
+        // First rotation: seal [1,2], continue with [3,4] on the new active.
+        await rename(active, join(eventsDir, sealedName(id, "chain1")));
+        await writeFile(active, line("w1", 3, "agent_start") + line("w1", 4, "agent_settled"));
+        await waitFor(() => received.length === 4, 10000, "first rotation did not drain");
+        const firstDeadline = Date.now() + 10000;
+        while ((await settledAnchor()) === null && Date.now() < firstDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        const firstAnchor = await settledAnchor();
+        expect(firstAnchor, "first rotation never settled to one anchor").not.toBeNull();
+
+        // Second rotation beside the settled anchor: seal [3,4], continue [5,6].
+        await rename(active, join(eventsDir, sealedName(id, "chain2")));
+        await writeFile(active, line("w1", 5, "agent_start") + line("w1", 6, "agent_settled"));
+        await waitFor(() => received.length === 6, 15000, "second rotation did not drain");
+        expect(received).toEqual([1, 2, 3, 4, 5, 6]);
+        const secondDeadline = Date.now() + 10000;
+        while ((await settledAnchor()) === null && Date.now() < secondDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        const secondAnchor = await settledAnchor();
+        expect(secondAnchor, "second rotation never settled to one anchor").not.toBeNull();
+        expect(secondAnchor).not.toBe(firstAnchor);
+        const names = await readdir(eventsDir);
+        expect(names.filter((name) => name.startsWith(`.quarantine-${id}`))).toEqual([]);
+        const cursor = JSON.parse(await readFile(join(eventsDir, `.cursor-${id}.json`), "utf8"));
+        expect(cursor.sequence).toBe(6);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 45000);
+
+  it("writer rotates beside a settled retained anchor (refs #183)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-writerchain-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-wchain";
+    const active = join(eventsDir, `${id}.jsonl`);
+    try {
+      await writeFile(active, "\n".repeat(8 * 1024 * 1024 + 64));
+      const writer = createSidecarWriter({ eventsDir, terminalId: id, bridgeId: "writer-1" });
+      writer.logEvent({ t: "session_ready", ok: true });
+      const firstSeals = (await readdir(eventsDir)).filter((name) => name.endsWith(".sealed"));
+      expect(firstSeals).toHaveLength(1);
+      // Simulate a settled tailer reclaim: the sealed name becomes a lone
+      // retained anchor (writer only observes names, never inode state).
+      await rename(join(eventsDir, firstSeals[0]), join(eventsDir, `${firstSeals[0]}.retained-simulated`));
+      await appendFile(active, "\n".repeat(8 * 1024 * 1024 + 64));
+      writer.logEvent({ t: "agent_settled" });
+      expect(writer.isWriteStopped()).toBe(false);
+      const names = await readdir(eventsDir);
+      expect(names.filter((name) => name.endsWith(".sealed"))).toHaveLength(1);
+      expect(names.filter((name) => name.includes(".retained-"))).toHaveLength(1);
+      expect(names.filter((name) => name.startsWith(`.quarantine-${id}`))).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
 });
