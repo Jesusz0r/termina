@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { closeSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,7 +27,10 @@ afterEach(() => {
 function project(): string {
   const root = mkdtempSync(join(tmpdir(), "termina-file-special-"));
   roots.push(root);
-  return root;
+  // Production callers canonicalize (freezeCwd/confinePath); macOS tmpdirs
+  // are symlinked (/var -> /private/var), so tests must too before
+  // asserting on walked paths.
+  return realpathSync(root);
 }
 
 function makeFifo(path: string): boolean {
