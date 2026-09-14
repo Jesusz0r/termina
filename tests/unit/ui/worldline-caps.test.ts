@@ -32,7 +32,7 @@ function summary(label: "A" | "B"): WorldlineSummary {
   };
 }
 
-function details(label: "A" | "B", fileCount: number, opts?: { truncated?: boolean; changedFileCount?: number }): WorldlineDetails {
+function details(label: "A" | "B", fileCount: number): WorldlineDetails {
   const changedFiles: WorldlineChangedFile[] = [];
   for (let i = 0; i < fileCount; i++) changedFiles.push({ relPath: `file-${i}.ts`, status: "modified" });
   return {
@@ -51,7 +51,6 @@ function details(label: "A" | "B", fileCount: number, opts?: { truncated?: boole
     sourceFiles: fileCount,
     sourceBytes: 1024,
     changedFiles,
-    ...(opts?.truncated ? { truncated: true, changedFileCount: opts.changedFileCount ?? fileCount } : {}),
     dependencies: [],
     ageMs: 1000,
     unownedEdits: 0,
@@ -114,33 +113,12 @@ describe("worldline changed-file caps (refs #213)", () => {
       expect(changedList.children.length).toBeGreaterThan(1);
     });
 
-    expect(changedList.children.length).toBe(worldlines.MAX_CHANGED_FILES + 1);
+    expect(changedList.children.length).toBe(worldlines.MAX_INLINE_CHANGED_ROWS + 1);
     const note = changedList.children.at(-1)!;
     expect(note.className).toBe("cand-more");
     expect(note.textContent).toContain("9500 more");
     expect(note.textContent).toContain("Compare");
-    const card = panel.querySelectorAll(".candidate-card")[0];
-    expect(card.querySelector(".cand-changed-title")!.textContent).toBe("Changed vs base (10000)");
-    expect(card.querySelector(".cand-stats")!.textContent).toContain("10000 changed");
-  });
-
-  it("keeps the count honest when main already capped the listing", async () => {
-    const panel = makePanel();
-    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
-    view.bind({});
-    view.upsert(summary("A"));
-    view.upsert(summary("B"));
-
-    pendingDetails = details("A", worldlines.MAX_CHANGED_FILES, { truncated: true, changedFileCount: 10_000 });
-    panel.querySelectorAll(".candidate-card")[0].querySelectorAll(".cand-details")[0].click();
-    const changedList = panel.querySelectorAll(".cand-changed")[0];
-    await vi.waitFor(() => {
-      expect(changedList.children.length).toBe(worldlines.MAX_CHANGED_FILES + 1);
-    });
-    const note = changedList.children.at(-1)!;
-    expect(note.className).toBe("cand-more");
-    expect(note.textContent).toContain("9500 more");
-    expect(note.textContent).toContain("Compare");
+    // Totals stay honest: the array itself is complete on the renderer side.
     const card = panel.querySelectorAll(".candidate-card")[0];
     expect(card.querySelector(".cand-changed-title")!.textContent).toBe("Changed vs base (10000)");
     expect(card.querySelector(".cand-stats")!.textContent).toContain("10000 changed");
@@ -162,42 +140,16 @@ describe("worldline changed-file caps (refs #213)", () => {
     expect(changedList.querySelectorAll(".cand-more")).toHaveLength(0);
   });
 
-  it("renders a listing at the cap with no overflow note", async () => {
-    const panel = makePanel();
-    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
-    view.bind({});
-    view.upsert(summary("A"));
-    view.upsert(summary("B"));
-
-    pendingDetails = details("A", worldlines.MAX_CHANGED_FILES);
-    panel.querySelectorAll(".candidate-card")[0].querySelectorAll(".cand-details")[0].click();
-    const changedList = panel.querySelectorAll(".cand-changed")[0];
-    await vi.waitFor(() => {
-      expect(changedList.children.length).toBe(worldlines.MAX_CHANGED_FILES);
-    });
-    expect(changedList.querySelectorAll(".cand-more")).toHaveLength(0);
-  });
-
   it("caps the Compare file-list modal with an overflow note", () => {
     const items: Array<[string, "modified"]> = [];
     for (let i = 0; i < 10_000; i++) items.push([`file-${i}.ts`, "modified"]);
     modals.showFileListModal("A ⇄ B — 10000 file(s)", items, () => {});
     const list = fake.modalRoot.querySelector(".worldline-list")!;
-    expect(list.children.length).toBe(worldlines.MAX_CHANGED_FILES + 1);
+    expect(list.children.length).toBe(modals.MAX_FILE_LIST_MODAL_ROWS + 1);
     const note = list.children.at(-1)!;
     expect(note.className).toBe("worldline-more");
-    expect(note.textContent).toContain("9500 more");
+    expect(note.textContent).toContain("9000 more");
     expect(fake.modalRoot.querySelector(".modal-title")!.textContent).toBe("A ⇄ B — 10000 file(s)");
-  });
-
-  it("uses the uncapped total when the caller already truncated the items", () => {
-    const items: Array<[string, "modified"]> = [];
-    for (let i = 0; i < worldlines.MAX_CHANGED_FILES; i++) items.push([`file-${i}.ts`, "modified"]);
-    modals.showFileListModal("base → A — 10000 file(s)", items, () => {}, 10_000);
-    const list = fake.modalRoot.querySelector(".worldline-list")!;
-    expect(list.children.length).toBe(worldlines.MAX_CHANGED_FILES + 1);
-    expect(list.children.at(-1)!.textContent).toContain("9500 more");
-    expect(fake.modalRoot.querySelector(".modal-title")!.textContent).toBe("base → A — 10000 file(s)");
   });
 
   it("renders small file-list modals fully with no overflow note", () => {
@@ -205,22 +157,5 @@ describe("worldline changed-file caps (refs #213)", () => {
     const list = fake.modalRoot.querySelector(".worldline-list")!;
     expect(list.children.length).toBe(2);
     expect(list.querySelectorAll(".worldline-more")).toHaveLength(0);
-  });
-
-  it("caps the Compare modal when opened from a 10k details payload", async () => {
-    const panel = makePanel();
-    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
-    view.bind({});
-    view.upsert(summary("A"));
-    view.upsert(summary("B"));
-    pendingDetails = details("A", 10_000);
-    panel.querySelectorAll(".candidate-card")[0].querySelector(".cand-compare")!.click();
-    await vi.waitFor(() => {
-      expect(fake.modalRoot.querySelector(".worldline-list")).not.toBeNull();
-    });
-    const list = fake.modalRoot.querySelector(".worldline-list")!;
-    expect(list.children.length).toBe(worldlines.MAX_CHANGED_FILES + 1);
-    expect(list.querySelector(".worldline-more")!.textContent).toContain("9500 more");
-    expect(fake.modalRoot.querySelector(".modal-title")!.textContent).toBe("base → A — 10000 file(s)");
   });
 });

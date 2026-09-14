@@ -11,8 +11,11 @@ import {
   gitCommitTree,
   gitWorkingChanges,
 } from "../worldline-git.js";
-import { capChangedFileList, type WorldlineChangedFile } from "../../shared/types.js";
+import type { WorldlineChangedFile } from "../../shared/types.js";
 import type { CandidateState, ComparisonState } from "./types.js";
+
+/** Bound for the changed-file listing sent over IPC (details + export listing). */
+export const MAX_CHANGED_FILES = 500;
 
 export function isSafeRelativePath(relPath: string): boolean {
   return relPath.length > 0 && relPath !== "." && relPath.indexOf("\0") === -1 && !isAbsolute(relPath) && !relPath.startsWith("/") && !relPath.split(/[\\/]/).includes("..");
@@ -50,6 +53,12 @@ export async function changedFiles(cmp: ComparisonState, cand: CandidateState): 
     sourceBytes += entry.size;
   }
   const files = [...byPath.values()].sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
-  const listed = capChangedFileList(files);
-  return { files: listed.files, sourceFiles, sourceBytes, truncated: listed.truncated, total: listed.total };
+  const truncated = files.length > MAX_CHANGED_FILES;
+  return {
+    files: truncated ? files.slice(0, MAX_CHANGED_FILES) : files,
+    sourceFiles,
+    sourceBytes,
+    truncated,
+    total: files.length,
+  };
 }

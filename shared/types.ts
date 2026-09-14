@@ -432,16 +432,6 @@ export interface WorldlineChangedFile {
   status: "created" | "modified" | "deleted";
 }
 
-/** One listing cap for details IPC, inline rows, and the Compare modal. */
-export const MAX_CHANGED_FILES = 500;
-
-/** Bound a changed-file listing. `total` is the uncapped count. */
-export function capChangedFileList<T>(files: readonly T[]): { files: T[]; truncated: boolean; total: number } {
-  const total = files.length;
-  const truncated = total > MAX_CHANGED_FILES;
-  return { files: truncated ? files.slice(0, MAX_CHANGED_FILES) : [...files], truncated, total };
-}
-
 /** A declared dependency difference between base and candidate head. */
 export interface DependencyChange {
   file: string;
@@ -509,9 +499,9 @@ export interface WorldlineDetails {
   /** Source statistics of the candidate head tree. */
   sourceFiles: number;
   sourceBytes: number;
-  /** Files differing from the comparison base (capped at MAX_CHANGED_FILES). */
+  /** Files differing from the comparison base (capped; see truncated). */
   changedFiles: WorldlineChangedFile[];
-  /** True when changedFiles was truncated at MAX_CHANGED_FILES. */
+  /** True when changedFiles was truncated before IPC. */
   truncated?: boolean;
   /** Uncapped changed-file count; defaults to changedFiles.length. */
   changedFileCount?: number;

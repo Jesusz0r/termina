@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { changedFiles } from "../../../electron/worldlines/candidate-files.ts";
+import { changedFiles, MAX_CHANGED_FILES } from "../../../electron/worldlines/candidate-files.ts";
 import { gitCommittedChanges, gitCommitTree, gitWorkingChanges } from "../../../electron/worldline-git.ts";
-import { capChangedFileList, MAX_CHANGED_FILES } from "../../../shared/types.ts";
 import type { CandidateState, ComparisonState } from "../../../electron/worldlines/types.ts";
 
 vi.mock("../../../electron/worldline-git.ts", () => ({
@@ -86,15 +85,5 @@ describe("changedFiles merge (issue #187)", () => {
     expect(result.files).toHaveLength(MAX_CHANGED_FILES);
     expect(result.truncated).toBe(false);
     expect(result.total).toBe(MAX_CHANGED_FILES);
-  });
-});
-
-describe("capChangedFileList", () => {
-  it("returns the same bound and truncated flag the listings share", () => {
-    const files = Array.from({ length: 10_000 }, (_, i) => ({ relPath: `f-${i}.ts` }));
-    const listed = capChangedFileList(files);
-    expect(listed.files).toHaveLength(MAX_CHANGED_FILES);
-    expect(listed.truncated).toBe(true);
-    expect(listed.total).toBe(10_000);
   });
 });
