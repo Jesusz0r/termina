@@ -4,12 +4,12 @@
  * Pure over the process environment and filesystem; no retained state.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IGNORED_SEGMENTS, parseGitignore, type GitignoreRules } from "../../shared/gitignore.ts";
-import { freezeCwd, gitignoreSkips, sortUtf8, underRoot } from "./files.ts";
+import { freezeCwd, gitignoreSkips, readIgnoreFile, sortUtf8, underRoot } from "./files.ts";
 
 const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
@@ -94,7 +94,8 @@ export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): str
     const giPath = join(root, ".gitignore");
     const listingRules: GitignoreRules = new Map();
     try {
-      if (existsSync(giPath)) listingRules.set("", parseGitignore(readFileSync(giPath, "utf8")));
+      const text = readIgnoreFile(giPath);
+      if (text !== null) listingRules.set("", parseGitignore(text));
     } catch {
       /* listing still works without gitignore */
     }

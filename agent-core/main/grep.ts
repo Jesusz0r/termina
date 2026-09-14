@@ -3,7 +3,7 @@
  * walk, with hit grouping/paging for the model. Stateless between calls.
  */
 import { spawn } from "node:child_process";
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, readSync } from "node:fs";
 import { relative, sep } from "node:path";
 import { IGNORED_SEGMENTS } from "../../shared/gitignore.ts";
 import { validateGrepPattern } from "../../shared/grep-pattern.ts";
@@ -24,6 +24,7 @@ import {
   confinePath,
   freezeCwd,
   matchGlob,
+  openRegularFile,
   posixRel,
   shellQuote,
   yieldEventLoop,
@@ -67,7 +68,9 @@ function forEachGrepLine(
   let truncated = false;
   const result = (state: CompletionState): LineScanResult => ({ state, truncated });
   try {
-    fd = openSync(abs, "r");
+    const opened = openRegularFile(abs);
+    if ("error" in opened) return result("unreadable");
+    fd = opened.fd;
     const chunk = Buffer.alloc(64 * 1024);
     let leftover = Buffer.alloc(0);
     let skipUntilNl = false;

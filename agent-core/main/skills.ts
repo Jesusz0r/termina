@@ -2,10 +2,10 @@
  * Skills and instruction blocks: SKILL.md discovery, the skill index page,
  * and the project/user AGENTS.md wrappers. Stateless between calls.
  */
-import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { formatSkillIndex as formatCompactSkillIndex, type SkillIndexSkill } from "../skill-index.ts";
-import { GREP_VISIT_CAP, classifyWalkPath, fileHasNul, sortUtf8 } from "./files.ts";
+import { GREP_VISIT_CAP, classifyWalkPath, fileHasNul, readBoundedRegularFile, sortUtf8 } from "./files.ts";
 
 export type Skill = SkillIndexSkill;
 
@@ -84,19 +84,9 @@ export function scanSkills(dirs: string[]): { skills: Skill[]; capped: boolean }
     if (walked.capped) capped = true;
     for (const abs of walked.files) {
       if (fileHasNul(abs)) continue;
-      let text: string;
-      try {
-        const fd = openSync(abs, "r");
-        try {
-          const buf = Buffer.alloc(8192);
-          const n = readSync(fd, buf, 0, 8192, 0);
-          text = buf.subarray(0, n).toString("utf8");
-        } finally {
-          closeSync(fd);
-        }
-      } catch {
-        continue;
-      }
+      const head = readBoundedRegularFile(abs, 8192);
+      if ("error" in head) continue;
+      const text = head.text;
       const fm = parseFrontmatter(text);
       if (fm["disable-model-invocation"] === "true") continue;
       const name = (fm.name || basename(dirname(abs))).trim();

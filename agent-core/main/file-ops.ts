@@ -7,11 +7,8 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
-  fstatSync,
   mkdirSync,
-  openSync,
   readdirSync,
-  readFileSync,
   readSync,
   realpathSync,
   renameSync,
@@ -33,8 +30,10 @@ import {
   confinePath,
   freezeCwd,
   gitignoreSkips,
+  openRegularFile,
   parseFileTags,
   posixRel,
+  readIgnoreFile,
   sortUtf8,
   underRoot,
   xmlSafe,
@@ -226,10 +225,10 @@ function gitignoreRulesFor(root: string, dirAbs: string): GitignoreRules {
   }
   for (const dir of dirs.reverse()) {
     try {
-      const gi = join(dir, ".gitignore");
-      if (!existsSync(gi)) continue;
+      const text = readIgnoreFile(join(dir, ".gitignore"));
+      if (text === null) continue;
       const rel = dir === root ? "" : posixRel(root, dir);
-      rules.set(rel, parseGitignore(readFileSync(gi, "utf8")));
+      rules.set(rel, parseGitignore(text));
     } catch {
       /* unreadable gitignore */
     }
@@ -316,12 +315,14 @@ export function readTextView(
   });
   let fd: number | undefined;
   try {
-    fd = openSync(abs, "r");
-    const st = fstatSync(fd);
-    const head = Buffer.alloc(Math.min(4096, st.size));
+    const opened = openRegularFile(abs);
+    if ("error" in opened) return fail(opened.error);
+    fd = opened.fd;
+    const size = opened.size;
+    const head = Buffer.alloc(Math.min(4096, size));
     if (head.length > 0) readSync(fd, head, 0, head.length, 0);
     if (head.includes(0)) return fail("error: binary file");
-    if (st.size === 0) return logicalToolText("", {
+    if (size === 0) return logicalToolText("", {
       maxBytes: READ_CAP_BYTES,
       state: "complete",
       isError: false,
@@ -334,9 +335,9 @@ export function readTextView(
     const endLine = opts.endLine;
     let from = opts.offset;
     let viewStartLine = 1;
-    let until = st.size;
+    let until = size;
     if (lineMode) {
-      const offsets = lineRangeOffsets(fd, st.size, startLine, endLine, started);
+      const offsets = lineRangeOffsets(fd, size, startLine, endLine, started);
       if ("error" in offsets) return fail(offsets.error, offsets.timedOut ? "timeout" : "failed");
       from = offsets.start;
       viewStartLine = startLine;
@@ -346,7 +347,7 @@ export function readTextView(
       if (typeof nls === "object") return fail(nls.error, nls.timedOut ? "timeout" : "failed");
       viewStartLine = nls + 1;
     }
-    if (from >= st.size || from >= until) return logicalToolText("", {
+    if (from >= size || from >= until) return logicalToolText("", {
       maxBytes: READ_CAP_BYTES,
       state: "complete",
       isError: false,
@@ -457,18 +458,20 @@ export function readFileResult(abs: string, offset: number): ToolTextResult {
   });
   let fd: number | undefined;
   try {
-    fd = openSync(abs, "r");
-    const st = fstatSync(fd);
-    const head = Buffer.alloc(Math.min(4096, st.size));
+    const opened = openRegularFile(abs);
+    if ("error" in opened) return fail(opened.error);
+    fd = opened.fd;
+    const size = opened.size;
+    const head = Buffer.alloc(Math.min(4096, size));
     if (head.length > 0) readSync(fd, head, 0, head.length, 0);
     if (head.includes(0)) return fail("error: binary file");
-    if (offset >= st.size) return logicalToolText("", {
+    if (offset >= size) return logicalToolText("", {
       maxBytes: READ_CAP_BYTES,
       state: "complete",
       isError: false,
       repro,
     });
-    const want = Math.min(READ_CAP_BYTES, Math.max(0, st.size - offset));
+    const want = Math.min(READ_CAP_BYTES, Math.max(0, size - offset));
     const slice = Buffer.alloc(want);
     if (want > 0) readSync(fd, slice, 0, want, offset);
     const safe = new BoundedTextAccumulator({ maxBytes: READ_CAP_BYTES, direction: "head", marker: "" });
@@ -476,15 +479,15 @@ export function readFileResult(abs: string, offset: number): ToolTextResult {
     const text = safe.finish();
     const completeBytes = completeUtf8Boundary(slice);
     const nextOffset = offset + Math.min(text.retainedBytes, completeBytes);
-    const marker = nextOffset < st.size
+    const marker = nextOffset < size
       ? `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset}]`
       : text.truncated
         ? `[invalid UTF-8 omitted — continue with read_file offset ${nextOffset}]`
         : null;
     const result = logicalToolText(text.text, {
       maxBytes: READ_CAP_BYTES,
-      state: nextOffset >= st.size && text.truncated ? "unreadable" : "complete",
-      isError: nextOffset >= st.size && text.truncated,
+      state: nextOffset >= size && text.truncated ? "unreadable" : "complete",
+      isError: nextOffset >= size && text.truncated,
       forceMarker: marker !== null,
       marker,
       continuation: marker,
@@ -687,20 +690,22 @@ export function editProjectFile(
   if (oldText === "") return { content: "error: old_text must not be empty", isError: true };
   const confined = confinePath(cwd, path ?? "", { mustExist: true });
   if (!confined.ok) return { content: confined.error, isError: true };
-  let st;
-  try {
-    st = statSync(confined.abs);
-  } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
+  const opened = openRegularFile(confined.abs);
+  if ("error" in opened) {
+    return {
+      content: opened.error === "error: path is a directory" ? "error: EISDIR" : opened.error,
+      isError: true,
+    };
   }
-  if (st.isDirectory()) return { content: "error: EISDIR", isError: true };
-  if (st.size > EDIT_MAX_BYTES) return { content: `error: file exceeds ${EDIT_MAX_BYTES} bytes`, isError: true };
-  let fd: number | undefined;
+  if (opened.size > EDIT_MAX_BYTES) {
+    closeSync(opened.fd);
+    return { content: `error: file exceeds ${EDIT_MAX_BYTES} bytes`, isError: true };
+  }
+  const fileMode = opened.mode & 0o777;
   let body: string;
   try {
-    fd = openSync(confined.abs, "r");
-    const buf = Buffer.alloc(st.size);
-    if (st.size > 0) readSync(fd, buf, 0, st.size, 0);
+    const buf = Buffer.alloc(opened.size);
+    if (opened.size > 0) readSync(opened.fd, buf, 0, opened.size, 0);
     if (buf.subarray(0, Math.min(4096, buf.length)).includes(0)) {
       return { content: "error: binary file", isError: true };
     }
@@ -708,7 +713,7 @@ export function editProjectFile(
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    closeSync(opened.fd);
   }
   if (body.charCodeAt(0) === 0xfeff) body = body.slice(1);
   const ending = body.includes("\r\n") ? "\r\n" : "\n";
@@ -729,7 +734,7 @@ export function editProjectFile(
       if (fuzzy && !("ambiguous" in fuzzy)) {
         const next = body.slice(0, fuzzy.at) + replacement + body.slice(fuzzy.at + fuzzy.len);
         try {
-          atomicWrite(confined.abs, next, st.mode & 0o777);
+          atomicWrite(confined.abs, next, fileMode);
         } catch (err) {
           return { content: `error: ${(err as Error).message}`, isError: true };
         }
@@ -744,7 +749,7 @@ export function editProjectFile(
     const at = body.indexOf(old);
     const next = body.slice(0, at) + replacement + body.slice(at + old.length);
     try {
-      atomicWrite(confined.abs, next, st.mode & 0o777);
+      atomicWrite(confined.abs, next, fileMode);
     } catch (err) {
       return { content: `error: ${(err as Error).message}`, isError: true };
     }
@@ -766,7 +771,7 @@ export function editProjectFile(
   }
   if (n === 0) return { content: editMissDiagnostic(body, old), isError: true };
   try {
-    atomicWrite(confined.abs, next, st.mode & 0o777);
+    atomicWrite(confined.abs, next, fileMode);
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
   }

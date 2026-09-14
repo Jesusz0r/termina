@@ -2,12 +2,12 @@
  * Frozen deterministic front matter: the built-once system prompt (identity,
  * environment, instructions, skill index) plus the allow-set it discovers.
  */
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { formatSkillIndex as formatCompactSkillIndex } from "../skill-index.ts";
 import { formatEnvironment } from "./env.ts";
-import { freezeCwd, underRoot } from "./files.ts";
+import { freezeCwd, readBoundedRegularFile, underRoot } from "./files.ts";
 import {
   SKILL_XML_CAP,
   formatProjectInstructions,
@@ -15,10 +15,15 @@ import {
   scanSkills,
 } from "./skills.ts";
 
+/** Instruction-file cap far above the display caps; truncation still notes itself downstream. */
+const INSTRUCTION_FILE_CAP_BYTES = 256 * 1024;
+
 function readOptional(path: string): string | null {
   try {
     if (!existsSync(path)) return null;
-    return readFileSync(path, "utf8");
+    const got = readBoundedRegularFile(path, INSTRUCTION_FILE_CAP_BYTES);
+    if ("error" in got) return null;
+    return got.text;
   } catch {
     return null;
   }
