@@ -146,6 +146,43 @@ async function durableAtomicWrite(path: string, content: string): Promise<void> 
 }
 
 
+/**
+ * Atomic cursor publish without durability syncs. Cursors live in the OS temp
+ * dir and every delivery persists before the stream advances (a redelivery
+ * window of one event, which non-idempotent consumers such as run-state
+ * resets depend on), so rename atomicity — not sync durability — is the
+ * load-bearing property here: an app crash sees the old or the new complete
+ * cursor via the surviving page cache, while an OS crash is
+ * recycle-equivalent (tmp wiped or stale) and handled by launch-scope
+ * validation. Skipping the two fsyncs lifts drain throughput from ~91
+ * events/s toward the syscall floor without widening the redelivery window.
+ * Markers and anchors stay fully durable: they are written rarely.
+ */
+async function atomicWriteFile(path: string, content: string): Promise<void> {
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let handle: Awaited<ReturnType<typeof openFile>> | undefined;
+  try {
+    handle = await openFile(temp, "wx", 0o600);
+    await handle.writeFile(content, "utf8");
+    await handle.close();
+    handle = undefined;
+    await renameFile(temp, path);
+  } catch (error) {
+    try {
+      await handle?.close();
+    } catch {
+      /* best effort cleanup */
+    }
+    try {
+      await unlinkFile(temp);
+    } catch {
+      /* best effort cleanup */
+    }
+    throw error;
+  }
+}
+
+
 async function durableUnlink(path: string): Promise<void> {
   try {
     await unlinkFile(path);
@@ -2384,7 +2421,7 @@ export class SidecarTailer {
       };
       if (previous && this.persistedCursors.has(id) && sameDurableSidecarCursor(previous, cursor)) return true;
       try {
-        await durableAtomicWrite(this.cursorPath(id), JSON.stringify(cursor));
+        await atomicWriteFile(this.cursorPath(id), JSON.stringify(cursor));
         if (!this.isLive(id, generation)) return false;
         this.durableCursors.set(id, cursor);
         this.persistedCursors.add(id);

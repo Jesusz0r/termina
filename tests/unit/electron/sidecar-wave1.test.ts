@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { build } from "esbuild";
 import type * as fs from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { SidecarEventQueue, SidecarTailer } from "../../../electron/sidecar.ts";
@@ -461,6 +464,138 @@ describe("Wave 1 quarantine launch-scope regressions", () => {
       expect(marker.producerPid).toBe(process.pid);
       expect("bootId" in marker).toBe(true);
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+});
+
+describe("Wave 1 cursor throughput regressions", () => {
+  it("drains a 2000-event backlog above the throughput floor (refs #185)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-throughput-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-throughput";
+    const active = join(eventsDir, `${id}.jsonl`);
+    const COUNT = 2000;
+    try {
+      await writeFile(active, "");
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      const received: number[] = [];
+      tailer.onEvent = (_terminalId, event) => {
+        received.push(event.seq);
+        return true;
+      };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        const lines: string[] = [];
+        for (let seq = 1; seq <= COUNT; seq++) {
+          lines.push(JSON.stringify({ bridgeId: "flood", seq, t: "checkpoint_result", ok: true }));
+        }
+        const startedAt = Date.now();
+        await appendFile(active, `${lines.join("\n")}\n`);
+        // Floor: 2000 events in 12 s. Post-fix this takes ~1 s (poll cadence
+        // plus syscall-cost persists); per-event fsync drains fail it on
+        // sync-slow filesystems (APFS: ~22 s). Fast tmpfs passes either way,
+        // so the no-sync syscall test below pins the design deterministically.
+        await waitFor(() => received.length === COUNT, 12000, `backlog did not drain above the floor (got ${received.length}/${COUNT})`);
+        expect(Date.now() - startedAt).toBeLessThan(12000);
+        expect(received).toEqual(Array.from({ length: COUNT }, (_unused, index) => index + 1));
+        // Every event still persists before the stream advances: the cursor
+        // must cover the full backlog, not a group-committed prefix.
+        const cursorPath = join(eventsDir, `.cursor-${id}.json`);
+        const deadline = Date.now() + 5000;
+        let sequence = 0;
+        while (Date.now() < deadline) {
+          try {
+            sequence = JSON.parse(await readFile(cursorPath, "utf8")).sequence;
+            if (sequence === COUNT) break;
+          } catch {
+            /* Cursor not published yet. */
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(sequence).toBe(COUNT);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("issues no fsync syscalls on the cursor path (refs #185)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-nosync-"));
+    const eventsDir = join(root, "events");
+    const bundle = join(root, "sidecar.mjs");
+    const signal = join(root, "cursor-sync.signal");
+    process.env.TERMINA_CURSOR_SYNC_SIGNAL = signal;
+    const virtualPath = "termina-cursor-sync-counter";
+    const virtualSource = `
+    import { link as realLink, open as realOpen, readdir as realReaddir, rename as realRename, stat as realStat, unlink as realUnlink } from "node:fs/promises";
+    import { appendFileSync } from "node:fs";
+    export const link = realLink;
+    export const readdir = realReaddir;
+    export const rename = realRename;
+    export const stat = realStat;
+    export const unlink = realUnlink;
+    export async function open(path, ...args) {
+      const handle = await realOpen(path, ...args);
+      if (String(path).includes(".cursor-")) {
+        const realSync = handle.sync.bind(handle);
+        handle.sync = async (...syncArgs) => {
+          appendFileSync(process.env.TERMINA_CURSOR_SYNC_SIGNAL, String(path) + "\\n");
+          return realSync(...syncArgs);
+        };
+      }
+      return handle;
+    }
+    `;
+    try {
+      await build({
+        entryPoints: ["electron/sidecar.ts"],
+        bundle: true,
+        platform: "node",
+        format: "esm",
+        outfile: bundle,
+        logLevel: "silent",
+        plugins: [{
+          name: "count-cursor-sync",
+          setup(pluginBuild) {
+            pluginBuild.onResolve({ filter: /^node:fs\/promises$/ }, (args) => {
+              if (args.namespace === "count-fs") return { path: args.path, external: true };
+              return { path: virtualPath, namespace: "count-fs" };
+            });
+            pluginBuild.onLoad({ filter: /.*/, namespace: "count-fs" }, () => ({ contents: virtualSource, loader: "js" }));
+          },
+        }],
+      });
+      await mkdir(eventsDir, { recursive: true });
+      const id = "term-nosync";
+      const active = join(eventsDir, `${id}.jsonl`);
+      await writeFile(active, "");
+      const { SidecarTailer: BundledTailer } = await import(pathToFileURL(bundle).href);
+      const tailer = new BundledTailer(eventsDir, () => ({ close() {} }));
+      const received: number[] = [];
+      tailer.onEvent = (_terminalId: string, event: { seq: number }) => {
+        received.push(event.seq);
+        return true;
+      };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        const lines: string[] = [];
+        for (let seq = 1; seq <= 50; seq++) {
+          lines.push(JSON.stringify({ bridgeId: "sync", seq, t: "checkpoint_result", ok: true }));
+        }
+        await appendFile(active, `${lines.join("\n")}\n`);
+        await waitFor(() => received.length === 50, 8000, "counting drain did not deliver");
+        expect(existsSync(signal), "cursor persists issued fsync syscalls").toBe(false);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      delete process.env.TERMINA_CURSOR_SYNC_SIGNAL;
       await rm(root, { recursive: true, force: true });
     }
   }, 30000);
