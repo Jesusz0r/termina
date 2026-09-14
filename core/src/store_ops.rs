@@ -80,7 +80,9 @@ pub(crate) fn op_store_create(req: &Value) -> Result<Value, String> {
     for name in stale {
         if let Ok(reference) = repo.find_reference(&name) {
             let mut reference = reference;
-            reference.delete().ok();
+            reference
+                .delete()
+                .map_err(|e| format!("delete stale store ref {name} failed: {e}"))?;
         }
     }
     // Read-only object access to the source repository.

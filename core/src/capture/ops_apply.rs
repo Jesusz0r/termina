@@ -39,25 +39,30 @@ fn commit_index_if_changed(repo: &Repository, message: &str) -> Result<Option<Oi
     let tree = index
         .write_tree_to(repo)
         .map_err(|e| format!("write-tree failed: {e}"))?;
-    let head_tree = match repo.head() {
-        Ok(head) => match head.peel_to_tree() {
-            Ok(tree) => Some(tree.id()),
-            Err(_) => None,
-        },
+    let head = match repo.head() {
+        Ok(head) => Some(head),
         Err(e) if e.code() == ErrorCode::UnbornBranch || e.code() == ErrorCode::NotFound => None,
-        Err(e) => return Err(e.to_string()),
+        Err(e) => return Err(format!("git head failed: {e}")),
+    };
+    let head_tree = match &head {
+        Some(head) => Some(
+            head.peel_to_tree()
+                .map_err(|e| format!("HEAD tree is unreadable: {e}"))?
+                .id(),
+        ),
+        None => None,
     };
     if head_tree == Some(tree) {
         return Ok(None);
     }
-    let parents: Vec<git2::Commit> = match repo.head() {
-        Ok(head) => match head.peel_to_commit() {
-            Ok(commit) => vec![commit],
-            Err(_) => vec![],
-        },
-        Err(_) => vec![],
+    let parent = match &head {
+        Some(head) => Some(
+            head.peel_to_commit()
+                .map_err(|e| format!("HEAD commit is unreadable: {e}"))?,
+        ),
+        None => None,
     };
-    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+    let parent_refs: Vec<&git2::Commit> = parent.iter().collect();
     let signature = Signature::now("termina", "dev@termina.local").map_err(|e| e.to_string())?;
     let tree_obj = repo.find_tree(tree).map_err(|e| e.to_string())?;
     let oid = repo
@@ -286,4 +291,84 @@ pub(crate) fn op_template(req: &Value) -> Result<Value, String> {
     })();
     drop(cwd);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::commit_index_if_changed;
+    use git2::Repository;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    struct RepoFixture {
+        path: PathBuf,
+        repo: Repository,
+    }
+
+    impl RepoFixture {
+        fn new() -> Self {
+            loop {
+                let path = std::env::temp_dir().join(format!(
+                    "termina-apply-head-{}-{}",
+                    std::process::id(),
+                    SEQ.fetch_add(1, Ordering::Relaxed)
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => {
+                        let repo = Repository::init(&path).expect("init apply fixture");
+                        return Self { path, repo };
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create apply fixture: {error}"),
+                }
+            }
+        }
+    }
+
+    impl Drop for RepoFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn stage_file(repo: &Repository, root: &Path, name: &str, bytes: &[u8]) {
+        fs::write(root.join(name), bytes).expect("write worktree file");
+        let mut index = repo.index().expect("index");
+        index.add_path(Path::new(name)).expect("stage file");
+        index.write().expect("write index");
+    }
+
+    #[test]
+    fn unborn_repository_still_writes_a_root_commit() {
+        let fixture = RepoFixture::new();
+        stage_file(&fixture.repo, &fixture.path, "a.txt", b"hello\n");
+        let oid = commit_index_if_changed(&fixture.repo, "termina state")
+            .expect("unborn HEAD must still commit")
+            .expect("unborn commit writes an oid");
+        let commit = fixture.repo.find_commit(oid).expect("find unborn commit");
+        assert_eq!(commit.parent_count(), 0);
+    }
+
+    #[test]
+    fn corrupt_head_is_not_treated_as_unborn() {
+        let fixture = RepoFixture::new();
+        stage_file(&fixture.repo, &fixture.path, "a.txt", b"hello\n");
+        commit_index_if_changed(&fixture.repo, "termina state")
+            .expect("seed commit")
+            .expect("seed oid");
+        let blob = fixture.repo.blob(b"not a commit").expect("blob");
+        fs::write(fixture.path.join(".git").join("HEAD"), format!("{blob}\n"))
+            .expect("point HEAD at a blob");
+        let repo = Repository::open(&fixture.path).expect("reopen after HEAD rewrite");
+        stage_file(&repo, &fixture.path, "a.txt", b"changed\n");
+        let err = commit_index_if_changed(&repo, "termina state")
+            .expect_err("corrupt HEAD must fail closed");
+        assert!(
+            err.contains("HEAD tree is unreadable") || err.contains("HEAD commit is unreadable"),
+            "expected unreadable HEAD, got {err}"
+        );
+    }
 }
