@@ -321,6 +321,16 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
       expect(result.content).toMatch(/mcp resource payload omitted/);
     });
 
+    it("labels too-deep and cyclic payloads distinctly from unserializable ones (#222)", () => {
+      const cyclic: Record<string, unknown> = { a: 1 };
+      cyclic.self = cyclic;
+      const deep = normalizeMcpCallResult({ structuredContent: cyclic });
+      expect(deep.content).toMatch(/too deep or cyclic/);
+      expect(deep.content).not.toMatch(/not JSON-serializable/);
+      const unserializable = normalizeMcpCallResult({ structuredContent: { fn: () => 1 } });
+      expect(unserializable.content).toMatch(/not JSON-serializable/);
+    });
+
     it("does not falsely mark MCP output at exact UTF-8 limit", () => {
       const text = "🙂".repeat(Math.floor(MCP_RESULT_BYTES / 4));
       const result = normalizeMcpCallResult({ content: [{ type: "text", text }] });

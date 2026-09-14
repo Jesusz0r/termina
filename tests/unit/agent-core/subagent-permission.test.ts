@@ -46,6 +46,7 @@ async function runChild(opts: {
   approveEnv?: string;
   command: string;
   timeoutMs?: number;
+  taskFileBody?: string;
 }): Promise<{ code: number | null; output: string; approvals: string[]; frameOk: boolean }> {
   const root = mkdtempSync(join(tmpdir(), "termina-subagent-perm-"));
   const project = join(root, "project");
@@ -59,7 +60,7 @@ async function runChild(opts: {
   const taskFile = join(events, "task.json");
   writeFileSync(
     taskFile,
-    JSON.stringify({
+    opts.taskFileBody ?? JSON.stringify({
       version: 1,
       runId,
       task: "run one command",
@@ -211,5 +212,15 @@ describe("headless child permission mode (#206)", () => {
     expect(result.code, result.output).toBe(0);
     expect(result.frameOk, result.output).toBe(true);
     expect(result.approvals).toEqual([]);
+  });
+
+  it("rejects an oversized task file before parsing (#222)", async () => {
+    const result = await runChild({
+      taskMode: "ask",
+      command: "echo hi",
+      taskFileBody: `{"version":1,"padding":"${"p".repeat(70 * 1024)}"}`,
+    });
+    expect(result.code, result.output).toBe(2);
+    expect(result.output).toMatch(/task file exceeds its budget/);
   });
 });

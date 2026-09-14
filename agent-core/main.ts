@@ -45,7 +45,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   readdirSync,
-  readFileSync,
   rmSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -184,6 +183,7 @@ import {
   freezeCwd,
   globFiles,
   listTaggedFiles,
+  readBoundedRegularFile,
   shellQuote,
 } from "./main/files.ts";
 import { isDirectRunFrom, trustedPath } from "./main/env.ts";
@@ -259,6 +259,7 @@ import {
   writeSubagentAckFile,
   writeSubagentApprovalRequest,
   writeSubagentTaskFile,
+  MAX_SUBAGENT_FILE_BYTES,
   MAX_SUBAGENT_RESULT_CHARS,
   type SubagentPermissionMode,
   type SubagentTaskFile,
@@ -1375,6 +1376,10 @@ function closeSessionWriter(): void {
 }
 
 function openSessionWriter(): void {
+  if (testOnlyOpenSessionWriterOverride) {
+    testOnlyOpenSessionWriterOverride();
+    return;
+  }
   closeSessionWriter();
   if (!sessionFile) return;
   const opened = SessionWriter.open(sessionFile, storageSeq);
@@ -1868,6 +1873,11 @@ function stopSubagentApprovalTimer(): void {
  * parents (no picker surface) resolve to a fast deny ack instead of
  * making the child hang the full timeout.
  */
+/** A picker prompt is only valid for a live run; settled runs must not be asked about. */
+export function isLiveSubagentRun(run: { state: string } | undefined): boolean {
+  return run?.state === "active";
+}
+
 function pollSubagentApprovals(): void {
   if (!eventsDir || !terminalId || subagentRegistry.activeRuns().length === 0) return;
   let names: string[];
@@ -1887,7 +1897,7 @@ function pollSubagentApprovals(): void {
     const run = subagentRegistry.get(runId);
     const req = readSubagentApprovalRequest(join(eventsDir, name));
     const fresh = req.ok && Date.now() - req.file.createdAt < timeout;
-    if (!run || run.state !== "active" || !fresh) {
+    if (!isLiveSubagentRun(run) || !fresh) {
       try {
         rmSync(join(eventsDir, name));
       } catch {
@@ -1916,6 +1926,19 @@ function pollSubagentApprovals(): void {
       // outlived the child's wait. Asking about a dead request wastes
       // attention and writes an orphan ack.
       if (Date.now() - createdAt >= timeout) {
+        try {
+          rmSync(join(eventsDir, name));
+        } catch {
+          /* Dead letter stays for the startup sweep. */
+        }
+        pendingSubagentApprovals.delete(key);
+        return false;
+      }
+      // Re-check liveness too: the run may have settled while queued. A
+      // picker for a dead run would write an orphan ack for a child that is
+      // no longer waiting.
+      const live = subagentRegistry.get(runId);
+      if (!isLiveSubagentRun(live)) {
         try {
           rmSync(join(eventsDir, name));
         } catch {
@@ -2362,8 +2385,18 @@ export function stampHistoryCache(
     const blocks = m.content as Array<Record<string, unknown>>;
     for (let j = blocks.length - 1; j >= 0; j--) {
       const b = blocks[j]!;
-      if (lookback <= 0) return messages;
-      lookback--;
+      const bType = typeof b.type === "string" ? b.type : "";
+      // Anthropic merges a run of consecutive tool_use blocks (and likewise
+      // tool_result) into one lookback position, so only the run's far edge
+      // consumes the budget. See "20-block lookback window" in the prompt
+      // caching docs: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+      const prev = j > 0 ? blocks[j - 1] : null;
+      const prevType = prev && typeof prev.type === "string" ? prev.type : "";
+      const continuesRun = (bType === "tool_use" || bType === "tool_result") && prevType === bType;
+      if (!continuesRun) {
+        if (lookback <= 0) return messages;
+        lookback--;
+      }
       if (typeof b.type !== "string" || !HISTORY_CACHE_BLOCKS.has(b.type)) continue;
       if (Object.prototype.hasOwnProperty.call(b, "cache_control")) return messages;
       const next = messages.slice();
@@ -2484,11 +2517,6 @@ interface Message {
 }
 
 const history: Message[] = [];
-
-export function placeStreamBlock<T>(slots: Array<T | undefined>, index: unknown, block: T): void {
-  if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index > 10_000) return;
-  slots[index] = block;
-}
 
 export function compactStreamBlocks<T>(slots: Array<T | undefined>): T[] {
   return slots.filter((b): b is T => b !== undefined);
@@ -4616,12 +4644,11 @@ async function runSubagentTask(taskPath: string): Promise<never> {
     process.exit(2);
   };
   if (!taskPath) await fail("missing task file path");
+  const taskRead = readBoundedRegularFile(taskPath, MAX_SUBAGENT_FILE_BYTES);
   let raw: string;
-  try {
-    raw = readFileSync(taskPath, "utf8");
-  } catch (err) {
-    await fail(`cannot read task file: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  if ("error" in taskRead) await fail(`cannot read task file: ${taskRead.error}`);
+  else if (taskRead.truncated) await fail("task file exceeds its budget");
+  else raw = taskRead.text;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw!);
@@ -4683,6 +4710,14 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   process.stdout.write(`${formatSubagentResultFrame(frame)}\n`);
   await shutdownAgentCore({ reason: "subagent" });
   process.exit(frame.ok ? 0 : 1);
+}
+
+/** Images carried into one run: pending claims first, then startup extras. */
+export const RUN_IMAGE_CAP = 4;
+
+/** Images dropped by the run cap (#222): pending claims come first, so a full claim evicts startup extras. */
+export function droppedRunImageCount(loadedCount: number, extrasCount: number): number {
+  return Math.max(0, loadedCount + extrasCount - RUN_IMAGE_CAP);
 }
 
 async function runPrompt(prompt: string, extraImages: Array<{ name: string; mediaType: string }> = []): Promise<void> {
@@ -4783,7 +4818,13 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   const extras = extraImages
     .map((ref) => loadImageFromRoots(ref, imageRoots))
     .filter((img): img is NonNullable<typeof img> => img !== null);
-  const allImages = [...loaded, ...extras].slice(0, 4);
+  const allImages = [...loaded, ...extras].slice(0, RUN_IMAGE_CAP);
+  const droppedImages = droppedRunImageCount(loaded.length, extras.length);
+  if (droppedImages > 0) {
+    // Pending claims come first, so a full claim silently evicts structured
+    // startup images. Say so instead of dropping them without a trace.
+    out(`(note: dropped ${droppedImages} image${droppedImages === 1 ? "" : "s"} over the ${RUN_IMAGE_CAP}-image cap)\n`);
+  }
   const persistedImages = persistLoadedImages(sessionFile, allImages);
   if (!persistedImages.ok) {
     cancelPreflight();
@@ -5578,6 +5619,33 @@ export function testOnlyResumeState(): { historyLength: number; storageSeq: numb
   return { historyLength: history.length, storageSeq, streamPrepared };
 }
 
+/** Live-view reset shared by /clear success and its writer-open failure path. */
+function resetLiveSessionState(): void {
+  storageSeq = 0;
+  history.length = 0;
+  lastHandoff = null;
+  clearSubagentApprovals();
+  rotateCacheSession();
+  sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
+  lastUsd = null;
+  permissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
+  postRevision = false;
+  revisions = 0;
+  revisionKinds = [];
+}
+
+/** Test seam: fail the next session-writer open (covers /clear recovery). */
+let testOnlyOpenSessionWriterOverride: (() => void) | null = null;
+
+export function testOnlySetOpenSessionWriterOverride(fn: (() => void) | null): void {
+  testOnlyOpenSessionWriterOverride = fn;
+}
+
+/** Test seam: drive one input line through the command router. */
+export function testOnlyDispatchLine(line: string): void {
+  dispatchLine(line);
+}
+
 // ---- terminal surface ----
 
 let surface: AgentTui | null = null;
@@ -6327,26 +6395,22 @@ function dispatchLine(line: string): void {
         showPrompt();
         return;
       }
-      storageSeq = 0;
       try {
         openSessionWriter();
       } catch (err) {
-        out(`(could not start a fresh session: ${err instanceof Error ? err.message : String(err)})\n`);
+        // The old view is archived, but there is no live writer: reset to a
+        // coherent not-prepared state instead of keeping orphaned history
+        // with sequence 0. The next prompt re-prepares (retrying the open)
+        // rather than running writerless or reusing sequence numbers.
+        resetLiveSessionState();
+        streamPrepared = false;
+        syncIndicators();
+        out(`(could not start a fresh session: ${err instanceof Error ? err.message : String(err)}; retry with /clear or send a prompt)\n`);
         showPrompt();
         return;
       }
     }
-    storageSeq = 0;
-    history.length = 0;
-    lastHandoff = null;
-    clearSubagentApprovals();
-    rotateCacheSession();
-    sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
-    lastUsd = null;
-    permissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
-    postRevision = false;
-    revisions = 0;
-    revisionKinds = [];
+    resetLiveSessionState();
     streamPrepared = true;
     syncIndicators();
     out("(session cleared)\n");

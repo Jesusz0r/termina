@@ -5,7 +5,7 @@
  * payloads, and startup-control consume/format. Split from
  * agent-core/host.ts (issue #38).
  */
-import { errorCode, isErrno } from "../../shared/guards.ts";
+import { errorCode, isErrno, isRecord } from "../../shared/guards.ts";
 import { HAS_PLAN_TASK } from "../../shared/plan-task.ts";
 import { BoundedTextAccumulator, type BoundedText, type BoundedTextMarkerDetails, type CompletionState } from "../tool-output.ts";
 import { createHash, type Hash } from "node:crypto";
@@ -74,15 +74,29 @@ export async function waitForAck(
   const deadline = Date.now() + Math.max(0, timeoutMs);
   while (Date.now() < deadline) {
     if (opts?.shouldStop?.()) return null;
+    let claimedAck = false;
     try {
       renameSync(target, claimed);
+      claimedAck = true;
       try {
         const raw = readFileSync(claimed, "utf8");
-        return JSON.parse(raw) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(raw);
+        if (!isRecord(parsed)) return { ok: false, error: "malformed ack", malformed: true };
+        return parsed;
       } finally {
         rmSync(claimed, { force: true });
       }
     } catch {
+      // A claimed but unreadable file is corruption, not absence: fail the
+      // wait promptly instead of polling to timeout like a missing ack.
+      if (claimedAck) {
+        try {
+          rmSync(claimed, { force: true });
+        } catch {
+          /* best effort dead-letter removal */
+        }
+        return { ok: false, error: "malformed ack", malformed: true };
+      }
       /* not written yet */
     }
     await new Promise((resolve) => setTimeout(resolve, 50));

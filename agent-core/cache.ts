@@ -610,6 +610,9 @@ export function classifyCacheMiss(input: {
   }
 
   const read = finiteNonnegative(input.current.usage.cacheReadTokens) as number;
+  // Unreachable for honest provider totals (read is part of currentTotal, so
+  // read > total needs negative siblings); kept as defense-in-depth against
+  // corrupt usage payloads, which must not produce a confident attribution.
   if (read > currentTotal) {
     return {
       attributed: false,

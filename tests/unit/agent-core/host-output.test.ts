@@ -168,4 +168,18 @@ describe("Agent Core Host Output & Context Bounding", () => {
     );
     expect(image).toBeNull();
   });
+
+  it("caps inline base64 images by decoded bytes (#222)", () => {
+    const over = Buffer.alloc(host.MAX_IMAGE_BYTES + 1, 7).toString("base64");
+    expect(over.length).toBeLessThanOrEqual(host.MAX_IMAGE_BYTES * 2);
+    expect(
+      host.expandFileImageSource({ type: "base64", media_type: "image/png", data: over }, []),
+    ).toBeNull();
+    const exact = Buffer.alloc(host.MAX_IMAGE_BYTES, 7).toString("base64");
+    const ok = host.expandFileImageSource({ type: "base64", media_type: "image/png", data: exact }, []);
+    expect(ok?.type).toBe("base64");
+    expect(
+      host.expandFileImageSource({ type: "base64", media_type: "image/png", data: "   " }, []),
+    ).toBeNull();
+  });
 });
