@@ -706,18 +706,20 @@ export class Explorer {
     const clip = this.clipboardEntry;
     const projectId = this.projectId;
     if (!clip || !projectId) return;
+    let pastedName: string | undefined;
     try {
       const res = await window.termina.pasteEntry(projectId, targetDirRel, clip.relPath, clip.cut);
       if (!res.ok) {
         toast(res.error ?? "paste failed", "error");
         return;
       }
+      pastedName = res.name;
     } catch (err) {
       toast(`paste failed: ${(err as Error).message}`, "error");
       return;
     }
     if (clip.cut) this.clipboardEntry = null; // a move pastes exactly once
-    toast(`Pasted as ${res.name ?? "entry"}`, "info");
+    toast(`Pasted as ${pastedName ?? "entry"}`, "info");
     await this.refresh();
   }
 
