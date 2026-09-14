@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildExportMarkdown,
+  buildSkippedFilesText,
   buildUnifiedPatch,
+  exportStubReason,
+  partitionExportPatchFiles,
   unifiedFileDiff,
 } from "../../../electron/worldlines/export.ts";
 
@@ -42,10 +49,29 @@ describe("export unified diff", () => {
     expect(deleted).toContain("+++ /dev/null");
   });
 
-  it("stubs binary and oversized files", () => {
-    expect(buildUnifiedPatch([{ relPath: "img.png", before: "a\0b", after: "a\0c" }])).toContain("Binary file changed");
-    const big = `${"x\n".repeat(2100)}`;
-    expect(buildUnifiedPatch([{ relPath: "big.ts", before: "y\n", after: big }])).toContain("Binary file changed");
+  it("excludes binary and oversized files from the patch as listed-only stubs", () => {
+    const files = [
+      { relPath: "img.png", before: "a\0b", after: "a\0c" },
+      { relPath: "big.ts", before: "y\n", after: `${"x\n".repeat(2100)}` },
+      { relPath: "huge.ts", before: "y\n", after: `z${"z".repeat(300 * 1024)}\n` },
+      { relPath: "ok.ts", before: "a\n", after: "b\n" },
+    ];
+    expect(exportStubReason(files[0]!)).toBe("binary");
+    expect(exportStubReason(files[1]!)).toBe("long");
+    expect(exportStubReason(files[2]!)).toBe("oversized");
+    expect(exportStubReason(files[3]!)).toBe(null);
+    const { patchable, stubs } = partitionExportPatchFiles(files);
+    expect(patchable.map((f) => f.relPath)).toEqual(["ok.ts"]);
+    expect(stubs.map((s) => s.relPath)).toEqual(["img.png", "big.ts", "huge.ts"]);
+    const patch = buildUnifiedPatch(files);
+    expect(patch).toContain("diff --git a/ok.ts b/ok.ts");
+    expect(patch).not.toContain("img.png");
+    expect(patch).not.toContain("big.ts");
+    expect(patch).not.toContain("huge.ts");
+    const skipped = buildSkippedFilesText(stubs);
+    expect(skipped).toContain("img.png (binary,");
+    expect(skipped).toContain("big.ts (long,");
+    expect(skipped).toContain("huge.ts (oversized,");
   });
 
   it("sorts files by path", () => {
@@ -62,6 +88,72 @@ describe("export unified diff", () => {
     expect(patch).toContain("--- a/f.ts");
     expect(patch).toContain("+++ b/f.ts");
     expect(patch.endsWith("\n")).toBe(true);
+  });
+});
+
+describe("export git apply (issue #189)", () => {
+  function fixtureRepo(): string {
+    const dir = mkdtempSync(join(tmpdir(), "termina-export-apply-"));
+    const git = (...args: string[]): void => {
+      execFileSync("git", ["-c", "user.email=test@termina.local", "-c", "user.name=test", "-c", "commit.gpgsign=false", ...args], { cwd: dir, stdio: "pipe" });
+    };
+    git("init", "-q", ".");
+    writeFileSync(join(dir, "a-stub.ts"), "y\n");
+    writeFileSync(join(dir, "img.png"), "img-bytes\n");
+    writeFileSync(join(dir, "z-normal.ts"), "a\nb\n");
+    git("add", ".");
+    git("commit", "-qm", "init");
+    return dir;
+  }
+
+  function applyCheck(dir: string, patch: string): number {
+    const patchPath = join(dir, "candidate.patch");
+    writeFileSync(patchPath, patch);
+    try {
+      execFileSync("git", ["apply", "--check", patchPath], { cwd: dir, stdio: "pipe" });
+      return 0;
+    } catch (err) {
+      return (err as { status?: number }).status ?? 1;
+    } finally {
+      rmSync(patchPath, { force: true });
+    }
+  }
+
+  it("passes git apply --check with a stub, a binary, and an oversized file", () => {
+    const dir = fixtureRepo();
+    try {
+      // Stub sorts first: the pre-fix patch died here with exit 128.
+      const patch = buildUnifiedPatch([
+        { relPath: "a-stub.ts", before: "y\n", after: `${"x\n".repeat(2100)}` },
+        { relPath: "img.png", before: "img-bytes\n", after: "img-\0bytes\n" },
+        { relPath: "oversized.ts", before: null, after: `z${"z".repeat(300 * 1024)}\n` },
+        { relPath: "z-normal.ts", before: "a\nb\n", after: "a\nc\n" },
+      ]);
+      expect(applyCheck(dir, patch)).toBe(0);
+      // The surviving patch still applies for real.
+      const patchPath = join(dir, "candidate.patch");
+      writeFileSync(patchPath, patch);
+      execFileSync("git", ["apply", patchPath], { cwd: dir, stdio: "pipe" });
+      expect(readFileSync(join(dir, "z-normal.ts"), "utf8")).toBe("a\nc\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes git apply --check for a stub-free patch and an all-stub patch", () => {
+    const dir = fixtureRepo();
+    try {
+      const clean = buildUnifiedPatch([{ relPath: "z-normal.ts", before: "a\nb\n", after: "a\nc\n" }]);
+      expect(applyCheck(dir, clean)).toBe(0);
+      const allStub = buildUnifiedPatch([
+        { relPath: "a-stub.ts", before: "y\n", after: `${"x\n".repeat(2100)}` },
+        { relPath: "img.png", before: "img-bytes\n", after: "img-\0bytes\n" },
+      ]);
+      // Nothing patchable: an empty patch plus the skipped-files listing.
+      expect(allStub).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

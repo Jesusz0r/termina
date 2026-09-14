@@ -10,8 +10,10 @@ import { lstat as lstatPath, mkdir, readdir, realpath, rm, writeFile } from "nod
 import { join } from "node:path";
 import {
   buildExportMarkdown,
+  buildSkippedFilesText,
   MAX_EXPORT_BUNDLES,
   MAX_EXPORT_FILES,
+  partitionExportPatchFiles,
   type ExportPatchFile,
 } from "./export.js";
 import { changedFiles, isSafeRelativePath } from "./candidate-files.js";
@@ -82,6 +84,9 @@ export async function exportCandidateRun(
     patchFiles.push({ relPath: file.relPath, before, after });
   }
   if (patchFiles.length === 0) return { ok: false, error: "no exportable file contents" };
+  // Stubs never enter candidate.patch (git apply rejects the whole patch
+  // when a stub line is followed by another file); they ship as a listing.
+  const { patchable, stubs } = partitionExportPatchFiles(patchFiles);
   const evidence = ctx.evidenceByComparison.get(comparisonId);
   const records = evidence?.byCandidate[label] ?? [];
   const bundle = buildExportMarkdown({
@@ -95,13 +100,18 @@ export async function exportCandidateRun(
     evidence: records.map((record) => ({ kind: record.kind, status: record.status, reason: record.reason })),
     profiles: (evidence?.profiles ?? []).map((profile) => ({ profile: profile.profile, winner: profile.winner })),
     truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,
+    skippedFiles: stubs.length,
     evidenceStale: evidence?.stale === true,
   });
   let patch: string;
-  try {
-    patch = await ctx.buildExportPatch(patchFiles);
-  } catch (err) {
-    return { ok: false, error: `could not build the export patch: ${err instanceof Error ? err.message : String(err)}` };
+  if (patchable.length === 0) {
+    patch = "";
+  } else {
+    try {
+      patch = await ctx.buildExportPatch(patchable);
+    } catch (err) {
+      return { ok: false, error: `could not build the export patch: ${err instanceof Error ? err.message : String(err)}` };
+    }
   }
   // The gather + patch window is long: refuse to write a bundle for a
   // candidate that was discarded while it ran.
@@ -119,6 +129,9 @@ export async function exportCandidateRun(
     if (!isInside(canonicalRoot, canonicalDir)) return { ok: false, error: "export bundle escaped its directory" };
     await writeFile(join(canonicalDir, "candidate.patch"), patch, { mode: 0o600 });
     await writeFile(join(canonicalDir, "pr-body.md"), bundle, { mode: 0o600 });
+    if (stubs.length > 0) {
+      await writeFile(join(canonicalDir, "skipped-files.txt"), buildSkippedFilesText(stubs), { mode: 0o600 });
+    }
     await writeFile(join(canonicalDir, "metadata.json"), JSON.stringify({
       comparisonId,
       label,
@@ -128,6 +141,7 @@ export async function exportCandidateRun(
       exportedAt: new Date().toISOString(),
       files: changed.length,
       truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,
+      skippedFiles: stubs.length,
     }, null, 2), { mode: 0o600 });
     await pruneExportBundles(canonicalRoot, canonicalDir);
   } catch (err) {

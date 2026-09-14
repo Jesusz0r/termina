@@ -129,26 +129,69 @@ function isBinary(text: string): boolean {
   return text.includes("\0");
 }
 
-/** Full unified patch for a candidate file set, sorted by path. */
+/** Why a file is listed, not patched: binary bytes, over the byte cap, or
+ * over the line cap (the O(n*m) diff is bounded). */
+export type ExportStubReason = "binary" | "oversized" | "long";
+
+/** The stub reason for a patch file, or null when it is patchable. */
+export function exportStubReason(file: ExportPatchFile): ExportStubReason | null {
+  for (const text of [file.before, file.after]) {
+    if (text === null) continue;
+    if (isBinary(text)) return "binary";
+    if (Buffer.byteLength(text, "utf8") > MAX_EXPORT_FILE_BYTES) return "oversized";
+    if (splitLines(text).length > MAX_EXPORT_FILE_LINES) return "long";
+  }
+  return null;
+}
+
+export interface ExportStubFile {
+  relPath: string;
+  reason: ExportStubReason;
+  beforeSize: number;
+  afterSize: number;
+}
+
+/** Split gathered files into patchable entries and listed-only stubs. Stubs
+ * never enter `candidate.patch`: git apply rejects a whole patch whose stub
+ * line is followed by another file. */
+export function partitionExportPatchFiles(files: ExportPatchFile[]): { patchable: ExportPatchFile[]; stubs: ExportStubFile[] } {
+  const patchable: ExportPatchFile[] = [];
+  const stubs: ExportStubFile[] = [];
+  for (const file of files) {
+    const reason = exportStubReason(file);
+    if (reason === null) {
+      patchable.push(file);
+      continue;
+    }
+    stubs.push({
+      relPath: file.relPath,
+      reason,
+      beforeSize: file.before === null ? 0 : Buffer.byteLength(file.before, "utf8"),
+      afterSize: file.after === null ? 0 : Buffer.byteLength(file.after, "utf8"),
+    });
+  }
+  return { patchable, stubs };
+}
+
+/** The `skipped-files.txt` bundle companion: every listed-only stub. */
+export function buildSkippedFilesText(stubs: ExportStubFile[]): string {
+  const lines = ["Listed, not patched (binary, oversized, or long files):"];
+  for (const stub of [...stubs].sort((a, b) => (a.relPath < b.relPath ? -1 : 1))) {
+    lines.push(`${stub.relPath} (${stub.reason}, ${stub.beforeSize} -> ${stub.afterSize} bytes)`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** Full unified patch for a candidate file set, sorted by path. Stubs are
+ * excluded so the patch always round-trips through `git apply`. */
 export function buildUnifiedPatch(files: ExportPatchFile[]): string {
   const out: string[] = [];
-  const sorted = [...files].sort((a, b) => (a.relPath < b.relPath ? -1 : 1));
+  const sorted = [...files].filter((file) => exportStubReason(file) === null).sort((a, b) => (a.relPath < b.relPath ? -1 : 1));
   for (const file of sorted) {
     const devNull = "/dev/null";
     const from = file.before === null ? devNull : `a/${file.relPath}`;
     const to = file.after === null ? devNull : `b/${file.relPath}`;
-    const beforeSize = file.before === null ? 0 : Buffer.byteLength(file.before, "utf8");
-    const afterSize = file.after === null ? 0 : Buffer.byteLength(file.after, "utf8");
-    const beforeLines = file.before === null ? 0 : splitLines(file.before).length;
-    const afterLines = file.after === null ? 0 : splitLines(file.after).length;
-    const stub =
-      (file.before !== null && (isBinary(file.before) || beforeSize > MAX_EXPORT_FILE_BYTES || beforeLines > MAX_EXPORT_FILE_LINES)) ||
-      (file.after !== null && (isBinary(file.after) || afterSize > MAX_EXPORT_FILE_BYTES || afterLines > MAX_EXPORT_FILE_LINES));
     out.push(`diff --git ${from} ${to}`);
-    if (stub) {
-      out.push(`Binary file changed (${beforeSize} -> ${afterSize} bytes)`);
-      continue;
-    }
     if (file.before === null) out.push("new file mode 100644");
     if (file.after === null) out.push("deleted file mode 100644");
     out.push(`--- ${from}`);
@@ -176,6 +219,8 @@ export interface ExportBundleInput {
   profiles: Array<{ profile: string; winner: string }>;
   /** Files listed but left out of the patch by the file cap. */
   truncatedFiles?: number;
+  /** Files listed but left out of the patch as stubs (see skipped-files.txt). */
+  skippedFiles?: number;
   /** True when the candidate ran again after the evidence. */
   evidenceStale?: boolean;
 }
@@ -208,6 +253,9 @@ export function buildExportMarkdown(input: ExportBundleInput): string {
   }
   if ((input.truncatedFiles ?? 0) > 0) {
     lines.push(`- …and ${input.truncatedFiles} more files listed only (patch file cap).`);
+  }
+  if ((input.skippedFiles ?? 0) > 0) {
+    lines.push(`- …and ${input.skippedFiles} more files listed only (binary/oversized stubs — see skipped-files.txt).`);
   }
   lines.push(``, `## Evidence`, ``);
   if (input.evidenceStale) {
