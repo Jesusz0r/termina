@@ -316,3 +316,152 @@ describe("Wave 1 sidecar anchor chaining regressions", () => {
     }
   }, 30000);
 });
+
+describe("Wave 1 quarantine launch-scope regressions", () => {
+  const line = (bridgeId: string, seq: number, t: string): string =>
+    `${JSON.stringify({ bridgeId, seq, t })}\n`;
+  /** A pid above every platform's pid_max: deterministically dead. */
+  const DEAD_PID = 99999999;
+
+  async function writeStaleLaunch(id: string, eventsDir: string, marker: Record<string, unknown>): Promise<void> {
+    const active = join(eventsDir, `${id}.jsonl`);
+    const sealedName = `.${id}.jsonl.${Date.now().toString(36)}-${DEAD_PID}-stale.sealed`;
+    await writeFile(join(eventsDir, sealedName), line("old-bridge", 1, "agent_start") + line("old-bridge", 2, "agent_settled"));
+    await writeFile(active, "");
+    await writeFile(
+      join(eventsDir, `.cursor-${id}.json`),
+      JSON.stringify({ version: 1, offset: 0, bridgeId: "old-bridge", sequence: 2 }),
+    );
+    await writeFile(join(eventsDir, `.quarantine-${id}`), `${JSON.stringify({ version: 1, state: "quarantined", terminalId: id, ...marker })}\n`);
+  }
+
+  it("ignores an unbound stale quarantine marker on id recycle (refs #184)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-recycle-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-recycle";
+    try {
+      await writeStaleLaunch(id, eventsDir, { reason: "stale previous-launch marker" });
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      const received: Array<{ bridgeId: string; seq: number }> = [];
+      tailer.onEvent = (_terminalId, event) => {
+        received.push({ bridgeId: event.bridgeId, seq: event.seq });
+        return true;
+      };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        // A stale marker must not stop a brand-new terminal: watch-time
+        // quarantine inheritance is synchronous, so this is deterministic.
+        expect(tailer.isPaused(id)).toBe(false);
+        await appendFile(join(eventsDir, `${id}.jsonl`), line("new-bridge", 1, "session_ready") + line("new-bridge", 2, "agent_start"));
+        await waitFor(() => received.length === 2, 10000, "recycled terminal did not go live");
+        expect(received).toEqual([
+          { bridgeId: "new-bridge", seq: 1 },
+          { bridgeId: "new-bridge", seq: 2 },
+        ]);
+        // Stale markers are ignored, not swept: the file remains but gates nothing.
+        const names = await readdir(eventsDir);
+        expect(names.filter((name) => name === `.quarantine-${id}`)).toHaveLength(1);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("ignores a dead-producer quarantine marker on id recycle (refs #184)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-recyclepid-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-recyclepid";
+    try {
+      await writeStaleLaunch(id, eventsDir, { reason: "dead producer", producerPid: DEAD_PID });
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      const received: number[] = [];
+      tailer.onEvent = (_terminalId, event) => {
+        received.push(event.seq);
+        return true;
+      };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        expect(tailer.isPaused(id)).toBe(false);
+        await appendFile(join(eventsDir, `${id}.jsonl`), line("new-bridge", 1, "session_ready"));
+        await waitFor(() => received.length === 1, 10000, "recycled terminal did not go live");
+        expect(tailer.isPaused(id)).toBe(false);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("honors a live quarantine marker across re-watch (refs #184)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-liveq-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-liveq";
+    try {
+      // Two retained anchors with different identities: a genuine structural
+      // race the tailer must quarantine (and keep quarantined on re-watch).
+      await writeFile(join(eventsDir, `.${id}.jsonl.a1.sealed.retained-aaa`), line("b1", 1, "agent_start"));
+      await writeFile(join(eventsDir, `.${id}.jsonl.a2.sealed.retained-bbb`), line("b1", 1, "agent_start"));
+      await writeFile(join(eventsDir, `${id}.jsonl`), "");
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      tailer.onEvent = () => true;
+      tailer.start();
+      tailer.watch(id);
+      try {
+        const markerPath = join(eventsDir, `.quarantine-${id}`);
+        const quarantined = async (): Promise<boolean> => {
+          try {
+            await readFile(markerPath, "utf8");
+            return tailer.isPaused(id);
+          } catch {
+            return false;
+          }
+        };
+        const deadline = Date.now() + 8000;
+        while (!(await quarantined()) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(await quarantined(), "genuine multi-identity race did not quarantine").toBe(true);
+        const marker = JSON.parse(await readFile(markerPath, "utf8"));
+        expect(marker.state).toBe("quarantined");
+        expect(marker.producerPid).toBe(process.pid);
+        expect("bootId" in marker).toBe(true);
+        // A re-watch in the same launch must inherit the live quarantine.
+        tailer.stopWatching(id);
+        expect(tailer.isPaused(id)).toBe(false);
+        tailer.watch(id);
+        expect(tailer.isPaused(id)).toBe(true);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("writer quarantine markers carry producer binding (refs #184)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-wave1-writerq-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-writerq";
+    try {
+      // A mid-flight reclaim link blocks rotation, forcing the writer down
+      // its quarantine path synchronously.
+      await writeFile(join(eventsDir, `${id}.jsonl`), "\n".repeat(8 * 1024 * 1024 + 64));
+      await writeFile(join(eventsDir, `.${id}.jsonl.blocker.draining-zzz`), "mid-flight");
+      const writer = createSidecarWriter({ eventsDir, terminalId: id, bridgeId: "writer-1" });
+      writer.logEvent({ t: "session_ready", ok: true });
+      const marker = JSON.parse(await readFile(join(eventsDir, `.quarantine-${id}`), "utf8"));
+      expect(marker.state).toBe("quarantined");
+      expect(marker.producerPid).toBe(process.pid);
+      expect("bootId" in marker).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+});

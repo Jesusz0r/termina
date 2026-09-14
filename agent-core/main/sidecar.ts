@@ -4,6 +4,7 @@
  * process; all writer state lives in the factory closure.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -12,6 +13,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   renameSync,
   rmSync,
@@ -24,6 +26,38 @@ import { syncParentDir } from "../../shared/fsync.ts";
 
 export function isValidTerminalId(id: string): boolean {
   return /^[A-Za-z0-9_-]{1,128}$/.test(id);
+}
+
+
+let cachedBootId: string | null | undefined;
+/** Best-effort stable boot identity for launch-scoping quarantine markers.
+ * Mirrors the tailer's helper (which owns validation): Linux reads the
+ * kernel boot id file, macOS reads kern.boottime, anything else yields null
+ * and markers fall back to pid-only binding. Cached per process. */
+function currentBootId(): string | null {
+  if (cachedBootId !== undefined) return cachedBootId;
+  cachedBootId = null;
+  try {
+    if (process.platform === "linux") {
+      const raw = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim().toLowerCase();
+      if (/^[0-9a-f-]{8,128}$/.test(raw)) cachedBootId = raw;
+    } else if (process.platform === "darwin") {
+      for (const sysctl of ["/usr/sbin/sysctl", "sysctl"]) {
+        try {
+          const raw = execFileSync(sysctl, ["-n", "kern.boottime"], { encoding: "utf8", timeout: 5000 }).trim();
+          if (raw.length > 0 && raw.length <= 256) {
+            cachedBootId = raw;
+            break;
+          }
+        } catch {
+          /* Try the next sysctl candidate. */
+        }
+      }
+    }
+  } catch {
+    cachedBootId = null;
+  }
+  return cachedBootId;
 }
 
 /** Keep producer edit previews below the tailer's durable record limit. The
@@ -194,7 +228,7 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
       if (!hasQuarantineSidecar()) {
         writeDurableMarker(
           join(eventsDir, SIDECAR_QUARANTINE_PREFIX + terminalId),
-          JSON.stringify({ version: 1, state: "quarantined", terminalId, reason }) + "\n",
+          JSON.stringify({ version: 1, state: "quarantined", terminalId, reason, producerPid: process.pid, bootId: currentBootId() }) + "\n",
         );
       }
     } catch {

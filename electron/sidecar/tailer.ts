@@ -5,9 +5,11 @@
  * watch/poll lifecycle. Split from electron/sidecar.ts (issue #38).
  */
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, type FSWatcher, watch } from "node:fs";
 import { link as linkFile, open as openFile, readdir as readDirectory, rename as renameFile, stat as statFile, unlink as unlinkFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { isRecord } from "../../shared/guards.js";
 import { MAX_SIDECAR_BYTES, MAX_SIDECAR_RECORD_BYTES, SIDECAR_BACKPRESSURE_FILE_PREFIX, SIDECAR_CURSOR_VERSION, SIDECAR_DRAIN_FILE_TOKEN, SIDECAR_FINAL_GUARD_FILE_TOKEN, SIDECAR_MAX_SEQUENCE_GAP_POLLS, SIDECAR_PROOF_MAX_BYTES, SIDECAR_QUARANTINE_FILE_PREFIX, SIDECAR_RETAINED_FILE_TOKEN, SIDECAR_SEALED_FILE_SUFFIX, SIDECAR_SEALED_PROOF_SUFFIX, SIDECAR_TAIL_READ_BYTES, SIDECAR_VERIFY_MAX_READS, SIDECAR_VERIFY_READ_CHUNK_BYTES } from "./events.js";
 import type { SidecarEvent, SidecarMeta } from "./events.js";
 import { parseSidecarRecord, sidecarEnvelope, sidecarEventBody } from "./parse.js";
@@ -223,6 +225,50 @@ function sameDurableSidecarCursor(left: DurableSidecarCursor, right: DurableSide
     && (left.sealedSegment ?? undefined) === (right.sealedSegment ?? undefined)
     && (left.sealedOffset ?? undefined) === (right.sealedOffset ?? undefined)
     && (left.sealedIdentity ?? undefined) === (right.sealedIdentity ?? undefined);
+}
+
+
+let cachedBootId: string | null | undefined;
+/** Best-effort stable boot identity for launch-scoping quarantine markers.
+ * Linux reads the kernel boot id file; macOS reads kern.boottime; anything
+ * else (or any failure) yields null and markers fall back to pid-only
+ * binding. Cached: a process never crosses a reboot. */
+function currentBootId(): string | null {
+  if (cachedBootId !== undefined) return cachedBootId;
+  cachedBootId = null;
+  try {
+    if (process.platform === "linux") {
+      const raw = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim().toLowerCase();
+      if (/^[0-9a-f-]{8,128}$/.test(raw)) cachedBootId = raw;
+    } else if (process.platform === "darwin") {
+      for (const sysctl of ["/usr/sbin/sysctl", "sysctl"]) {
+        try {
+          const raw = execFileSync(sysctl, ["-n", "kern.boottime"], { encoding: "utf8", timeout: 5000 }).trim();
+          if (raw.length > 0 && raw.length <= 256) {
+            cachedBootId = raw;
+            break;
+          }
+        } catch {
+          /* Try the next sysctl candidate. */
+        }
+      }
+    }
+  } catch {
+    cachedBootId = null;
+  }
+  return cachedBootId;
+}
+
+
+/** True when pid names a live process. EPERM means it exists under another user. */
+function isProducerAlive(pid: number): boolean {
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
 }
 
 
@@ -472,10 +518,12 @@ export class SidecarTailer {
     // Cursor writes remain serialized in cursorWrites, but their generation
     // check prevents a late completion from repopulating these maps.
     this.clearSegmentState(id);
-    // A marker left by a previous process is durable evidence that an unsafe
-    // source transition was observed. Keep this lifecycle fail-closed until
-    // the source set is explicitly replaced or cleaned.
-    const persistedQuarantine = this.hasQuarantineMarkerSync(id) || wasQuarantined;
+    // A quarantine marker bound to a live producer is durable evidence that
+    // an unsafe source transition was observed. Keep this lifecycle
+    // fail-closed until the source set is explicitly replaced or cleaned. A
+    // marker from a dead producer is previous-launch residue: terminal ids
+    // restart every launch, so it must not stop a brand-new terminal.
+    const persistedQuarantine = this.hasLiveQuarantineMarkerSync(id) || wasQuarantined;
     this.sealedSegments.delete(id);
     this.retainedSegments.delete(id);
     this.segmentDrainPaths.delete(id);
@@ -596,7 +644,7 @@ export class SidecarTailer {
 
   stopWatching(id: string): void {
     const generation = this.terminalGenerations.get(id);
-    const wasQuarantined = this.quarantined.has(id) || this.hasQuarantineMarkerSync(id);
+    const wasQuarantined = this.quarantined.has(id) || this.hasLiveQuarantineMarkerSync(id);
     this.lifecycleGeneration++;
     this.terminalGenerations.delete(id);
     this.inFlight.delete(id);
@@ -627,9 +675,9 @@ export class SidecarTailer {
     this.paused.delete(id);
     this.dirty.delete(id);
     void this.clearBackpressureMarker(id, generation, true);
-    // Quarantine is durable admission state. Keep its marker across lifecycle
-    // teardown so a restart cannot resume after an
-    // identity-bound source was lost; normal terminals have no marker.
+    // Quarantine is durable admission state. Keep a live marker across
+    // lifecycle teardown so a restart cannot resume after an identity-bound
+    // source was lost; a stale previous-launch marker is cleared instead.
     if (!wasQuarantined) void this.clearQuarantineMarker(id);
   }
 
@@ -1737,12 +1785,35 @@ export class SidecarTailer {
     return join(this.dir, `${SIDECAR_QUARANTINE_FILE_PREFIX}${id}`);
   }
 
-  private hasQuarantineMarkerSync(id: string): boolean {
+  private hasLiveQuarantineMarkerSync(id: string): boolean {
+    let raw: string;
     try {
-      return existsSync(this.quarantinePath(id));
+      const size = statSync(this.quarantinePath(id)).size;
+      if (size <= 0 || size > SIDECAR_PROOF_MAX_BYTES) return false;
+      raw = readFileSync(this.quarantinePath(id), "utf8");
     } catch {
       return false;
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    if (!isRecord(parsed)) return false;
+    // Terminal ids restart every launch while the events dir persists, so a
+    // marker from a dead producer (or without any binding) is stale
+    // previous-launch residue and must not stop a brand-new terminal.
+    // Re-validation still re-quarantines a persisting race at once.
+    if (parsed.state !== "quarantined") return false;
+    if (!isProducerAlive(parsed.producerPid as number)) return false;
+    const boot = parsed.bootId;
+    if (boot !== undefined && boot !== null) {
+      if (typeof boot !== "string") return false;
+      const current = currentBootId();
+      if (current !== null && boot !== current) return false;
+    }
+    return true;
   }
 
   /**
@@ -1760,7 +1831,7 @@ export class SidecarTailer {
     this.paused.add(id);
     if (first) {
       const marker = this.quarantinePath(id);
-      void durableAtomicWrite(marker, JSON.stringify({ version: 1, state: "quarantined", terminalId: id, reason: reason.slice(0, 256) }) + "\n").catch((error) => {
+      void durableAtomicWrite(marker, JSON.stringify({ version: 1, state: "quarantined", terminalId: id, reason: reason.slice(0, 256), producerPid: process.pid, bootId: currentBootId() }) + "\n").catch((error) => {
         if (this.isLive(id, generation)) {
           console.warn(`[sidecar] could not publish ${id} quarantine: ${error instanceof Error ? error.message : String(error)}`);
         }
