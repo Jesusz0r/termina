@@ -64,7 +64,8 @@ describe("editor save acknowledgment (refs #126)", () => {
 
   it("keeps the conflict marker while post-submit edits remain dirty", () => {
     const ack = memberBody(editor, "private acknowledgeSave(");
-    expect(ack).toContain('if (!this.userDirty.has(key)) tab.dom.classList.remove("conflict")');
+    expect(ack).toContain("} else if (!this.userDirty.has(key)) {");
+    expect(ack).toContain('tab.dom.classList.remove("conflict")');
   });
 
   it("ignores late acknowledgments for closed or replaced tabs", () => {

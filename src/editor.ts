@@ -183,6 +183,8 @@ export class EditorManager {
   private previewKey: string | null = null;
   /** Tab keys with unsaved user edits. */
   private userDirty = new Set<string>();
+  /** Dirty tabs whose file was deleted on disk (kept open for an explicit save-or-discard). */
+  private deletedOnDisk = new Set<string>();
   /** True while a workspace agent is running (models stay read-only). */
   private locked = false;
   /** Fired when a disk write reaches a model with unsaved user edits. */
@@ -398,6 +400,14 @@ export class EditorManager {
     const resolved = this.resolveKey(path);
     if (resolved === null) return;
     const tab = this.tabs.get(resolved)!;
+    if (this.deletedOnDisk.delete(resolved)) {
+      // A content push proves the file exists again. The deletion is gone
+      // even though unsaved edits colliding with this push stay a conflict.
+      tab.dom.classList.remove("deleted");
+      tab.dom.title = tab.dom.classList.contains("conflict")
+        ? `${resolved} — changed on disk while you have unsaved edits`
+        : "";
+    }
     if (this.userDirty.has(resolved)) {
       if (!tab.dom.classList.contains("conflict")) {
         tab.dom.classList.add("conflict");
@@ -649,6 +659,7 @@ export class EditorManager {
     this.tabs.delete(key);
     this.order = this.order.filter((k) => k !== key);
     this.userDirty.delete(key);
+    this.deletedOnDisk.delete(key);
     if (this.previewKey === key) this.previewKey = null;
     this.renderTabs();
     if (this.activeKey === key) {
@@ -675,6 +686,7 @@ export class EditorManager {
       // The tab closed (or was replaced) while queued: a stale op must not
       // touch the disposed model, let alone a new tab under the same key.
       if (!live || live !== tab || !live.owner) return;
+      await this.restoreDeletedBeforeSave(live);
       const submittedText = live.model.getValue();
       const submittedVersion = live.model.getAlternativeVersionId();
       const savedAtSubmit = live.savedVersionId;
@@ -685,8 +697,13 @@ export class EditorManager {
         toast(`could not save ${pathBasename(live.key)}: ${(err as Error).message}`, "error");
         return;
       }
-      if (res.ok) this.acknowledgeSave(live.key, live.model, submittedVersion, savedAtSubmit);
-      else toast(`could not save ${pathBasename(live.key)}: ${res.error ?? "unknown error"}`, "error");
+      if (res.ok) {
+        this.acknowledgeSave(live.key, live.model, submittedVersion, savedAtSubmit);
+      } else if (this.deletedOnDisk.has(live.key)) {
+        toast(`could not restore ${pathBasename(live.key)} (deleted on disk): ${res.error ?? "unknown error"}`, "error");
+      } else {
+        toast(`could not save ${pathBasename(live.key)}: ${res.error ?? "unknown error"}`, "error");
+      }
     });
   }
 
@@ -718,7 +735,31 @@ export class EditorManager {
     if (!tab || tab.model !== model) return;
     if (tab.savedVersionId === savedAtSubmit) tab.savedVersionId = submittedVersion;
     this.syncDirty(tab);
-    if (!this.userDirty.has(key)) tab.dom.classList.remove("conflict");
+    if (this.deletedOnDisk.delete(key)) {
+      // The save recreated the file: disk now holds the submitted text, so
+      // the deletion conflict is resolved (remaining dirt is ordinary typing).
+      tab.dom.classList.remove("deleted", "conflict");
+      tab.dom.title = "";
+    } else if (!this.userDirty.has(key)) {
+      tab.dom.classList.remove("conflict");
+      tab.dom.title = "";
+    }
+  }
+
+  /** Recreate a deleted-on-disk file before saving it. Main's save refuses
+   *  non-regular paths, so without the recreate the restore would fail; when
+   *  the file reappeared meanwhile the create fails harmlessly and the save
+   *  below overwrites it as usual. Errors stay silent here — the save itself
+   *  reports the real outcome. */
+  private async restoreDeletedBeforeSave(tab: OpenTab): Promise<void> {
+    if (!this.deletedOnDisk.has(tab.key) || !tab.owner) return;
+    const rel = this.relativePath(tab.key);
+    if (rel === null) return;
+    try {
+      await window.termina.createEntry(tab.owner.projectId, rel, "file");
+    } catch {
+      /* the save below reports the real outcome */
+    }
   }
 
   /** Save every model with unsaved user edits. Returns the failed paths.
@@ -742,6 +783,7 @@ export class EditorManager {
       const ok = await this.chainSave(key, async () => {
         const live = this.tabs.get(key);
         if (!live || live !== tab || !live.owner) return false;
+        await this.restoreDeletedBeforeSave(live);
         const submittedText = live.model.getValue();
         const submittedVersion = live.model.getAlternativeVersionId();
         const savedAtSubmit = live.savedVersionId;
@@ -771,10 +813,24 @@ export class EditorManager {
     return this.userDirty.size;
   }
 
-  /** Close a tab if it is open (the file was deleted on disk). */
+  /** The file was deleted on disk. Clean tabs close; a dirty buffer stays
+   *  open with a deleted-on-disk conflict — disk deletion is never consent
+   *  to discard memory-only edits. The user explicitly saves to restore the
+   *  file or closes (the usual unsaved prompt) to discard. */
   closeIfOpen(path: string): void {
     const resolved = this.resolveKey(path);
-    if (resolved !== null) this.closeTab(resolved);
+    if (resolved === null) return;
+    if (this.userDirty.has(resolved)) {
+      const tab = this.tabs.get(resolved);
+      if (tab && !this.deletedOnDisk.has(resolved)) {
+        this.deletedOnDisk.add(resolved);
+        tab.dom.classList.add("conflict", "deleted");
+        tab.dom.title = `${resolved} — deleted on disk; save to restore the file or close to discard`;
+        this.onConflict(resolved);
+      }
+      return;
+    }
+    this.closeTab(resolved);
   }
 
   // ---------------- tab actions (VS Code-style context menu) ---------------
@@ -1020,6 +1076,7 @@ export class EditorManager {
     this.tabs.clear();
     this.order = [];
     this.userDirty.clear();
+    this.deletedOnDisk.clear();
     this.mineKeys.clear();
   }
 }
