@@ -387,6 +387,9 @@ export class SidecarTailer {
     terminalId: string,
     event: SidecarEvent,
   ) => SidecarEventDelivery | boolean | void | Promise<SidecarEventDelivery | boolean | void> = () => {};
+  /** Quarantine or producer backpressure paused this source. */
+  onHold: (terminalId: string, held: boolean) => void = () => {};
+  private lastHold = new Map<string, boolean>();
 
   constructor(private dir: string, private watchTree: typeof watch = watch, options: SidecarTailerOptions = {}) {
     this.maxBacklogBytes = options.maxBacklogBytes ?? MAX_SIDECAR_BYTES;
@@ -745,6 +748,9 @@ export class SidecarTailer {
     const resumeTimer = this.resumeTimers.get(id);
     if (resumeTimer) clearTimeout(resumeTimer);
     this.resumeTimers.delete(id);
+    const wasHeld = this.lastHold.get(id) === true;
+    this.lastHold.delete(id);
+    if (this.isHeld(id) || wasHeld) this.notifyHold(id);
   }
 
   /** Establish a new lifecycle and wait until its initial cursor is durable.
@@ -792,6 +798,7 @@ export class SidecarTailer {
     if (resumeTimer) clearTimeout(resumeTimer);
     this.resumeTimers.delete(id);
     this.paused.delete(id);
+    this.lastHold.delete(id);
     this.dirty.delete(id);
     this.untailedSinceWatch.delete(id);
     void this.clearBackpressureMarker(id, generation, true);
@@ -815,6 +822,7 @@ export class SidecarTailer {
     for (const t of this.resumeTimers.values()) clearTimeout(t);
     this.resumeTimers.clear();
     this.paused.clear();
+    this.lastHold.clear();
     this.quarantined.clear();
     this.untailedSinceWatch.clear();
     this.pendingDeliveries.clear();
@@ -864,11 +872,23 @@ export class SidecarTailer {
     const timer = this.resumeTimers.get(id);
     if (timer) clearTimeout(timer);
     this.resumeTimers.delete(id);
+    this.notifyHold(id);
     this.schedule(id);
   }
 
   isPaused(id: string): boolean {
     return this.paused.has(id);
+  }
+
+  isHeld(id: string): boolean {
+    return this.paused.has(id) || this.quarantined.has(id);
+  }
+
+  private notifyHold(id: string): void {
+    const held = this.isHeld(id);
+    if (this.lastHold.get(id) === held) return;
+    this.lastHold.set(id, held);
+    this.onHold(id, held);
   }
 
   isBacklogOverflowed(id: string): boolean {
@@ -1945,6 +1965,7 @@ export class SidecarTailer {
     const first = !this.quarantined.has(id);
     this.quarantined.add(id);
     this.paused.add(id);
+    this.notifyHold(id);
     if (first) {
       const marker = this.quarantinePath(id);
       void durableAtomicWrite(marker, JSON.stringify({ version: 1, state: "quarantined", terminalId: id, reason: reason.slice(0, 256), producerPid: process.pid, bootId: currentBootId() }) + "\n").catch((error) => {
@@ -2166,6 +2187,7 @@ export class SidecarTailer {
   private pause(id: string, generation = this.terminalGenerations.get(id)): void {
     if (!this.isLive(id, generation)) return;
     this.paused.add(id);
+    this.notifyHold(id);
     // Assert producer flow control immediately on admission failure, rather
     // than waiting for the next 300 ms poll to discover an 8 MiB overflow.
     // This keeps a paused sidecar a bounded spool even when its producer is
@@ -2186,6 +2208,7 @@ export class SidecarTailer {
         return;
       }
       this.paused.delete(id);
+      this.notifyHold(id);
       void this.tail(id, generation);
     }, 300);
     this.resumeTimers.set(id, timer);

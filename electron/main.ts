@@ -92,6 +92,16 @@ import {
 } from "./terminal-roster.js";
 import { TerminalRosterStore, loadRosterFile, rosterFilePath, type RosterTerminal } from "./roster-store.js";
 import { AgentTerminalInstance } from "./terminal-instance.js";
+import {
+  activityFor,
+  activityKey,
+  activityToolTarget,
+  activityView,
+  applyActivityEvent,
+  emptyActivityInput,
+  type ActivitySignal,
+  type AgentActivityInput,
+} from "./agent-activity.js";
 import { PathLookup } from "./path-lookup.js";
 import { attachMacTitlebarReclaim, macWindowChrome } from "./window-chrome.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
@@ -697,6 +707,9 @@ class TerminaApp {
   private worldlineTailers = new Map<string, SidecarTailer>();
   /** Preserve event order while bounding sidecar fanout per terminal. */
   private sidecarQueues = new Map<string, SidecarEventQueue>();
+  /** Live fold for `electron/agent-activity.ts`. Never persisted. */
+  private activityInputs = new Map<string, AgentActivityInput>();
+  private lastActivityKey = new Map<string, string>();
   /** One-use start preflights by token. */
   private pendingPreflights = new Map<string, PendingPreflight>();
   /** Write-snapshot fills keyed by the timeline event object (same reference pushTimeline mutates). */
@@ -2140,6 +2153,7 @@ class TerminaApp {
     if (!eventsDir) throw new Error("candidate events directory is missing");
     const tailer = new SidecarTailer(eventsDir);
     tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
+    this.bindSidecarHold(tailer);
     tailer.start();
     this.worldlineTailers.set(terminalId, tailer);
     try {
@@ -3096,6 +3110,7 @@ class TerminaApp {
       // The exit marker was delivered and acknowledged by PtyEgressScheduler;
       // it is not sent through the unsequenced generic channel.
       this.closeRunOnExit(inst);
+      this.foldActivity(inst, { t: "pty_exit", seq: inst.timelineSeq, at: Date.now() }, rendererTarget);
       void this.cleanupPromptPayloads(inst);
       for (const event of inst.timeline) {
         this.resolveTimelineContentFill(event);
@@ -3112,6 +3127,8 @@ class TerminaApp {
       }
       this.terminals.delete(inst.id);
       this.busyAgents.delete(inst.id);
+      this.activityInputs.delete(inst.id);
+      this.lastActivityKey.delete(inst.id);
       this.autoVerifyTasks.delete(inst.id);
       this.autoVerifyFailures.delete(inst.id);
       exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
@@ -3148,6 +3165,11 @@ class TerminaApp {
     const sidecarTailer = opts?.sidecarTailer ?? this.tailer;
     if (!opts?.skipSidecarWatch) sidecarTailer.watch(inst.id);
     if (type === "agent") sidecarTailer.setExpectedProducer(inst.id, inst.pty.pid);
+    // watchReady for candidates runs before the instance exists; publish a
+    // hold that landed in that window now that foldActivity can see the pane.
+    if (type === "agent" && sidecarTailer.isHeld(inst.id)) {
+      this.foldActivity(inst, { t: "sidecar_hold", seq: inst.timelineSeq, at: Date.now(), held: true }, rendererTarget);
+    }
     if (type === "agent" && owner) {
       const mineRefresh = owner.mineCommit.catch(() => undefined).then(() => this.writeMineContext(owner));
       owner.mineCommit = mineRefresh;
@@ -4556,6 +4578,7 @@ class TerminaApp {
       generation: t.generation,
       cwd: t.cwd,
       busy: t.busy,
+      activity: activityView(activityFor(this.activityInputs.get(t.id) ?? emptyActivityInput())),
       type: t.type,
       engine: t.engine,
       shellName: t.shellName,
@@ -4658,6 +4681,7 @@ class TerminaApp {
     // A sidecar callback can yield across store/file work. Keep every push
     // from this event tied to the document that admitted it.
     const rendererTarget = this.captureRendererSendTarget();
+    this.foldSidecarActivity(inst, event, rendererTarget);
     switch (event.t) {
       // ---- run-boundary events (WORLDLINES §6.3) ----
       case "preflight_request":
@@ -4671,7 +4695,7 @@ class TerminaApp {
         const requestId = String(event.requestId ?? "");
         for (const [token, pending] of this.pendingPreflights) {
           if (pending.terminalId !== inst.id || pending.requestId !== requestId) continue;
-          this.expirePreflight(token);
+          this.expirePreflight(token, "cancel");
           break;
         }
         break;
@@ -5264,12 +5288,17 @@ class TerminaApp {
   }
 
   /** A preflight that never reached agent_start releases its lease. */
-  private expirePreflight(token: string): void {
+  private expirePreflight(token: string, cause: "timeout" | "cancel" = "timeout"): void {
     const pending = this.pendingPreflights.get(token);
     if (!pending) return;
     clearTimeout(pending.timer);
     this.pendingPreflights.delete(token);
     this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
+    const inst = this.terminals.get(pending.terminalId);
+    // Cancel already folded `preflight_cancel`. Only the timer is a lease wait.
+    if (inst && cause === "timeout") {
+      this.foldActivity(inst, { t: "preflight_timeout", seq: inst.timelineSeq, at: Date.now() });
+    }
   }
 
   /**
@@ -6046,22 +6075,87 @@ class TerminaApp {
 
   /** Last-tool counts for the Timeline header. Tiny payload. Not ranking. */
   private timelinePrefixOf(inst: AgentTerminalInstance | undefined): TimelinePrefix {
-    if (!inst) return { terminalId: "", ok: 0, error: 0, open: 0 };
+    if (!inst) return { terminalId: "", ok: 0, error: 0, open: 0, activity: { state: "idle", reason: null } };
     let ok = 0;
     let error = 0;
     for (const v of inst.toolOutcomes.values()) {
       if (v === "ok") ok++;
       else error++;
     }
-    return { terminalId: inst.id, ok, error, open: inst.pendingFileTools.size };
+    const activity = activityView(activityFor(this.activityInputs.get(inst.id) ?? emptyActivityInput()));
+    return { terminalId: inst.id, ok, error, open: inst.pendingFileTools.size, activity };
   }
 
   private sendTimelinePrefix(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     const payload = this.timelinePrefixOf(inst);
-    const key = `${payload.ok}:${payload.error}:${payload.open}`;
+    const key = `${payload.ok}:${payload.error}:${payload.open}:${activityKey(payload.activity ?? { state: "idle", reason: null })}`;
     if (inst.lastTimelinePrefixKey === key) return;
     inst.lastTimelinePrefixKey = key;
     this.send("timeline:prefix", payload, expected);
+  }
+
+  private foldSidecarActivity(
+    inst: AgentTerminalInstance,
+    event: SidecarEvent,
+    expected?: PtyRendererSendTarget | null,
+  ): void {
+    const at = Date.now();
+    const seq = event.seq;
+    switch (event.t) {
+      case "preflight_request":
+        this.foldActivity(inst, { t: "preflight_request", seq, at }, expected);
+        break;
+      case "preflight_cancel":
+        this.foldActivity(inst, { t: "preflight_cancel", seq, at }, expected);
+        break;
+      case "prompt":
+        this.foldActivity(inst, { t: "prompt", seq, at }, expected);
+        break;
+      case "agent_start":
+        this.foldActivity(inst, { t: "agent_start", seq, at }, expected);
+        break;
+      case "agent_settled":
+        this.foldActivity(inst, { t: "agent_settled", seq, at, error: event.error ?? null }, expected);
+        break;
+      case "tool":
+        this.foldActivity(inst, { t: "tool", seq, at, target: activityToolTarget(event.toolCallId, event.path) }, expected);
+        break;
+      case "tool_end":
+        this.foldActivity(inst, {
+          t: "tool_end",
+          seq,
+          at,
+          target: activityToolTarget(event.toolCallId),
+          isError: event.isError === true,
+        }, expected);
+        break;
+      default:
+        break;
+    }
+  }
+
+  private foldActivity(
+    inst: AgentTerminalInstance,
+    event: ActivitySignal,
+    expected?: PtyRendererSendTarget | null,
+  ): void {
+    if (inst.type !== "agent") return;
+    const next = applyActivityEvent(this.activityInputs.get(inst.id) ?? emptyActivityInput(), event);
+    this.activityInputs.set(inst.id, next);
+    const view = activityView(activityFor(next));
+    const key = activityKey(view);
+    if (this.lastActivityKey.get(inst.id) === key) return;
+    this.lastActivityKey.set(inst.id, key);
+    this.sendTimelinePrefix(inst, expected);
+    this.sendInstances(expected);
+  }
+
+  private bindSidecarHold(tailer: SidecarTailer): void {
+    tailer.onHold = (terminalId, held) => {
+      const inst = this.terminals.get(terminalId);
+      if (!inst) return;
+      this.foldActivity(inst, { t: "sidecar_hold", seq: inst.timelineSeq, at: Date.now(), held });
+    };
   }
 
   private isNewCommand(text: string): boolean {
@@ -6129,8 +6223,11 @@ class TerminaApp {
     inst.runSnapshots.clear();
     inst.runSnapshotBytes = 0;
     inst.lastTimelinePrefixKey = "";
+    this.activityInputs.set(inst.id, emptyActivityInput());
+    this.lastActivityKey.delete(inst.id);
     this.send("timeline:clear", { terminalId }, expected);
     this.sendTimelinePrefix(inst, expected);
+    this.sendInstances(expected);
     // Plan: fresh board for the new session.
     inst.plan = [];
     inst.touched = new Set();
@@ -8140,7 +8237,7 @@ class TerminaApp {
     });
     ipcMain.handle("timeline:prefix", (_e, terminalId: string) => {
       const inst = this.terminals.get(terminalId);
-      if (!inst) return { terminalId, ok: 0, error: 0, open: 0 };
+      if (!inst) return { terminalId, ok: 0, error: 0, open: 0, activity: { state: "idle", reason: null } };
       return this.timelinePrefixOf(inst);
     });
     ipcMain.handle("timeline:progress", (_e, terminalId: string, seq: number) => this.timelineProgress(terminalId, seq));
@@ -8541,6 +8638,7 @@ class TerminaApp {
     pendingOpenPath = null;
     const initialCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
+    this.bindSidecarHold(this.tailer);
     this.tailer.start();
     this.schedules.start();
     // Publish the restoration barrier before yielding to the renderer's

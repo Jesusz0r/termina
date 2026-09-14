@@ -25,3 +25,11 @@ export const KNOWN_FILE_STATUSES = ["created", "modified", "deleted"] as const;
 export const KNOWN_PLAN_STATES = ["pending", "active", "done"] as const;
 export const KNOWN_VERIFY_BADGE_STATES = ["pass", "fail", "timeout", "running", "cancelled"] as const;
 export const KNOWN_RECORDER_STATES = ["indexing", "ready", "paused", "degraded", "budget"] as const;
+export const KNOWN_ACTIVITY_STATES = ["idle", "working", "blocked"] as const;
+export const KNOWN_ACTIVITY_REASONS = [
+  "tool-error-loop",
+  "stalled",
+  "lease-wait",
+  "sidecar-paused",
+  "exited-mid-run",
+] as const;

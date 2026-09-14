@@ -871,6 +871,11 @@ body {
   animation: blink 1.2s ease-in-out infinite;
 }
 
+.terminal-tab .tab-status.blocked {
+  background: var(--yellow);
+  animation: none;
+}
+
 .terminal-tab .tab-status.verify-fail {
   background: var(--red);
   animation: none;
@@ -2696,7 +2701,8 @@ html[data-theme="light"] #statusbar .muted {
   }
 }
 
-#status-state.busy {
+#status-state.busy,
+#status-state.blocked {
   font-weight: 700;
 }
 

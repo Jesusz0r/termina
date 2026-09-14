@@ -65,10 +65,10 @@ import {
   updateWorldlinePaneTab,
   worldlineEventBelongsToProject,
 } from "./worldline-project-state";
-import { asKnownState, KNOWN_VERIFY_BADGE_STATES } from "./known-state";
+import { asKnownState, KNOWN_ACTIVITY_REASONS, KNOWN_ACTIVITY_STATES, KNOWN_VERIFY_BADGE_STATES } from "./known-state";
 import { CHALLENGE_PROFILES, cssFontFamily, defaultAppPreferences, isTuiOwnedShortcut, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
+import type { AgentActivityView, AppPreferences, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
 type EditorManagerInstance = import("./editor").EditorManager;
 type ReviewViewInstance = import("./review").ReviewView;
@@ -670,6 +670,7 @@ interface Pane {
   statusEl: HTMLElement;
   cwd: string | null;
   busy: boolean;
+  activity: AgentActivityView;
   type: "agent" | "shell";
   engine?: "core";
   shellName: string | undefined;
@@ -692,7 +693,7 @@ interface Pane {
   timelineLoaded: boolean;
   /** Monotonic token for the current timeline/prefix load. */
   timelineRequestToken: number;
-  timelinePrefix: Pick<TimelinePrefix, "ok" | "error" | "open"> | null;
+  timelinePrefix: Pick<TimelinePrefix, "ok" | "error" | "open" | "activity"> | null;
   recorderState: RecorderState;
   recorderDetail: string | null;
   /** True when this pane was created from the authoritative roster. */
@@ -948,6 +949,7 @@ function createPaneShell(instanceId: string): Pane {
     statusEl,
     cwd: null,
     busy: false,
+    activity: { state: "idle", reason: null },
     type: "agent",
     engine: "core",
     shellName: undefined,
@@ -1226,7 +1228,10 @@ function updatePaneTab(pane: Pane): void {
           ? ` · ${pane.shellName} shell`
           : " · core agent"
       }`;
-  pane.statusEl.classList.toggle("busy", pane.busy);
+  const presented = presentActivity(pane);
+  pane.statusEl.classList.toggle("busy", presented.working && !presented.blocked);
+  pane.statusEl.classList.toggle("blocked", presented.blocked);
+  pane.statusEl.title = presented.blocked ? presented.blockedLabel : "unseen verify failure";
   // Unseen verify failures hold the tab dot until first view; any newer
   // verify state clears them.
   const failDot = pane.verifyAttention && pane.verify.state === "fail";
@@ -1264,10 +1269,28 @@ function renderChrome(): void {
   activityPane.renderModified(pane, false);
 }
 
+function presentActivity(pane: Pane): { blocked: boolean; working: boolean; blockedLabel: string } {
+  const state = asKnownState(pane.activity?.state, KNOWN_ACTIVITY_STATES);
+  const reason = pane.activity?.reason ? asKnownState(pane.activity.reason, KNOWN_ACTIVITY_REASONS) : "unknown";
+  return {
+    blocked: state === "blocked",
+    // Explicit idle/working/blocked win. `busy` is only a fallback when
+    // activity is missing or hostile so a settle fold cannot flash "working".
+    working: state === "working" || (state === "unknown" && pane.busy),
+    blockedLabel: reason === "unknown" ? "blocked" : `blocked: ${reason}`,
+  };
+}
+
 /** Status bar and Verify only. Busy ticks must not rebuild the plan or modified lists. */
 function renderStatus(pane: Pane): void {
-  statusState.textContent = pane.busy ? "● agent working" : "idle";
-  statusState.classList.toggle("busy", pane.busy);
+  const presented = presentActivity(pane);
+  statusState.textContent = presented.blocked
+    ? `● ${presented.blockedLabel}`
+    : presented.working
+      ? "● agent working"
+      : "idle";
+  statusState.classList.toggle("busy", presented.working);
+  statusState.classList.toggle("blocked", presented.blocked);
   statusCwd.textContent = pane.cwd ?? "";
   renderAgentStatus(pane);
   renderVerify(pane);

@@ -7,6 +7,8 @@ import {
   KNOWN_FILE_STATUSES,
   KNOWN_PLAN_STATES,
   KNOWN_PROFILE_WINNERS,
+  KNOWN_ACTIVITY_REASONS,
+  KNOWN_ACTIVITY_STATES,
   KNOWN_RECORDER_STATES,
   KNOWN_VERIFY_BADGE_STATES,
   UNKNOWN_STATE,
@@ -21,6 +23,8 @@ describe("asKnownState (issue #272)", () => {
     expect(asKnownState("cancelled", KNOWN_VERIFY_BADGE_STATES)).toBe("cancelled");
     expect(asKnownState("paused", KNOWN_RECORDER_STATES)).toBe("paused");
     expect(asKnownState("fail", KNOWN_EVIDENCE_STATUSES)).toBe("fail");
+    expect(asKnownState("blocked", KNOWN_ACTIVITY_STATES)).toBe("blocked");
+    expect(asKnownState("tool-error-loop", KNOWN_ACTIVITY_REASONS)).toBe("tool-error-loop");
   });
 
   it("returns unknown for missing, hostile, or neighboring-but-wrong values", () => {

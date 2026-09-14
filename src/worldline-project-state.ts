@@ -1,4 +1,4 @@
-import { worldlineEventBelongsToProject, type InstanceSummary, type RecorderState, type VerifyInfo, type WorldlineSummary } from "../shared/types";
+import { worldlineEventBelongsToProject, type AgentActivityView, type InstanceSummary, type RecorderState, type VerifyInfo, type WorldlineSummary } from "../shared/types";
 export { worldlineEventBelongsToProject } from "../shared/types";
 
 export interface WorldlineProjectPane {
@@ -163,6 +163,7 @@ export interface WorldlineInstancePane extends WorldlineCandidateTestPane {
   cwd: string | null;
   workspaceId: string;
   busy: boolean;
+  activity: AgentActivityView;
   type: "agent" | "shell";
   engine?: "core";
   shellName: string | undefined;
@@ -197,6 +198,7 @@ export function applyInstanceSummary<TPane extends WorldlineInstancePane>(
   pane.workspaceId = summary.workspaceId;
   pane.projectId = summary.projectId ?? null;
   pane.busy = summary.busy;
+  if (summary.activity !== undefined) pane.activity = summary.activity;
   pane.type = summary.type;
   pane.engine = summary.engine;
   bindings.setEngine(pane, summary.engine);

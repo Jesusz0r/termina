@@ -72,6 +72,25 @@ export interface BusyPayload {
   busy: boolean;
 }
 
+/** Semantic run state derived in main from the sidecar tail (issue #291). */
+export const AGENT_ACTIVITY_STATES = ["idle", "working", "blocked"] as const;
+export type AgentActivityState = (typeof AGENT_ACTIVITY_STATES)[number];
+
+/** Short blocked reasons. Never free text. */
+export const AGENT_ACTIVITY_REASONS = [
+  "tool-error-loop",
+  "stalled",
+  "lease-wait",
+  "sidecar-paused",
+  "exited-mid-run",
+] as const;
+export type AgentActivityReason = (typeof AGENT_ACTIVITY_REASONS)[number];
+
+export interface AgentActivityView {
+  state: AgentActivityState;
+  reason: AgentActivityReason | null;
+}
+
 /** One task on the Plan Board (parsed from the agent's plan message). */
 export interface PlanTask {
   /** The task line text. */
@@ -140,6 +159,8 @@ export interface TimelinePrefix {
   ok: number;
   error: number;
   open: number;
+  /** Live semantic state for this terminal. Additive; idle when omitted. */
+  activity?: AgentActivityView;
 }
 
 /** On-demand source diff of one forkable timeline moment. */
@@ -208,6 +229,8 @@ export interface InstanceSummary {
   generation: number;
   cwd: string;
   busy: boolean;
+  /** Semantic idle/working/blocked. Keep `busy`; this is additive. */
+  activity?: AgentActivityView;
   type: "agent" | "shell";
   /** The agent harness. Unset for shells. */
   engine?: "core";

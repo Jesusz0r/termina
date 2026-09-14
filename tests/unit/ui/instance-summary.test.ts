@@ -13,6 +13,7 @@ function pane(id: string): WorldlineInstancePane {
     cwd: null,
     workspaceId: "",
     busy: false,
+    activity: { state: "idle", reason: null },
     type: "shell",
     engine: undefined,
     shellName: undefined,
@@ -63,6 +64,22 @@ describe("applyInstanceSummary (issue #276)", () => {
     expect(target.recorderDetail).toBe("degraded: disk");
     expect(target.workspaceId).toBe("ws-primary");
     expect(target.dispatchWorker).toBe(false);
+    expect(target.activity).toEqual({ state: "idle", reason: null });
+  });
+
+  it("copies additive activity from the roster payload", () => {
+    const target = pane("term-1");
+    applyInstanceSummary(target, summary({ activity: { state: "blocked", reason: "tool-error-loop" } }), {
+      setEngine: () => {},
+    });
+    expect(target.activity).toEqual({ state: "blocked", reason: "tool-error-loop" });
+  });
+
+  it("leaves existing activity when the roster omits the additive field", () => {
+    const target = pane("term-1");
+    target.activity = { state: "blocked", reason: "stalled" };
+    applyInstanceSummary(target, summary(), { setEngine: () => {} });
+    expect(target.activity).toEqual({ state: "blocked", reason: "stalled" });
   });
 
   it("is the single hydration path for roster pushes", () => {

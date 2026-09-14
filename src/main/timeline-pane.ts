@@ -12,7 +12,7 @@ export interface TimelinePaneState {
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
   timelineRequestToken: number;
-  timelinePrefix: Pick<TimelinePrefix, "ok" | "error" | "open"> | null;
+  timelinePrefix: Pick<TimelinePrefix, "ok" | "error" | "open" | "activity"> | null;
   recorderState: string;
   recorderDetail: string | null;
 }

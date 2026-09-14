@@ -9,6 +9,7 @@ function toolEvent(seq: number): TimelineEvent {
 
 interface Harness {
   view: TimelineView;
+  prefix: FakeEl;
   calls: number[];
   resolvers: Map<number, (p: TimelineProgress) => void>;
   dot(seq: number): FakeEl;
@@ -38,6 +39,7 @@ function makeHarness(document: FakeDocument): Harness {
   const internals = view as unknown as { dots: Map<number, FakeEl> };
   return {
     view,
+    prefix: container.querySelector("#timeline-prefix") as FakeEl,
     calls,
     resolvers,
     dot: (seq: number) => {
@@ -137,5 +139,56 @@ describe("timeline progress across eviction (refs #145)", () => {
 
     await h.hover(1);
     expect(h.calls).toEqual([1, 1]);
+  });
+});
+
+describe("timeline activity prefix (issue #291)", () => {
+  it("shows blocked activity when tool counts are still zero", () => {
+    const h = makeHarness(fake.document);
+    h.view.setPrefix({
+      ok: 0,
+      error: 0,
+      open: 0,
+      activity: { state: "blocked", reason: "tool-error-loop" },
+    });
+    expect(h.prefix.hidden).toBe(false);
+    expect(h.prefix.textContent).toBe("blocked: tool-error-loop");
+    expect(h.prefix.title).toBe("blocked: tool-error-loop");
+  });
+
+  it("annotates the newest dot tooltip when blocked", () => {
+    const h = makeHarness(fake.document);
+    h.view.push(toolEvent(1));
+    h.view.setPrefix({
+      ok: 0,
+      error: 3,
+      open: 0,
+      activity: { state: "blocked", reason: "tool-error-loop" },
+    });
+    expect(h.dot(1).title).toContain("blocked: tool-error-loop");
+  });
+
+  it("hides the prefix when idle and counts are zero", () => {
+    const h = makeHarness(fake.document);
+    h.view.setPrefix({
+      ok: 0,
+      error: 0,
+      open: 0,
+      activity: { state: "idle", reason: null },
+    });
+    expect(h.prefix.hidden).toBe(true);
+    expect(h.prefix.textContent).toBe("");
+  });
+
+  it("renders an unknown blocked reason as blocked, not as raw text", () => {
+    const h = makeHarness(fake.document);
+    h.view.setPrefix({
+      ok: 0,
+      error: 0,
+      open: 0,
+      activity: { state: "blocked", reason: "evil-reason" as "stalled" },
+    });
+    expect(h.prefix.textContent).toBe("blocked");
+    expect(h.prefix.title).toBe("blocked");
   });
 });

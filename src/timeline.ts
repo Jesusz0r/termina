@@ -7,8 +7,8 @@
  * arrows/Home/End move the selection, Enter/Space open the moment,
  * Cmd/Ctrl+Enter forks it, Escape stops a replay.
  */
-import type { TimelineEvent, RecorderState, TimelinePrefix, TimelineProgress } from "../shared/types";
-import { asKnownState, KNOWN_RECORDER_STATES } from "./known-state";
+import type { AgentActivityView, TimelineEvent, RecorderState, TimelinePrefix, TimelineProgress } from "../shared/types";
+import { asKnownState, KNOWN_ACTIVITY_REASONS, KNOWN_ACTIVITY_STATES, KNOWN_RECORDER_STATES } from "./known-state";
 
 export const MAX_TIMELINE_EVENTS = 400;
 
@@ -51,6 +51,7 @@ export class TimelineView {
   private onFork: (ev: TimelineEvent) => void = () => {};
   private onProgress: (seq: number) => Promise<TimelineProgress> = async (seq) => ({ ok: false, seq });
   private onContent: (has: boolean, count: number) => void = () => {};
+  private activity: AgentActivityView | null = null;
 
   constructor(container: HTMLElement) {
     this.dotsEl = container.querySelector("#timeline-dots")!;
@@ -101,25 +102,40 @@ export class TimelineView {
   resetForProject(): void {
     this.setEvents([]);
     this.setRecorder("paused");
+    this.activity = null;
     this.setPrefix(null);
   }
 
-  /** Last-tool counts for this run. Hidden when every count is zero. */
-  setPrefix(p: Pick<TimelinePrefix, "ok" | "error" | "open"> | null): void {
+  /** Last-tool counts plus semantic activity for this run. */
+  setPrefix(p: Pick<TimelinePrefix, "ok" | "error" | "open" | "activity"> | null): void {
+    this.activity = p?.activity ?? null;
     const total = p ? p.ok + p.error + p.open : 0;
-    if (!p || total === 0) {
+    const activityState = asKnownState(p?.activity?.state, KNOWN_ACTIVITY_STATES);
+    const activityReason = p?.activity?.reason
+      ? asKnownState(p.activity.reason, KNOWN_ACTIVITY_REASONS)
+      : "unknown";
+    const activityLabel =
+      activityState === "blocked"
+        ? activityReason === "unknown" ? "blocked" : `blocked: ${activityReason}`
+        : activityState === "working"
+          ? "working"
+          : "";
+    if (!p || (total === 0 && !activityLabel)) {
       this.prefixEl.hidden = true;
       this.prefixEl.textContent = "";
       this.prefixEl.removeAttribute("title");
+      this.refreshNewestDotLabel();
       return;
     }
     const parts: string[] = [];
+    if (activityLabel) parts.push(activityLabel);
     if (p.ok) parts.push(`${p.ok} ok`);
     if (p.error) parts.push(`${p.error} error`);
     if (p.open) parts.push(`${p.open} open`);
     this.prefixEl.hidden = false;
     this.prefixEl.textContent = parts.join(" · ");
-    this.prefixEl.title = "file tools in this run";
+    this.prefixEl.title = activityLabel || "file tools in this run";
+    this.refreshNewestDotLabel();
   }
 
   /** The recorder state label (indexing / ready / paused / degraded / budget). */
@@ -308,6 +324,14 @@ export class TimelineView {
     return this.events.length > 0 ? this.events[this.events.length - 1].seq : null;
   }
 
+  private refreshNewestDotLabel(): void {
+    const seq = this.newestSeq();
+    if (seq === null) return;
+    const ev = this.eventsBySeq.get(seq);
+    const dot = this.dots.get(seq);
+    if (ev && dot) this.setDotLabel(dot, ev, this.progressCache.get(seq));
+  }
+
   /** Title and aria-label stay in lockstep (hover tooltip + keyboard name). */
   private setDotLabel(dot: HTMLElement, ev: TimelineEvent, progress?: TimelineProgress): void {
     const label = this.tooltip(ev, progress);
@@ -430,7 +454,16 @@ export class TimelineView {
         base = `${time} — changed on disk: ${ev.relPath ?? ""}${fork}`;
         break;
     }
-    return base + this.progressLine(progress);
+    const newest = this.newestSeq();
+    const activityState = asKnownState(this.activity?.state, KNOWN_ACTIVITY_STATES);
+    const activityReason = this.activity?.reason
+      ? asKnownState(this.activity.reason, KNOWN_ACTIVITY_REASONS)
+      : "unknown";
+    const blocked =
+      newest === ev.seq && activityState === "blocked"
+        ? activityReason === "unknown" ? " — blocked" : ` — blocked: ${activityReason}`
+        : "";
+    return base + blocked + this.progressLine(progress);
   }
 
   private eventBySeq(seq: number): TimelineEvent | undefined {
