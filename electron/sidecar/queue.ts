@@ -100,11 +100,21 @@ const SIDECAR_HANDLER_RETRY_MS = 50;
 /** Handler attempts before a poison event is dead-lettered. See options docs. */
 const SIDECAR_HANDLER_MAX_ATTEMPTS = 10;
 
+/** Admission byte sizes, cached per event object. Backpressure retries
+ * re-enqueue the same object every pass; events are immutable once parsed,
+ * so re-stringifying on every attempt is pure cost. Weakly held: entries
+ * die with their events and never leak across terminals. */
+const sidecarEventByteCache = new WeakMap<SidecarEvent, number>();
+
 
 function sidecarEventBytes(event: SidecarEvent): number {
   // Events are already parsed and bounded by the tail read.  Keep admission
   // accounting byte-accurate for multibyte prompt/model/path values.
-  return Buffer.byteLength(JSON.stringify(event), "utf8") + 1;
+  const cached = sidecarEventByteCache.get(event);
+  if (cached !== undefined) return cached;
+  const bytes = Buffer.byteLength(JSON.stringify(event), "utf8") + 1;
+  sidecarEventByteCache.set(event, bytes);
+  return bytes;
 }
 
 

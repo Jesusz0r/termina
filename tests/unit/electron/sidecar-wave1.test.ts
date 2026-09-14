@@ -1,16 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, utimesSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import type * as fs from "node:fs";
 import type { FSWatcher } from "node:fs";
-import { SidecarEventQueue, SidecarTailer } from "../../../electron/sidecar.ts";
+import { SidecarEventQueue, SidecarTailer, sidecarEventFromRecord } from "../../../electron/sidecar.ts";
 import type { SidecarEvent } from "../../../electron/sidecar.ts";
-import { createSidecarWriter } from "../../../agent-core/main/sidecar.ts";
+import { boundedSidecarEdits, createSidecarWriter } from "../../../agent-core/main/sidecar.ts";
 
 /** fs.watch-shaped fake that never fires; the recovery poll drives tails. */
 const inertWatch: typeof fs.watch = (..._args: unknown[]) =>
@@ -597,6 +598,393 @@ describe("Wave 1 cursor throughput regressions", () => {
     } finally {
       delete process.env.TERMINA_CURSOR_SYNC_SIGNAL;
       await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+});
+
+describe("Wave 1 sidecar hardening regressions (refs #186)", () => {
+  const line = (bridgeId: string, seq: number, t: string): string =>
+    `${JSON.stringify({ bridgeId, seq, t })}\n`;
+
+  it("(a) unproven sealed publications warn instead of staying silent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-186a-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-verifywarn";
+    const active = join(eventsDir, `${id}.jsonl`);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.join(" "));
+    };
+    try {
+      await writeFile(active, "");
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      tailer.onEvent = () => true;
+      tailer.start();
+      tailer.watch(id);
+      try {
+        await appendFile(active, line("w1", 1, "session_ready"));
+        // Rotate WITHOUT a writer proof: verification must fail loudly.
+        const sealedName = `.${id}.jsonl.${Date.now().toString(36)}-${process.pid}-noproof.sealed`;
+        await rename(active, join(eventsDir, sealedName));
+        await writeFile(active, "");
+        const cursorPath = join(eventsDir, `.cursor-${id}.json`);
+        const deadline = Date.now() + 10000;
+        for (;;) {
+          try {
+            const cursor = JSON.parse(await readFile(cursorPath, "utf8"));
+            if (typeof cursor.sealedSegment === "string" && cursor.sealedSegment.includes(".retained-")) break;
+          } catch {
+            /* Cursor not adopted yet. */
+          }
+          expect(Date.now() < deadline, "rotation was never reclaimed").toBe(true);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(warnings.some((warning) => warning.includes("failed publication verification"))).toBe(true);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      console.warn = originalWarn;
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("(b) watcher wakes on sealed segment files", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-186b-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-segwake";
+    try {
+      await writeFile(join(eventsDir, `${id}.jsonl`), "");
+      let listener: ((...args: unknown[]) => void) | null = null;
+      const capturingWatch = (...args: unknown[]) => {
+        listener = args[1] as (...inner: unknown[]) => void;
+        return { close() {} };
+      };
+      const tailer = new SidecarTailer(eventsDir, capturingWatch as never);
+      tailer.onEvent = () => true;
+      tailer.start();
+      tailer.watch(id);
+      try {
+        const captured = listener as ((...args: unknown[]) => void) | null;
+        if (!captured) throw new Error("watch listener was not captured");
+        captured("rename", `.${id}.jsonl.mu0qwzke-99-uuid.sealed`);
+        await waitFor(() => tailer.tailWakeCounts().watch === 1, 3000, "sealed segment did not wake the watcher path");
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("(f) over-cap active lines warn once and keep draining", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-186f-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-overcap";
+    const active = join(eventsDir, `${id}.jsonl`);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.join(" "));
+    };
+    try {
+      await writeFile(active, "");
+      const tailer = new SidecarTailer(eventsDir, inertWatch, { maxRecordBytes: 64 });
+      const received: number[] = [];
+      tailer.onEvent = (_terminalId, event) => {
+        received.push(event.seq);
+        return true;
+      };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        // Exactly 65 bytes per line (64 content + newline): each completes in
+        // a single bounded read and skips via the shared diagnostic.
+        const big = (seq: number): string => {
+          const prefix = `{"bridgeId":"w1","seq":${seq},"t":"c","p":"`;
+          return prefix + "x".repeat(64 - prefix.length - 2) + '"}\n';
+        };
+        const first = big(1);
+        expect(first.length).toBe(65);
+        await appendFile(active, big(1) + big(2) + big(3) + line("w1", 4, "agent_settled"));
+        await waitFor(() => received.length === 1, 8000, "valid event behind over-cap lines was not delivered");
+        expect(received).toEqual([4]);
+        expect(warnings.filter((warning) => warning.includes("exceeds"))).toHaveLength(1);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      console.warn = originalWarn;
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("(g) fresh watch over a large sealed segment does not warn", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-186g-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-bigseal";
+    const active = join(eventsDir, `${id}.jsonl`);
+    try {
+      await writeFile(active, "");
+      let overflowCalls = 0;
+      const tailer = new SidecarTailer(eventsDir, inertWatch, {
+        maxBacklogBytes: 1024,
+        onBacklogOverflow: () => {
+          overflowCalls++;
+        },
+      });
+      const received: number[] = [];
+      tailer.onEvent = (_terminalId, event) => {
+        received.push(event.seq);
+        return true;
+      };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        await appendFile(active, line("w1", 1, "session_ready") + line("w1", 2, "agent_start"));
+        await waitFor(() => received.length === 2, 5000, "initial records were not delivered");
+        await appendFile(active, "\n".repeat(2048));
+        await rename(active, join(eventsDir, `.${id}.jsonl.${Date.now().toString(36)}-${process.pid}-big.sealed`));
+        await writeFile(active, line("w1", 3, "agent_settled"));
+        await waitFor(() => received.length === 3, 10000, "post-rotation event was not delivered");
+        // Let several poll ticks run: an unpaused draining terminal must stay quiet.
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        expect(overflowCalls).toBe(0);
+        expect(tailer.isPaused(id)).toBe(false);
+        expect((await readdir(eventsDir)).filter((name) => name.startsWith(`.quarantine-${id}`))).toEqual([]);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("(g) settled anchor growth is observed after restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-186gr-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-regrow";
+    const active = join(eventsDir, `${id}.jsonl`);
+    try {
+      await writeFile(active, "");
+      const first = new SidecarTailer(eventsDir, inertWatch, { maxBacklogBytes: 1024 });
+      const received: number[] = [];
+      first.onEvent = (_terminalId, event) => {
+        received.push(event.seq);
+        return true;
+      };
+      first.start();
+      first.watch(id);
+      await appendFile(active, line("w1", 1, "session_ready"));
+      await waitFor(() => received.length === 1, 5000, "setup record was not delivered");
+      await rename(active, join(eventsDir, `.${id}.jsonl.${Date.now().toString(36)}-${process.pid}-grow.sealed`));
+      await writeFile(active, "");
+      const settled = async (): Promise<string | null> => {
+        const names = await readdir(eventsDir);
+        if (names.some((name) => name.endsWith(".sealed"))) return null;
+        const anchors = names.filter((name) => name.includes(".retained-"));
+        return anchors.length === 1 ? anchors[0]! : null;
+      };
+      const firstDeadline = Date.now() + 10000;
+      while ((await settled()) === null && Date.now() < firstDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const anchor = await settled();
+      expect(anchor, "rotation never settled").not.toBeNull();
+      first.stop();
+
+      // Restart over the settled anchor: quiet while drained, loud on growth.
+      const second = new SidecarTailer(eventsDir, inertWatch, { maxBacklogBytes: 1024 });
+      second.onEvent = () => true;
+      second.start();
+      second.watch(id);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        const quiet = second.tailWakeCounts();
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        expect(second.tailWakeCounts()).toEqual(quiet);
+        // An escaped descriptor growing the anchor behind the drain.
+        await appendFile(join(eventsDir, anchor!), "x".repeat(2048));
+        const deadline = Date.now() + 8000;
+        const quarantined = async (): Promise<boolean> => {
+          try {
+            await readFile(join(eventsDir, `.quarantine-${id}`), "utf8");
+            return second.isPaused(id);
+          } catch {
+            return false;
+          }
+        };
+        while (!(await quarantined()) && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        }
+        expect(await quarantined(), "anchor growth after restart was not observed").toBe(true);
+      } finally {
+        second.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("(h) watch rejects malformed terminal ids without side effects", async () => {    const root = await mkdtemp(join(tmpdir(), "termina-186h-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    try {
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      tailer.onEvent = () => true;
+      tailer.start();
+      const evil = `../../evil-186h-${Date.now().toString(36)}`;
+      try {
+        tailer.watch(evil);
+        tailer.watch("has space");
+        tailer.watch("dot.in.name");
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        expect(tailer.tailWakeCounts()).toEqual({ poll: 0, watch: 0 });
+        expect(await readdir(eventsDir)).toEqual([]);
+        expect(existsSync(resolve(eventsDir, `.cursor-${evil}.json`))).toBe(false);
+        expect((await readdir(root)).filter((name) => name !== "events")).toEqual([]);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("(j) startup sweeps stale tmps and keeps live ones", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-186j-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-tmp";
+    const uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const deadPid = `.cursor-${id}.json.99999999.${uuid}.tmp`;
+    const oldWriter = `.quarantine-${id}.${uuid}.tmp`;
+    const freshWriter = `.quarantine-${id}.bbbbbbbb-cccc-dddd-eeee-ffffffffffff.tmp`;
+    const livePid = `.cursor-${id}.json.${process.pid}.cccccccc-dddd-eeee-ffff-000000000000.tmp`;
+    const foreign = `unrelated.99999999.${uuid}.tmp`;
+    try {
+      await writeFile(join(eventsDir, deadPid), "stale tailer tmp");
+      await writeFile(join(eventsDir, oldWriter), "stale writer tmp");
+      const old = new Date(Date.now() - 120_000);
+      utimesSync(join(eventsDir, oldWriter), old, old);
+      await writeFile(join(eventsDir, freshWriter), "live writer tmp");
+      await writeFile(join(eventsDir, livePid), "live tailer tmp");
+      await writeFile(join(eventsDir, foreign), "foreign tmp");
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
+      tailer.start();
+      try {
+        const names = await readdir(eventsDir);
+        expect(names.includes(deadPid)).toBe(false);
+        expect(names.includes(oldWriter)).toBe(false);
+        expect(names.includes(freshWriter)).toBe(true);
+        expect(names.includes(livePid)).toBe(true);
+        expect(names.includes(foreign)).toBe(true);
+      } finally {
+        tailer.stop();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("(k) truncation digests stay exact when small and bounded when huge", async () => {
+    // Small truncated input: the digest must equal a full-content hash.
+    const small = [{ oldText: "a", newText: "b" }, 12345];
+    const smallBounded = boundedSidecarEdits(small) ?? {};
+    expect(smallBounded.editsTruncated).toBe(true);
+    const smallSerialized = JSON.stringify(small);
+    expect(smallBounded.editsBytes).toBe(Buffer.byteLength(smallSerialized, "utf8"));
+    expect(smallBounded.editsCount).toBe(2);
+    expect(smallBounded.editsSha256).toBe(createHash("sha256").update(smallSerialized, "utf8").digest("hex"));
+    // Huge input: exact bytes/count, bounded preview, capped (prefix) digest.
+    const huge = [{ oldText: "y".repeat(10 * 1024 * 1024), newText: "z" }];
+    const hugeBounded = boundedSidecarEdits(huge) ?? {};
+    expect(hugeBounded.editsTruncated).toBe(true);
+    expect(hugeBounded.editsBytes).toBe(Buffer.byteLength(JSON.stringify(huge), "utf8"));
+    expect(hugeBounded.editsCount).toBe(1);
+    expect(typeof hugeBounded.editsSha256).toBe("string");
+    expect(hugeBounded.editsSha256).not.toBe(
+      createHash("sha256").update(JSON.stringify(huge), "utf8").digest("hex"),
+    );
+    expect(Buffer.byteLength(JSON.stringify(hugeBounded.edits), "utf8")).toBeLessThanOrEqual(512 * 1024);
+  }, 30000);
+
+  it("(l) large appends stay exact at scale", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-186l-"));
+    const eventsDir = join(root, "events");
+    await mkdir(eventsDir, { recursive: true });
+    const id = "term-bigappend";
+    const active = join(eventsDir, `${id}.jsonl`);
+    try {
+      await writeFile(active, "");
+      const writer = createSidecarWriter({ eventsDir, terminalId: id, bridgeId: "writer-1" });
+      const startedAt = Date.now();
+      for (let index = 0; index < 50; index++) {
+        writer.logEvent({ t: "tool", toolName: "edit", path: `file-${index}.txt`, bulk: "a".repeat(64 * 1024) });
+      }
+      expect(Date.now() - startedAt).toBeLessThan(15000);
+      expect(writer.isWriteStopped()).toBe(false);
+      const lines = (await readFile(active, "utf8")).trim().split("\n");
+      expect(lines).toHaveLength(50);
+      const seqs = lines.map((entry, position) => {
+        const rec = JSON.parse(entry) as { seq: number; generation: string };
+        expect(rec.seq).toBe(position + 1);
+        return rec.seq;
+      });
+      expect(seqs).toHaveLength(50);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("(m) hostile edit previews are capped and flagged", async () => {
+    const tool = (edits: unknown): Record<string, unknown> | null =>
+      sidecarEventFromRecord({ bridgeId: "b", seq: 1, t: "tool", toolName: "edit", path: "f", edits }) as unknown as Record<string, unknown> | null;
+    // Control: a fitting preview passes through untouched.
+    const fitting = tool([{ oldText: "aaa", newText: "bbb" }]);
+    expect(fitting?.edits).toEqual([{ oldText: "aaa", newText: "bbb" }]);
+    expect(fitting?.editsTruncated).toBeUndefined();
+    // Hostile element flood: bounded count, flagged truncation.
+    const flood = Array.from({ length: 100_000 }, () => ({ oldText: "o", newText: "n" }));
+    const flooded = tool(flood);
+    expect((flooded?.edits as unknown[]).length).toBeLessThanOrEqual(65536);
+    expect(flooded?.editsTruncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(flooded?.edits), "utf8")).toBeLessThan(600 * 1024);
+    // Hostile field flood: clipped fields, flagged truncation.
+    const wide = tool([{ oldText: "x".repeat(2 * 1024 * 1024), newText: "y" }]);
+    const admitted = (wide?.edits as Array<{ oldText?: string }>) ?? [];
+    expect(admitted).toHaveLength(1);
+    expect(Buffer.byteLength(admitted[0]?.oldText ?? "", "utf8")).toBeLessThanOrEqual(128 * 1024);
+    expect(wide?.editsTruncated).toBe(true);
+    // Junk elements are dropped and flagged.
+    const junk = tool([0, null, "x", { oldText: "a" }]);
+    expect(junk?.edits).toEqual([{ oldText: "a" }]);
+    expect(junk?.editsTruncated).toBe(true);
+  }, 30000);
+
+  it("(p) event byte sizes are cached across enqueue attempts", async () => {
+    const event: SidecarEvent = { bridgeId: "b", seq: 1, t: "agent_start" };
+    const realStringify = JSON.stringify;
+    let calls = 0;
+    JSON.stringify = ((...args: [unknown, ...unknown[]]) => {
+      if (args[0] === event) calls++;
+      return (realStringify as (...inner: unknown[]) => string)(...args);
+    }) as typeof JSON.stringify;
+    try {
+      const queue = new SidecarEventQueue(async () => {}, { maxItems: 8, maxBytes: 1_000_000 });
+      expect(queue.enqueue(event)).toBe(true);
+      expect(queue.enqueue(event)).toBe(true);
+      await queue.drain();
+      expect(calls).toBe(1);
+      queue.dispose();
+    } finally {
+      JSON.stringify = realStringify;
     }
   }, 30000);
 });

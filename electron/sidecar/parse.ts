@@ -5,6 +5,7 @@
  * Split from electron/sidecar.ts (issue #38).
  */
 import type { SidecarEvent, SidecarMeta, ToolEdits } from "./events.js";
+import { SIDECAR_TOOL_EDIT_ELEMENTS, SIDECAR_TOOL_EDIT_FIELD_BYTES, SIDECAR_TOOL_EDIT_TOTAL_BYTES } from "./events.js";
 
 
 const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
@@ -134,20 +135,22 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
       };
     case "plan":
       return { ...meta, t: "plan", text: optionalString(rec.text) };
-    case "tool":
+    case "tool": {
+      const bounded = boundedEdits(rec.edits);
       return {
         ...meta,
         t: "tool",
         toolName: optionalString(rec.toolName),
         path: optionalString(rec.path),
-        edits: optionalEdits(rec.edits),
-        editsTruncated: optionalBoolean(rec.editsTruncated),
+        edits: bounded.edits,
+        editsTruncated: bounded.clipped || optionalBoolean(rec.editsTruncated),
         editsBytes: optionalSafeInteger(rec.editsBytes),
         editsCount: optionalSafeInteger(rec.editsCount),
         editsSha256: optionalString(rec.editsSha256),
         toolCallId: optionalString(rec.toolCallId),
         entryId: optionalStringOrNull(rec.entryId),
       };
+    }
     case "tool_end":
       return { ...meta, t: "tool_end", toolCallId: optionalString(rec.toolCallId), isError: optionalBoolean(rec.isError) };
     case "subagent_spawn":
@@ -177,16 +180,43 @@ function optionalStringOrNull(value: unknown): string | null | undefined {
 }
 
 
-function optionalEdits(value: unknown): ToolEdits | undefined {
-  if (!Array.isArray(value)) return undefined;
+function utf8BytePrefix(value: string, maxBytes: number): string {
+  const source = Buffer.from(value, "utf8");
+  if (source.length <= maxBytes) return value;
+  let end = Math.max(0, maxBytes);
+  while (end > 0 && (source[end]! & 0xc0) === 0x80) end--;
+  return source.subarray(0, end).toString("utf8");
+}
+
+
+/** Admit a hostile tool-edit preview within the inbound contract. Elements,
+ * fields, and total volume are all capped; anything clipped forces the
+ * truncated flag so consumers fall back to file authority. */
+function boundedEdits(value: unknown): { edits: ToolEdits | undefined; clipped: boolean } {
+  if (!Array.isArray(value)) return { edits: undefined, clipped: false };
   const edits: ToolEdits = [];
-  for (const item of value) {
+  let totalBytes = 2;
+  let clipped = false;
+  const limit = Math.min(value.length, SIDECAR_TOOL_EDIT_ELEMENTS);
+  for (let index = 0; index < limit; index++) {
+    const item = value[index];
     if (!item || typeof item !== "object") continue;
     const rec = item as Record<string, unknown>;
-    const oldText = optionalString(rec.oldText);
-    const newText = optionalString(rec.newText);
+    let oldText = optionalString(rec.oldText);
+    let newText = optionalString(rec.newText);
     if (oldText === undefined && newText === undefined) continue;
-    edits.push({ ...(oldText !== undefined ? { oldText } : {}), ...(newText !== undefined ? { newText } : {}) });
+    if (oldText !== undefined && Buffer.byteLength(oldText, "utf8") > SIDECAR_TOOL_EDIT_FIELD_BYTES) {
+      oldText = utf8BytePrefix(oldText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
+      clipped = true;
+    }
+    if (newText !== undefined && Buffer.byteLength(newText, "utf8") > SIDECAR_TOOL_EDIT_FIELD_BYTES) {
+      newText = utf8BytePrefix(newText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
+      clipped = true;
+    }
+    const candidate = { ...(oldText !== undefined ? { oldText } : {}), ...(newText !== undefined ? { newText } : {}) };
+    if (totalBytes + Buffer.byteLength(JSON.stringify(candidate), "utf8") + 1 > SIDECAR_TOOL_EDIT_TOTAL_BYTES) break;
+    totalBytes += Buffer.byteLength(JSON.stringify(candidate), "utf8") + 1;
+    edits.push(candidate);
   }
-  return edits;
+  return { edits, clipped: clipped || edits.length < value.length };
 }
