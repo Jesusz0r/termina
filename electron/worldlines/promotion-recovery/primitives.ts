@@ -128,5 +128,20 @@ export function exactObjectKeys(value: Record<string, unknown>, expected: readon
 
 
 export function isSafePromotionRelativePath(rel: string): boolean {
-  return rel.length > 0 && rel !== "." && rel.indexOf("\0") === -1 && !isAbsolute(rel) && !rel.startsWith("/") && !rel.split(/[\\/]/).includes("..");
+  if (rel.length === 0 || rel === "." || rel.indexOf("\0") !== -1 || isAbsolute(rel) || rel.startsWith("/")) return false;
+  const parts = splitPromotionComponents(rel);
+  if (parts.length === 0) return false;
+  // The same language the native component splitters accept: no `.` or `..`
+  // segments, so validation fails fast instead of dying at apply time.
+  return !parts.some((part) => part === "." || part === "..");
+}
+
+
+/**
+ * Split a promotion-relative path into native components. On POSIX only `/`
+ * separates — a backslash is a filename character. On Windows both do.
+ */
+export function splitPromotionComponents(rel: string): string[] {
+  const parts = process.platform === "win32" ? rel.split(/[\\/]+/) : rel.split(/\/+/);
+  return parts.filter(Boolean);
 }

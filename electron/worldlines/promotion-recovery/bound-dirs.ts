@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { lstat as lstatPath, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { sha256Hex } from "./primitives.js";
+import { sha256Hex, splitPromotionComponents } from "./primitives.js";
 
 
 const PROMOTION_ROOT_PROVENANCE_VERSION = 1;
@@ -399,13 +399,15 @@ export async function ensureBoundRetainedRoot(
 }
 
 
-function promotionDirectoryComponents(root: string, target: string, field: string): string[] {
+export function promotionDirectoryComponents(root: string, target: string, field: string): string[] {
   const rootPath = resolve(root);
   const targetPath = resolve(target);
   const rel = relative(rootPath, targetPath);
   if (rel === "" || rel === ".") return [];
-  if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(`${field} escapes its bound root`);
-  const components = rel.split(/[\\/]+/).filter(Boolean);
+  if (isAbsolute(rel)) throw new Error(`${field} escapes its bound root`);
+  // No `..`-prefix shortcut: `..foo` is a valid name and the per-component
+  // check below is the exact escape test, matching the shared validator.
+  const components = splitPromotionComponents(rel);
   if (components.some((part) => !part || part === "." || part === ".." || part.includes("\0"))) {
     throw new Error(`invalid ${field} components`);
   }

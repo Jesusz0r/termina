@@ -14,7 +14,7 @@ import { constants as fsConstants } from "node:fs";
 import { lstat as lstatPath, open as openFile, readlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ensureBoundRelativeDirectory } from "./bound-dirs.js";
-import { isSafePromotionRelativePath, promotionNoFollowFlag, sha256Hex, statIdentityEqual } from "./primitives.js";
+import { isSafePromotionRelativePath, promotionNoFollowFlag, sha256Hex, splitPromotionComponents, statIdentityEqual } from "./primitives.js";
 
 type PromotionParentIdentity = { path: string; dev: number; ino: number; capability?: string };
 
@@ -199,7 +199,7 @@ export async function boundPromotionExpectedLeaf(abs: string, expected: Promotio
 
 export function promotionDestinationComponents(primaryRoot: string, parent: string, rel: string): string[] {
   const parentRel = relative(primaryRoot, parent);
-  const parts = parentRel ? parentRel.split(/[\\/]+/).filter(Boolean) : [];
+  const parts = parentRel ? splitPromotionComponents(parentRel) : [];
   const destination = basename(rel);
   if (parts.some((part) => part === "." || part === ".." || part.includes("\0")) || !destination || destination === "." || destination === "..") {
     throw new Error(`invalid native promotion destination: ${rel}`);
@@ -211,7 +211,7 @@ export function promotionDestinationComponents(primaryRoot: string, parent: stri
 export function promotionParentComponents(root: string, parent: string): string[] {
   const parentRel = relative(root, parent);
   if (!parentRel) return [];
-  const parts = parentRel.split(/[\\/]+/).filter(Boolean);
+  const parts = splitPromotionComponents(parentRel);
   if (parts.some((part) => part === "." || part === ".." || part.includes("\0"))) throw new Error(`invalid native promotion parent: ${parent}`);
   return parts;
 }
@@ -219,7 +219,7 @@ export function promotionParentComponents(root: string, parent: string): string[
 
 export function promotionSourceComponents(rel: string): string[] {
   if (!isSafePromotionRelativePath(rel)) throw new Error(`invalid native promotion source: ${rel}`);
-  const parts = rel.split(/[\\/]+/).filter(Boolean);
+  const parts = splitPromotionComponents(rel);
   if (parts.some((part) => part === "." || part === ".." || part.includes("\0")) || parts.length === 0) {
     throw new Error(`invalid native promotion source: ${rel}`);
   }
