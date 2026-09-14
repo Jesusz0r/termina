@@ -4503,7 +4503,7 @@ class TerminaApp {
         }
       }
     }, 2000);
-    inst.pty.onExit = async (code, origin = "native") => {
+    inst.pty.onExit = async (code, origin: "native" | "forced" = "native") => {
       clearTimeout(killWatchdog);
       if (existingOnExit) await existingOnExit(code, origin);
     };
