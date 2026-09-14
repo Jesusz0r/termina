@@ -71,11 +71,13 @@ function markPrefixThenTail(
 /** Strip prompt_cache_breakpoint and prompt_cache_options when a model rejects explicit caching. */
 /**
  * Provider stop reasons that mean the turn was cut by the output limit:
- * OpenAI "length", Anthropic "max_tokens", Google "MAX_TOKENS". Tool calls
+ * OpenAI "length", Anthropic "max_tokens", Google "MAX_TOKENS", and the
+ * Responses-route "incomplete" status (emitted as response.incomplete with
+ * incomplete_details.reason="max_output_tokens"). Tool calls
  * from such a turn may carry truncated arguments that still parse.
  */
 export function isTruncatedStopReason(reason: string | null | undefined): boolean {
-  return reason === "length" || reason === "max_tokens" || reason === "MAX_TOKENS";
+  return reason === "length" || reason === "max_tokens" || reason === "MAX_TOKENS" || reason === "incomplete";
 }
 
 
