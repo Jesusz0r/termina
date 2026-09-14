@@ -558,6 +558,45 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
             _ => return Err(format!("tree verification mismatch for {rel_path}")),
         }
     }
+    // Verify deletions and type transitions the same sparse way. A deletion
+    // superseded by a descendant addition turned its path into a directory;
+    // every other deletion must leave the path absent as both tree and blob.
+    let mut superseded: HashSet<String> = HashSet::new();
+    for path in changed_entries.keys() {
+        if changed_entries.get(path) == Some(&None) {
+            continue;
+        }
+        let mut rest = path.as_str();
+        while let Some(i) = rest.rfind('/') {
+            rest = &rest[..i];
+            if changed_entries.get(rest) == Some(&None) {
+                superseded.insert(rest.to_string());
+            }
+        }
+    }
+    for (rel_path, entry) in &changed_entries {
+        if entry.is_some() {
+            continue;
+        }
+        if superseded.contains(rel_path) {
+            match tree_lookup(&store, tree, rel_path, TreeLookupKind::Tree)? {
+                Some(_) => {}
+                None => return Err(format!("tree verification mismatch for {rel_path}")),
+            }
+            continue;
+        }
+        if tree_lookup(&store, tree, rel_path, TreeLookupKind::Tree)?.is_some() {
+            return Err(format!("tree verification mismatch for {rel_path}"));
+        }
+        if tree_lookup(&store, tree, rel_path, TreeLookupKind::Blob)?.is_some() {
+            return Err(format!("tree verification mismatch for {rel_path}"));
+        }
+    }
+    // An unchanged tree must carry the unchanged map. Caching a changed flat
+    // map under the parent tree oid would poison later incremental work.
+    if tree == parent_tree && flat != *parent_arc {
+        return Err("incremental capture tree does not match its flat map".to_string());
+    }
     let commit = commit_tree(
         &mut object_transaction,
         &store,
