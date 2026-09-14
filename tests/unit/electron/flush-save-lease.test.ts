@@ -103,6 +103,21 @@ interface FakeWorkspace {
   generation: number;
 }
 
+interface FakeApp {
+  disposed: boolean;
+  workspaceById: (id: string) => FakeWorkspace | undefined;
+  projectWorkspace: (value: unknown) => { project: { id: string }; workspace: FakeWorkspace } | null;
+  managedPath: (absPath: string, workspaceId: string) => Promise<{ path: string; workspace: FakeWorkspace } | null>;
+  joinWriteLease: (wsId: string, requesterId: string) => boolean;
+  releaseWriteLease: (wsId: string, requesterId: string) => void;
+  acquireWriteLease: (wsId: string, requesterId: string, timeoutMs?: number) => Promise<LeaseResult>;
+  durableReplaceFile: (path: string, data: string | Buffer, mode?: number) => Promise<void>;
+  projectOfWorkspace: (id: string) => null;
+  projectIsSwitching: (id: string | undefined) => boolean;
+  terminalsOnWorkspace: (ws: FakeWorkspace) => unknown[];
+  kickWorkspaceMomentCapture: (ws: FakeWorkspace) => void;
+}
+
 const realAcquire = loadMethod("acquireWriteLease", "private async acquireWriteLease(", [], []) as (
   wsId: string,
   requesterId: string,
@@ -128,7 +143,7 @@ function makeHarness(opts: { durableReplace?: (path: string, data: string | Buff
   const dir = mkdtempSync(join(tmpdir(), "termina-flush-gate-"));
   const ws: FakeWorkspace = { id: "ws-1", root: dir, writerId: null, generation: 1 };
   const owner = { projectId: "proj-1", workspaceId: ws.id };
-  const app = {
+  const app: FakeApp = {
     disposed: false,
     workspaceById: (id: string) => (id === ws.id ? ws : undefined),
     projectWorkspace: (value: unknown) =>
@@ -147,10 +162,10 @@ function makeHarness(opts: { durableReplace?: (path: string, data: string | Buff
       realAcquire.call(app, wsId, requesterId, timeoutMs),
     durableReplaceFile: opts.durableReplace ?? ((path: string, data: string | Buffer, mode?: number) =>
       realDurableReplace.call(app, path, data, mode)),
-    projectOfWorkspace: (_id: string) => null,
-    projectIsSwitching: (_id: string | undefined) => false,
-    terminalsOnWorkspace: (_ws: FakeWorkspace) => [],
-    kickWorkspaceMomentCapture: (_ws: FakeWorkspace) => undefined,
+    projectOfWorkspace: (_id: string): null => null,
+    projectIsSwitching: (_id: string | undefined): boolean => false,
+    terminalsOnWorkspace: (_ws: FakeWorkspace): unknown[] => [],
+    kickWorkspaceMomentCapture: (_ws: FakeWorkspace): void => undefined,
   };
   const call = (absPath: string, content: string, writerId: unknown) =>
     flushSave.call(app, {}, absPath, content, writerId, owner);
