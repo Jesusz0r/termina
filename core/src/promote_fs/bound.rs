@@ -23,7 +23,7 @@ use crate::util::{
 
 use super::capability::{PromotionIdentity, issue_promotion_root_capability, promotion_root_capabilities};
 use super::expected::{promotion_absolute_path, promotion_component, promotion_identity_from_value};
-use super::io::promotion_directory_identity_matches;
+use super::io::{promotion_directory_identity_matches, promotion_mkdir_at};
 
 pub(crate) fn open_promotion_absolute_directory(path: &str, field: &str) -> Result<fs::File, String> {
     promotion_absolute_path(path, field)?;
@@ -265,6 +265,10 @@ pub(crate) fn open_promotion_parent(
 /// materialization primitive used by live promotion.  In particular, it never
 /// re-resolves a component through a pathname after the root descriptor has
 /// been acquired.
+///
+/// After creating a component, the new directory and the parent that now
+/// contains its dirent are synced through those held descriptors.  Directories
+/// that already existed and were only opened are not synced again.
 pub(crate) fn open_or_create_promotion_parent(
     root: &fs::File,
     components: &[(String, CString)],
@@ -282,17 +286,16 @@ pub(crate) fn open_or_create_promotion_parent(
         ) {
             Ok(next) => parent = next,
             Err(error) if missing_path(&error) => {
-                unsafe {
-                    if libc::mkdirat(parent.as_raw_fd(), component.as_ptr(), mode) == -1 {
-                        let mkdir_error = io::Error::last_os_error();
-                        if mkdir_error.raw_os_error() != Some(libc::EEXIST) {
-                            return Err(format!(
-                                "create promotion {field} component {index} failed: {mkdir_error}"
-                            ));
-                        }
+                let created = match promotion_mkdir_at(parent.as_raw_fd(), component, mode) {
+                    Ok(()) => true,
+                    Err(mkdir_error) if mkdir_error.raw_os_error() == Some(libc::EEXIST) => false,
+                    Err(mkdir_error) => {
+                        return Err(format!(
+                            "create promotion {field} component {index} failed: {mkdir_error}"
+                        ));
                     }
-                }
-                parent = open_at(
+                };
+                let next = open_at(
                     parent.as_raw_fd(),
                     component,
                     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
@@ -300,6 +303,17 @@ pub(crate) fn open_or_create_promotion_parent(
                 .map_err(|open_error| {
                     format!("open created promotion {field} component {index} failed: {open_error}")
                 })?;
+                if created {
+                    next.sync_all().map_err(|error| {
+                        format!("sync created promotion {field} component {index} failed: {error}")
+                    })?;
+                    parent.sync_all().map_err(|error| {
+                        format!(
+                            "sync promotion {field} parent after creating component {index} failed: {error}"
+                        )
+                    })?;
+                }
+                parent = next;
             }
             Err(error) => {
                 return Err(format!(
@@ -309,4 +323,101 @@ pub(crate) fn open_or_create_promotion_parent(
         }
     }
     Ok(parent)
+}
+
+#[cfg(test)]
+mod open_or_create_promotion_parent_tests {
+    use super::open_or_create_promotion_parent;
+    use crate::util::stat_file;
+    use std::ffi::CString;
+    use std::fs;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    struct DirFixture {
+        path: PathBuf,
+        root: fs::File,
+    }
+
+    impl DirFixture {
+        fn new() -> Self {
+            loop {
+                let path = std::env::temp_dir().join(format!(
+                    "termina-promote-parent-{}-{}",
+                    std::process::id(),
+                    SEQ.fetch_add(1, Ordering::Relaxed)
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => {
+                        let root = fs::OpenOptions::new()
+                            .read(true)
+                            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                            .open(&path)
+                            .expect("open promotion parent fixture root");
+                        return Self { path, root };
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create promotion parent fixture: {error}"),
+                }
+            }
+        }
+    }
+
+    impl Drop for DirFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn component(name: &str) -> (String, CString) {
+        (
+            name.to_string(),
+            CString::new(name).expect("test component has no NUL"),
+        )
+    }
+
+    #[test]
+    fn creates_and_reopens_three_missing_nested_directories() {
+        let fixture = DirFixture::new();
+        let components = [component("a"), component("b"), component("c")];
+        assert!(!fixture.path.join("a").exists());
+
+        let created = open_or_create_promotion_parent(
+            &fixture.root,
+            &components,
+            "nested parent",
+            0o700,
+        )
+        .expect("create three previously missing nested directories");
+
+        assert!(fixture.path.join("a").is_dir());
+        assert!(fixture.path.join("a").join("b").is_dir());
+        assert!(fixture.path.join("a").join("b").join("c").is_dir());
+
+        let created_identity = stat_file(&created).expect("stat created nested parent");
+        let path_identity = stat_file(
+            &fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(fixture.path.join("a").join("b").join("c"))
+                .expect("open created nested parent by path"),
+        )
+        .expect("stat nested parent path");
+        assert_eq!(created_identity.dev, path_identity.dev);
+        assert_eq!(created_identity.ino, path_identity.ino);
+
+        let reopened = open_or_create_promotion_parent(
+            &fixture.root,
+            &components,
+            "nested parent",
+            0o700,
+        )
+        .expect("reopen existing nested directories without creating extras");
+        let reopened_identity = stat_file(&reopened).expect("stat reopened nested parent");
+        assert_eq!(created_identity.dev, reopened_identity.dev);
+        assert_eq!(created_identity.ino, reopened_identity.ino);
+    }
 }

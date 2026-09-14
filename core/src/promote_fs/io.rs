@@ -360,8 +360,16 @@ pub(crate) fn promotion_rename_noreplace(
     }
 }
 
+/// Optional Unix permission bits. An absent field uses `default`. A present
+/// value must be an integer in `0..=0o777`; any other JSON type or out-of-range
+/// integer fails closed before callers mutate the filesystem.
 pub(crate) fn promotion_mode(value: Option<&Value>, field: &str, default: u32) -> Result<u32, String> {
-    let mode = value.and_then(Value::as_u64).unwrap_or(u64::from(default));
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let mode = value
+        .as_u64()
+        .ok_or_else(|| format!("{field} is invalid"))?;
     if mode > 0o777 {
         return Err(format!("{field} is invalid"));
     }
@@ -373,4 +381,40 @@ pub(crate) struct PromotionJournalFileIdentity {
     pub(crate) file: FileIdentity,
     pub(crate) uid: u64,
     pub(crate) links: u64,
+}
+
+#[cfg(test)]
+mod promotion_mode_tests {
+    use super::promotion_mode;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn distinguishes_absence_from_invalid_present() {
+        let cases: &[(&str, Option<Value>, u32, Result<u32, &str>)] = &[
+            ("absence", None, 0o600, Ok(0o600)),
+            ("zero", Some(json!(0)), 0o600, Ok(0)),
+            ("0o600", Some(json!(0o600)), 0o644, Ok(0o600)),
+            ("0o777", Some(json!(0o777)), 0o600, Ok(0o777)),
+            ("above 0o777", Some(json!(0o1000)), 0o600, Err("mode is invalid")),
+            ("negative", Some(json!(-1)), 0o600, Err("mode is invalid")),
+            ("fractional", Some(json!(1.5)), 0o600, Err("mode is invalid")),
+            ("string", Some(json!("600")), 0o600, Err("mode is invalid")),
+            ("bool", Some(json!(true)), 0o600, Err("mode is invalid")),
+            ("null", Some(Value::Null), 0o600, Err("mode is invalid")),
+        ];
+        for (name, value, default, expected) in cases {
+            let actual = promotion_mode(value.as_ref(), "mode", *default);
+            match (actual, expected) {
+                (Ok(actual), Ok(expected)) => {
+                    assert_eq!(actual, *expected, "{name}");
+                }
+                (Err(actual), Err(expected)) => {
+                    assert_eq!(actual, *expected, "{name}");
+                }
+                (actual, expected) => {
+                    panic!("{name}: got {actual:?}, expected {expected:?}");
+                }
+            }
+        }
+    }
 }
