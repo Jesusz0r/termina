@@ -7,7 +7,8 @@
  * followed only when they resolve inside the project root; visited
  * directories are tracked by realpath so cycles terminate.
  */
-import { readdir, readFile, realpath as fsRealpath, stat } from "node:fs/promises";
+import { readdir, realpath as fsRealpath, stat, open as fsOpen } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
 
@@ -21,6 +22,9 @@ const MAX_QUICK_OPEN_DIRS = 8000;
 const MAX_QUICK_OPEN_FILES = 30000;
 const MAX_QUICK_OPEN_RESULTS = 50;
 const MAX_QUICK_OPEN_QUERY = 256;
+/** Ignore files past this size are treated as missing: rules must stay small
+ *  enough to parse cheaply, and a partial read would hide arbitrary paths. */
+const MAX_GITIGNORE_BYTES = 256 * 1024;
 
 /** Path / name break: start of the string or after `/` `.` `-` `_`. */
 function isSegStart(candidate: string, index: number): boolean {
@@ -105,6 +109,36 @@ function isGitignoreRelPath(relPath: string): boolean {
 }
 
 /**
+ * Read one .gitignore file with bounded, descriptor-validated admission.
+ * The nonblocking open (POSIX) returns immediately on FIFOs and other
+ * special files, which the post-open regular-file check then rejects; a
+ * pre-open stat alone would leave a swap race. Missing, oversized, and
+ * unreadable files all read as null (non-fatal: the walk continues without
+ * that directory's rules). Symlinks are deliberately followed — the target
+ * supplies match patterns only, never executed content — and validated
+ * through the opened descriptor like any other path.
+ */
+export async function readGitignoreFile(abs: string): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof fsOpen>> | null = null;
+  try {
+    handle = await fsOpen(
+      abs,
+      fsConstants.O_RDONLY | (process.platform === "win32" ? 0 : fsConstants.O_NONBLOCK),
+    );
+    const st = await handle.stat();
+    if (!st.isFile() || st.size > MAX_GITIGNORE_BYTES) return null;
+    if (st.size === 0) return "";
+    const buf = Buffer.alloc(st.size);
+    const { bytesRead } = await handle.read(buf, 0, st.size, 0);
+    return buf.subarray(0, bytesRead).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/**
  * Load ancestor .gitignore files for one directory. Same nested-load as
  * content-search `ensureGitignoreChain`: each directory is read once,
  * parse/match stay in shared/gitignore.ts.
@@ -120,11 +154,8 @@ async function ensureGitignoreChain(
     if (!loaded.has(dir)) {
       loaded.add(dir);
       const abs = dir === "" ? join(root, ".gitignore") : join(root, ...dir.split("/"), ".gitignore");
-      try {
-        rules.set(dir, parseGitignore(await readFile(abs, "utf8")));
-      } catch {
-        /* no gitignore here */
-      }
+      const source = await readGitignoreFile(abs);
+      if (source !== null) rules.set(dir, parseGitignore(source));
     }
     if (dir === "") return;
     const slash = dir.lastIndexOf("/");
@@ -361,19 +392,31 @@ export class ProjectPathIndex {
   /** Candidate list for a query, building the index on first use. */
   async candidates(root: string, shouldStop?: () => boolean): Promise<{ paths: readonly string[]; truncated: boolean }> {
     if (this.root !== root) this.reset(root);
-    if (!this.built) {
-      const build = this.building ?? (this.building = this.build(root, shouldStop, this.generation));
+    const stop = shouldStop ?? (() => false);
+    for (;;) {
+      // Lost a root race to a concurrent caller: fail closed with no
+      // results rather than fighting over the single-root index. The next
+      // query for this root resets and rebuilds.
+      if (this.root !== root) return { paths: [], truncated: false };
+      if (this.built) return { paths: this.paths, truncated: this.truncated };
+      // A cancelled query takes nothing: the shared build below stays owned
+      // by the index (not by the initiating query), so a stale cancellation
+      // can neither strand current waiters nor serve them a partial tree.
+      if (stop()) return { paths: [], truncated: false };
+      const build = this.building ?? (this.building = this.build(root, this.generation));
       await build;
     }
-    return { paths: this.paths, truncated: this.truncated };
   }
 
-  private async build(root: string, shouldStop: (() => boolean) | undefined, generation: number): Promise<void> {
+  private async build(root: string, generation: number): Promise<void> {
     try {
-      const listed = await listProjectPaths(root, { shouldStop });
-      // Cancelled, invalidated, or superseded: leave the index unbuilt so the
-      // next search retries rather than caching a partial or stale tree.
-      if (this.root !== root || generation !== this.generation || shouldStop?.()) return;
+      // No per-query cancellation: concurrent callers share this build, and
+      // a superseded query must not discard the inventory a current waiter
+      // needs. Root switches and invalidations still fence via generation.
+      const listed = await listProjectPaths(root);
+      // Invalidated or superseded: leave the index unbuilt so the next
+      // waiter retries rather than caching a partial or stale tree.
+      if (this.root !== root || generation !== this.generation) return;
       this.paths = listed.paths;
       this.membership = new Set(listed.paths);
       this.truncated = listed.truncated;
@@ -388,7 +431,9 @@ export class ProjectPathIndex {
   /**
    * A watcher-reported create for one workspace root. Events from any other
    * root are ignored so a background project never patches the foreground
-   * index. Ignored until the index exists (nothing to patch).
+   * index. Ignored until the index exists (nothing to patch). Hidden
+   * segments follow the cold walk's visibility rule, so a filesystem event
+   * cannot surface a path the walk itself would skip.
    */
   noteAdded(root: string, relPath: string): void {
     if (this.root !== root) return;
@@ -398,6 +443,9 @@ export class ProjectPathIndex {
       return;
     }
     if (!this.built || this.membership.has(relPath)) return;
+    for (const segment of relPath.split(sep)) {
+      if (!visibleDirent(segment)) return;
+    }
     this.paths.push(relPath);
     this.membership.add(relPath);
   }

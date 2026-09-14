@@ -18,7 +18,7 @@ import { realpathSync, statSync } from "node:fs";
 import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
 import type { ContentHit } from "../shared/types.ts";
 import { isRecord } from "../shared/guards.ts";
-import { listProjectPaths } from "./quick-open.js";
+import { listProjectPaths, readGitignoreFile } from "./quick-open.js";
 
 export type { ContentHit };
 
@@ -242,11 +242,8 @@ async function ensureGitignoreChain(
     if (!loaded.has(dir)) {
       loaded.add(dir);
       const abs = dir === "" ? join(root, ".gitignore") : join(root, ...dir.split("/"), ".gitignore");
-      try {
-        rules.set(dir, parseGitignore(await readFile(abs, "utf8")));
-      } catch {
-        /* no gitignore here */
-      }
+      const source = await readGitignoreFile(abs);
+      if (source !== null) rules.set(dir, parseGitignore(source));
     }
     if (dir === "") return;
     const slash = dir.lastIndexOf("/");
