@@ -197,7 +197,7 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
       const discovered = mcp.normalizeMcpDiscovery([bad, good]);
       expect(discovered.tools.map((row) => row.original)).toEqual(["ok-tool"]);
       expect(discovered.conflicts.some((note) => note.includes("mcp schema invalid") && note.includes("bad-tool"))).toBe(true);
-      expect(JSON.stringify(discovered.tools)).not.toContain("\"properties\":{}");
+      expect(mcp.normalizeInputSchema({ type: "array" }).ok).toBe(false);
     });
 
     it("snapshots tool records instead of retaining discovery objects", () => {
