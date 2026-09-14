@@ -185,6 +185,10 @@ export function copyText(text: string, okMessage: string): void {
     .catch(() => toast("could not copy the path", "error"));
 }
 
+/** Rendered cap for file-list modals (worldline Compare). The title keeps the
+ *  true total; the overflow note keeps the count honest without the DOM cost. */
+export const MAX_FILE_LIST_MODAL_ROWS = 1000;
+
 /** A small modal with a clickable file list. */
 export function showFileListModal(
   title: string,
@@ -204,7 +208,7 @@ export function showFileListModal(
   body.className = "modal-body";
   const list = document.createElement("ul");
   list.className = "worldline-list";
-  for (const [relPath, status] of items) {
+  for (const [relPath, status] of items.slice(0, MAX_FILE_LIST_MODAL_ROWS)) {
     const li = document.createElement("li");
     const badge = document.createElement("span");
     badge.className = `status-badge ${status}`;
@@ -218,6 +222,12 @@ export function showFileListModal(
       onPick(relPath);
     });
     list.appendChild(li);
+  }
+  if (items.length > MAX_FILE_LIST_MODAL_ROWS) {
+    const more = document.createElement("li");
+    more.className = "worldline-more";
+    more.textContent = `…and ${items.length - MAX_FILE_LIST_MODAL_ROWS} more (showing first ${MAX_FILE_LIST_MODAL_ROWS})`;
+    list.appendChild(more);
   }
   body.appendChild(list);
   const footer = document.createElement("div");

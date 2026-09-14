@@ -13,6 +13,10 @@ import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, 
 /** Orientation caption on every A/B pair header: A kept the run, B is the retry. */
 export const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry";
 
+/** Rendered cap for the inline changed-files list. The title and stats keep the
+ *  true total; the overflow note points at Compare for the fuller listing. */
+export const MAX_INLINE_CHANGED_ROWS = 500;
+
 interface ViewHandlers {
   /** Open a base-to-candidate diff in Change Review. */
   onCompareBase(comparisonId: string, label: "A" | "B", relPath: string, absPath: string): void;
@@ -644,7 +648,7 @@ export class WorldlinesView {
     }
     card.detailsBody.querySelector(".cand-changed-title")!.textContent = `Changed vs base (${d.changedFiles.length})`;
     card.changedList.replaceChildren();
-    for (const f of d.changedFiles) {
+    for (const f of d.changedFiles.slice(0, MAX_INLINE_CHANGED_ROWS)) {
       const li = document.createElement("li");
       li.className = "cand-changed-item";
       const badge = document.createElement("span");
@@ -661,6 +665,13 @@ export class WorldlinesView {
         this.handlers.onCompareBase(card.summary.comparisonId, card.summary.label, f.relPath, `${root}/${f.relPath}`);
       });
       card.changedList.appendChild(li);
+    }
+    if (d.changedFiles.length > MAX_INLINE_CHANGED_ROWS) {
+      const more = document.createElement("li");
+      more.className = "cand-more";
+      more.textContent =
+        `…and ${d.changedFiles.length - MAX_INLINE_CHANGED_ROWS} more — open Compare to browse further`;
+      card.changedList.appendChild(more);
     }
   }
 

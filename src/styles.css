@@ -2028,6 +2028,19 @@ body {
   white-space: nowrap;
 }
 
+/* Overflow note for capped file lists (details + Compare modal). */
+.cand-changed .cand-more,
+.worldline-list .worldline-more {
+  color: var(--text-dim);
+  font-style: italic;
+  cursor: default;
+}
+
+.cand-changed .cand-more:hover,
+.worldline-list .worldline-more:hover {
+  background: none;
+}
+
 /* ----------------------------------------------------------------- editor */
 
 .project-editor {
