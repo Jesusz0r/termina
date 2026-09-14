@@ -5970,8 +5970,16 @@ class TerminaApp {
     if (this.timelineContentFills.has(ev)) return;
     let resolve!: () => void;
     const promise = new Promise<void>((r) => { resolve = r; });
-    const timer = setTimeout(() => this.resolveTimelineContentFill(ev), TIMELINE_CONTENT_WAIT_MS);
+    const timer = setTimeout(() => this.expireTimelineContentFill(ev), TIMELINE_CONTENT_WAIT_MS);
     this.timelineContentFills.set(ev, { promise, resolve, timer });
+  }
+
+  /** Unblock waiters without dropping the fill so a late tool_end can still read. */
+  private expireTimelineContentFill(ev: object): void {
+    const pending = this.timelineContentFills.get(ev);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pending.resolve();
   }
 
   private resolveTimelineContentFill(ev: object): void {

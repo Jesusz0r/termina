@@ -104,7 +104,9 @@ describe("timeline content ready path (refs #253)", () => {
     expect(extractMethod(main, "private async finishTimelineWriteSnapshot(")).toContain("this.readSnapshotFile(path)");
     expect(extractMethod(main, "private async readSnapshotFile(")).toContain("st.size > MAX_SNAPSHOT_SIZE");
     expect(main).toContain("const TIMELINE_CONTENT_WAIT_MS = 2500");
-    expect(extractMethod(main, "private beginTimelineContentFill(")).toContain("setTimeout(() => this.resolveTimelineContentFill(ev), TIMELINE_CONTENT_WAIT_MS)");
+    expect(extractMethod(main, "private beginTimelineContentFill(")).toContain("setTimeout(() => this.expireTimelineContentFill(ev), TIMELINE_CONTENT_WAIT_MS)");
+    expect(extractMethod(main, "private expireTimelineContentFill(")).not.toContain("this.timelineContentFills.delete(ev)");
+    expect(extractMethod(main, "private resolveTimelineContentFill(")).toContain("this.timelineContentFills.delete(ev)");
     expect(extractMethod(main, "private scheduleMomentCapture(")).toContain("finishUnmatchedTimelineWriteSnapshots");
   });
 
@@ -220,6 +222,53 @@ describe("timeline content ready path (refs #253)", () => {
     expect(ev.content).toBeUndefined();
     expect(assigned).toEqual([]);
     expect(reads).toEqual(["/proj/huge.ts"]);
+  });
+
+  it("keeps the fill after the 2.5s expire so a late finish can still read", async () => {
+    vi.useFakeTimers();
+    try {
+      const begin = loadMethod("beginTimelineContentFill", "private beginTimelineContentFill(", ["TIMELINE_CONTENT_WAIT_MS"], [2500]) as (ev: object) => void;
+      const expire = loadMethod("expireTimelineContentFill", "private expireTimelineContentFill(", [], []) as (ev: object) => void;
+      const resolve = loadMethod("resolveTimelineContentFill", "private resolveTimelineContentFill(", [], []) as (ev: object) => void;
+      const finish = loadMethod("finishTimelineWriteSnapshot", "private async finishTimelineWriteSnapshot(", [], []) as (
+        inst: object,
+        ev: { path: string; content?: string },
+      ) => Promise<void>;
+      const ev = { path: "/proj/late.ts", content: undefined as string | undefined };
+      const reads: string[] = [];
+      const app = {
+        timelineContentFills: new WeakMap<object, { promise: Promise<void>; resolve: () => void; timer: ReturnType<typeof setTimeout> }>(),
+        beginTimelineContentFill: begin,
+        expireTimelineContentFill: expire,
+        resolveTimelineContentFill: resolve,
+        finishTimelineWriteSnapshot: finish,
+        workspaceOfTerminal: () => ({ watcher: { lastContents: new Map() } }),
+        contentSizeOk: (content: string | undefined) => content !== undefined,
+        readSnapshotFile: async (path: string) => {
+          reads.push(path);
+          return "late-write";
+        },
+        setRunSnapshot() {},
+      };
+      begin.call(app, ev);
+      expect(app.timelineContentFills.has(ev)).toBe(true);
+      const waiter = app.timelineContentFills.get(ev)!.promise;
+      let unblocked = false;
+      void waiter.then(() => { unblocked = true; });
+      await vi.advanceTimersByTimeAsync(2499);
+      expect(unblocked).toBe(false);
+      expect(app.timelineContentFills.has(ev)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      await waiter;
+      expect(unblocked).toBe(true);
+      expect(app.timelineContentFills.has(ev)).toBe(true);
+      await finish.call(app, {}, ev);
+      expect(reads).toEqual(["/proj/late.ts"]);
+      expect(ev.content).toBe("late-write");
+      expect(app.timelineContentFills.has(ev)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("skips reading a file that is already over the snapshot cap", async () => {
