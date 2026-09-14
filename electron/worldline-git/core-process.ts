@@ -84,6 +84,9 @@ function appendStderrTail(tail: Buffer, chunk: Buffer): Buffer {
 
 export class CoreClient {
   private process: CoreProcess | null = null;
+  /** A child selected for termination that has not exited yet. No request is
+   * dispatched to it, and no replacement writer starts until it has stopped. */
+  private retiring: CoreProcess | null = null;
   private pending = new Map<string, PendingRequest>();
   private queue: QueuedRequest[] = [];
   private queuedBytes = 0;
@@ -126,6 +129,19 @@ export class CoreClient {
       }
     });
     const failAll = (err: Error) => {
+      if (this.retiring === process) {
+        // The timed-out child has stopped: unblock the queue. Its pending
+        // request was already rejected by the timeout; defensively settle any
+        // straggler tied to it so nothing hangs behind the retirement.
+        this.retiring = null;
+        for (const [requestId, pending] of this.pending) {
+          if (pending.process !== process) continue;
+          this.pending.delete(requestId);
+          pending.reject(this.withProcessStderr(err, process));
+        }
+        this.pump();
+        return;
+      }
       if (this.process !== process) return;
       const diagnostic = this.withProcessStderr(err, process);
       for (const [requestId, pending] of this.pending) {
@@ -221,7 +237,10 @@ export class CoreClient {
   }
 
   private pump(): void {
-    while (!this.disposed && this.inFlight < CORE_REQUEST_IN_FLIGHT_HIGH_WATER && this.queue.length > 0) {
+    // While a child is retiring, hold the queue: the next request must not
+    // reach the dying child, and no replacement writer may start until the
+    // old one has stopped. The exit handler resumes the pump.
+    while (!this.disposed && this.retiring === null && this.inFlight < CORE_REQUEST_IN_FLIGHT_HIGH_WATER && this.queue.length > 0) {
       const request = this.queue.shift()!;
       this.queuedBytes -= request.bytes;
       this.inFlight++;
@@ -239,12 +258,22 @@ export class CoreClient {
     return new Promise((resolve, reject) => {
       const process = this.ensure();
       const { requestId } = request;
-      // A hung core must not stall the queue forever. Kill it on timeout:
-      // the exit handler rejects pending requests and the next op respawns.
+      // A hung core must not stall the queue forever. Kill it on timeout,
+      // retire the child, and reject: the exit handler clears the retirement
+      // and the next op respawns on a fresh child.
       const timer = setTimeout(() => {
         if (!this.pending.delete(requestId)) return;
         process.buffer = "";
-        process.child.kill();
+        try {
+          process.child.kill();
+        } catch {
+          // Signal delivery can fail when the child is already exiting; the
+          // exit event still clears the retirement below.
+        }
+        if (this.process === process) {
+          this.process = null;
+          this.retiring = process;
+        }
         reject(this.withProcessStderr(new Error("snapshot core request timed out"), process));
       }, REQUEST_TIMEOUT_MS);
       this.pending.set(requestId, {
@@ -315,9 +344,19 @@ export class CoreClient {
     for (const request of queued) request.reject(new Error("snapshot core is disposed"));
     for (const pending of this.pending.values()) pending.reject(new Error("snapshot core is disposed"));
     this.pending.clear();
-    const process = this.process;
+    // The live and retiring children are never the same object: the timeout
+    // moves the live child to retiring instead of copying it.
+    const targets = [this.process, this.retiring];
     this.process = null;
-    process?.child.kill();
+    this.retiring = null;
+    for (const target of targets) {
+      if (!target) continue;
+      try {
+        target.child.kill();
+      } catch {
+        /* Already exiting; its exit event is now stale and ignored. */
+      }
+    }
   }
 }
 

@@ -13,6 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { SnapshotStore, boundPromotionOpenDirectory, gitHead, gitObjectFormat, gitTopLevel, gitCommonDir, type SourceState } from "../../electron/worldline-git.js";
+import { trackSpikeChild, trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 // This spike drives core pause hooks; they stay gated on TERMINA_CORE_TEST so
 // production requests can never pause an op or write hook markers.
@@ -25,13 +26,13 @@ export default async function run(log: (msg: string) => void) {
     log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + detail : ""}`);
   };
 
-  const work = mkdtempSync(join(tmpdir(), "wline-merge-"));
+  const work = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "wline-merge-")));
   const git = (args: string[], cwd: string) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
   const coreBin = process.env.TERMINA_CORE_BIN ?? join(process.cwd(), "core", "target", "release", "termina-core");
   const requestCore = (payload: Record<string, unknown>) =>
     new Promise<Record<string, unknown>>((resolve, reject) => {
-      const child = spawn(coreBin, [], { stdio: ["pipe", "pipe", "pipe"] });
+      const child = trackSpikeChild(spawn(coreBin, [], { stdio: ["pipe", "pipe", "pipe"] }));
       let stdout = "";
       let stderr = "";
       child.stdout.setEncoding("utf8");

@@ -84,9 +84,11 @@ function setup(opts: {
   isWorldlineTerminal?: (terminalId: string) => boolean;
   workspaceRootFor?: (terminalId: string) => { root: string; cwd: string } | null;
   autoApproveAllowedFor?: (terminalId: string) => boolean;
+  sessionRootFor?: (cwd: string) => Promise<string>;
+  eventsDirFor?: (terminalId: string) => string | null;
 } = {}) {
   const dir = tmp();
-  const { dispatch, launchFailures = 0, isWorldlineTerminal, workspaceRootFor, autoApproveAllowedFor, ...hostOpts } = opts;
+  const { dispatch, launchFailures = 0, isWorldlineTerminal, workspaceRootFor, autoApproveAllowedFor, sessionRootFor, eventsDirFor, ...hostOpts } = opts;
   const notes: Array<{ terminalId: string; note: string }> = [];
   const watched: string[] = [];
   const unwatched: string[] = [];
@@ -102,10 +104,10 @@ function setup(opts: {
   };
   const host = new SubagentHost(
     {
-      eventsDirFor: () => dir,
+      eventsDirFor: eventsDirFor ?? (() => dir),
       baseEnv: () => ({}),
       coreBinary: () => "/fake/agent-core.mjs",
-      sessionRootFor: async (cwd) => join(dir, "sessions", Buffer.from(cwd).toString("hex").slice(0, 16)),
+      sessionRootFor: sessionRootFor ?? (async (cwd) => join(dir, "sessions", Buffer.from(cwd).toString("hex").slice(0, 16))),
       appendMailboxNote: (terminalId, note) => { notes.push({ terminalId, note }); },
       watchStream: (id) => { watched.push(id); },
       releaseStream: (id) => { unwatched.push(id); },
@@ -675,5 +677,145 @@ describe("SubagentHost", () => {
       s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json"),
     ]);
     expect(s.procs.length).toBe(1);
+  });
+
+  it("admits only one of two concurrent identical cross-parent claims (refs #148)", async () => {
+    const s = setup();
+    const proj = tmp();
+    mkdirSync(join(proj, "src"), { recursive: true });
+    writeFileSync(join(proj, "src", "a.ts"), "x");
+    writeFileSync(join(s.dir, "subagent-term-7-bg-1.task.json"), JSON.stringify(validTask({ cwd: proj, paths: ["src/a.ts"] })));
+    writeFileSync(
+      join(s.dir, "subagent-term-9-bg-1.task.json"),
+      JSON.stringify(validTask({ runId: "bg-1", parentTerminalId: "term-9", cwd: proj, paths: ["src/a.ts"] })),
+    );
+    await Promise.all([
+      s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json"),
+      s.host.handleSpawn("term-9", "bg-1", "subagent-term-9-bg-1.task.json"),
+    ]);
+    expect(s.procs.length).toBe(1);
+    expect(s.host.activeCount()).toBe(1);
+    const outcomes = ["subagent-term-7-bg-1.result.json", "subagent-term-9-bg-1.result.json"].map((name) => {
+      const file = join(s.dir, name);
+      return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as { outcome: string }).outcome : "running";
+    });
+    expect(outcomes.filter((o) => o === "failed")).toHaveLength(1);
+    expect(outcomes.filter((o) => o === "running")).toHaveLength(1);
+    expect(s.notes.some((n) => /paths overlap running subagent/.test(n.note))).toBe(true);
+  });
+
+  it("admits only one of two concurrent prefix claims (refs #148)", async () => {
+    const s = setup();
+    const proj = tmp();
+    mkdirSync(join(proj, "src"), { recursive: true });
+    writeFileSync(join(s.dir, "subagent-term-7-bg-1.task.json"), JSON.stringify(validTask({ cwd: proj, paths: ["src"] })));
+    writeFileSync(join(s.dir, "subagent-term-7-bg-2.task.json"), JSON.stringify(validTask({ runId: "bg-2", cwd: proj, paths: ["src/a.ts"] })));
+    await Promise.all([
+      s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json"),
+      s.host.handleSpawn("term-7", "bg-2", "subagent-term-7-bg-2.task.json"),
+    ]);
+    expect(s.procs.length).toBe(1);
+    expect(s.host.activeCount()).toBe(1);
+  });
+
+  it("rejects nested-cwd aliases of the same file (refs #148)", async () => {
+    const s = setup();
+    const proj = tmp();
+    mkdirSync(join(proj, "pkg"), { recursive: true });
+    writeFileSync(join(proj, "pkg", "shared.ts"), "x");
+    s.writeTask(validTask({ cwd: proj, paths: ["pkg/shared.ts"] }));
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.procs.length).toBe(1);
+    // Same absolute file through a subdirectory cwd: rejected even sequentially.
+    const other = "subagent-term-9-bg-1.task.json";
+    writeFileSync(
+      join(s.dir, other),
+      JSON.stringify(validTask({ runId: "bg-1", parentTerminalId: "term-9", cwd: join(proj, "pkg"), paths: ["shared.ts"] })),
+    );
+    await s.host.handleSpawn("term-9", "bg-1", other);
+    expect(s.procs.length).toBe(1);
+    const body = JSON.parse(readFileSync(join(s.dir, "subagent-term-9-bg-1.result.json"), "utf8"));
+    expect(body.outcome).toBe("failed");
+    // Non-overlapping control: a disjoint file under the same tree proceeds.
+    const free = "subagent-term-9-bg-2.task.json";
+    writeFileSync(
+      join(s.dir, free),
+      JSON.stringify(validTask({ runId: "bg-2", parentTerminalId: "term-9", cwd: join(proj, "pkg"), paths: ["other.ts"] })),
+    );
+    await s.host.handleSpawn("term-9", "bg-2", free);
+    expect(s.procs.length).toBe(2);
+  });
+
+  it("never launches a child killed during session setup (refs #149)", async () => {
+    let releaseSetup!: (root: string) => void;
+    const setupGate = new Promise<string>((resolve) => {
+      releaseSetup = resolve;
+    });
+    const s = setup({ sessionRootFor: () => setupGate });
+    s.writeTask();
+    const spawned = s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    await until(() => s.host.activeCount() === 1);
+    // Kill while the run is parked awaiting session-root resolution.
+    expect(s.host.kill("term-7", "bg-1", "terminal cleared")).toBe(true);
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("killed");
+    expect(s.host.activeCount()).toBe(0);
+    // Release setup: the late resumption must not launch, stream, or re-report.
+    releaseSetup(join(s.dir, "sessions", "late"));
+    await spawned;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(s.procs.length).toBe(0);
+    expect(s.launches.length).toBe(0);
+    expect(s.watched).toHaveLength(0);
+    expect(s.notes).toHaveLength(1);
+    expect(s.host.kill("term-7", "bg-1", "again")).toBe(false);
+  });
+
+  it("fails closed when session setup rejects or the parent is gone (refs #149)", async () => {
+    const failing = setup({ sessionRootFor: async () => { throw new Error("sessions unavailable"); } });
+    failing.writeTask();
+    await failing.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(failing.procs.length).toBe(0);
+    expect(failing.readResult().outcome).toBe("failed");
+
+    let alive = true;
+    let gatedDir = "";
+    let releaseSetup2!: (root: string) => void;
+    const setupGate2 = new Promise<string>((resolve) => {
+      releaseSetup2 = resolve;
+    });
+    const gated = setup({
+      eventsDirFor: () => (alive ? gatedDir : null),
+      sessionRootFor: () => setupGate2,
+    });
+    gatedDir = gated.dir;
+    gated.writeTask();
+    const spawned = gated.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    await until(() => gated.host.activeCount() === 1);
+    // The parent vanishes while setup is parked: the late resumption must
+    // not launch, and the run must stay manageable for the close path.
+    alive = false;
+    releaseSetup2(join(gatedDir, "sessions", "late"));
+    await spawned;
+    expect(gated.procs.length).toBe(0);
+    alive = true;
+    expect(gated.host.kill("term-7", "bg-1", "terminal closed")).toBe(true);
+    await until(() => existsSync(join(gatedDir, "subagent-term-7-bg-1.result.json")));
+  });
+
+  it("signals live children on shutdown without PTY exit delivery (refs #211)", async () => {
+    const s = setup();
+    s.writeTask(validTask({ paths: [] }));
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.host.activeCount()).toBe(1);
+    // dispose() calls killOwner per live terminal id before killing PTYs:
+    // the headless child is signalled directly, not via any exit cascade.
+    expect(s.host.killOwner("term-7", "app shutdown")).toBe(1);
+    expect(s.procs[0]!.kills).toEqual(["group:SIGTERM"]);
+    s.procs[0]!.exit(null, "SIGTERM");
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("killed");
+    expect(s.host.activeCount()).toBe(0);
+    expect(s.notes).toHaveLength(1);
   });
 });

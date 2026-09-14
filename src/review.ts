@@ -120,11 +120,6 @@ export class ReviewView {
   /** Show the diff for a file the agent changed in the given terminal. */
   async show(terminalId: string, path: string, relPath: string, owner: ProjectWorkspaceRef): Promise<void> {
     const seq = ++this.loadSeq;
-    this.terminalId = terminalId;
-    this.path = path;
-    this.owner = owner;
-    this.nameEl.textContent = relPath;
-
     const hint = document.getElementById("review-hint")!;
     hint.textContent = "loading…";
     let res;
@@ -140,13 +135,21 @@ export class ReviewView {
       return;
     }
     if (seq !== this.loadSeq) return;
-    this.baseline = res.baseline;
-    const deleted = res.status === "deleted" && !current.ok && typeof this.baseline === "string";
+    const deleted = res.status === "deleted" && !current.ok && typeof res.baseline === "string";
     if (!current.ok && !deleted) {
       hint.textContent = current.error;
       toast(`could not load ${relPath}: ${current.error}`, "error");
       return;
     }
+    // Identity stages only after both loads succeed: a failed load for B must
+    // leave A's name, path, and diff sides untouched — Revert acts on the
+    // staged path, and matchesPath routes watcher pushes by it. The loadSeq
+    // guard above already covers interleaved shows.
+    this.terminalId = terminalId;
+    this.path = path;
+    this.owner = owner;
+    this.nameEl.textContent = relPath;
+    this.baseline = res.baseline;
     const currentText = current.ok ? current.content : "";
 
     this.setDiff(this.baseline ?? "", currentText);
@@ -181,10 +184,20 @@ export class ReviewView {
     this.path = absPath;
     this.owner = null;
     this.nameEl.textContent = `${relPath}  ·  ${label}`;
-    const [base, cand] = await Promise.all([
-      window.termina.getWorldlineBaseFile(comparisonId, relPath),
-      window.termina.getWorldlineFile(comparisonId, label, relPath),
-    ]);
+    let base: { ok: boolean; content?: string; error?: string };
+    let cand: { ok: boolean; content?: string; error?: string };
+    try {
+      [base, cand] = await Promise.all([
+        window.termina.getWorldlineBaseFile(comparisonId, relPath),
+        window.termina.getWorldlineFile(comparisonId, label, relPath),
+      ]);
+    } catch (err) {
+      if (seq !== this.loadSeq) return;
+      const hint = document.getElementById("review-hint")!;
+      hint.textContent = `shared base → candidate ${label} — ${(err as Error).message}`;
+      toast(`could not load candidate diff: ${(err as Error).message}`, "error");
+      return;
+    }
     if (seq !== this.loadSeq) return;
     this.setDiff(base.ok && base.content !== undefined ? base.content : "", cand.ok && cand.content !== undefined ? cand.content : "");
     const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
@@ -206,10 +219,20 @@ export class ReviewView {
     this.path = aRoot ? `${aRoot}/${relPath}` : null;
     this.owner = null;
     this.nameEl.textContent = `${relPath}  ·  A ⇄ B`;
-    const [a, b] = await Promise.all([
-      window.termina.getWorldlineFile(comparisonId, "A", relPath),
-      window.termina.getWorldlineFile(comparisonId, "B", relPath),
-    ]);
+    let a: { ok: boolean; content?: string; error?: string };
+    let b: { ok: boolean; content?: string; error?: string };
+    try {
+      [a, b] = await Promise.all([
+        window.termina.getWorldlineFile(comparisonId, "A", relPath),
+        window.termina.getWorldlineFile(comparisonId, "B", relPath),
+      ]);
+    } catch (err) {
+      if (seq !== this.loadSeq) return;
+      const hint = document.getElementById("review-hint")!;
+      hint.textContent = `A ⇄ B — ${(err as Error).message}`;
+      toast(`could not load A ⇄ B diff: ${(err as Error).message}`, "error");
+      return;
+    }
     if (seq !== this.loadSeq) return;
     this.setDiff(a.ok && a.content !== undefined ? a.content : "", b.ok && b.content !== undefined ? b.content : "");
     const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
@@ -319,7 +342,13 @@ export class ReviewView {
 
   async revert(): Promise<void> {
     if (!this.terminalId || !this.path) return;
-    const res = await window.termina.reviewRevert(this.terminalId, this.path);
+    let res;
+    try {
+      res = await window.termina.reviewRevert(this.terminalId, this.path);
+    } catch (err) {
+      toast(`revert failed: ${(err as Error).message}`, "error");
+      return;
+    }
     if (!res.ok) {
       toast(res.error ?? "revert failed", "error");
       return;

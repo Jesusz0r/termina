@@ -13,6 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { platformHasRecursiveWatcher, platformHasSandboxExec, platformHasCopyOnWrite, freeDiskBytes } from "../../electron/worldline-git.js";
+import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 export default async function run(log: (msg: string) => void) {
   const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -21,7 +22,7 @@ export default async function run(log: (msg: string) => void) {
     log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + detail : ""}`);
   };
 
-  const work = mkdtempSync(join(tmpdir(), "wline-platform-"));
+  const work = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "wline-platform-")));
   const candidate = join(work, "candidate");
   const forbidden = join(work, "forbidden");
   mkdirSync(candidate, { recursive: true });

@@ -154,10 +154,11 @@ A core tab can call MCP tools listed in the user-owned
 `~/.termina/agent/mcp.json`. Project files cannot start MCP processes.
 
 Use the Claude/Cursor `mcpServers` shape with `command`, `args`, and
-`env`. HTTP and SSE servers are ignored. The kernel starts those
-processes when the tab starts and keeps the tool list frozen until
-`/clear` or a new tab. MCP is a program you installed. It is not limited
-to the project jail.
+`env` for local servers, or a `url` with `type: "http"` / `"sse"`
+(https only) for remote Streamable HTTP and SSE servers. The kernel
+starts those processes when the tab starts and keeps the tool list
+frozen until `/clear` or a new tab. MCP is a program you installed. It
+is not limited to the project jail.
 
 ---
 
@@ -314,8 +315,9 @@ Worldlines answer one question: *what if the agent had done it differently?*
 A completed run can be forked into isolated candidates — full copies of the
 project with their own agent sessions — that run side by side with the original.
 
-Requirements: the project must be inside a Git repository, and your platform
-must support the candidate sandbox (macOS and Linux x64 do). Otherwise the
+Requirements: the project must be inside a Git repository, on macOS with
+the candidate sandbox helpers available (`sandbox-exec`, `taskpolicy`).
+Candidates are not supported on other platforms yet. Otherwise the
 feature disables itself with a precise reason.
 
 ### Fork Run
@@ -328,9 +330,11 @@ the timeline. It forks the run into two candidates:
   original prompt loaded. Text prompts arrive editable, so you can change the
   instructions and get a different implementation of the same task.
 
-Both candidates open as real agent terminals (badged `A` and `B`). They are fully
-isolated: their own source trees, sessions, homes, and process groups, with
-network access denied except the model provider.
+Both candidates open as real agent terminals (badged `A` and `B`). They are
+filesystem-isolated: their own source trees, sessions, homes, and process
+groups, with writes denied outside their own tree. Live candidates keep
+network access (the model provider must stay reachable); only candidate
+Verify and evidence workers run fully offline.
 
 The Fork Run button is disabled with the exact reason when a run is not
 replayable — for example when you steered mid-run with extra messages, another
@@ -491,9 +495,12 @@ the previous one searchable.
   renders state the main process pushes.
 - **Clean environments.** Host session variables are stripped before
   the agent starts, so a host session can never attach to a terminal.
-- **Candidate sandboxes.** Worldline candidates, Verify, and evidence runs
-  execute under OS-level profiles that deny writes outside their own tree and
-  deny network except the model provider. Evidence runs are fully offline.
+- **Primary terminals are unsandboxed.** Your main agent and shell tabs run
+  with your normal user access, including network.
+- **Candidate sandboxes (macOS only).** Worldline candidates run under
+  OS-level profiles that deny writes outside their own tree. Live
+  candidates keep network access; candidate Verify and evidence runs
+  execute fully offline.
 - **External effects are not isolated.** Filesystem isolation does not cover
   remote services: a command inside a sandbox can still affect an allowed
   cloud account or deployed service.
@@ -507,8 +514,9 @@ The agent has no provider configured yet. Run `/login` in the terminal, then pic
 model with `/models`.
 
 **Worldlines is unavailable.**
-The opened folder must be inside a Git repository, and the platform must
-support the sandbox. Submodules, sparse checkouts, content-transforming Git
+The opened folder must be inside a Git repository, on macOS with the
+sandbox helpers available — candidates are not supported on other
+platforms yet. Submodules, sparse checkouts, content-transforming Git
 filters, unresolved merge states, or unsupported file types also disable it —
 the UI names the specific reason.
 

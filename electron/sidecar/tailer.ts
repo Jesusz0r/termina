@@ -5,9 +5,13 @@
  * watch/poll lifecycle. Split from electron/sidecar.ts (issue #38).
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync, type FSWatcher, watch } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, type FSWatcher, watch } from "node:fs";
 import { link as linkFile, open as openFile, readdir as readDirectory, rename as renameFile, stat as statFile, unlink as unlinkFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { isValidTerminalId } from "../../agent-core/main/sidecar.js";
+import { syncDirectory, syncDirectoryAsync } from "../../shared/fsync.js";
+import { isRecord } from "../../shared/guards.js";
 import { MAX_SIDECAR_BYTES, MAX_SIDECAR_RECORD_BYTES, SIDECAR_BACKPRESSURE_FILE_PREFIX, SIDECAR_CURSOR_VERSION, SIDECAR_DRAIN_FILE_TOKEN, SIDECAR_FINAL_GUARD_FILE_TOKEN, SIDECAR_MAX_SEQUENCE_GAP_POLLS, SIDECAR_PROOF_MAX_BYTES, SIDECAR_QUARANTINE_FILE_PREFIX, SIDECAR_RETAINED_FILE_TOKEN, SIDECAR_SEALED_FILE_SUFFIX, SIDECAR_SEALED_PROOF_SUFFIX, SIDECAR_TAIL_READ_BYTES, SIDECAR_VERIFY_MAX_READS, SIDECAR_VERIFY_READ_CHUNK_BYTES } from "./events.js";
 import type { SidecarEvent, SidecarMeta } from "./events.js";
 import { parseSidecarRecord, sidecarEnvelope, sidecarEventBody } from "./parse.js";
@@ -144,6 +148,45 @@ async function durableAtomicWrite(path: string, content: string): Promise<void> 
 }
 
 
+/**
+ * Atomic cursor publish without durability syncs. Cursors live in the OS temp
+ * dir and every delivery persists before the stream advances (a redelivery
+ * window of one event, which non-idempotent consumers such as run-state
+ * resets depend on), so rename atomicity — not sync durability — is the
+ * load-bearing property here: an app crash sees the old or the new complete
+ * cursor via the surviving page cache, while an OS crash may additionally
+ * replay the unflushed dirty window (duplication-bounded, never corrupting:
+ * consumers degrade to duplicate dots/runs; wiped tmp recovers clean).
+ * Skipping the two fsyncs lifts drain throughput from ~91
+ * events/s toward the syscall floor without widening the app-crash
+ * redelivery window.
+ * Markers and anchors stay fully durable: they are written rarely.
+ */
+async function atomicWriteFile(path: string, content: string): Promise<void> {
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let handle: Awaited<ReturnType<typeof openFile>> | undefined;
+  try {
+    handle = await openFile(temp, "wx", 0o600);
+    await handle.writeFile(content, "utf8");
+    await handle.close();
+    handle = undefined;
+    await renameFile(temp, path);
+  } catch (error) {
+    try {
+      await handle?.close();
+    } catch {
+      /* best effort cleanup */
+    }
+    try {
+      await unlinkFile(temp);
+    } catch {
+      /* best effort cleanup */
+    }
+    throw error;
+  }
+}
+
+
 async function durableUnlink(path: string): Promise<void> {
   try {
     await unlinkFile(path);
@@ -160,13 +203,10 @@ async function durableUnlink(path: string): Promise<void> {
 }
 
 
+/** Async parent-dir sync via the canonical fsync owner (shared/fsync.ts has
+ * no async parent-dir helper, so adapt its async directory sync here). */
 async function syncParentDirectory(path: string): Promise<void> {
-  const directory = await openFile(dirname(path), "r");
-  try {
-    await directory.sync();
-  } finally {
-    await directory.close();
-  }
+  await syncDirectoryAsync(dirname(path));
 }
 
 
@@ -213,6 +253,63 @@ async function readBoundedText(path: string, maxBytes: number): Promise<string> 
 }
 
 
+/** True when a cursor persist would rewrite identical bytes. Selection plus
+ * offsets plus stream ownership all match; skipping the write keeps idle
+ * terminals quiet instead of fsyncing every poll. */
+function sameDurableSidecarCursor(left: DurableSidecarCursor, right: DurableSidecarCursor): boolean {
+  return left.offset === right.offset
+    && (left.bridgeId ?? undefined) === (right.bridgeId ?? undefined)
+    && (left.sequence ?? undefined) === (right.sequence ?? undefined)
+    && (left.sealedSegment ?? undefined) === (right.sealedSegment ?? undefined)
+    && (left.sealedOffset ?? undefined) === (right.sealedOffset ?? undefined)
+    && (left.sealedIdentity ?? undefined) === (right.sealedIdentity ?? undefined);
+}
+
+
+let cachedBootId: string | null | undefined;
+/** Best-effort stable boot identity for launch-scoping quarantine markers.
+ * Linux reads the kernel boot id file; macOS reads kern.boottime; anything
+ * else (or any failure) yields null and markers fall back to pid-only
+ * binding. Cached: a process never crosses a reboot. */
+function currentBootId(): string | null {
+  if (cachedBootId !== undefined) return cachedBootId;
+  cachedBootId = null;
+  try {
+    if (process.platform === "linux") {
+      const raw = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim().toLowerCase();
+      if (/^[0-9a-f-]{8,128}$/.test(raw)) cachedBootId = raw;
+    } else if (process.platform === "darwin") {
+      for (const sysctl of ["/usr/sbin/sysctl", "sysctl"]) {
+        try {
+          const raw = execFileSync(sysctl, ["-n", "kern.boottime"], { encoding: "utf8", timeout: 5000 }).trim();
+          if (raw.length > 0 && raw.length <= 256) {
+            cachedBootId = raw;
+            break;
+          }
+        } catch {
+          /* Try the next sysctl candidate. */
+        }
+      }
+    }
+  } catch {
+    cachedBootId = null;
+  }
+  return cachedBootId;
+}
+
+
+/** True when pid names a live process. EPERM means it exists under another user. */
+function isProducerAlive(pid: number): boolean {
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+
 export class SidecarTailer {
   /** Pending scan cursor; durableCursors is advanced only after delivery ack. */
   private offsets = new Map<string, number>();
@@ -228,7 +325,9 @@ export class SidecarTailer {
    * prove that an escaped descriptor will not append after verification. */
   private retainedSegments = new Map<string, string>();
   /** A second link keeps a retired inode observable while an old descriptor
-   *  finishes an append during the unlink syscall. */
+   * finishes an append during the unlink syscall. Set only while a reclaim
+   * chain is mid-flight; cleared once the retained anchor settles (a settled
+   * drain link IS the anchor path, so join() resolution is identical). */
   private segmentDrainPaths = new Map<string, string>();
   private durableCursors = new Map<string, DurableSidecarCursor>();
   private streams = new Map<string, StreamState>();
@@ -239,15 +338,21 @@ export class SidecarTailer {
   private partialRecords = new Map<string, Buffer>();
   private segmentPartialRecords = new Map<string, Buffer>();
   private oversizedRecords = new Map<string, OversizedRecord>();
+  /** Diagnostic-only shared record for skipped over-cap active lines. Unlike
+   * source-state oversized entries, it never stops a pass; cleared per
+   * lifecycle so a later flood warns again. */
+  private oversizedSkipDiagnostics = new Map<string, OversizedRecord>();
   private segmentOversizedRecords = new Map<string, OversizedRecord>();
   private segmentEmptyPolls = new Map<string, number>();
   /** Bounded retries while an older identity may still fill a sequence gap. */
   private sequenceGapPolls = new Map<string, number>();
   /** A source deferred during this tail pass; other identities still drain. */
   private sequenceGapDeferred = new Set<string>();
-  /** A segment was reclaimed before its cursor-clear publish completed. */
-  private pendingSegmentCursorClears = new Map<string, number>();
   private cursorWrites = new Map<string, Promise<boolean>>();
+  /** Ids whose in-memory durable cursor is proven present on disk. A fresh
+   * watch seeds memory without writing, so the no-op persist skip below must
+   * not treat unmaterialized memory as durable across a restart. */
+  private persistedCursors = new Set<string>();
   private cursorInitializations = new Map<string, Promise<boolean>>();
   private markerStates = new Map<string, MarkerState>();
   private markerCleanups = new Map<string, Promise<void>>();
@@ -264,6 +369,9 @@ export class SidecarTailer {
   private dirty = new Set<string>();
   /** Watcher-driven vs poll-driven tail dispatches, for wakeup attribution. */
   private wakeCounts = { poll: 0, watch: 0 };
+  /** Lifecycles owed one bootstrap tail so anchor binding and structural
+   * quarantine checks run at least once even when every probe is quiet. */
+  private untailedSinceWatch = new Set<string>();
   /** A rejected delivery pauses reads so the durable file remains the queue. */
   private paused = new Set<string>();
   /** Accepted records whose handler acknowledgement has not settled. */
@@ -309,9 +417,9 @@ export class SidecarTailer {
   /** Internal segment work that only advances inside a pass. Drain links are
    * transient by design; a set link means the retirement chain is mid-flight
    * (or hit a transient failure it must retry). Empty-poll countdowns gate
-   * sealed retirement the same way. Stable retained anchors are excluded on
-   * purpose: their names are sweep-stable and their content is contractually
-   * immutable, so bound anchors stay quiet until the active file moves. */
+   * sealed retirement the same way. Settled retained anchors stay out of the
+   * countdowns (they would pin idle tails forever) and are observed by a
+   * cheap size probe instead: quiet while drained, tailed on late appends. */
   private needsSegmentRevisit(id: string): boolean {
     if (this.segmentDrainPaths.has(id)) return true;
     const prefix = `${id}\u0000`;
@@ -324,6 +432,15 @@ export class SidecarTailer {
         return true;
       } catch {
         this.segmentEmptyPolls.delete(key);
+      }
+    }
+    const anchor = this.retainedSegments.get(id);
+    if (anchor !== undefined) {
+      try {
+        if (statSync(join(this.dir, anchor)).size !== (this.segmentOffsets.get(this.segmentStateKey(id, anchor)) ?? 0)) return true;
+      } catch {
+        // A vanished anchor must fail closed in readTail, not idle quietly.
+        return true;
       }
     }
     return false;
@@ -344,6 +461,7 @@ export class SidecarTailer {
   start(): void {
     if (this.timer) return;
     this.stopping = false;
+    this.sweepStaleTempFiles();
     this.armWatch();
     this.timer = setInterval(() => {
       // Recovery poll: catch events the watcher missed. Also re-arm the
@@ -352,6 +470,52 @@ export class SidecarTailer {
       if (!this.watcher) this.armWatch();
       void this.pollTick();
     }, 300);
+  }
+
+  /** Sweep crash-littered sidecar publish tmps. Tailer tmps carry the owner
+   * pid (`<path>.<pid>.<uuid>.tmp`): sweep when the owner is dead. Writer
+   * tmps carry no pid: sweep only past the age gate, so a live writer
+   * mid-publish is never unlinked. Restricted to sidecar-publish shapes so
+   * other subsystems' tmps are untouched. Best effort; litter is cosmetic
+   * and the next startup retries. */
+  private sweepStaleTempFiles(): void {
+    let names: string[];
+    try {
+      names = readdirSync(this.dir);
+    } catch {
+      return;
+    }
+    let swept = 0;
+    const now = Date.now();
+    for (const name of names) {
+      if (!name.endsWith(".tmp")) continue;
+      if (!name.includes(".cursor-") && !name.includes(".backpressure-") && !name.includes(".quarantine-") && !name.includes(".jsonl.")) continue;
+      const pid = name.match(/\.(\d+)\.[0-9a-f-]{8,}\.tmp$/)?.[1];
+      let stale: boolean;
+      if (pid !== undefined) {
+        stale = !isProducerAlive(Number(pid));
+      } else {
+        try {
+          stale = statSync(join(this.dir, name)).mtimeMs < now - 60_000;
+        } catch {
+          continue;
+        }
+      }
+      if (!stale) continue;
+      try {
+        rmSync(join(this.dir, name), { force: true });
+        swept++;
+      } catch {
+        /* Litter is cosmetic; the next startup retries. */
+      }
+    }
+    if (swept > 0) {
+      try {
+        syncDirectory(this.dir);
+      } catch {
+        /* Best effort; the unlink itself already landed for readers. */
+      }
+    }
   }
 
   private async pollTick(): Promise<void> {
@@ -378,7 +542,8 @@ export class SidecarTailer {
       if (this.paused.has(id)) void this.checkBacklog(id, undefined, generation);
       else if (
         !this.watcher || this.dirty.has(id) || this.inFlight.has(id) ||
-        this.sequenceGapDeferred.has(id) || this.needsSegmentRevisit(id) || this.activeMoved(id)
+        this.sequenceGapDeferred.has(id) || this.untailedSinceWatch.has(id) ||
+        this.needsSegmentRevisit(id) || this.activeMoved(id)
       ) {
         this.dirty.delete(id);
         this.wakeCounts.poll++;
@@ -395,7 +560,10 @@ export class SidecarTailer {
         if (!name) return;
         const fileName = String(name);
         const active = fileName.match(/^([^.]+)\.jsonl$/);
-        const generation = fileName.match(/^\.([^.]+)\.jsonl\.(?:sealed|retained-|draining-|final-)/);
+        // Segment files carry a ts-pid-uuid infix between `.jsonl.` and the
+        // sealed/retained/draining/final token, so match the dotted prefix
+        // rather than the token position.
+        const generation = fileName.match(/^\.([^.]+)\.jsonl\./);
         const id = active?.[1] ?? generation?.[1];
         if (id && this.offsets.has(id)) this.schedule(id);
       });
@@ -434,6 +602,10 @@ export class SidecarTailer {
    *  belong to previous app sessions (the file is global) — start from the
    *  current size so a fresh instance does not replay old history. */
   watch(id: string): void {
+    // Validate before any path join: the writer enforces this contract and
+    // the tailer must not stat, read, or publish cursors outside the events
+    // directory for a malformed id.
+    if (!isValidTerminalId(id)) return;
     const previousGeneration = this.terminalGenerations.get(id);
     const wasQuarantined = this.quarantined.has(id);
     if (previousGeneration !== undefined) {
@@ -453,20 +625,26 @@ export class SidecarTailer {
     // Cursor writes remain serialized in cursorWrites, but their generation
     // check prevents a late completion from repopulating these maps.
     this.clearSegmentState(id);
-    // A marker left by a previous process is durable evidence that an unsafe
-    // source transition was observed. Keep this lifecycle fail-closed until
-    // the source set is explicitly replaced or cleaned.
-    const persistedQuarantine = this.hasQuarantineMarkerSync(id) || wasQuarantined;
+    // A quarantine marker bound to a live producer is durable evidence that
+    // an unsafe source transition was observed. Keep this lifecycle
+    // fail-closed until the source set is explicitly replaced or cleaned. A
+    // marker from a dead producer is previous-launch residue: terminal ids
+    // restart every launch, so it must not stop a brand-new terminal.
+    const persistedQuarantine = this.hasLiveQuarantineMarkerSync(id) || wasQuarantined;
     this.sealedSegments.delete(id);
     this.retainedSegments.delete(id);
     this.segmentDrainPaths.delete(id);
-    this.pendingSegmentCursorClears.delete(id);
     const file = join(this.dir, `${id}.jsonl`);
     let start = 0;
     let fileSize = 0;
     this.cleanupOrphanProofs(id);
     const sealedNames = this.listSealedSegmentsSync(id);
     const retainedNames = this.listRetainedSegmentsSync(id);
+    // A lifecycle that starts with segments is owed one bootstrap tail so
+    // anchor binding and structural quarantine checks run at least once even
+    // when every probe is quiet. Segment-free watches stay lazy.
+    if (sealedNames.length > 0 || retainedNames.length > 0) this.untailedSinceWatch.add(id);
+    else this.untailedSinceWatch.delete(id);
     const cursor = this.loadCursor(id);
     const cursorSource = cursor?.sealedSegment
       ? sealedNames.find((name) => name === cursor.sealedSegment)
@@ -499,7 +677,6 @@ export class SidecarTailer {
       if (segmentIdentity) this.segmentIdentities.set(sourceKey, segmentIdentity);
       this.sealedSegments.set(id, selectedSource!);
       if (this.isRetainedSegmentName(id, selectedSource!)) this.retainedSegments.set(id, selectedSource!);
-      this.segmentEmptyPolls.set(sourceKey, 0);
       start = this.cursorMatchesSegment(cursor?.sealedSegment, selectedSource) && cursorFitsActive ? cursor.offset : 0;
     } else if (cursorFitsActive) {
       start = cursor.offset;
@@ -526,8 +703,10 @@ export class SidecarTailer {
       || !this.cursorMatchesSegment(cursor.sealedSegment, selectedSource)
       || (cursor.sealedIdentity !== undefined && cursor.sealedIdentity !== segmentIdentity)
     ))) {
+      this.persistedCursors.delete(id);
       this.cursorInitializations.set(id, this.persistCursor(id, initialCursor, generation));
     } else {
+      this.persistedCursors.add(id);
       this.cursorInitializations.delete(id);
     }
     this.streams.delete(id);
@@ -541,6 +720,7 @@ export class SidecarTailer {
     }
     this.partialRecords.delete(id);
     this.oversizedRecords.delete(id);
+    this.oversizedSkipDiagnostics.delete(id);
     this.paused.delete(id);
     this.pendingDeliveries.delete(id);
     this.backlogOverflowed.delete(id);
@@ -552,6 +732,14 @@ export class SidecarTailer {
         void this.clearQuarantineMarker(id);
         void this.clearBackpressureMarker(id, generation);
       }
+    } else if (existsSync(this.quarantinePath(id))) {
+      // A stale previous-launch marker gates the writer (which refuses all
+      // appends beside any marker file) even though this lifecycle ignores
+      // it for inheritance. Sweep the residue so the recycled terminal's
+      // producer can append; a persisting race re-quarantines at once with
+      // a fresh live-bound marker. Live markers and re-quarantined
+      // lifecycles never reach this branch, so no fresh marker is raced.
+      void this.clearQuarantineMarker(id);
     }
     void this.checkBacklog(id, undefined, generation);
     const resumeTimer = this.resumeTimers.get(id);
@@ -575,7 +763,7 @@ export class SidecarTailer {
 
   stopWatching(id: string): void {
     const generation = this.terminalGenerations.get(id);
-    const wasQuarantined = this.quarantined.has(id) || this.hasQuarantineMarkerSync(id);
+    const wasQuarantined = this.quarantined.has(id) || this.hasLiveQuarantineMarkerSync(id);
     this.lifecycleGeneration++;
     this.terminalGenerations.delete(id);
     this.inFlight.delete(id);
@@ -586,13 +774,14 @@ export class SidecarTailer {
     this.retainedSegments.delete(id);
     this.segmentDrainPaths.delete(id);
     this.durableCursors.delete(id);
+    this.persistedCursors.delete(id);
     this.streams.delete(id);
     this.producerPids.delete(id);
     this.expectedProducerPids.delete(id);
     this.bridgeIds.delete(id);
     this.partialRecords.delete(id);
     this.oversizedRecords.delete(id);
-    this.pendingSegmentCursorClears.delete(id);
+    this.oversizedSkipDiagnostics.delete(id);
     this.cursorInitializations.delete(id);
     this.pendingDeliveries.delete(id);
     this.backlogOverflowed.delete(id);
@@ -604,10 +793,11 @@ export class SidecarTailer {
     this.resumeTimers.delete(id);
     this.paused.delete(id);
     this.dirty.delete(id);
+    this.untailedSinceWatch.delete(id);
     void this.clearBackpressureMarker(id, generation, true);
-    // Quarantine is durable admission state. Keep its marker across lifecycle
-    // teardown so a restart cannot resume after an
-    // identity-bound source was lost; normal terminals have no marker.
+    // Quarantine is durable admission state. Keep a live marker across
+    // lifecycle teardown so a restart cannot resume after an identity-bound
+    // source was lost; a stale previous-launch marker is cleared instead.
     if (!wasQuarantined) void this.clearQuarantineMarker(id);
   }
 
@@ -626,6 +816,7 @@ export class SidecarTailer {
     this.resumeTimers.clear();
     this.paused.clear();
     this.quarantined.clear();
+    this.untailedSinceWatch.clear();
     this.pendingDeliveries.clear();
     const markerIds = new Set([...this.offsets.keys(), ...this.markerStates.keys()]);
     for (const id of markerIds) {
@@ -638,6 +829,7 @@ export class SidecarTailer {
     this.retainedSegments.clear();
     this.segmentDrainPaths.clear();
     this.durableCursors.clear();
+    this.persistedCursors.clear();
     this.streams.clear();
     this.producerPids.clear();
     this.expectedProducerPids.clear();
@@ -645,11 +837,11 @@ export class SidecarTailer {
     this.partialRecords.clear();
     this.segmentPartialRecords.clear();
     this.oversizedRecords.clear();
+    this.oversizedSkipDiagnostics.clear();
     this.segmentOversizedRecords.clear();
     this.segmentEmptyPolls.clear();
     this.sequenceGapPolls.clear();
     this.sequenceGapDeferred.clear();
-    this.pendingSegmentCursorClears.clear();
     this.cursorInitializations.clear();
     for (const state of this.markerStates.values()) {
       if (state.retryTimer) clearTimeout(state.retryTimer);
@@ -692,7 +884,9 @@ export class SidecarTailer {
   }
 
   private async tail(id: string, generation = this.terminalGenerations.get(id)): Promise<void> {
-    if (!this.isLive(id, generation) || this.paused.has(id)) return;
+    if (!this.isLive(id, generation)) return;
+    this.untailedSinceWatch.delete(id);
+    if (this.paused.has(id)) return;
     if (this.inFlight.has(id)) {
       // A slow acknowledgement still needs a periodic marker refresh if a
       // prior marker write failed; never let a hung consumer grow the spool.
@@ -711,20 +905,6 @@ export class SidecarTailer {
           return;
         }
       }
-      const pendingClear = this.pendingSegmentCursorClears.get(id);
-      if (pendingClear !== undefined) {
-        if (!(await this.persistCursor(id, {
-          offset: this.offsets.get(id) ?? pendingClear,
-          sealedOffset: null,
-          sealedIdentity: null,
-          sealedSegment: null,
-        }, generation))) {
-          this.pause(id, generation);
-          return;
-        }
-        if (!this.isLive(id, generation)) return;
-        this.pendingSegmentCursorClears.delete(id);
-      }
       await this.readTail(id, generation);
     } finally {
       if (this.inFlight.get(id) === generation) this.inFlight.delete(id);
@@ -733,9 +913,14 @@ export class SidecarTailer {
 
   private async readTail(id: string, generation: number): Promise<void> {
     if (!this.isLive(id, generation) || this.quarantined.has(id)) return;
-    let retainedNames = await this.listRetainedSegments(id);
+    // One directory listing serves the whole pass (anchor bind, candidates,
+    // backlog accounting). The seal gate in readSource deliberately re-lists:
+    // a pass-stale gate could admit active bytes ahead of a mid-pass rotation
+    // and silently skip the sealed source as duplicates.
+    const segmentNames = await this.listSegmentNames(id);
+    const retainedNames = segmentNames.retained;
     if (retainedNames.length > 0) {
-      const retainedName = await this.bindRetainedAnchor(id, generation, retainedNames);
+      const retainedName = await this.bindRetainedAnchor(id, generation, retainedNames, segmentNames.sealed);
       if (retainedName === false || !this.isLive(id, generation) || this.quarantined.has(id)) return;
     }
     const retainedName = this.retainedSegments.get(id)
@@ -757,8 +942,6 @@ export class SidecarTailer {
     }
 
     const candidates: SegmentCandidate[] = [];
-    const segmentNames = await this.listSegmentNames(id);
-    retainedNames = segmentNames.retained;
     const retainedCandidateName = this.retainedSegments.get(id) ?? retainedName;
     if (retainedCandidateName && !retainedNames.includes(retainedCandidateName)) retainedNames.push(retainedCandidateName);
     for (const name of retainedNames) candidates.push({ name, retained: true });
@@ -777,11 +960,7 @@ export class SidecarTailer {
       ? this.partialRecords.has(id) || this.oversizedRecords.has(id)
       : this.segmentPartialRecords.has(this.segmentStateKey(id, candidate.name))
         || this.segmentOversizedRecords.has(this.segmentStateKey(id, candidate.name)))) {
-      await this.checkBacklog(id, undefined, generation);
-      return;
-    }
-    if (this.pendingSegmentCursorClears.has(id)) {
-      await this.checkBacklog(id, undefined, generation);
+      await this.checkBacklog(id, undefined, generation, segmentNames);
       return;
     }
     if (!this.isLive(id, generation)) return;
@@ -792,7 +971,7 @@ export class SidecarTailer {
       this.pause(id, generation);
       return;
     }
-    await this.checkBacklog(id, undefined, generation);
+    await this.checkBacklog(id, undefined, generation, segmentNames);
   }
 
   private segmentStateKey(id: string, name: string): string {
@@ -985,10 +1164,6 @@ export class SidecarTailer {
     }
   }
 
-  private async listRetainedSegments(id: string): Promise<string[]> {
-    return (await this.listSegmentNames(id)).retained;
-  }
-
   private retainedBaseName(id: string, name: string): string | null {
     for (const token of [SIDECAR_RETAINED_FILE_TOKEN, SIDECAR_DRAIN_FILE_TOKEN, SIDECAR_FINAL_GUARD_FILE_TOKEN]) {
       const index = name.indexOf(token);
@@ -1006,7 +1181,7 @@ export class SidecarTailer {
    * the terminal. The surviving alias is then the sole descriptor-safe source
    * used by the normal retained drain path.
    */
-  private async bindRetainedAnchor(id: string, generation: number, names: string[]): Promise<string | false | null> {
+  private async bindRetainedAnchor(id: string, generation: number, names: string[], sealedNames: string[]): Promise<string | false | null> {
     if (names.length === 0) return null;
     if (!this.isLive(id, generation)) return false;
     if (names.some((name) => this.retainedBaseName(id, name) === null)) {
@@ -1064,14 +1239,13 @@ export class SidecarTailer {
       this.segmentEmptyPolls.delete(priorKey);
     }
     this.segmentIdentities.set(selectedKey, identity);
-    this.segmentEmptyPolls.set(selectedKey, 0);
     this.sealedSegments.set(id, selected);
     this.retainedSegments.set(id, selected);
-    this.segmentDrainPaths.set(id, join(this.dir, selected));
 
     // A prior lifecycle may have left a first drain link, final guard, and
     // retained link to the same inode. Keep one survivor and unlink only the
-    // redundant names whose identity was just proven equal.
+    // redundant names whose identity was just proven equal. Prune the pass
+    // listing as names are removed so later candidates never chase ghosts.
     for (const entry of entries) {
       if (entry.name === selected) continue;
       try {
@@ -1080,6 +1254,8 @@ export class SidecarTailer {
         this.quarantine(id, generation, `retained sidecar alias ${entry.name} could not be retired safely`);
         return false;
       }
+      const pruned = names.indexOf(entry.name);
+      if (pruned >= 0) names.splice(pruned, 1);
       const key = this.segmentStateKey(id, entry.name);
       this.segmentOffsets.delete(key);
       this.segmentIdentities.delete(key);
@@ -1090,19 +1266,27 @@ export class SidecarTailer {
 
     // If the crash happened before the first sealed unlink, the published
     // name is another hard link to this same inode. Remove only that proven
-    // duplicate; a different sealed identity is an unprocessed generation.
-    for (const sealedName of await this.listSealedSegments(id)) {
+    // duplicate. A different sealed identity is a newer generation beside
+    // our settled anchor: chain it. Keep both; the scheduler drains the
+    // older anchor first by sequence order, and the newer seal's reclaim
+    // retires the older anchor once both generations prove fully drained.
+    for (const sealedName of [...sealedNames]) {
+      let sealedIdentity: string;
       try {
-        const sealedIdentity = this.fileIdentity(await statFile(join(this.dir, sealedName)));
-        if (sealedIdentity !== identity) {
-          this.quarantine(id, generation, "sealed generation appeared beside a retained anchor");
-          return false;
-        }
+        sealedIdentity = this.fileIdentity(await statFile(join(this.dir, sealedName)));
+      } catch {
+        this.quarantine(id, generation, `sealed generation ${sealedName} could not be reconciled`);
+        return false;
+      }
+      if (sealedIdentity !== identity) continue;
+      try {
         await durableUnlink(join(this.dir, sealedName));
       } catch {
         this.quarantine(id, generation, `sealed generation ${sealedName} could not be reconciled`);
         return false;
       }
+      const prunedSealed = sealedNames.indexOf(sealedName);
+      if (prunedSealed >= 0) sealedNames.splice(prunedSealed, 1);
     }
     if (!(await this.persistCursor(id, {
       offset: this.offsets.get(id) ?? 0,
@@ -1113,6 +1297,11 @@ export class SidecarTailer {
       this.quarantine(id, generation, "retained sidecar cursor could not be persisted");
       return false;
     }
+    // The anchor is settled: the only drain link that could exist IS this
+    // anchor path, so join() resolution is identical. Clear it so idle polls
+    // stop re-binding this anchor and the mid-flight guards below only fire
+    // while a reclaim is genuinely in flight.
+    this.segmentDrainPaths.delete(id);
     return selected;
   }
 
@@ -1264,13 +1453,32 @@ export class SidecarTailer {
     for (const candidate of candidates) {
       if (!pending.has(candidate.name)) pending.set(candidate.name, candidate);
     }
+    // An active read is administratively blocked while any sealed generation
+    // exists (see readSource's seal gate), so scheduling it can only no-op.
+    // Worse, a stale active partial from before the rotation would rank
+    // active first and end the pass, starving the sealed source forever.
+    // Active reads cannot run while a seal exists, so any active offset or
+    // partial now predates the rotation: no active byte has been delivered,
+    // and the pre-rotation bytes live in the seal while stream ownership
+    // stays. Reset to the start of the post-rotation inode and drain sealed
+    // candidates first; without the offset reset a stale offset at or past
+    // the new file size would hide the new bytes forever.
+    if ([...pending.values()].some((candidate) => !candidate.retained && !candidate.active)) {
+      this.partialRecords.delete(id);
+      this.oversizedRecords.delete(id);
+      this.offsets.set(id, 0);
+      for (const [name, candidate] of pending) {
+        if (candidate.active) pending.delete(name);
+      }
+    }
     while (pending.size > 0) {
       if (!this.isLive(id, generation) || this.quarantined.has(id)) return;
       if (this.segmentDrainPaths.has(id) && [...pending.values()].some((candidate) => !candidate.retained && !candidate.active)) {
-        // A retained identity is already the last safe anchor for an older
-        // canonical generation. A later sealed pathname cannot be admitted
-        // beside it without proving both identities and their order; keep the
-        // sealed bytes and fail closed before any source can overtake it.
+        // A reclaim chain is mid-flight (settled anchors clear their drain
+        // link and chain via bindRetainedAnchor instead). A later sealed
+        // pathname cannot be admitted beside a mid-flight chain without
+        // proving both identities and their order; keep the sealed bytes and
+        // fail closed before any source can overtake it.
         this.quarantine(id, generation, "canonical generation appeared beside a retained identity anchor");
         return;
       }
@@ -1331,8 +1539,9 @@ export class SidecarTailer {
       }
       pending.delete(chosen.name);
       if (this.segmentDrainPaths.has(id) && [...pending.values()].some((candidate) => !candidate.retained && !candidate.active)) {
-        // A second canonical generation beside a retained identity cannot be
-        // ordered or safely discarded. Preserve it and stop admission.
+        // A second canonical generation beside a mid-flight reclaim chain
+        // cannot be ordered or safely discarded. Preserve it and stop
+        // admission. (Settled anchors chain instead of quarantining.)
         this.quarantine(id, generation, "canonical generation appeared beside a retained identity anchor");
         return;
       }
@@ -1524,7 +1733,15 @@ export class SidecarTailer {
           this.quarantine(id, generation, `sidecar source ${sourceName} exceeded the ${this.maxRecordBytes}-byte record cap`);
           return;
         }
-        this.reportOversizedRecord(id, { bytes: recordBytes, diagnosticEmitted: false });
+        // Skipped over-cap lines share one stored diagnostic per lifecycle so
+        // a flood warns once instead of once per line. Diagnostic-only: it
+        // never enters source state, so skipping never stops the pass.
+        let skipped = this.oversizedSkipDiagnostics.get(id);
+        if (!skipped) {
+          skipped = { bytes: recordBytes, diagnosticEmitted: false };
+          this.oversizedSkipDiagnostics.set(id, skipped);
+        }
+        this.reportOversizedRecord(id, skipped);
         committedOffset = nextOffset;
         cursor = lineEnd + 1;
         state.offset = committedOffset;
@@ -1684,12 +1901,35 @@ export class SidecarTailer {
     return join(this.dir, `${SIDECAR_QUARANTINE_FILE_PREFIX}${id}`);
   }
 
-  private hasQuarantineMarkerSync(id: string): boolean {
+  private hasLiveQuarantineMarkerSync(id: string): boolean {
+    let raw: string;
     try {
-      return existsSync(this.quarantinePath(id));
+      const size = statSync(this.quarantinePath(id)).size;
+      if (size <= 0 || size > SIDECAR_PROOF_MAX_BYTES) return false;
+      raw = readFileSync(this.quarantinePath(id), "utf8");
     } catch {
       return false;
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    if (!isRecord(parsed)) return false;
+    // Terminal ids restart every launch while the events dir persists, so a
+    // marker from a dead producer (or without any binding) is stale
+    // previous-launch residue and must not stop a brand-new terminal.
+    // Re-validation still re-quarantines a persisting race at once.
+    if (parsed.state !== "quarantined") return false;
+    if (!isProducerAlive(parsed.producerPid as number)) return false;
+    const boot = parsed.bootId;
+    if (boot !== undefined && boot !== null) {
+      if (typeof boot !== "string") return false;
+      const current = currentBootId();
+      if (current !== null && boot !== current) return false;
+    }
+    return true;
   }
 
   /**
@@ -1707,7 +1947,7 @@ export class SidecarTailer {
     this.paused.add(id);
     if (first) {
       const marker = this.quarantinePath(id);
-      void durableAtomicWrite(marker, JSON.stringify({ version: 1, state: "quarantined", terminalId: id, reason: reason.slice(0, 256) }) + "\n").catch((error) => {
+      void durableAtomicWrite(marker, JSON.stringify({ version: 1, state: "quarantined", terminalId: id, reason: reason.slice(0, 256), producerPid: process.pid, bootId: currentBootId() }) + "\n").catch((error) => {
         if (this.isLive(id, generation)) {
           console.warn(`[sidecar] could not publish ${id} quarantine: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -1732,8 +1972,8 @@ export class SidecarTailer {
    * append after a verification read. Retired `.segment` files never enter
    * this method and are intentionally left in place.
    */
-  private async maybeReclaimSegment(id: string, name: string, offset: number, generation: number): Promise<boolean> {
-    if (!this.isLive(id, generation) || !this.isSealedSegmentName(id, name)) return false;
+  private async maybeReclaimSegment(id: string, name: string, offset: number, generation: number): Promise<void> {
+    if (!this.isLive(id, generation) || !this.isSealedSegmentName(id, name)) return;
     const segment = join(this.dir, name);
     const segmentKey = this.segmentStateKey(id, name);
     let size: number;
@@ -1743,38 +1983,72 @@ export class SidecarTailer {
       size = stats.size;
       identity = this.fileIdentity(stats);
     } catch {
-      return false;
+      return;
     }
-    if (!this.isLive(id, generation)) return false;
+    if (!this.isLive(id, generation)) return;
     if (size !== offset) {
       this.segmentEmptyPolls.set(segmentKey, 0);
-      return false;
+      return;
     }
     const emptyPolls = (this.segmentEmptyPolls.get(segmentKey) ?? 0) + 1;
     this.segmentEmptyPolls.set(segmentKey, emptyPolls);
-    if (emptyPolls < 2) return false;
-    if (!(await this.setBackpressureMarker(id, offset, generation)) || !this.isLive(id, generation)) return false;
+    if (emptyPolls < 2) return;
+    if (!(await this.setBackpressureMarker(id, offset, generation)) || !this.isLive(id, generation)) return;
 
     let drainPath: string | undefined;
     let verificationPath: string | undefined;
     try {
       const afterStats = await statFile(segment);
       const after = afterStats.size;
-      if (!this.isLive(id, generation)) return false;
+      if (!this.isLive(id, generation)) return;
       if (this.fileIdentity(afterStats) !== identity) {
         this.segmentEmptyPolls.set(segmentKey, 0);
-        return false;
+        return;
       }
       if (after !== (this.segmentOffsets.get(segmentKey) ?? offset)) {
         this.segmentEmptyPolls.set(segmentKey, 0);
-        return false;
+        return;
+      }
+      // Generation chaining: this newer generation is proven fully drained
+      // (size == offset across two empty polls). Retire a settled older
+      // anchor whose bytes are all delivered-or-skipped. If the older anchor
+      // still has undelivered bytes, wait: normal passes drain it first by
+      // sequence order, and a later pass retries this reclaim.
+      const olderAnchor = this.retainedSegments.get(id);
+      if (olderAnchor !== undefined && olderAnchor !== name) {
+        const olderKey = this.segmentStateKey(id, olderAnchor);
+        let olderSize: number;
+        try {
+          olderSize = (await statFile(join(this.dir, olderAnchor))).size;
+        } catch {
+          this.quarantine(id, generation, `retained sidecar anchor ${olderAnchor} disappeared`);
+          return;
+        }
+        const olderDrained = olderSize === (this.segmentOffsets.get(olderKey) ?? 0)
+          && !this.segmentPartialRecords.has(olderKey)
+          && !this.segmentOversizedRecords.has(olderKey);
+        if (!olderDrained) return;
+        try {
+          await durableUnlink(join(this.dir, olderAnchor));
+        } catch {
+          this.quarantine(id, generation, `retained sidecar anchor ${olderAnchor} could not be retired`);
+          return;
+        }
+        this.segmentOffsets.delete(olderKey);
+        this.segmentIdentities.delete(olderKey);
+        this.segmentPartialRecords.delete(olderKey);
+        this.segmentOversizedRecords.delete(olderKey);
+        this.segmentEmptyPolls.delete(olderKey);
+        this.sequenceGapPolls.delete(olderKey);
+        this.retainedSegments.delete(id);
+        if (this.sealedSegments.get(id) === olderAnchor) this.sealedSegments.delete(id);
       }
       if (!(await this.persistCursor(id, {
         offset: this.offsets.get(id) ?? 0,
         sealedOffset: after,
         sealedIdentity: identity,
         sealedSegment: name,
-      }, generation)) || !this.isLive(id, generation)) return false;
+      }, generation)) || !this.isLive(id, generation)) return;
 
       // link() is the proof that the inode remains reachable after the
       // published sealed pathname is removed. If the platform cannot create
@@ -1782,22 +2056,22 @@ export class SidecarTailer {
       drainPath = `${segment}.draining-${randomUUID()}`;
       await linkFile(segment, drainPath);
       await syncParentDirectory(drainPath);
-      if (!this.isLive(id, generation)) return false;
+      if (!this.isLive(id, generation)) return;
       this.segmentDrainPaths.set(id, drainPath);
       await durableUnlink(segment);
-      if (!this.isLive(id, generation)) return false;
+      if (!this.isLive(id, generation)) return;
 
       // The delayed-unlink window is deliberately drained through the hard
       // link. This also catches an append from a retired descriptor which was
       // opened before the writer published the sealed generation.
       await this.readSource(id, true, name, generation, false);
-      if (!this.isLive(id, generation)) return false;
+      if (!this.isLive(id, generation)) return;
       for (let pass = 0; pass < 3; pass++) {
         const latest = (await statFile(drainPath)).size;
         const current = this.segmentOffsets.get(segmentKey) ?? 0;
         if (latest !== current) {
           await this.readSource(id, true, name, generation, false);
-          if (!this.isLive(id, generation)) return false;
+          if (!this.isLive(id, generation)) return;
           continue;
         }
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1805,13 +2079,13 @@ export class SidecarTailer {
         break;
       }
       const finalOffset = this.segmentOffsets.get(segmentKey) ?? 0;
-      if (this.segmentPartialRecords.has(segmentKey) || this.segmentOversizedRecords.has(segmentKey)) return false;
+      if (this.segmentPartialRecords.has(segmentKey) || this.segmentOversizedRecords.has(segmentKey)) return;
       if (!(await this.persistCursor(id, {
         offset: this.offsets.get(id) ?? 0,
         sealedOffset: finalOffset,
         sealedIdentity: identity,
         sealedSegment: name,
-      }, generation)) || !this.isLive(id, generation)) return false;
+      }, generation)) || !this.isLive(id, generation)) return;
 
       // A final guard link ensures the first retirement unlink cannot make an
       // inode unreachable while a descriptor is still being drained.
@@ -1819,14 +2093,14 @@ export class SidecarTailer {
       await linkFile(drainPath, finalGuard);
       await syncParentDirectory(finalGuard);
       await durableUnlink(drainPath);
-      if (!this.isLive(id, generation)) return false;
+      if (!this.isLive(id, generation)) return;
       this.segmentDrainPaths.set(id, finalGuard);
       await this.readSource(id, true, name, generation, false);
-      if (!this.isLive(id, generation)) return false;
+      if (!this.isLive(id, generation)) return;
       const afterGuard = (await statFile(finalGuard)).size;
       if (afterGuard !== (this.segmentOffsets.get(segmentKey) ?? finalOffset)) {
         this.segmentEmptyPolls.set(segmentKey, 0);
-        return false;
+        return;
       }
 
       // Keep a verification anchor for *every* publication, including a
@@ -1839,12 +2113,15 @@ export class SidecarTailer {
       await linkFile(finalGuard, verificationPath);
       await syncParentDirectory(verificationPath);
       await durableUnlink(finalGuard);
-      if (!this.isLive(id, generation)) return false;
+      if (!this.isLive(id, generation)) return;
       this.segmentDrainPaths.set(id, verificationPath);
       await this.readSource(id, true, name, generation, false);
-      if (!this.isLive(id, generation)) return false;
-      await this.verifySealedPublication(name, verificationPath, identity);
-      if (!this.isLive(id, generation)) return false;
+      if (!this.isLive(id, generation)) return;
+      const verified = await this.verifySealedPublication(name, verificationPath, identity);
+      if (!verified) {
+        console.warn(`[sidecar] ${id} sealed generation ${name} failed publication verification; keeping retained anchor`);
+      }
+      if (!this.isLive(id, generation)) return;
 
       // `verified` is useful provenance/health evidence, but it is not a
       // close acknowledgement: an escaped descriptor can append after this
@@ -1873,11 +2150,16 @@ export class SidecarTailer {
         sealedSegment: retainedName,
       }, generation))) {
         this.pause(id, generation);
+      } else {
+        // The anchor is settled: the drain link IS the retained path, so
+        // join() resolution is identical. Clear it so idle polls stop
+        // re-binding this anchor until the next rotation lands.
+        this.segmentDrainPaths.delete(id);
       }
-      return false;
+      return;
     } catch {
       /* Keep flow control asserted until a later poll can retry reclaim. */
-      return false;
+      return;
     }
   }
 
@@ -1913,6 +2195,7 @@ export class SidecarTailer {
     id: string,
     knownRetained?: number,
     generation = this.terminalGenerations.get(id),
+    segmentNames?: SidecarSegmentNames,
   ): Promise<number | undefined> {
     if (!this.isLive(id, generation)) return undefined;
     let retained = knownRetained;
@@ -1935,11 +2218,11 @@ export class SidecarTailer {
       };
       await count(join(this.dir, `${id}.jsonl`), this.offsets.get(id) ?? 0);
       const activeSegment = this.sealedSegments.get(id);
-      const segmentNames = await this.listSegmentNames(id);
-      for (const name of segmentNames.sealed) {
+      const names = segmentNames ?? await this.listSegmentNames(id);
+      for (const name of names.sealed) {
         await count(join(this.dir, name), name === activeSegment ? (this.segmentOffset(id, name) ?? 0) : 0);
       }
-      for (const name of segmentNames.retained) {
+      for (const name of names.retained) {
         await count(join(this.dir, name), name === activeSegment ? (this.segmentOffset(id, name) ?? 0) : 0);
       }
       const drainPath = this.segmentDrainPaths.get(id);
@@ -1948,8 +2231,20 @@ export class SidecarTailer {
     if (!this.isLive(id, generation)) return undefined;
     const holdProducer = this.paused.has(id) || this.quarantined.has(id);
     if (holdProducer) void this.setBackpressureMarker(id, retained, generation);
-    if (retained > this.maxBacklogBytes) this.reportBacklogOverflow(id, retained, generation);
-    else if (!holdProducer) {
+    // Overflow is a held-terminal signal (see maxBacklogBytes docs): an
+    // unpaused terminal over a large sealed segment is draining, not stuck,
+    // so a fresh watch must not warn spuriously. The retained-anchor bound
+    // stays unconditioned: an escaped descriptor growing the anchor behind
+    // the drain trips it while unpaused, and losing that breaker would turn
+    // runaway retained growth into a silent stall. A crash restart with a
+    // huge undrained remainder can trip it spuriously; bytes are preserved
+    // and the marker is loud. Progress-aware overflow is future work.
+    if (retained > this.maxBacklogBytes) {
+      if (holdProducer) this.reportBacklogOverflow(id, retained, generation);
+      else if (this.retainedSegments.has(id)) {
+        this.quarantine(id, generation, "retained sidecar source exceeded bounded backlog");
+      }
+    } else if (!holdProducer) {
       this.backlogOverflowed.delete(id);
       void this.clearBackpressureMarker(id, generation);
     }
@@ -2219,10 +2514,12 @@ export class SidecarTailer {
         ...(sealedOffset !== undefined ? { sealedOffset } : {}),
         ...(sealedIdentity ? { sealedIdentity } : {}),
       };
+      if (previous && this.persistedCursors.has(id) && sameDurableSidecarCursor(previous, cursor)) return true;
       try {
-        await durableAtomicWrite(this.cursorPath(id), JSON.stringify(cursor));
+        await atomicWriteFile(this.cursorPath(id), JSON.stringify(cursor));
         if (!this.isLive(id, generation)) return false;
         this.durableCursors.set(id, cursor);
+        this.persistedCursors.add(id);
         return true;
       } catch (error) {
         if (this.isLive(id, generation)) {

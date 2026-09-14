@@ -121,16 +121,23 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
         && bindings.getActiveProject().id === projectId
         && bindings.getEditor() === editor;
       // Snapshots are fetched on demand — the strip/IPC never carries content.
-      let res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);
-      if (!isCurrent()) return;
-      // A write snapshot may still be filling in (the delayed fill takes
-      // 400 milliseconds) — retry
-      // briefly before giving up.
-      for (let i = 0; i < 5 && !res.ok; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        if (!isCurrent()) return;
+      let res;
+      try {
         res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);
         if (!isCurrent()) return;
+        // A write snapshot may still be filling in (the delayed fill takes
+        // 400 milliseconds) — retry
+        // briefly before giving up.
+        for (let i = 0; i < 5 && !res.ok; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          if (!isCurrent()) return;
+          res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);
+          if (!isCurrent()) return;
+        }
+      } catch (err) {
+        if (!isCurrent()) return;
+        toast(`could not load this moment: ${(err as Error).message}`, "warning");
+        return;
       }
       if (!res.ok) {
         const what = ev.t === "change" ? "change" : ev.toolName ?? "event";
@@ -150,7 +157,7 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
       void window.termina.forkPoint(pane.instanceId, ev.seq).then((res) => {
         // Success needs no toast: the new candidate cards are the confirmation.
         if (!res.ok) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
-      });
+      }).catch((err) => toast(`fork at this moment failed: ${(err as Error).message}`, "warning"));
     },
     onProgress: (seq) => {
       const pane = bindings.getActivePane();

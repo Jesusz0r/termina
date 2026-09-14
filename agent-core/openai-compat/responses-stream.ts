@@ -295,7 +295,11 @@ export function responsesResultFromEvents(
         if (call) call.args += ev.delta;
       }
     }
-    if (type === "response.completed" && ev.response && typeof ev.response === "object") {
+    if (
+      (type === "response.completed" || type === "response.incomplete" || type === "response.failed") &&
+      ev.response &&
+      typeof ev.response === "object"
+    ) {
       const response = ev.response as {
         usage?: Record<string, unknown>;
         status?: string;
@@ -305,20 +309,25 @@ export function responsesResultFromEvents(
         rawUsage = mergeUsageRecords(rawUsage, response.usage);
         usage = usageFromOpenAI(rawUsage);
       }
-      if (typeof response.status === "string") stopReason = response.status === "completed" ? "stop" : response.status;
-      for (const item of response.output ?? []) {
-        if (!item || typeof item !== "object") continue;
-        const rec = item as {
-          type?: string;
-          id?: string;
-          call_id?: string;
-          name?: string;
-          arguments?: string;
-          encrypted_content?: unknown;
-          summary?: unknown;
-        };
-        takeReasoning(rec);
-        takeFunctionCall(rec, undefined);
+      // Failed turns surface usage only; the error path above already owns
+      // stopReason/error. Incomplete turns unpack like completed so truncated
+      // output, usage, and stop reason survive the terminal envelope.
+      if (type !== "response.failed") {
+        if (typeof response.status === "string") stopReason = response.status === "completed" ? "stop" : response.status;
+        for (const item of response.output ?? []) {
+          if (!item || typeof item !== "object") continue;
+          const rec = item as {
+            type?: string;
+            id?: string;
+            call_id?: string;
+            name?: string;
+            arguments?: string;
+            encrypted_content?: unknown;
+            summary?: unknown;
+          };
+          takeReasoning(rec);
+          takeFunctionCall(rec, undefined);
+        }
       }
     }
     if (typeof ev.usage === "object" && ev.usage && !Array.isArray(ev.usage)) {
@@ -351,23 +360,4 @@ export function responsesResultFromEvents(
   }
   blocks.push(...decoded.map((call) => ({ type: "tool_use", ...call })));
   return { blocks, usage, ttftMs, stopReason, error };
-}
-
-
-export function textFromResponsesPayload(data: unknown): { text: string; usage?: Record<string, unknown> } {
-  if (!data || typeof data !== "object") return { text: "" };
-  const rec = data as {
-    output_text?: unknown;
-    output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
-    usage?: Record<string, unknown>;
-  };
-  if (typeof rec.output_text === "string" && rec.output_text.trim()) return { text: rec.output_text.trim(), usage: rec.usage };
-  const parts: string[] = [];
-  for (const item of rec.output ?? []) {
-    if (!item || typeof item !== "object") continue;
-    for (const c of item.content ?? []) {
-      if (c && (c.type === "output_text" || c.type === "text") && typeof c.text === "string") parts.push(c.text);
-    }
-  }
-  return { text: parts.join("").trim(), usage: rec.usage };
 }

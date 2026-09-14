@@ -293,8 +293,9 @@
         side with the original.
       </p>
       <p>
-        Requirements: the project must be inside a Git repository, and your platform must support the candidate
-        sandbox (macOS and Linux x64 do). Otherwise the feature disables itself with a precise reason.
+        Requirements: the project must be inside a Git repository, on macOS with the candidate
+        sandbox helpers available (<code>sandbox-exec</code>, <code>taskpolicy</code>).
+        Candidates are not supported on other platforms yet. Otherwise the feature disables itself with a precise reason.
       </p>
 
       <h3>Fork Run</h3>
@@ -304,9 +305,10 @@
         <li><b>Candidate B — Alternative</b>: the project at the run's start, with the original prompt loaded. Text prompts arrive editable, so you can change the instructions and get a different implementation of the same task.</li>
       </ul>
       <p>
-        Both candidates open as real agent terminals (badged <code>A</code> and <code>B</code>). They are fully isolated:
-        their own source trees, sessions, homes, and process groups, with network access denied except the model
-        provider.
+        Both candidates open as real agent terminals (badged <code>A</code> and <code>B</code>). They are
+        filesystem-isolated: their own source trees, sessions, homes, and process groups, with writes denied
+        outside their own tree. Live candidates keep network access (the model provider must stay reachable);
+        only candidate Verify and evidence workers run fully offline.
       </p>
       <p>
         The Fork Run button is disabled with the exact reason when a run is not replayable — for example when you
@@ -473,7 +475,8 @@
         <li><b>Your Git is read-only to Termina.</b> Snapshots live in an app-owned store outside your repository. Promotion writes files, never Git history.</li>
         <li><b>Renderer isolation.</b> The editor UI never talks to the agent directly; it renders state the main process pushes.</li>
         <li><b>Clean environments.</b> Host <code>PI_*</code> session variables are stripped before the agent starts, so a host session can never attach to a terminal.</li>
-        <li><b>Candidate sandboxes.</b> Worldline candidates, Verify, and evidence runs execute under OS-level profiles that deny writes outside their own tree and deny network except the model provider. Evidence runs are fully offline.</li>
+        <li><b>Primary terminals are unsandboxed.</b> Your main agent and shell tabs run with your normal user access, including network.</li>
+        <li><b>Candidate sandboxes (macOS only).</b> Worldline candidates run under OS-level profiles that deny writes outside their own tree. Live candidates keep network access; candidate Verify and evidence runs execute fully offline.</li>
         <li><b>External effects are not isolated.</b> Filesystem isolation does not cover remote services: a command inside a sandbox can still affect an allowed cloud account or deployed service.</li>
       </ul>
     </section>
@@ -486,7 +489,8 @@
       the agent has no provider configured yet. Run <code>/login</code> in the terminal, then pick a model with <code>/models</code>.</p>
 
       <p><b>Worldlines is unavailable.</b><br>
-      The opened folder must be inside a Git repository, and the platform must support the sandbox. Submodules,
+      The opened folder must be inside a Git repository, on macOS with the sandbox helpers available —
+      candidates are not supported on other platforms yet. Submodules,
       sparse checkouts, content-transforming Git filters, unresolved merge states, or unsupported file types also
       disable it — the UI names the specific reason.</p>
 

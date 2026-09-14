@@ -136,20 +136,29 @@ pub(crate) fn write_tree_delta(
     // Index the changed directory paths once.  The recursive writer only
     // needs direct child directories for the current level; rescanning every
     // `per_dir` key at every level turns a large sparse delta into O(D^2)
-    // work.
+    // work. Register the complete ancestor closure so a deep leaf like
+    // `a/b/file` descends through `"" -> a -> a/b`; indexing only the
+    // immediate parent edge would leave the changed subtree unvisited.
     let mut child_dirs: HashMap<String, Vec<String>> = HashMap::new();
     for dir in per_dir.keys() {
         if dir.is_empty() {
             continue;
         }
-        let (parent, child) = match dir.rsplit_once('/') {
-            Some((parent, child)) => (parent, child),
-            None => ("", dir.as_str()),
-        };
-        child_dirs
-            .entry(parent.to_string())
-            .or_default()
-            .push(child.to_string());
+        let mut rel = dir.as_str();
+        loop {
+            let (parent, child) = match rel.rsplit_once('/') {
+                Some((parent, child)) => (parent, child),
+                None => ("", rel),
+            };
+            child_dirs
+                .entry(parent.to_string())
+                .or_default()
+                .push(child.to_string());
+            if parent.is_empty() {
+                break;
+            }
+            rel = parent;
+        }
     }
     for children in child_dirs.values_mut() {
         children.sort_unstable();

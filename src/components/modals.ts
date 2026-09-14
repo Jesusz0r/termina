@@ -39,10 +39,17 @@ export function showInput(title: string, placeholder: string, prefill: string): 
     input.type = "text";
     input.placeholder = placeholder ?? "";
     input.value = prefill ?? "";
-    makeModal(title, "", [
+    const modal = makeModal(title, "", [
       { label: "Cancel", primary: false, onClick: () => resolve({ cancelled: true }) },
       { label: "OK", primary: true, onClick: () => resolve({ cancelled: false, value: input.value }) },
     ], input);
+    // Enter confirms through the OK button's own close+resolve path, so
+    // keyboard users can complete create/rename without tabbing to OK.
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing) return;
+      e.preventDefault();
+      (modal.querySelector(".modal-btn.primary") as HTMLElement | null)?.click();
+    });
     input.focus();
   });
 }
@@ -111,13 +118,63 @@ function close(backdrop: HTMLElement): void {
   backdrop.remove();
 }
 
+// -------------------------------------------------------------- focus trap --
+
+/** Focusables for the modal Tab trap (buttons, fields, and tab stops). */
+const FOCUS_TRAP_SELECTOR =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** The topmost open modal backdrop, if any (#modal-root stacks them in order). */
+function topmostBackdrop(): HTMLElement | null {
+  const backdrops = root.querySelectorAll(".modal-backdrop, .settings-backdrop");
+  return (backdrops[backdrops.length - 1] as HTMLElement | undefined) ?? null;
+}
+
+/** Trap Tab inside the topmost modal backdrop, so keyboard focus cannot leave
+ *  for the background tree or editor. Installed once: every modal backdrop
+ *  (makeModal, file-list, settings) lives in #modal-root. Only keystrokes
+ *  already inside the backdrop are trapped — background surfaces keep Tab. */
+function trapTab(event: KeyboardEvent): void {
+  if (event.key !== "Tab" || event.defaultPrevented) return;
+  const top = topmostBackdrop();
+  if (!top || !top.contains(event.target as Node | null)) return;
+  const focusables = [...top.querySelectorAll<HTMLElement>(FOCUS_TRAP_SELECTOR)];
+  if (focusables.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const active = document.activeElement as HTMLElement | null;
+  const at = active ? focusables.indexOf(active) : -1;
+  if (event.shiftKey && at <= 0) {
+    event.preventDefault();
+    focusables[focusables.length - 1].focus();
+  } else if (!event.shiftKey && (at === -1 || at === focusables.length - 1)) {
+    event.preventDefault();
+    focusables[0].focus();
+  }
+}
+
+document.addEventListener("keydown", trapTab, true);
+
 // ------------------------------------------------------------------- toasts --
+
+/** Stacked toast container (one fixed slot; rapid toasts pile vertically). */
+let toastContainer: HTMLElement | null = null;
+
+function ensureToastContainer(): HTMLElement {
+  if (!toastContainer) {
+    toastContainer = document.createElement("div");
+    toastContainer.className = "toast-container";
+    document.body.appendChild(toastContainer);
+  }
+  return toastContainer;
+}
 
 export function toast(message: string, type: "info" | "warning" | "error" = "info"): void {
   const el = document.createElement("div");
   el.className = `toast toast-${type}`;
   el.textContent = message;
-  document.body.appendChild(el);
+  ensureToastContainer().appendChild(el);
   setTimeout(() => el.remove(), 5000);
 }
 
@@ -127,6 +184,10 @@ export function copyText(text: string, okMessage: string): void {
     .then(() => toast(okMessage, "info"))
     .catch(() => toast("could not copy the path", "error"));
 }
+
+/** Rendered cap for file-list modals (worldline Compare). The title keeps the
+ *  true total; the overflow note keeps the count honest without the DOM cost. */
+export const MAX_FILE_LIST_MODAL_ROWS = 1000;
 
 /** A small modal with a clickable file list. */
 export function showFileListModal(
@@ -147,11 +208,13 @@ export function showFileListModal(
   body.className = "modal-body";
   const list = document.createElement("ul");
   list.className = "worldline-list";
-  for (const [relPath, status] of items) {
+  for (const [relPath, status] of items.slice(0, MAX_FILE_LIST_MODAL_ROWS)) {
     const li = document.createElement("li");
     const badge = document.createElement("span");
-    badge.className = `status-badge ${status}`;
-    badge.textContent = status === "created" ? "A" : status === "deleted" ? "D" : "M";
+    // Upstream-typed but cosmetic-only: an unknown status falls back to modified.
+    const safe = status === "created" || status === "deleted" ? status : "modified";
+    badge.className = `status-badge ${safe}`;
+    badge.textContent = safe === "created" ? "A" : safe === "deleted" ? "D" : "M";
     const path = document.createElement("span");
     path.className = "path";
     path.textContent = relPath;
@@ -161,6 +224,12 @@ export function showFileListModal(
       onPick(relPath);
     });
     list.appendChild(li);
+  }
+  if (items.length > MAX_FILE_LIST_MODAL_ROWS) {
+    const more = document.createElement("li");
+    more.className = "worldline-more";
+    more.textContent = `…and ${items.length - MAX_FILE_LIST_MODAL_ROWS} more (showing first ${MAX_FILE_LIST_MODAL_ROWS})`;
+    list.appendChild(more);
   }
   body.appendChild(list);
   const footer = document.createElement("div");

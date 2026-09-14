@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { SessionWriter, coreSessionFile, writeForkedSession } from "../../agent-core/session.js";
 import { recoverPromotionJournals } from "../../electron/worldlines/index.js";
+import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 function artifactManifest(path: string) {
   const entries: Array<{ rel: string; dev: number; ino: number; state: Record<string, unknown> }> = [];
@@ -21,7 +22,7 @@ function artifactManifest(path: string) {
 }
 
 export default async function run(log: (message: string) => void): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "termina-core-promotion-"));
+  const root = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "termina-core-promotion-")));
   try {
     const source = coreSessionFile(join(root, "source"), "session");
     mkdirSync(dirname(source), { recursive: true, mode: 0o700 });

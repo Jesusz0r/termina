@@ -11,7 +11,7 @@ import { extractAccountId } from "./providers/openai-codex.ts";
 import { type ProviderId } from "./providers/types.ts";
 import { ANTHROPIC_CLIENT_ID, GITHUB_ACCESS_TOKEN_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_TOKEN_URL, GITHUB_DEVICE_GRANT, GITHUB_DEVICE_URL, OPENAI_CODEX_CLIENT_ID, XAI_CLIENT_ID, XAI_DEFAULT_EXPIRES_MS, XAI_DEFAULT_INTERVAL_MS, XAI_DEVICE_GRANT, XAI_MIN_INTERVAL_MS, XAI_POLL_MARGIN_MS, XAI_SCOPE, XAI_SLOW_DOWN_MS, deviceUrl, isSupportedProvider, redirectUri, testLoopbackOverride, tokenUrl, validateCopilotApiUrl } from "./endpoints.ts";
 import { AUTH_REQUEST_CANCELLED, authFetch, authHttpError, isAuthHttpFailure, postForm, postJson } from "./http.ts";
-import { modifyProvider, readAuth, refreshFlights } from "./store.ts";
+import { modifyProvider, readAuth, refreshFlights, type AuthWriteOpts } from "./store.ts";
 
 const EXPIRE_MARGIN_MS = 300_000;
 
@@ -76,6 +76,7 @@ export function persistOauth(
   providerId: ProviderId,
   parsed: { access: string; refresh: string; expires: number },
   extra: Record<string, unknown> = {},
+  opts?: AuthWriteOpts,
 ): { ok: true } | { ok: false; error: string } {
   try {
     modifyProvider(providerId, (current) => {
@@ -93,7 +94,7 @@ export function persistOauth(
         expires: parsed.expires,
         ...(accountId ? { accountId } : {}),
       };
-    });
+    }, opts);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -101,12 +102,16 @@ export function persistOauth(
 }
 
 
-export function persistApiKey(providerId: ProviderId, key: string): { ok: true } | { ok: false; error: string } {
+export function persistApiKey(
+  providerId: ProviderId,
+  key: string,
+  opts?: AuthWriteOpts,
+): { ok: true } | { ok: false; error: string } {
   try {
     modifyProvider(providerId, (current) => {
       const cur = isRecord(current) ? current : {};
       return { ...cur, type: "api_key", key };
-    });
+    }, opts);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -219,6 +224,7 @@ export async function exchangeAnthropic(
   verifier: string,
   port: number,
   signal?: AbortSignal,
+  opts?: AuthWriteOpts,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const res = await postJson(
@@ -235,7 +241,7 @@ export async function exchangeAnthropic(
     const parsed = parseTokenResponse(res.payload);
     if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
-    return persistOauth("anthropic", parsed);
+    return persistOauth("anthropic", parsed, {}, opts);
   } catch (error) {
     return { ok: false, error: authHttpError(error) ?? "login failed: Anthropic token exchange failed" };
   }
@@ -247,6 +253,7 @@ export async function exchangeCodex(
   verifier: string,
   port: number,
   signal?: AbortSignal,
+  opts?: AuthWriteOpts,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const res = await postForm(
@@ -266,7 +273,7 @@ export async function exchangeCodex(
     const rec = isRecord(res.payload) ? res.payload : {};
     const idToken = typeof rec.id_token === "string" ? rec.id_token : "";
     const accountId = extractAccountId(parsed.access) || extractAccountId(idToken) || undefined;
-    return persistOauth("openai-codex", parsed, accountId ? { accountId } : {});
+    return persistOauth("openai-codex", parsed, accountId ? { accountId } : {}, opts);
   } catch (error) {
     return { ok: false, error: authHttpError(error) ?? "login failed: OpenAI token exchange failed" };
   }
@@ -277,6 +284,7 @@ export async function exchangeOpenRouter(
   code: string,
   verifier: string,
   signal?: AbortSignal,
+  opts?: AuthWriteOpts,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const res = await postJson(
@@ -288,7 +296,7 @@ export async function exchangeOpenRouter(
     const key = typeof rec.key === "string" ? rec.key : "";
     if (!res.ok || !key) return { ok: false, error: "login failed: OpenRouter key exchange failed" };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
-    return persistApiKey("openrouter", key);
+    return persistApiKey("openrouter", key, opts);
   } catch (error) {
     return { ok: false, error: authHttpError(error) ?? "login failed: OpenRouter key exchange failed" };
   }
@@ -303,6 +311,9 @@ function validateVerificationUri(raw: string): string {
     throw new Error("Untrusted verification URI in xAI OAuth response");
   }
   if (url.protocol !== "https:" && !testLoopbackOverride("TERMINA_TEST_DEVICE_URL")) {
+    throw new Error("Untrusted verification URI in xAI OAuth response");
+  }
+  if (!testLoopbackOverride("TERMINA_TEST_DEVICE_URL") && url.hostname !== "auth.x.ai" && !url.hostname.endsWith(".auth.x.ai")) {
     throw new Error("Untrusted verification URI in xAI OAuth response");
   }
   return url.href;

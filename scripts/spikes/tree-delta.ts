@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SnapshotStore, gitHead } from "../../electron/worldline-git.js";
 import { blobOid } from "../../electron/watcher.js";
+import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 /** Deterministic RNG so failures reproduce. */
 function mulberry32(seed: number): () => number {
@@ -36,7 +37,7 @@ export default async function run(log: (msg: string) => void) {
     log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + detail : ""}`);
   };
 
-  const work = mkdtempSync(join(tmpdir(), "wline-tree-delta-"));
+  const work = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "wline-tree-delta-")));
   const repo = join(work, "repo");
   // Spread files over nested directories of varying depth so deletions
   // cascade through several tree levels.

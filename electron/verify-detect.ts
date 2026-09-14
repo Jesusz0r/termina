@@ -45,10 +45,11 @@ export function detectTestFromPkg(pkgText: string): DetectedTestCommand | null {
     if (pick) {
       const body = (scripts[pick] ?? "").trim();
       if (!body) return null;
-      // A simple invocation runs directly; a shell body runs under sh.
-      const tokens = body.split(/\s+/);
-      if (tokens.some((t) => /[|&;<>()]/.test(t) || /[=$]/.test(t))) return { command: "sh", args: ["-c", body], label: `npm run ${pick}` };
-      return { command: tokens[0] ?? "true", args: tokens.slice(1), label: `npm run ${pick}` };
+      // npm scripts are shell by definition: preserve the immutable body
+      // verbatim through sh. Both executors (the verify shell path and
+      // sandboxed argv) run this form with exact shell semantics for
+      // quotes, escapes, wildcards, and metacharacters — no tokenizer.
+      return { command: "sh", args: ["-c", body], label: `npm run ${pick}` };
     }
   } catch {
     /* no package.json */
@@ -96,8 +97,12 @@ export async function benchmarkConfigFrom(store: SnapshotStore, stateId: string)
   try {
     const cfg = (JSON.parse(pkg.toString("utf8")) as { "termina"?: { benchmark?: { command?: string; unit?: string; direction?: string; samples?: number; thresholdPct?: number } } })["termina"]?.benchmark;
     if (!cfg?.command) return null;
+    const body = cfg.command.trim();
+    if (!body) return null;
     return {
-      command: cfg.command.split(/\s+/),
+      // The harness declaration is shell, like a package script: preserve
+      // it verbatim through sh instead of tokenizing it.
+      command: ["sh", "-c", body],
       unit: cfg.unit ?? "ms",
       direction: cfg.direction === "higher" ? "higher" : "lower",
       samples: Math.min(10, Math.max(3, cfg.samples ?? 5)),

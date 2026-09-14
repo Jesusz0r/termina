@@ -52,7 +52,7 @@ export function parseModelRef(
   if (slash > 0) {
     const head = trimmed.slice(0, slash);
     if (isSupportedProvider(head)) {
-      return { provider: head, model: trimmed.slice(slash + 1) };
+      return { provider: head, model: trimmed.slice(slash + 1) || DEFAULT_MODELS[head].main };
     }
   }
   if (trimmed.startsWith("claude") || trimmed.startsWith("haiku")) return { provider: "anthropic", model: trimmed };
@@ -189,7 +189,7 @@ export async function resolveAuth(providerId: string = "anthropic", signal?: Abo
       source: "env",
       envName: env.envName,
       baseUrl: baseUrl(providerId),
-      headers: requestHeaders(providerId, env.token),
+      headers: requestHeaders(providerId, env.token, { envName: env.envName }),
     };
   }
   return { ok: false, error: missingCredentialError(providerId) };

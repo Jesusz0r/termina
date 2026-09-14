@@ -46,7 +46,7 @@ export const THEME_TOKENS: Record<ThemeId, ThemeTokens> = {
     text: "#1f2328",
     textDim: "#57606a",
     accent: "#0969da",
-    onAccent: "#10130a",
+    onAccent: "#ffffff",
     green: "#1a7f37",
     yellow: "#9a6700",
     red: "#cf222e",

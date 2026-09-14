@@ -268,56 +268,75 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
         verifyGrowthTailer.stop();
       }
     
-      // Repeated retained generations must hit a bounded fail-closed boundary.
-      // Even a complete v2 proof cannot prove that an escaped POSIX descriptor
-      // will not append after the verification read, so the last identity anchor
-      // remains reachable and a later rotation is refused/quarantined.
-      const repeatedId = "term-repeated-retirement";
-      const repeatedActive = join(eventsDir, `${repeatedId}.jsonl`);
+    // Chained retained generations: once the newer generation proves fully
+    // drained, the older settled anchor retires and the terminal continues
+    // instead of hitting a lifetime cap. An escaped-descriptor late append
+    // to the retired inode can only surface as a stream gap, which still
+    // fails closed through the bounded gap budget.
+    const repeatedId = "term-repeated-retirement";
+    const repeatedActive = join(eventsDir, `${repeatedId}.jsonl`);
+    await writeFile(repeatedActive, "");
+    const repeatedTailer = makeTailer();
+    const repeatedReceived: number[] = [];
+    repeatedTailer.onEvent = (_id, event) => {
+      repeatedReceived.push(event.seq);
+      return true;
+    };
+    repeatedTailer.watch(repeatedId);
+    try {
+      let repeatedGeneration = randomUUID();
+      await appendFile(repeatedActive, record(repeatedId, 1, "checkpoint_result", repeatedGeneration) + record(repeatedId, 2, "checkpoint_result", repeatedGeneration));
+      await waitFor(() => repeatedReceived.length === 2, "repeated-retention setup was not delivered");
+      const firstSealed = join(eventsDir, `.${repeatedId}.jsonl.generation-2.sealed`);
+      await rename(repeatedActive, firstSealed);
       await writeFile(repeatedActive, "");
-      const repeatedTailer = makeTailer();
-      const repeatedReceived: number[] = [];
-      repeatedTailer.onEvent = (_id, event) => {
-        repeatedReceived.push(event.seq);
-        return true;
-      };
-      repeatedTailer.watch(repeatedId);
-      try {
-        let repeatedGeneration = randomUUID();
-        await appendFile(repeatedActive, record(repeatedId, 1, "checkpoint_result", repeatedGeneration) + record(repeatedId, 2, "checkpoint_result", repeatedGeneration));
-        await waitFor(() => repeatedReceived.length === 2, "repeated-retention setup was not delivered");
-        const firstSealed = join(eventsDir, `.${repeatedId}.jsonl.generation-2.sealed`);
-        await rename(repeatedActive, firstSealed);
-        await writeFile(repeatedActive, "");
-        await publishOwnerProof(firstSealed, repeatedId, repeatedGeneration, 2);
-        repeatedGeneration = randomUUID();
-        await waitFor(() => readdirSync(eventsDir).some((name) => name.startsWith(basename(firstSealed) + ".retained-")), "first retained generation was not anchored");
-        const firstRetained = readdirSync(eventsDir).filter((name) => name.startsWith(`.${repeatedId}.jsonl.`) && name.includes(".retained-"));
-        assert.equal(firstRetained.length, 1, "first retained generation allocated more than one anchor");
-    
-        await appendFile(repeatedActive, record(repeatedId, 3, "checkpoint_result", repeatedGeneration));
-        await waitFor(() => repeatedReceived.length === 3, "active delivery behind retained generation was blocked");
-        const secondSealed = join(eventsDir, `.${repeatedId}.jsonl.generation-3.sealed`);
-        await rename(repeatedActive, secondSealed);
-        await writeFile(repeatedActive, "");
-        await waitFor(() => repeatedTailer.isPaused(repeatedId) && existsSync(join(eventsDir, `.quarantine-${repeatedId}`)), "repeated retained cap did not fail closed");
-        assert.equal(existsSync(secondSealed), true, "quarantine deleted a possible second generation");
-        const repeatedRetained = readdirSync(eventsDir).filter((name) => name.startsWith(`.${repeatedId}.jsonl.`) && name.includes(".retained-"));
-        assert.equal(repeatedRetained.length, 1, "repeated retained cap allocated unbounded anchors");
-        const repeatedCursor = JSON.parse(await readFile(join(eventsDir, `.cursor-${repeatedId}.json`), "utf8"));
-        assert.equal(repeatedCursor.sequence, 3);
-        assert.equal(repeatedCursor.sealedSegment, repeatedRetained[0]);
-      } finally {
-        repeatedTailer.stop();
-      }
-    
-      const repeatedRestart = makeTailer();
-      repeatedRestart.watch(repeatedId);
-      try {
-        await waitFor(() => repeatedRestart.isPaused(repeatedId) && existsSync(join(eventsDir, `.quarantine-${repeatedId}`)), "repeated retained quarantine did not survive restart");
-      } finally {
-        repeatedRestart.stop();
-      }
+      await publishOwnerProof(firstSealed, repeatedId, repeatedGeneration, 2);
+      repeatedGeneration = randomUUID();
+      await waitFor(() => readdirSync(eventsDir).some((name) => name.startsWith(basename(firstSealed) + ".retained-")), "first retained generation was not anchored");
+      const firstRetained = readdirSync(eventsDir).filter((name) => name.startsWith(`.${repeatedId}.jsonl.`) && name.includes(".retained-"));
+      assert.equal(firstRetained.length, 1, "first retained generation allocated more than one anchor");
+
+      await appendFile(repeatedActive, record(repeatedId, 3, "checkpoint_result", repeatedGeneration));
+      await waitFor(() => repeatedReceived.length === 3, "active delivery behind retained generation was blocked");
+      const secondSealed = join(eventsDir, `.${repeatedId}.jsonl.generation-3.sealed`);
+      await rename(repeatedActive, secondSealed);
+      await writeFile(repeatedActive, "");
+      await publishOwnerProof(secondSealed, repeatedId, repeatedGeneration, 3);
+      await waitFor(() => readdirSync(eventsDir).some((name) => name.startsWith(basename(secondSealed) + ".retained-")), "chained generation was not anchored");
+      assert.equal(existsSync(join(eventsDir, `.quarantine-${repeatedId}`)), false, "chained rotation quarantined");
+      assert.equal(repeatedTailer.isPaused(repeatedId), false, "chained rotation paused the terminal");
+      const repeatedRetained = readdirSync(eventsDir).filter((name) => name.startsWith(`.${repeatedId}.jsonl.`) && name.includes(".retained-"));
+      assert.equal(repeatedRetained.length, 1, "chained rotation left more than one anchor");
+      assert.equal(firstRetained.includes(repeatedRetained[0]!), false, "chained rotation did not retire the older anchor");
+      await waitFor(() => {
+        try {
+          return JSON.parse(readFileSync(join(eventsDir, `.cursor-${repeatedId}.json`), "utf8")).sealedSegment === repeatedRetained[0];
+        } catch {
+          return false;
+        }
+      }, "chained cursor did not adopt the new anchor");
+      const repeatedCursor = JSON.parse(await readFile(join(eventsDir, `.cursor-${repeatedId}.json`), "utf8"));
+      assert.equal(repeatedCursor.sequence, 3);
+      assert.equal(repeatedCursor.sealedSegment, repeatedRetained[0]);
+    } finally {
+      repeatedTailer.stop();
+    }
+
+    const repeatedRestart = makeTailer();
+    const repeatedAfterRestart: number[] = [];
+    repeatedRestart.onEvent = (_id, event) => {
+      repeatedAfterRestart.push(event.seq);
+      return true;
+    };
+    repeatedRestart.watch(repeatedId);
+    try {
+      await appendFile(repeatedActive, record(repeatedId, 4, "checkpoint_result"));
+      await waitFor(() => repeatedAfterRestart.length === 1, "chained anchor did not survive restart");
+      assert.deepEqual(repeatedAfterRestart, [4]);
+      assert.equal(existsSync(join(eventsDir, `.quarantine-${repeatedId}`)), false, "chained restart quarantined");
+    } finally {
+      repeatedRestart.stop();
+    }
     
       // An unproven generation is retained exactly once. If another sealed
       // generation appears behind that anchor, admission is quarantined instead

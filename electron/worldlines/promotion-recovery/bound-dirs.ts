@@ -6,14 +6,14 @@
  */
 import { boundPromotionCopyFile, boundPromotionCreateDirectory, boundPromotionEnsureDirectory, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, type PromotionFsIdentity } from "../../worldline-git.js";
 import { promotionIdentityOf, refreshBoundPromotionDirectory } from "../bindings.js";
-import { errnoCode } from "../guards.js";
+import { errorCode } from "../../../shared/guards.js";
 import { MAX_AGENT_RESOURCE_BYTES, MAX_PROMOTION_SCAN_DEPTH, MAX_PROMOTION_SCAN_WORK_BYTES } from "../limits.js";
 import { type BoundPromotionDirectory, type ComparisonState, type PromotionDirectoryPlan, type PromotionRootProvenance } from "../types.js";
 import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { lstat as lstatPath, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { sha256Hex } from "./primitives.js";
+import { sha256Hex, splitPromotionComponents } from "./primitives.js";
 
 
 const PROMOTION_ROOT_PROVENANCE_VERSION = 1;
@@ -102,7 +102,7 @@ async function ensureRetainedRootParent(path: string, field: string): Promise<Bo
     try {
       info = await lstatPath(current, { bigint: true });
     } catch (error) {
-      if (errnoCode(error) !== "ENOENT") throw error;
+      if (errorCode(error) !== "ENOENT") throw error;
       const parent = dirname(current);
       if (parent === current) throw new Error(`${field} parent has no existing trusted ancestor`);
       if (missing.length >= MAX_PROMOTION_SCAN_DEPTH) throw new Error(`${field} parent exceeds its ${MAX_PROMOTION_SCAN_DEPTH}-level depth bound`);
@@ -190,7 +190,7 @@ async function readPromotionRootProvenance(
   try {
     info = await lstatPath(provenancePath, { bigint: true });
   } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
+    if (errorCode(error) === "ENOENT") return null;
     throw error;
   }
   if (!info.isFile() || info.isSymbolicLink() || info.size <= 0n || info.size > BigInt(PROMOTION_ROOT_PROVENANCE_MAX_BYTES)) {
@@ -349,7 +349,7 @@ export async function existingPromotionDirectoryIdentity(path: string, field: st
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${field} is not a real directory`);
     return { dev: String(info.dev), ino: String(info.ino) };
   } catch (error) {
-    if (errnoCode(error) === "ENOENT") return undefined;
+    if (errorCode(error) === "ENOENT") return undefined;
     throw error;
   }
 }
@@ -399,13 +399,15 @@ export async function ensureBoundRetainedRoot(
 }
 
 
-function promotionDirectoryComponents(root: string, target: string, field: string): string[] {
+export function promotionDirectoryComponents(root: string, target: string, field: string): string[] {
   const rootPath = resolve(root);
   const targetPath = resolve(target);
   const rel = relative(rootPath, targetPath);
   if (rel === "" || rel === ".") return [];
-  if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(`${field} escapes its bound root`);
-  const components = rel.split(/[\\/]+/).filter(Boolean);
+  if (isAbsolute(rel)) throw new Error(`${field} escapes its bound root`);
+  // No `..`-prefix shortcut: `..foo` is a valid name and the per-component
+  // check below is the exact escape test, matching the shared validator.
+  const components = splitPromotionComponents(rel);
   if (components.some((part) => !part || part === "." || part === ".." || part.includes("\0"))) {
     throw new Error(`invalid ${field} components`);
   }
@@ -465,7 +467,7 @@ export async function filesystemCanonicalPath(absPath: string): Promise<string> 
       const canonical = await realpath(current);
       return tail ? join(canonical, tail) : canonical;
     } catch (error) {
-      if (errnoCode(error) !== "ENOENT") throw error;
+      if (errorCode(error) !== "ENOENT") throw error;
       const parent = dirname(current);
       if (parent === current) return absPath;
       tail = tail ? join(basename(current), tail) : basename(current);

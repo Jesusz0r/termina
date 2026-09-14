@@ -3,6 +3,78 @@
 # Opens the given directory or file in Termina, defaulting to opening the app.
 set -eu
 
+# Best-effort canonical path for identity comparison: resolve symlinks
+# (bounded) and normalize the directory physically. Never fails; used only
+# to compare two paths, not for access decisions.
+canonical_path() {
+  local p="$1" n=0 link dir base
+  while [ -L "$p" ] && [ "$n" -lt 40 ]; do
+    link="$(readlink "$p" 2>/dev/null || true)"
+    [ -n "$link" ] || break
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="$(dirname "$p")/$link" ;;
+    esac
+    n=$((n + 1))
+  done
+  if [ -d "$p" ]; then
+    (cd "$p" 2>/dev/null && pwd -P) || echo "$p"
+  else
+    dir="$(dirname "$p")"
+    base="$(basename "$p")"
+    dir="$(cd "$dir" 2>/dev/null && pwd -P)" || { echo "$p"; return 0; }
+    echo "$dir/$base"
+  fi
+  return 0
+}
+
+# Normalize one CLI path argument to an absolute path. Shared by the macOS
+# and Linux launch branches.
+resolve_target_path() {
+  local target="$1" dir
+  if [ -d "$target" ]; then
+    (cd "$target" 2>/dev/null && pwd)
+  elif [ -f "$target" ]; then
+    dir="$(cd "$(dirname "$target")" 2>/dev/null && pwd)"
+    echo "$dir/$(basename "$target")"
+  else
+    echo "$(pwd)/$target"
+  fi
+}
+
+# Resolve the real application executable for non-macOS launches, once. An
+# explicit TERMINA_BIN wins unless it resolves back to this launcher (which
+# would exec forever). PATH discovery must never resolve back to this
+# launcher either: the installed launcher is itself named `termina`, so a
+# naive `command -v termina` self-executes forever.
+resolve_linux_target() {
+  local self="$0"
+  case "$self" in
+    */*) ;;
+    *) self="$(command -v "$self" 2>/dev/null | head -n 1 || true)" ;;
+  esac
+  local self_canonical=""
+  if [ -n "$self" ]; then
+    self_canonical="$(canonical_path "$self")"
+  fi
+  if [ -n "${TERMINA_BIN:-}" ] && [ -f "$TERMINA_BIN" ] && [ -x "$TERMINA_BIN" ]; then
+    if [ -z "$self_canonical" ] || [ "$(canonical_path "$TERMINA_BIN")" != "$self_canonical" ]; then
+      echo "$TERMINA_BIN"
+      return 0
+    fi
+  fi
+  local found
+  found="$(command -v termina 2>/dev/null | head -n 1 || true)"
+  if [ -z "$found" ] || [ ! -f "$found" ] || [ ! -x "$found" ]; then
+    return 1
+  fi
+  if [ -n "$self_canonical" ] && [ "$(canonical_path "$found")" = "$self_canonical" ]; then
+    return 1
+  fi
+  echo "$found"
+  return 0
+}
+
 resolve_app_path() {
   if [ -n "${TERMINA_APP_PATH:-}" ] && [ -d "$TERMINA_APP_PATH" ]; then
     echo "$TERMINA_APP_PATH"
@@ -101,44 +173,22 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
   fi
 
   TARGET="$1"
-  if [ -d "$TARGET" ]; then
-    ABSOLUTE_PATH="$(cd "$TARGET" 2>/dev/null && pwd)"
-  elif [ -f "$TARGET" ]; then
-    DIR="$(cd "$(dirname "$TARGET")" 2>/dev/null && pwd)"
-    ABSOLUTE_PATH="$DIR/$(basename "$TARGET")"
-  else
-    ABSOLUTE_PATH="$(pwd)/$TARGET"
-  fi
+  ABSOLUTE_PATH="$(resolve_target_path "$TARGET")"
 
   open -a "$APP_PATH" --args "$ABSOLUTE_PATH"
 else
+  LINUX_BIN="$(resolve_linux_target || true)"
+  if [ -z "$LINUX_BIN" ]; then
+    echo "Error: Termina executable not found (set TERMINA_BIN to the application executable)" >&2
+    exit 1
+  fi
+
   if [ "$#" -eq 0 ]; then
-    if command -v termina >/dev/null 2>&1; then
-      exec termina
-    elif [ -n "${TERMINA_BIN:-}" ] && [ -x "$TERMINA_BIN" ]; then
-      exec "$TERMINA_BIN"
-    else
-      echo "Error: Termina executable not found in PATH" >&2
-      exit 1
-    fi
+    exec "$LINUX_BIN"
   fi
 
   TARGET="$1"
-  if [ -d "$TARGET" ]; then
-    ABSOLUTE_PATH="$(cd "$TARGET" 2>/dev/null && pwd)"
-  elif [ -f "$TARGET" ]; then
-    DIR="$(cd "$(dirname "$TARGET")" 2>/dev/null && pwd)"
-    ABSOLUTE_PATH="$DIR/$(basename "$TARGET")"
-  else
-    ABSOLUTE_PATH="$(pwd)/$TARGET"
-  fi
+  ABSOLUTE_PATH="$(resolve_target_path "$TARGET")"
 
-  if command -v termina >/dev/null 2>&1; then
-    exec termina "$ABSOLUTE_PATH"
-  elif [ -n "${TERMINA_BIN:-}" ] && [ -x "$TERMINA_BIN" ]; then
-    exec "$TERMINA_BIN" "$ABSOLUTE_PATH"
-  else
-    echo "Error: Termina executable not found in PATH" >&2
-    exit 1
-  fi
+  exec "$LINUX_BIN" "$ABSOLUTE_PATH"
 fi

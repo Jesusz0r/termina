@@ -128,6 +128,7 @@ import {
   type PendingCandidateReady,
   type PromoteSeed,
   type PromotionDirectoryPlan,
+  type PromotionEntryState,
   type PromotionJournalAdmissionResult,
   type PromotionJournalBinding,
   type PromotionJournalPath,
@@ -146,7 +147,9 @@ import {
   MAX_STALE_SWEEP_BYTES,
   MAX_TEMPLATE_BYTES,
   MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
+  MAX_UNCERTAIN_SCAN_WORK_BYTES,
   MAX_WORLDLINE_FILE_BYTES,
+  PROMOTION_JOURNAL_CHECKPOINT_PATHS,
   READY_TIMEOUT_MS,
   RUNTIME_ALLOWLIST,
 } from "./limits.js";
@@ -650,14 +653,16 @@ export class WorldlineManager {
       return { ok: false, error: "the run has no captured task or pre-task anchor" };
     }
     if (cmp.engine !== "core") return { ok: false, error: "core is the only engine" };
-    // This comparison is replaced by the challenge pair, so its live
-    // candidates free their budget slots.
-    if (this.liveWorldlineCount() - cmp.candidates.size + 2 > 3) {
-      return { ok: false, error: "the live worldline budget is exhausted" };
-    }
     const uncertaintyAdmission = await this.acquireUncertainComparisonAdmission();
     if (!uncertaintyAdmission.ok) return { ok: false, error: uncertaintyAdmission.error };
     const admissionLease = uncertaintyAdmission.lease;
+    // Inside the admission gate: the owner serializes creators, so this sees
+    // every materialized rival. This comparison is replaced by the challenge
+    // pair, so its live candidates free their budget slots.
+    if (this.liveWorldlineCount() - cmp.candidates.size + 2 > 3) {
+      admissionLease.release();
+      return { ok: false, error: "the live worldline budget is exhausted" };
+    }
     this.challengeInFlight.add(comparisonId);
     try {
     // Snapshot the candidate head as the new reference A.
@@ -695,7 +700,6 @@ export class WorldlineManager {
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease: admissionLease,
       removeUncertainRequested: false,
       createdAt: Date.now(),
       candidates: new Map(),
@@ -785,8 +789,8 @@ export class WorldlineManager {
         action: "structured",
         content: [{ type: "text", text: challengedPrompt(payload.text, profile) }, ...payload.images],
       });
-      await this.launchCandidate(ncmp, nA, [], wHead.commit);
-      await this.launchCandidate(ncmp, nB, cmp.model && cmp.model.includes("/") ? ["--model", cmp.model] : [], ncmp.baseStateId);
+      await this.launchCandidate(ncmp, nA, wHead.commit);
+      await this.launchCandidate(ncmp, nB, ncmp.baseStateId);
       ncmp.phase = "running";
       ncmp.readyTimer = setTimeout(() => {
         if (ncmp.phase !== "running") return;
@@ -960,7 +964,7 @@ export class WorldlineManager {
   }
 
   /** Read one file from a candidate tree. */
-  async fileOf(comparisonId: string, label: "A" | "B", relPath: string): Promise<{ ok: boolean; content?: string; error?: string }> {
+  async fileOf(comparisonId: string, label: "A" | "B", relPath: string): Promise<{ ok: boolean; content?: string; mode?: string; error?: string }> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
@@ -974,7 +978,9 @@ export class WorldlineManager {
       const info = await stat(canonicalTarget);
       if (!info.isFile()) return { ok: false, error: "the candidate path is not a file" };
       if (info.size > MAX_WORLDLINE_FILE_BYTES) return { ok: false, error: "the candidate file is too large" };
-      return { ok: true, content: await readFile(canonicalTarget, "utf8") };
+      // Git modes for export: any exec bit means 100755, else 100644.
+      const mode = (info.mode & 0o111) !== 0 ? "100755" : "100644";
+      return { ok: true, content: await readFile(canonicalTarget, "utf8"), mode };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -1007,6 +1013,17 @@ export class WorldlineManager {
         worldsRoot: this.deps.worldsRoot,
         baseFileOf: (cid, relPath) => this.baseFileOf(cid, relPath),
         fileOf: (cid, candidateLabel, relPath) => this.fileOf(cid, candidateLabel, relPath),
+        captureHead: async (cid, candidateLabel) => {
+          const c = this.comparisons.get(cid);
+          const cd = c?.candidates.get(candidateLabel);
+          if (!c || !cd) return { ok: false, error: "candidate not found" };
+          try {
+            const head = await this.deps.captureHead(cd.dir, join(cd.dir, ".git"), c.baseStateId);
+            return { ok: true, commit: head.commit, tree: head.tree };
+          } catch (err) {
+            return { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        },
       },
       comparisonId,
       label,
@@ -1105,7 +1122,6 @@ export class WorldlineManager {
     }
     if (!run.startStateId || !run.settledStateId) return { ok: false, error: "the run has no complete source checkpoints" };
     if (!run.sessionBranchFile) return { ok: false, error: "the run has no session branch copy" };
-    if (this.liveWorldlineCount() + 2 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
     // The fork preflight (WORLDLINES §4): repository, platform, disk.
     const pre = await this.deps.preflight();
     if (!pre.ok) return { ok: false, error: pre.reasons.join("; ") };
@@ -1149,6 +1165,12 @@ export class WorldlineManager {
 
     const uncertaintyAdmission = await this.acquireUncertainComparisonAdmission();
     if (!uncertaintyAdmission.ok) return { ok: false, error: uncertaintyAdmission.error };
+    // Inside the admission gate: the owner serializes creators, so this sees
+    // every materialized rival instead of racing it.
+    if (this.liveWorldlineCount() + 2 > 3) {
+      uncertaintyAdmission.lease.release();
+      return { ok: false, error: "the live worldline budget is exhausted" };
+    }
     let cmp: ComparisonState;
     try {
       cmp = await this.createComparison(run, opts.challengeProfile, uncertaintyAdmission.lease);
@@ -1226,7 +1248,6 @@ export class WorldlineManager {
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease,
       removeUncertainRequested: false,
       createdAt: Date.now(),
       candidates: new Map(),
@@ -1518,16 +1539,12 @@ export class WorldlineManager {
   /** Launch both candidate agent terminals inside their sandboxes. */
   private async launchCandidates(cmp: ComparisonState, run: RunRecord): Promise<void> {
     for (const cand of cmp.candidates.values()) {
-      // Candidate B replays with the captured model and thinking level.
-      // A bare model id is ambiguous across providers; pass only the
-      // provider-qualified form.
-      const extra: string[] = [];
-      if (cand.label === "B" && run.model && run.model.includes("/")) extra.push("--model", run.model);
-      if (cand.label === "B" && run.thinkingLevel) extra.push("--thinking", run.thinkingLevel);
+      // Both candidates inherit the captured model and thinking level
+      // through the candidate env; B additionally replays the task.
       // The moment chain of each candidate seeds from its own head: A is
       // the settled state, B is the run start.
       const head = cand.label === "A" ? run.settledStateId : run.startStateId;
-      await this.launchCandidate(cmp, cand, extra, head);
+      await this.launchCandidate(cmp, cand, head);
     }
   }
 
@@ -1572,7 +1589,6 @@ export class WorldlineManager {
   private async candidateLaunch(
     cmp: ComparisonState,
     cand: CandidateState,
-    _extraArgs: string[],
   ): Promise<{ cmd: string; args: string[]; env: Record<string, string | undefined> }> {
     await refreshComparisonBindings(cmp);
     // A moment comparison has a single candidate: no sibling to deny (the
@@ -1630,6 +1646,9 @@ export class WorldlineManager {
       ...(model && cut > 0
         ? { TERMINA_CORE_PROVIDER: model.slice(0, cut), TERMINA_CORE_MODEL: model.slice(cut + 1) }
         : {}),
+      // Candidates replay the recorded effort, like primary spawns. There are
+      // no --model/--thinking CLI flags; the env is the contract.
+      ...(cmp.thinkingLevel ? { TERMINA_CORE_EFFORT: cmp.thinkingLevel } : {}),
     };
     const launch = candidateSandboxLaunch(cand.profilePath, [
       this.deps.electronExecPath,
@@ -2110,31 +2129,27 @@ export class WorldlineManager {
         throw error;
       }
     };
+    const removeJournal = async (): Promise<void> => {
+      if (!journalBinding) return;
+      // Cleanup failure never fails the promotion: the journal is retained
+      // as evidence and counted by the next admission.
+      await boundPromotionRemoveTree({
+        root: journalBinding.root.path,
+        rootIdentity: promotionIdentityOf(journalBinding.root),
+        components: [journalBinding.name],
+        parentIdentity: promotionIdentityOf(journalBinding.root),
+        expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
+      }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
+    };
     const fail = async (message: string): Promise<{ ok: false; error: string }> => {
       releaseLeases();
-      if (journalBinding) {
-        await boundPromotionRemoveTree({
-          root: journalBinding.root.path,
-          rootIdentity: promotionIdentityOf(journalBinding.root),
-          components: [journalBinding.name],
-          parentIdentity: promotionIdentityOf(journalBinding.root),
-          expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-        }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
-      }
+      await removeJournal();
       await this.finishPromotion(comparisonId, false, message);
       return { ok: false, error: message };
     };
     const askConfirm = async (message: string): Promise<{ ok: false; confirm: string }> => {
       releaseLeases();
-      if (journalBinding) {
-        await boundPromotionRemoveTree({
-          root: journalBinding.root.path,
-          rootIdentity: promotionIdentityOf(journalBinding.root),
-          components: [journalBinding.name],
-          parentIdentity: promotionIdentityOf(journalBinding.root),
-          expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-        }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
-      }
+      await removeJournal();
       await this.finishPromotion(comparisonId, false, null);
       return { ok: false, confirm: message };
     };
@@ -2170,7 +2185,9 @@ export class WorldlineManager {
       const pPaths = await store.treePaths(pState.commit);
       const parentPlans = new Map<string, PromotionDirectoryPlan>();
       const parentPaths = new Set<string>();
-      for (const rel of [...changed.map((entry) => entry.relPath), ...pPaths]) {
+      // Only touched parents: every effected write or delete below names a
+      // candidate-changed path, so the full primary tree needs no probing.
+      for (const rel of changed.map((entry) => entry.relPath)) {
         parentPaths.add(resolve(dirname(join(this.deps.primaryRoot, rel))));
       }
       for (const parentPath of parentPaths) {
@@ -2221,11 +2238,52 @@ export class WorldlineManager {
       });
       const promotionBudget = await createPromotionOperationBudget(mergedDir);
       const mergedPaths = await store.treePaths(merge.tree);
+      // The journal covers the touched set only: candidate changes that
+      // survive the merge, plus primary files the merge deletes. Untouched
+      // files already equal the merged bytes; reinstalling them rewrites
+      // every mtime and trips the path cap on large repos.
+      const changedWriteRels = new Set(changed.filter((entry) => entry.status !== "deleted").map((entry) => entry.relPath));
+      const writeRels = [...mergedPaths].filter((rel) => changedWriteRels.has(rel)).sort();
+      const deleteRels = [...pPaths].filter((rel) => !mergedPaths.has(rel)).sort();
+      // Fail fast before any before-image copy or journal growth: recovery
+      // never accepts more paths than this.
+      if (writeRels.length + deleteRels.length > 2000) throw new Error("the promotion touches too many paths");
       const beforeBinding = await ensureBoundChildDirectory(journalBinding!.directory, "before", true);
       const beforeDir = beforeBinding.path;
       const canonicalPrimaryRoot = await this.deps.canonicalPath(this.deps.primaryRoot);
       const paths: PromotionJournalPath[] = [];
-      for (const rel of [...mergedPaths].sort()) {
+      // Gathered records accumulate in memory; the journal persists at
+      // bounded checkpoints. Every checkpoint holds complete crash-rollback
+      // inputs: a record joins `paths` only after its before-image identity
+      // is captured, and the failed record never joins at all.
+      const checkpointJournal = async (): Promise<void> => {
+        journal.paths = paths;
+        await writePromotionJournal(journalBinding!, journal);
+      };
+      const maybeCheckpointJournal = async (): Promise<void> => {
+        if (paths.length % PROMOTION_JOURNAL_CHECKPOINT_PATHS === 0) await checkpointJournal();
+      };
+      // Copy one before-image into journal evidence and attach its identity
+      // to the record. Shared by the write and delete gather loops.
+      const copyBeforeImage = async (abs: string, rel: string, beforeState: PromotionEntryState, record: PromotionJournalPath): Promise<void> => {
+        const sourceParentPlan = parentPlans.get(resolve(dirname(abs)));
+        if (!sourceParentPlan) throw new Error(`promotion before-image parent was not pre-bound: ${dirname(abs)}`);
+        const sourceParent = await promotionParentIdentity(abs, canonicalPrimaryRoot, this.deps.canonicalPath, sourceParentPlan);
+        const sourceExpected = await boundPromotionExpectedLeaf(abs, beforeState, `promotion before-image ${rel}`);
+        const copied = await copyBoundBeforeImage(
+          primaryRootBinding,
+          promotionSourceComponents(rel),
+          { path: sourceParent.path, dev: String(sourceParent.dev), ino: String(sourceParent.ino), capability: sourceParent.capability },
+          journalBinding!.directory,
+          ["before", ...promotionSourceComponents(rel)],
+          sourceExpected,
+        );
+        record.beforeImageIdentity = copied.identity;
+        if (copied.state.type !== "file") throw new Error(`before-image copy changed type at ${rel}`);
+        record.beforeImageSize = copied.state.size;
+      };
+      try {
+      for (const rel of writeRels) {
         const abs = await promotionDestination(this.deps.primaryRoot, canonicalPrimaryRoot, rel, this.deps.canonicalPath);
         const before = await readPromotionEntry(abs);
         const after = await readPromotionEntry(join(mergedDir, rel));
@@ -2241,31 +2299,14 @@ export class WorldlineManager {
           beforeState: before.state,
           afterState: after.state,
         };
-        paths.push(record);
-        journal.paths = paths;
-        await writePromotionJournal(journalBinding!, journal);
         if (before.state.type === "file") {
-          reservePromotionOperationBytes(promotionBudget, before.bytes!.byteLength, `before-image ${rel}`);
-          const sourceParentPlan = parentPlans.get(resolve(dirname(abs)));
-          if (!sourceParentPlan) throw new Error(`promotion before-image parent was not pre-bound: ${dirname(abs)}`);
-          const sourceParent = await promotionParentIdentity(abs, canonicalPrimaryRoot, this.deps.canonicalPath, sourceParentPlan);
-          const sourceExpected = await boundPromotionExpectedLeaf(abs, before.state, `promotion before-image ${rel}`);
-          const copied = await copyBoundBeforeImage(
-            primaryRootBinding,
-            promotionSourceComponents(rel),
-            { path: sourceParent.path, dev: String(sourceParent.dev), ino: String(sourceParent.ino), capability: sourceParent.capability },
-            journalBinding!.directory,
-            ["before", ...promotionSourceComponents(rel)],
-            sourceExpected,
-          );
-          record.beforeImageIdentity = copied.identity;
-          if (copied.state.type !== "file") throw new Error(`before-image copy changed type at ${rel}`);
-          record.beforeImageSize = copied.state.size;
-          journal.paths = paths;
-          await writePromotionJournal(journalBinding!, journal);
+          reservePromotionOperationBytes(promotionBudget, before.size!, `before-image ${rel}`);
+          await copyBeforeImage(abs, rel, before.state, record);
         }
+        paths.push(record);
+        await maybeCheckpointJournal();
       }
-      for (const rel of [...pPaths].filter((p) => !mergedPaths.has(p)).sort()) {
+      for (const rel of deleteRels) {
         const abs = await promotionDestination(this.deps.primaryRoot, canonicalPrimaryRoot, rel, this.deps.canonicalPath);
         const before = await readPromotionEntry(abs);
         if (!isRestorablePromotionState(before.state)) throw new Error(`unsupported filesystem object in promotion: ${rel}`);
@@ -2278,36 +2319,26 @@ export class WorldlineManager {
           beforeState: before.state,
           afterState: { type: "missing" },
         };
-        paths.push(record);
-        journal.paths = paths;
-        await writePromotionJournal(journalBinding!, journal);
         if (before.state.type === "file") {
-          reservePromotionOperationBytes(promotionBudget, before.bytes!.byteLength, `before-image ${rel}`);
+          reservePromotionOperationBytes(promotionBudget, before.size!, `before-image ${rel}`);
           // A deletion is retired into journal-owned evidence during apply;
           // reserve that second file copy as well so the operation cap covers
           // both rollback input and preservation-first retention.
-          reservePromotionOperationBytes(promotionBudget, before.bytes!.byteLength, `retained delete ${rel}`);
-          const sourceParentPlan = parentPlans.get(resolve(dirname(abs)));
-          if (!sourceParentPlan) throw new Error(`promotion before-image parent was not pre-bound: ${dirname(abs)}`);
-          const sourceParent = await promotionParentIdentity(abs, canonicalPrimaryRoot, this.deps.canonicalPath, sourceParentPlan);
-          const sourceExpected = await boundPromotionExpectedLeaf(abs, before.state, `promotion before-image ${rel}`);
-          const copied = await copyBoundBeforeImage(
-            primaryRootBinding,
-            promotionSourceComponents(rel),
-            { path: sourceParent.path, dev: String(sourceParent.dev), ino: String(sourceParent.ino), capability: sourceParent.capability },
-            journalBinding!.directory,
-            ["before", ...promotionSourceComponents(rel)],
-            sourceExpected,
-          );
-          record.beforeImageIdentity = copied.identity;
-          if (copied.state.type !== "file") throw new Error(`before-image copy changed type at ${rel}`);
-          record.beforeImageSize = copied.state.size;
-          journal.paths = paths;
-          await writePromotionJournal(journalBinding!, journal);
+          reservePromotionOperationBytes(promotionBudget, before.size!, `retained delete ${rel}`);
+          await copyBeforeImage(abs, rel, before.state, record);
         }
+        paths.push(record);
+        await maybeCheckpointJournal();
       }
-      if (paths.length > 2000) throw new Error("the promotion touches too many paths");
-      journal.paths = paths;
+      } catch (err) {
+        // Persist the complete prefix for crash-rollback evidence, then let
+        // the outer handler roll back and report the original failure.
+        await checkpointJournal().catch((checkpointError) => console.warn(`[worldline] promotion error checkpoint retained: ${checkpointError instanceof Error ? checkpointError.message : String(checkpointError)}`));
+        throw err;
+      }
+      // Gather-to-session phase transition: persist the tail past the last
+      // periodic checkpoint.
+      await checkpointJournal();
       const retainedBinding = paths.some((p) => p.kind === "delete" && p.beforeState!.type !== "missing")
         ? await ensureBoundChildDirectory(journalBinding!.directory, "retained", true)
         : null;
@@ -2340,6 +2371,12 @@ export class WorldlineManager {
       if ((await this.deps.workspaceAt(this.deps.primaryRoot))?.generation !== leaseP.generation) {
         return fail("the primary changed during promotion apply");
       }
+      // Mirror fence for the candidate: the agent writes past its lease, so a
+      // running candidate that moved after capture must fail, not promote
+      // torn bytes. A vanished workspace fails the same way.
+      if (candWs && (await this.deps.workspaceAt(target.root))?.generation !== candGen) {
+        return fail("the candidate changed during promotion apply");
+      }
 
       const nativePrimaryRootIdentity = promotionIdentityOf(primaryRootBinding);
       const nativeMergedRootIdentity = promotionIdentityOf(mergedBinding);
@@ -2366,11 +2403,10 @@ export class WorldlineManager {
           const parentIdentity = promotionIdentityOf(destinationParent);
           if (p.kind === "delete") {
             const retainedName = basename(p.retainedName ?? `.termina-promotion-retained-${sha256Hex(Buffer.from(`${opId}:${p.rel}`)).slice(0, 24)}.tmp`);
-            if (!p.retainedName) {
-              p.retainedName = retainedName;
-              journal.paths = paths;
-              await writePromotionJournal(journalBinding!, journal);
-            }
+            // Retained names accumulate in memory and ride on the applied-phase
+            // write below: crash recovery re-derives an unpersisted name
+            // deterministically from opId and rel.
+            p.retainedName = retainedName;
             const result = await boundPromotionTransition({
               primaryRoot: this.deps.primaryRoot,
               primaryRootIdentity: nativePrimaryRootIdentity,
@@ -2477,15 +2513,7 @@ export class WorldlineManager {
       } catch (refreshError) {
         const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);
         releaseLeases();
-        if (journalBinding) {
-          await boundPromotionRemoveTree({
-            root: journalBinding.root.path,
-            rootIdentity: promotionIdentityOf(journalBinding.root),
-            components: [journalBinding.name],
-            parentIdentity: promotionIdentityOf(journalBinding.root),
-            expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-          }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
-        }
+        await removeJournal();
         return {
           ok: false,
           error: `the source was promoted, but the workspace snapshot was not refreshed: ${refreshMessage}`,
@@ -2493,15 +2521,7 @@ export class WorldlineManager {
         };
       }
       releaseLeases();
-      if (journalBinding) {
-        await boundPromotionRemoveTree({
-          root: journalBinding.root.path,
-          rootIdentity: promotionIdentityOf(journalBinding.root),
-          components: [journalBinding.name],
-          parentIdentity: promotionIdentityOf(journalBinding.root),
-          expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-        });
-      }
+      await removeJournal();
       return { ok: true, terminalId: opened.terminalId };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2515,15 +2535,7 @@ export class WorldlineManager {
         }
         releaseLeases();
         await this.finishPromotion(comparisonId, true, null);
-        if (journalBinding) {
-          await boundPromotionRemoveTree({
-            root: journalBinding.root.path,
-            rootIdentity: promotionIdentityOf(journalBinding.root),
-            components: [journalBinding.name],
-            parentIdentity: promotionIdentityOf(journalBinding.root),
-            expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
-          }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
-        }
+        await removeJournal();
         const suffix = snapshotError
           ? ` the workspace snapshot was not refreshed: ${snapshotError}`
           : ` the new session did not open: ${message}`;
@@ -2579,12 +2591,17 @@ export class WorldlineManager {
       sourceRunId: rootRun.id,
       baseStateId: rootRun.startStateId,
     };
-    if (this.liveWorldlineCount() + 1 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
     const store = await this.deps.getStore();
     if (!store) return { ok: false, error: "recording is not available" };
     const uncertaintyAdmission = await this.acquireUncertainComparisonAdmission();
     if (!uncertaintyAdmission.ok) return { ok: false, error: uncertaintyAdmission.error };
     const admissionLease = uncertaintyAdmission.lease;
+    // Inside the admission gate: the owner serializes creators, so this sees
+    // every materialized rival instead of racing it.
+    if (this.liveWorldlineCount() + 1 > 3) {
+      admissionLease.release();
+      return { ok: false, error: "the live worldline budget is exhausted" };
+    }
     let id: string;
     let dir: string;
     let rootIdentity: PromotionFsIdentity;
@@ -2629,7 +2646,6 @@ export class WorldlineManager {
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease: admissionLease,
       removeUncertainRequested: false,
       createdAt: Date.now(),
       candidates: new Map(),
@@ -2689,13 +2705,11 @@ export class WorldlineManager {
         await this.copyCoreResources(cmp);
       }
       this.ensureComparisonLive(cmp);
-      // A moment candidate starts with no prompt: the user continues it.
-      // Replay the captured model and thinking level of that moment.
+      // A moment candidate starts with no prompt: the user continues it. It
+      // inherits the captured model and thinking level of that moment
+      // through the candidate env.
       await this.writeControl(cand, { opId: randomUUID(), action: "none" });
-      const extra: string[] = [];
-      if (opts.model && opts.model.includes("/")) extra.push("--model", opts.model);
-      if (opts.thinkingLevel) extra.push("--thinking", opts.thinkingLevel);
-      await this.launchCandidate(cmp, cand, extra, opts.stateId);
+      await this.launchCandidate(cmp, cand, opts.stateId);
       cmp.phase = "running";
       cmp.readyTimer = setTimeout(() => {
         if (cmp.phase !== "running") return;
@@ -2713,7 +2727,7 @@ export class WorldlineManager {
   }
 
   /** Launch one candidate inside its sandbox (A or a moment candidate). */
-  private async launchCandidate(cmp: ComparisonState, cand: CandidateState, extraArgs: string[], headStateId: string | null): Promise<void> {
+  private async launchCandidate(cmp: ComparisonState, cand: CandidateState, headStateId: string | null): Promise<void> {
     const attempt: CandidateLaunchAttempt = {
       comparisonId: cmp.id,
       label: cand.label,
@@ -2739,7 +2753,7 @@ export class WorldlineManager {
 
     const operation = (async (): Promise<void> => {
       this.ensureCandidateLaunchLive(cmp, cand, attempt);
-      const { cmd, args, env } = await this.candidateLaunch(cmp, cand, extraArgs);
+      const { cmd, args, env } = await this.candidateLaunch(cmp, cand);
       this.ensureCandidateLaunchLive(cmp, cand, attempt);
       cand.headStateId = headStateId ?? cand.headStateId ?? cmp.baseStateId;
       const workspaceId = this.deps.createCandidateWorkspace(cand.dir, cand.headStateId, cmp.id);
@@ -3171,7 +3185,7 @@ export class WorldlineManager {
     let launchedPid: number | null = null;
     let launchedLstart: string | null = null;
     try {
-      const { cmd, args, env } = await this.candidateLaunch(cmp, cand, []);
+      const { cmd, args, env } = await this.candidateLaunch(cmp, cand);
       // A reopen gets a new control operation. Matching this operation is the
       // durable identity boundary that excludes a stale/replayed ready line
       // from the previous candidate process.
@@ -3500,7 +3514,6 @@ export class WorldlineManager {
       uncertainSessionArtifacts: [...manifest.uncertainSessionArtifacts],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease: null,
       removeUncertainRequested: false,
       createdAt: manifest.createdAt,
       candidates,
@@ -3518,7 +3531,9 @@ export class WorldlineManager {
   private liveWorldlineCount(): number {
     let n = 0;
     for (const cmp of this.comparisons.values()) {
-      if (cmp.phase === "running" || cmp.phase === "creating") n += cmp.candidates.size;
+      // A draining comparison still holds trees and processes until its
+      // teardown releases them; only a finished drain frees budget.
+      if (cmp.phase === "running" || cmp.phase === "creating" || cmp.teardownPromise !== null) n += cmp.candidates.size;
     }
     return n;
   }
@@ -3540,6 +3555,7 @@ export class WorldlineManager {
         worldsRoot,
         MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
         `worldline root contains too many entries (${MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES}); resolve retained recovery evidence before retrying`,
+        MAX_UNCERTAIN_SCAN_WORK_BYTES,
       );
     } catch {
       return;
@@ -3578,13 +3594,9 @@ export class WorldlineManager {
         continue;
       }
       for (const candidate of Object.values(manifest.candidates)) {
-        if (candidate.pid !== null && candidate.lstart && (await processStartMatches(candidate.pid, candidate.lstart))) {
-          try {
-            process.kill(-candidate.pid, "SIGKILL");
-          } catch {
-            /* The process can exit before the signal. */
-          }
-        }
+        // Post-crash orphans get the same TERM grace as live teardown, so a
+        // clean shutdown can still write its settled markers.
+        await this.terminateCandidateGroup(candidate.pid, candidate.lstart);
       }
       if (manifest.status === "uncertain") {
         // Keep the comparison addressable after restart. It is intentionally

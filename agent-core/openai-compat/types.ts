@@ -27,8 +27,8 @@ export type ProviderUsage = {
   output: number | null;
   reasoning: number | null;
   /**
-   * Exact billed USD as reported by the provider (xAI `cost_in_usd_ticks`).
-   * Absent when the provider reports no cost.
+   * Exact billed USD as reported by the provider (xAI `cost_in_usd_ticks`,
+   * OpenRouter `cost`). Absent when the provider reports no cost.
    */
   reportedUsd?: number | null;
 };

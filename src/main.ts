@@ -65,7 +65,7 @@ import {
 } from "./worldline-project-state";
 import { CHALLENGE_PROFILES, cssFontFamily, defaultAppPreferences, isTuiOwnedShortcut, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
+import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
 type EditorManagerInstance = import("./editor").EditorManager;
 type ReviewViewInstance = import("./review").ReviewView;
@@ -169,13 +169,17 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
   statusEl.className = "tab-status";
   statusEl.title = "unseen verify failure";
   tabEl.append(statusEl, nameEl, closeEl);
-  tabEl.addEventListener("click", () => void window.termina.projectActivate(project.id));
+  tabEl.addEventListener("click", () => {
+    void window.termina.projectActivate(project.id).catch((err) => {
+      toast(`could not switch projects: ${(err as Error).message}`, "warning");
+    });
+  });
   closeEl.addEventListener("click", (e) => {
     e.stopPropagation();
     void window.termina.projectClose(project.id).then((res) => {
       if (res.ok) removeProjectView(project.id);
       else if (!res.cancelled) toast(res.error ?? "could not close the project", "warning");
-    });
+    }).catch((err) => toast(`could not close the project: ${(err as Error).message}`, "warning"));
   });
   projectTabsEl.appendChild(tabEl);
 
@@ -606,10 +610,12 @@ function hydrateWorldlines(projectId: string | null): void {
 
 worldlinesView.bind({
   onCompareBase: (comparisonId, label, relPath, absPath) => {
-    void ensureReviewView().then((view) => view.showCandidateDiff(comparisonId, label, relPath, absPath));
+    void ensureReviewView().then((view) => view.showCandidateDiff(comparisonId, label, relPath, absPath))
+      .catch((err) => toast(`could not open Change Review: ${(err as Error).message}`, "error"));
   },
   onCompareAB: (comparisonId, relPath) => {
-    void ensureReviewView().then((view) => view.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A")));
+    void ensureReviewView().then((view) => view.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A")))
+      .catch((err) => toast(`could not open Change Review: ${(err as Error).message}`, "error"));
   },
   onOpenFile: (absPath) => void openFileSmart(absPath, false),
   onOpenTerminal: (terminalId) => activatePaneWhenReady(terminalId),
@@ -814,7 +820,7 @@ function applyTerminalPreferences(view: PtyView, prefs: AppPreferences): void {
 const settingsView = new SettingsView({
   onChange: (next) => applyPreferences(next, true, false),
   onReset: (next) => applyPreferences(next, true, false, true),
-  onOpen: () => void window.termina.setKeyboardShortcuts(emptyShortcuts()),
+  onOpen: () => void window.termina.setKeyboardShortcuts(emptyShortcuts()).catch(() => undefined),
   onClose: (next) => applyPreferences(next, true, true),
 });
 
@@ -855,8 +861,10 @@ function createPaneShell(instanceId: string): Pane {
 
   const view = new PtyView(
     container,
-    (data) => void window.termina.writeTerminal(instanceId, data),
-    (cols, rows) => void window.termina.resizeTerminal(instanceId, cols, rows),
+    // Per-keystroke fire-and-forget: failures stay silent (a toast per keystroke
+    // would spam), but the rejection must still be caught, never unhandled.
+    (data) => void window.termina.writeTerminal(instanceId, data).catch(() => undefined),
+    (cols, rows) => void window.termina.resizeTerminal(instanceId, cols, rows).catch(() => undefined),
     (text) => void window.termina.writeClipboard(text).catch(() => undefined),
     () => window.termina.pasteTerminal(instanceId),
     (message) => toast(message, "error"),
@@ -966,7 +974,9 @@ function applyTypeBadge(pane: Pane): void {
   }
 }
 
-/** Focus a terminal once its pane exists (Open / Promote can race instances). */
+/** Focus a terminal once its pane exists (Open / Promote can race instances).
+ *  Deliberately last-wins: rapid Open/Promote activations end on the newest
+ *  intent, and queueing would only flicker through superseded panes first. */
 let pendingActivateId: string | null = null;
 function activatePaneWhenReady(instanceId: string): void {
   pendingActivateId = instanceId;
@@ -1085,7 +1095,7 @@ btnForkRun.addEventListener("click", () => {
   void window.termina.forkRun(run.id).then((res) => {
     // Success needs no toast: the new candidate cards are the confirmation.
     if (!res.ok) toast(`Fork Run failed: ${res.error ?? "unknown error"}`, "warning");
-  });
+  }).catch((err) => toast(`Fork Run failed: ${(err as Error).message}`, "warning"));
 });
 
 for (const button of challengeRunButtons) {
@@ -1101,7 +1111,7 @@ for (const button of challengeRunButtons) {
     void window.termina.challengeRun(run.id, profile).then((res) => {
       // Success needs no toast: the challenger cards are the confirmation.
       if (!res.ok) toast(`Challenge failed: ${res.error ?? "unknown error"}`, "warning");
-    });
+    }).catch((err) => toast(`Challenge failed: ${(err as Error).message}`, "warning"));
   });
 }
 
@@ -1134,7 +1144,11 @@ async function closePane(instanceId: string): Promise<void> {
   pane.view.dispose();
   pane.container.remove();
   pane.tabEl.remove();
-  await window.termina.closeTerminal(instanceId, terminalGeneration);
+  try {
+    await window.termina.closeTerminal(instanceId, terminalGeneration);
+  } catch (err) {
+    toast(`could not close the terminal: ${(err as Error).message}`, "warning");
+  }
   setTimeout(() => closingPanes.delete(instanceId), 3000);
   if (activeId === instanceId) {
     // Prefer another terminal of the same project. Never surface a
@@ -1272,7 +1286,9 @@ function renderVerify(pane: Pane): void {
     return;
   }
   verifyBadge.hidden = false;
-  verifyBadge.className = `verify-badge state-${v.state}`;
+  // IPC-shaped but cosmetic-only: an unknown state falls back to cancelled.
+  const badgeState = v.state === "pass" || v.state === "fail" || v.state === "timeout" || v.state === "running" ? v.state : "cancelled";
+  verifyBadge.className = `verify-badge state-${badgeState}`;
   verifyBadge.replaceChildren();
   if (v.state === "running") {
     // Loader: a spinner and a label show that the run is running.
@@ -1305,11 +1321,15 @@ function commitSubjectFromPrompt(text: string | null | undefined): string {
 async function copyCommitSubject(): Promise<void> {
   const pane = activeId ? panes.get(activeId) : undefined;
   if (!pane) return;
-  if (!pane.runs) pane.runs = await window.termina.getRuns(pane.instanceId);
-  const subject = commitSubjectFromPrompt(lastCompletedRun(pane)?.promptText);
-  const res = await window.termina.writeClipboard(subject);
-  if (res.ok) toast("Copied commit subject — Termina does not write Git", "info");
-  else toast(res.error ?? "could not copy", "warning");
+  try {
+    if (!pane.runs) pane.runs = await window.termina.getRuns(pane.instanceId);
+    const subject = commitSubjectFromPrompt(lastCompletedRun(pane)?.promptText);
+    const res = await window.termina.writeClipboard(subject);
+    if (res.ok) toast("Copied commit subject — Termina does not write Git", "info");
+    else toast(res.error ?? "could not copy", "warning");
+  } catch (err) {
+    toast(`could not copy: ${(err as Error).message}`, "warning");
+  }
 }
 
 async function focusProjectShell(): Promise<void> {
@@ -1321,9 +1341,13 @@ async function focusProjectShell(): Promise<void> {
     activatePane(existing.instanceId);
     return;
   }
-  const res = await window.termina.createTerminal({ type: "shell", projectId: projectId ?? undefined });
-  if (!res.ok) toast(res.error ?? "could not open a shell", "warning");
-  else if (res.id && panes.has(res.id)) activatePane(res.id);
+  try {
+    const res = await window.termina.createTerminal({ type: "shell", projectId: projectId ?? undefined });
+    if (!res.ok) toast(res.error ?? "could not open a shell", "warning");
+    else if (res.id && panes.has(res.id)) activatePane(res.id);
+  } catch (err) {
+    toast(`could not open a shell: ${(err as Error).message}`, "warning");
+  }
 }
 
 // ---------------------------------------------------------------- commands --
@@ -1354,6 +1378,23 @@ async function openFileSmart(
   line?: number,
   column?: number,
 ): Promise<void> {
+  // Every caller floats this call: nothing inside may ever reject. The inner
+  // function reports its own failures; this wrapper catches sync surprises
+  // (routing, reveal) so a bad open toasts instead of going unhandled.
+  try {
+    await openFileSmartInner(path, preview, requestedOwner, line, column);
+  } catch (err) {
+    toast(`could not open ${pathBasename(path)}: ${(err as Error).message}`, "error");
+  }
+}
+
+async function openFileSmartInner(
+  path: string,
+  preview: boolean,
+  requestedOwner: ProjectWorkspaceRef | undefined,
+  line: number | undefined,
+  column: number | undefined,
+): Promise<void> {
   if (reviewView?.isVisible) reviewView.hide();
   let owner = requestedOwner ?? (() => {
     const view = activeProjectId ? projectViews.get(activeProjectId) : null;
@@ -1374,15 +1415,20 @@ async function openFileSmart(
   }
   cleanPath = normalizePath(cleanPath);
 
-  // If path is absolute, route to the project that owns it
+  // If path is absolute, route to the project that owns it. Nested projects
+  // match by longest prefix: first-match would route a nested file to its
+  // parent project whenever the parent sorts first.
   if (cleanPath.startsWith("/")) {
+    let best: { projId: string; view: ProjectView } | null = null;
     for (const [projId, projView] of projectViews.entries()) {
       if (cleanPath === projView.cwd || cleanPath.startsWith(projView.cwd + "/")) {
-        owner = { projectId: projId, workspaceId: projView.workspaceId };
-        if (activeProjectId !== projId) {
-          setActiveProject(projId);
-        }
-        break;
+        if (!best || projView.cwd.length > best.view.cwd.length) best = { projId, view: projView };
+      }
+    }
+    if (best) {
+      owner = { projectId: best.projId, workspaceId: best.view.workspaceId };
+      if (activeProjectId !== best.projId) {
+        setActiveProject(best.projId);
       }
     }
   }
@@ -1400,7 +1446,7 @@ async function openFileSmart(
     await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });
     // A successful open is the recency signal, whatever path led here.
     const rel = abs.startsWith(`${view.cwd}/`) ? abs.slice(view.cwd.length + 1) : null;
-    if (rel) void window.termina.recordRecentFile(owner.projectId, rel);
+    if (rel) void window.termina.recordRecentFile(owner.projectId, rel).catch(() => undefined);
   } catch (err) {
     toast(`could not open ${pathBasename(abs)}: ${(err as Error).message}`, "error");
   }
@@ -1430,16 +1476,24 @@ window.termina.onProjectClosed(({ projectId, activationGeneration }) => {
     getBaseEditor().setProjectOpen(false);
   }
 });
-btnNewProject.addEventListener("click", () => void window.termina.projectOpen());
+btnNewProject.addEventListener("click", () => {
+  void window.termina.projectOpen().catch((err) => {
+    toast(`could not open a project: ${(err as Error).message}`, "warning");
+  });
+});
 document.getElementById("right-pane")!.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLElement) || !target.closest(".empty-open-folder")) return;
-  void window.termina.projectOpen();
+  void window.termina.projectOpen().catch((err) => {
+    toast(`could not open a project: ${(err as Error).message}`, "warning");
+  });
 });
 // Double-click on the empty bar area opens a new project tab.
 projectTabsEl.addEventListener("dblclick", (e) => {
   if ((e.target as HTMLElement).closest(".project-tab, #btn-new-project")) return;
-  void window.termina.projectOpen();
+  void window.termina.projectOpen().catch((err) => {
+    toast(`could not open a project: ${(err as Error).message}`, "warning");
+  });
 });
 
 btnCopySubject.addEventListener("click", () => void copyCommitSubject());
@@ -1449,7 +1503,7 @@ btnVerify.addEventListener("click", () => {
   if (!id) return;
   void window.termina.runVerify(id).then((res) => {
     if (!res.ok) toast(res.error ?? "verify failed to start", "warning");
-  });
+  }).catch((err) => toast(`verify failed to start: ${(err as Error).message}`, "warning"));
 });
 verifyBadge.addEventListener("click", () => {
   const pane = activeId ? panes.get(activeId) : undefined;
@@ -1457,7 +1511,7 @@ verifyBadge.addEventListener("click", () => {
   if (!pane || pane.verify.state !== "running") return;
   void window.termina.cancelVerify(pane.instanceId).then((res) => {
     if (!res.ok) toast(res.error ?? "verify could not be cancelled", "warning");
-  });
+  }).catch((err) => toast(`verify could not be cancelled: ${(err as Error).message}`, "warning"));
 });
 
 // ---------------------------------------------------------------- layout ---
@@ -1719,6 +1773,10 @@ function workPaneCollapsed(): boolean {
 function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
   if (activeEditor().runMenuEdit(kind)) return;
   const pane = activeId ? panes.get(activeId) : undefined;
+  // NOTE: document.execCommand is deprecated but has no replacement for
+  // undo/redo/select-all on unfocused surfaces (navigator.clipboard only
+  // covers copy/cut/paste, already used on the clipboard path). Keep until
+  // browsers ship an equivalent; the calls below are the only three left.
   if (pane && !pane.error) {
     const term = pane.view.getTerminal();
     if (term.textarea && document.activeElement === term.textarea) {
@@ -1741,13 +1799,13 @@ function runClipboardCommand(command: "copy" | "cut" | "paste"): void {
     if (command === "copy" || command === "cut") {
       // A terminal has no cuttable text: cutting copies the selection.
       if (pane.view.copySelection()) return;
-      if (command === "copy") void window.termina.writeTerminal(pane.instanceId, "\x03");
+      if (command === "copy") void window.termina.writeTerminal(pane.instanceId, "\x03").catch(() => undefined);
       return;
     }
     void pane.view.pasteClipboard();
     return;
   }
-  void window.termina.editClipboard(command);
+  void window.termina.editClipboard(command).catch(() => toast("could not access the clipboard", "warning"));
 }
 
 const commands = new CommandDispatcher();
@@ -1848,6 +1906,12 @@ function positionTerminalFindBar(): void {
   findBar.style.top = `${rect.top + 8}px`;
   findBar.style.left = `${Math.max(8, rect.right - 328)}px`;
 }
+
+// The bar anchors to the terminal container, so it follows window resizes,
+// divider drags, and layout changes — not just the open that positioned it.
+new ResizeObserver(() => {
+  if (findBar && !findBar.hidden) positionTerminalFindBar();
+}).observe(termContainer);
 
 function buildTerminalFindBar(): void {
   const bar = document.createElement("div");
@@ -1954,12 +2018,20 @@ function cycleProjects(delta: 1 | -1): void {
   if (ids.length < 2) return;
   const index = activeProjectId ? ids.indexOf(activeProjectId) : -1;
   const next = ids[(index + delta + ids.length) % ids.length];
-  if (next) void window.termina.projectActivate(next);
+  if (next) {
+    void window.termina.projectActivate(next).catch((err) => {
+      toast(`could not switch projects: ${(err as Error).message}`, "warning");
+    });
+  }
 }
 
 function activateProjectByIndex(index: number): void {
   const id = orderedProjectIds()[index];
-  if (id) void window.termina.projectActivate(id);
+  if (id) {
+    void window.termina.projectActivate(id).catch((err) => {
+      toast(`could not switch projects: ${(err as Error).message}`, "warning");
+    });
+  }
 }
 
 for (let i = 1; i <= 9; i++) {
@@ -2364,14 +2436,22 @@ function updateEditorLock(): void {
 window.termina.onFlushRequest(({ requestId, writerId, projectId, workspaceId }) => {
   const view = projectViews.get(projectId);
   if (!view || view.workspaceId !== workspaceId) {
-    void window.termina.reportFlush(requestId, { ok: false, failed: ["project editor is unavailable"] });
+    void window.termina.reportFlush(requestId, { ok: false, failed: ["project editor is unavailable"] }).catch(() => undefined);
     return;
   }
   if (!view.editorMgr) {
-    void window.termina.reportFlush(requestId, { ok: true, failed: [] });
+    void window.termina.reportFlush(requestId, { ok: true, failed: [] }).catch(() => undefined);
     return;
   }
-  void view.editorMgr.flushAll(writerId).then((result) => void window.termina.reportFlush(requestId, result));
+  // Main awaits this report: a flush throw reports failure instead of withholding it.
+  void view.editorMgr.flushAll(writerId).then(
+    (result) => {
+      void window.termina.reportFlush(requestId, result).catch(() => undefined);
+    },
+    () => {
+      void window.termina.reportFlush(requestId, { ok: false, failed: ["could not save editor changes"] }).catch(() => undefined);
+    },
+  );
 });
 
 /** Editors that can hold dirty buffers for one project, or every project on quit. */
@@ -2413,7 +2493,15 @@ async function confirmUnsavedEditors(projectId: string | null): Promise<{ ok: bo
 }
 
 window.termina.onUnsavedConfirm(({ requestId, projectId }) => {
-  void confirmUnsavedEditors(projectId).then((result) => void window.termina.reportUnsavedConfirm(requestId, result));
+  // Main awaits this report: a confirm throw reports failure instead of withholding it.
+  void confirmUnsavedEditors(projectId).then(
+    (result) => {
+      void window.termina.reportUnsavedConfirm(requestId, result).catch(() => undefined);
+    },
+    () => {
+      void window.termina.reportUnsavedConfirm(requestId, { ok: false, error: "could not confirm unsaved changes" }).catch(() => undefined);
+    },
+  );
 });
 
 function applyAppUpdateState(state: AppUpdateState): void {
@@ -2446,23 +2534,23 @@ function appUpdateButtonLabel(
 btnAppUpdate.addEventListener("click", () => {
   void window.termina.getUpdateState().then((state) => {
     if (state.status === "error") {
-      void window.termina.checkUpdate();
+      void window.termina.checkUpdate().catch(() => undefined);
       return;
     }
     if (state.status === "ready") {
       void window.termina.installUpdate().then((res) => {
         if (!res.ok) toast(res.error ?? "could not install the update", "warning");
-      });
+      }).catch((err) => toast(`could not install the update: ${(err as Error).message}`, "warning"));
       return;
     }
     if (state.status === "downloading" || state.status === "available") {
       toast(`Downloading Termina ${state.version}…`, "info");
       return;
     }
-  });
+  }).catch(() => undefined);
 });
 window.termina.onUpdateState(applyAppUpdateState);
-void window.termina.getUpdateState().then(applyAppUpdateState);
+void window.termina.getUpdateState().then(applyAppUpdateState).catch(() => undefined);
 
 window.termina.onBusy(({ instanceId, busy }) => {
   handleWorldlineBusy(
@@ -2507,7 +2595,9 @@ window.termina.onToolTarget((p) => {
   if (!view || view.workspaceId !== p.workspaceId) return;
   if (!preferences.autoOpenAgentFiles) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
-  if (activeProjectId !== p.projectId) {
+  // Boot race: before the editor chunk resolves, active-project targets queue
+  // exactly like background ones — boot's post-import activation drains them.
+  if (activeProjectId !== p.projectId || !editorModule) {
     // Background agent's file: queue it and open on return instead of dropping it.
     const queued = pendingToolTargets.get(p.projectId) ?? [];
     const at = queued.findIndex((t) => t.path === p.path);
@@ -2525,6 +2615,8 @@ window.termina.onToolTarget((p) => {
 const lastChangePush = new Map<string, { at: number; changedLines?: number[] }>();
 const largeChangeFetch = new Set<string>();
 const MAX_LAST_CHANGE_PUSH = 500;
+/** A large-change read that never settles releases its key after this long. */
+const LARGE_CHANGE_FETCH_TIMEOUT_MS = 10_000;
 const changeKey = (owner: ProjectWorkspaceRef, path: string): string => `${owner.projectId}\u0000${owner.workspaceId}\u0000${path}`;
 
 function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: EditorManagerInstance): void {
@@ -2532,8 +2624,23 @@ function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: Edit
   if (largeChangeFetch.has(key)) return;
   largeChangeFetch.add(key);
   const at = lastChangePush.get(key)?.at;
-  void window.termina.openFile(path, owner).then((res) => {
+  let settled = false;
+  const timer = setTimeout(() => {
+    // A hung read releases the key so the next push retries; without this the
+    // path goes deaf forever. The late result below drops via the settled flag
+    // so it cannot clear a newer fetch's marker.
+    settled = true;
     largeChangeFetch.delete(key);
+  }, LARGE_CHANGE_FETCH_TIMEOUT_MS);
+  const settle = (): boolean => {
+    clearTimeout(timer);
+    if (settled) return false;
+    settled = true;
+    largeChangeFetch.delete(key);
+    return true;
+  };
+  void window.termina.openFile(path, owner).then((res) => {
+    if (!settle()) return;
     const latest = lastChangePush.get(key);
     if (latest !== undefined && latest.at !== at) {
       fetchLargeChange(path, owner, editor);
@@ -2543,7 +2650,7 @@ function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: Edit
       editor.updateContent(path, res.content, res.changedLines ?? latest?.changedLines);
     }
   }).catch(() => {
-    largeChangeFetch.delete(key);
+    settle();
   });
 }
 
@@ -2602,6 +2709,18 @@ function syncExplorerChanged(): void {
 }
 
 window.termina.onFolderOpened((e) => {
+  if (!editorModule) {
+    // Boot race: the editor chunk hasn't resolved yet, and activation builds
+    // the project editor. Defer until it has — the generation guard inside
+    // still drops pushes that went stale meanwhile.
+    void ensureEditorModule().then(() => applyFolderOpened(e)).catch(() => undefined);
+    return;
+  }
+  applyFolderOpened(e);
+});
+
+/** Apply a folder:opened push (activation, view, explorer, worldlines). */
+function applyFolderOpened(e: FolderOpenedPayload): void {
   if (
     !Number.isSafeInteger(e.activationGeneration)
     || e.activationGeneration < 1
@@ -2632,7 +2751,7 @@ window.termina.onFolderOpened((e) => {
   timelinePane.resetForProject();
   timelinePane.renderTimeline();
   hydrateWorldlines(projectId);
-});
+}
 
 window.termina.onLoginHint((e) => {
   for (const view of projectViews.values()) {
@@ -2715,11 +2834,12 @@ window.termina.onInstances((list: InstanceSummary[]) => {
     onProjectDiscovered: (pane, summary) => {
       const projectId = pane.projectId;
       if (projectId && !projectViews.has(projectId) && summary.cwd) {
-        // The project view is created lazily; projectList resolves it.
+        // The project view is created lazily; projectList resolves it. The next
+        // sync retries when this one fails, so the rejection stays silent.
         void window.termina.projectList().then((list) => {
           const project = list.find((p) => p.id === projectId);
           if (project && !projectViews.has(project.id)) createProjectView(project);
-        });
+        }).catch(() => undefined);
       }
     },
   });

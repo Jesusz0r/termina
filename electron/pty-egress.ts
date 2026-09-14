@@ -240,11 +240,6 @@ interface TerminalQueue {
   finishWaiters: Array<(delivered: boolean) => void>;
 }
 
-interface DrainWaiter {
-  terminalId?: string;
-  resolve: () => void;
-}
-
 function asPositiveInteger(value: number | undefined, fallback: number, name: string): number {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result < 1) throw new Error(`invalid PTY egress ${name}`);
@@ -270,7 +265,10 @@ export function* splitPtyData(data: string, maxBytes = PTY_EGRESS_CHUNK_BYTES): 
       const codePoint = data.codePointAt(end);
       if (codePoint === undefined) break;
       const width = codePoint > 0xffff ? 2 : 1;
-      const codeBytes = Buffer.byteLength(data.slice(end, end + width), "utf8");
+      // Arithmetic UTF-8 length: a per-code-point Buffer re-encode here
+      // costs ~20 ms per MiB on the main thread. Lone surrogates encode
+      // as the 3-byte replacement character, matching the < 0x10000 arm.
+      const codeBytes = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
       if (end > start && bytes + codeBytes > maxBytes) break;
       end += width;
       bytes += codeBytes;
@@ -301,7 +299,6 @@ export class PtyEgressScheduler {
   private disposed = false;
   private pumpTimer: ReturnType<typeof setTimeout> | null = null;
   private pumping = false;
-  private drainWaiters: DrainWaiter[] = [];
 
   constructor(
     private readonly transport: PtyEgressTransport,
@@ -405,22 +402,49 @@ export class PtyEgressScheduler {
   /**
    * Mark a naturally exited PTY. Its ordered exit marker is queued only after
    * every accepted output chunk has been acknowledged, and the terminal is
-   * retained until that marker is acknowledged by the hydrated renderer.
+   * retained until that marker is acknowledged by the hydrated renderer —
+   * or until timeoutMs passes, in which case the waiter resolves false (and
+   * unregisters) instead of blocking teardown forever on a wedged renderer.
+   * The queue itself is retained: the caller decides whether to cancel it.
+   * Crash/reload replay and acknowledgement still complete the queue
+   * normally when they arrive in budget.
    */
-  finish(terminalId: string, terminalGeneration: number, code = 0): Promise<boolean> {
+  finish(terminalId: string, terminalGeneration: number, code = 0, timeoutMs: number): Promise<boolean> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0) throw new Error("invalid PTY egress finish timeout");
+    const queue = this.beginFinish(terminalId, terminalGeneration, code);
+    if (!queue) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const done = (delivered: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(delivered);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const index = queue.finishWaiters.indexOf(done);
+        if (index >= 0) queue.finishWaiters.splice(index, 1);
+        resolve(false);
+      }, timeoutMs);
+      queue.finishWaiters.push(done);
+      this.maybeFinishQueue(queue);
+      this.schedulePump();
+    });
+  }
+
+  /** Shared finish admission: register closing state and queue the exit marker. */
+  private beginFinish(terminalId: string, terminalGeneration: number, code: number): TerminalQueue | null {
     const queue = this.queues.get(terminalId);
-    if (this.disposed || !queue || queue.terminalGeneration !== terminalGeneration) return Promise.resolve(false);
+    if (this.disposed || !queue || queue.terminalGeneration !== terminalGeneration) return null;
     if (!queue.closing) {
       queue.closing = true;
       queue.finishCode = Number.isSafeInteger(code) ? code : 0;
       this.pauseSource(queue);
     }
     this.maybeQueueExit(queue);
-    return new Promise<boolean>((resolve) => {
-      queue.finishWaiters.push(resolve);
-      this.maybeFinishQueue(queue);
-      this.schedulePump();
-    });
+    return queue;
   }
 
   /** Cancel a terminal whose close is user-initiated or part of teardown. */
@@ -428,7 +452,6 @@ export class PtyEgressScheduler {
     const queue = this.queues.get(terminalId);
     if (!queue || queue.terminalGeneration !== terminalGeneration) return;
     this.removeQueue(queue, false);
-    this.resolveDrainWaiters();
   }
 
   /**
@@ -524,7 +547,6 @@ export class PtyEgressScheduler {
     queue.inFlightBytes -= chunk.bytes;
     this.maybeResumeSource(queue);
     this.maybeFinishQueue(queue);
-    this.resolveDrainWaiters();
     if (this.rendererReady && this.hasDeliverableChunks()) this.schedulePump();
     return true;
   }
@@ -598,12 +620,6 @@ export class PtyEgressScheduler {
     };
   }
 
-  /** Wait until accepted output is acknowledged (or cancelled on shutdown). */
-  async drain(terminalId?: string): Promise<void> {
-    if (this.isDrained(terminalId)) return;
-    await new Promise<void>((resolve) => this.drainWaiters.push({ terminalId, resolve }));
-  }
-
   /** Stop all delivery and release retained output during app shutdown. */
   dispose(): void {
     if (this.disposed) return;
@@ -611,7 +627,6 @@ export class PtyEgressScheduler {
     if (this.pumpTimer !== null) clearTimeout(this.pumpTimer);
     this.pumpTimer = null;
     for (const queue of [...this.queues.values()]) this.removeQueue(queue, false);
-    this.resolveDrainWaiters();
     this.queues.clear();
     this.order = [];
     this.cursor = 0;
@@ -725,7 +740,6 @@ export class PtyEgressScheduler {
     } finally {
       this.pumping = false;
     }
-    this.resolveDrainWaiters();
     if (this.rendererReady && this.hasDeliverableChunks()) this.schedulePump();
   }
 
@@ -786,15 +800,6 @@ export class PtyEgressScheduler {
     });
   }
 
-  private isDrained(terminalId?: string): boolean {
-    if (terminalId !== undefined) {
-      const queue = this.queues.get(terminalId);
-      return !queue || this.retainedChunks(queue) === 0;
-    }
-    for (const queue of this.queues.values()) if (this.retainedChunks(queue) > 0) return false;
-    return true;
-  }
-
   private requeueRecord(queue: TerminalQueue, record: EgressRecord): void {
     // The transport call is re-entrant: a synchronous throw can cause main to
     // fence the renderer, and that readiness transition may already have
@@ -838,15 +843,5 @@ export class PtyEgressScheduler {
     queue.inFlightBytes = 0;
     const finishWaiters = queue.finishWaiters.splice(0);
     for (const resolve of finishWaiters) resolve(delivered);
-  }
-
-  private resolveDrainWaiters(): void {
-    if (this.drainWaiters.length === 0) return;
-    const remaining: DrainWaiter[] = [];
-    for (const waiter of this.drainWaiters) {
-      if (this.isDrained(waiter.terminalId)) waiter.resolve();
-      else remaining.push(waiter);
-    }
-    this.drainWaiters = remaining;
   }
 }

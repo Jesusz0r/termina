@@ -4,6 +4,7 @@
  * process; all writer state lives in the factory closure.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -12,6 +13,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   renameSync,
   rmSync,
@@ -26,11 +28,47 @@ export function isValidTerminalId(id: string): boolean {
   return /^[A-Za-z0-9_-]{1,128}$/.test(id);
 }
 
+
+let cachedBootId: string | null | undefined;
+/** Best-effort stable boot identity for launch-scoping quarantine markers.
+ * Mirrors the tailer's helper (which owns validation): Linux reads the
+ * kernel boot id file, macOS reads kern.boottime, anything else yields null
+ * and markers fall back to pid-only binding. Cached per process. */
+function currentBootId(): string | null {
+  if (cachedBootId !== undefined) return cachedBootId;
+  cachedBootId = null;
+  try {
+    if (process.platform === "linux") {
+      const raw = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim().toLowerCase();
+      if (/^[0-9a-f-]{8,128}$/.test(raw)) cachedBootId = raw;
+    } else if (process.platform === "darwin") {
+      for (const sysctl of ["/usr/sbin/sysctl", "sysctl"]) {
+        try {
+          const raw = execFileSync(sysctl, ["-n", "kern.boottime"], { encoding: "utf8", timeout: 5000 }).trim();
+          if (raw.length > 0 && raw.length <= 256) {
+            cachedBootId = raw;
+            break;
+          }
+        } catch {
+          /* Try the next sysctl candidate. */
+        }
+      }
+    }
+  } catch {
+    cachedBootId = null;
+  }
+  return cachedBootId;
+}
+
 /** Keep producer edit previews below the tailer's durable record limit. The
  * tool boundary and a digest/count remain even when the preview is clipped;
  * the file on disk remains the authority for the state mutation. */
 export const SIDECAR_TOOL_EDIT_PREVIEW_BYTES = 512 * 1024;
 const SIDECAR_TOOL_EDIT_FIELD_BYTES = 128 * 1024;
+/** Cap for the truncation-boundary digest input. Bytes/count stay exact via
+ * streaming measurement; the digest covers a bounded serialization prefix
+ * (identical to a full hash whenever the input fits the cap). */
+const SIDECAR_DIGEST_INPUT_CHARS = 64 * 1024;
 
 function utf8Prefix(value: string, maxBytes: number): string {
   const source = Buffer.from(value, "utf8");
@@ -38,6 +76,30 @@ function utf8Prefix(value: string, maxBytes: number): string {
   let end = Math.max(0, maxBytes);
   while (end > 0 && (source[end]! & 0xc0) === 0x80) end--;
   return source.subarray(0, end).toString("utf8");
+}
+
+
+/** Longest proper prefix of `payload` matching a suffix of `tail`, in linear
+ * time (KMP). Callers exclude full containment first, so the result is
+ * always a proper prefix. Only the overlap region can match, so only its
+ * trailing bytes are scanned. */
+function tornPrefixLength(tail: Buffer, payload: Buffer): number {
+  const maxPrefix = Math.min(payload.length - 1, tail.length);
+  if (maxPrefix <= 0) return 0;
+  const pi = new Int32Array(payload.length);
+  for (let i = 1; i < payload.length; i++) {
+    let j = pi[i - 1]!;
+    while (j > 0 && payload[i] !== payload[j]) j = pi[j - 1]!;
+    if (payload[i] === payload[j]) j++;
+    pi[i] = j;
+  }
+  let state = 0;
+  const start = tail.length - maxPrefix;
+  for (let i = start; i < tail.length; i++) {
+    while (state > 0 && tail[i] !== payload[state]) state = pi[state - 1]!;
+    if (tail[i] === payload[state]) state++;
+  }
+  return state;
 }
 
 export function boundedSidecarEdits(value: unknown): Record<string, unknown> | undefined {
@@ -76,16 +138,29 @@ export function boundedSidecarEdits(value: unknown): Record<string, unknown> | u
   }
   if (edits.length < value.length) editsTruncated = true;
   if (!editsTruncated) return edits.length > 0 ? { edits } : {};
-  // Only serialize the full edit list when callers actually need the
-  // truncation boundary (bytes/count/sha). The common fitting case skips it.
-  const serialized = JSON.stringify(value) ?? "[]";
-  const encoded = Buffer.from(serialized, "utf8");
+  // Only measure the full edit list when callers actually need the
+  // truncation boundary (bytes/count/sha). Stream per-item bytes exactly
+  // and hash a bounded digest prefix: worst-case transient garbage is one
+  // item, never the unbounded input, and small inputs hash identically.
+  const digest = createHash("sha256");
+  digest.update("[");
+  let encodedLength = 2;
+  let hashedChars = 1;
+  for (let index = 0; index < value.length; index++) {
+    const piece = (index === 0 ? "" : ",") + (JSON.stringify(value[index]) ?? "null");
+    encodedLength += Buffer.byteLength(piece, "utf8");
+    if (hashedChars < SIDECAR_DIGEST_INPUT_CHARS) {
+      digest.update(piece.slice(0, SIDECAR_DIGEST_INPUT_CHARS - hashedChars));
+      hashedChars += Math.min(piece.length, SIDECAR_DIGEST_INPUT_CHARS - hashedChars);
+    }
+  }
+  if (hashedChars < SIDECAR_DIGEST_INPUT_CHARS) digest.update("]");
   return {
     ...(edits.length > 0 ? { edits } : {}),
     editsTruncated: true,
-    editsBytes: encoded.length,
+    editsBytes: encodedLength,
     editsCount: value.length,
-    editsSha256: createHash("sha256").update(encoded).digest("hex"),
+    editsSha256: digest.digest("hex"),
   };
 }
 
@@ -173,14 +248,16 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
   function hasQuarantineSidecar(): boolean {
     return !!eventsDir && !!terminalId && existsSync(join(eventsDir, SIDECAR_QUARANTINE_PREFIX + terminalId));
   }
-  function hasRetainedSidecar(): boolean {
+  /** A mid-flight tailer reclaim chain (drain/final links) blocks rotation.
+   * A lone settled `.retained-` anchor does not: the tailer chains
+   * generations, retiring the older anchor once the newer one is proven. */
+  function hasUnsettledSidecar(): boolean {
     if (!eventsDir || !terminalId) return false;
     try {
       const prefix = "." + terminalId + ".jsonl.";
       return readdirSync(eventsDir).some((name) =>
         name.startsWith(prefix)
-        && (name.includes(".retained-")
-          || name.includes(".draining-")
+        && (name.includes(".draining-")
           || name.includes(".final-"))
       );
     } catch {
@@ -192,7 +269,7 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
       if (!hasQuarantineSidecar()) {
         writeDurableMarker(
           join(eventsDir, SIDECAR_QUARANTINE_PREFIX + terminalId),
-          JSON.stringify({ version: 1, state: "quarantined", terminalId, reason }) + "\n",
+          JSON.stringify({ version: 1, state: "quarantined", terminalId, reason, producerPid: process.pid, bootId: currentBootId() }) + "\n",
         );
       }
     } catch {
@@ -201,7 +278,14 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
   }
   /** Append one exact record idempotently. If a write/fsync throws after the
    * kernel accepted the bytes, the next attempt recognizes that same line and
-   * only commits its reserved sequence once durability succeeds. */
+   * only commits its reserved sequence once durability succeeds.
+   *
+   * Single writer per terminal is REQUIRED, not enforced: the resume loop
+   * below is multiple O_APPEND syscalls, so two concurrent writers can
+   * interleave mid-line and produce torn lines. The tailer skips unparseable
+   * lines, surfacing the damage as sequence gaps (bounded, then quarantine),
+   * but the interleaved records are lost. One createSidecarWriter owner per
+   * (eventsDir, terminalId); never share a terminal id across processes. */
   function appendDurable(path: string, line: string): void {
     const payload = Buffer.from(line, "utf8");
     const fd = openSync(path, "a+", 0o600);
@@ -218,16 +302,10 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
       if (tail.indexOf(payload) < 0) {
         // Recover a prefix accepted by a failed write without emitting the
         // pending identity a second time. O_APPEND keeps each syscall at EOF.
-        let prefix = 0;
-        const maxPrefix = Math.min(payload.length - 1, tail.length);
-        for (let length = maxPrefix; length > 0; length--) {
-          let equal = true;
-          const start = tail.length - length;
-          for (let i = 0; i < length; i++) {
-            if (tail[start + i] !== payload[i]) { equal = false; break; }
-          }
-          if (equal) { prefix = length; break; }
-        }
+        // The longest prefix of the payload matching a tail suffix, via KMP
+        // (linear): a naive longest-first scan is quadratic in adversarial
+        // inputs (repeated bytes defeat every early exit).
+        const prefix = tornPrefixLength(tail, payload);
         let written = prefix;
         while (written < payload.length) {
           const count = writeSync(fd, payload, written, payload.length - written, undefined);
@@ -264,11 +342,12 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
         return false;
       }
       if (activeStats.size === 0 || activeStats.size + lineBytes <= SIDECAR_MAX_BYTES) return true;
-      // A retained/unproven inode may continue draining while this active
+      // A mid-flight reclaim chain may still be draining while this active
       // generation has room. Once rotation is required, admission stops at
       // the bounded quarantine boundary instead of creating an overtaking
-      // generation that could lose sequence order.
-      if (hasRetainedSidecar()) {
+      // generation that could lose sequence order. A settled retained anchor
+      // does not block: the tailer chains it once the new generation proves.
+      if (hasUnsettledSidecar()) {
         quarantineAdmission("unproven sidecar generation blocked a safe rotation");
         return false;
       }
@@ -289,7 +368,7 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
         if (!waitForSidecarBackpressure()) return false;
         try { Atomics.wait(sidecarBackpressureCell, 0, 0, 25); } catch { return false; }
         if (hasQuarantineSidecar()) return false;
-        if (hasRetainedSidecar()) {
+        if (hasUnsettledSidecar()) {
           quarantineAdmission("unproven sidecar generation blocked a safe rotation");
           return false;
         }
@@ -302,7 +381,7 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
       }
       let proofPath: string | undefined;
       try {
-        const sealedPath = activeSidecarPath + "." + Date.now().toString(36) + "-" + process.pid + "-" + randomUUID() + SIDECAR_SEALED_SUFFIX;
+        const sealedPath = join(eventsDir, "." + basename(activeSidecarPath) + "." + Date.now().toString(36) + "-" + process.pid + "-" + randomUUID() + SIDECAR_SEALED_SUFFIX);
         proofPath = sealedPath + SIDECAR_SEALED_PROOF_SUFFIX;
         const sealedName = basename(sealedPath);
         const identity = String(activeStats.dev) + ":" + String(activeStats.ino);

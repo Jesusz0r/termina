@@ -137,11 +137,57 @@ function publicRoots(pkgText: string): string[] {
 
 /** Normalize a declaration file: strip comments, trim, drop blank lines. */
 function normalizeSignature(text: string): string {
-  const lines = text
+  const lines = stripComments(text)
     .split("\n")
-    .map((l) => l.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/, "").replace(/\s+$/g, ""))
+    .map((l) => l.replace(/\s+$/g, ""))
     .filter((l) => l.length > 0);
   return lines.join("\n");
+}
+
+/**
+ * Strip block and line comments, keeping comment markers inside string
+ * literals (notably `//` in URLs) intact. Unterminated strings and line
+ * comments compare literally, which fails closed toward "changed"; an
+ * unterminated block comment drops its tail instead.
+ */
+function stripComments(text: string): string {
+  let out = "";
+  let i = 0;
+  const n = text.length;
+  let quote: string | null = null;
+  while (i < n) {
+    const ch = text[i]!;
+    if (quote) {
+      out += ch;
+      if (ch === "\\" && i + 1 < n) {
+        out += text[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end === -1 ? n : end + 2;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "/") {
+      const end = text.indexOf("\n", i + 2);
+      i = end === -1 ? n : end;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 /** The declared dependency names of a package text. */
@@ -184,16 +230,22 @@ function referencedPackages(sourceFiles: Array<{ relPath: string; content: strin
   const refs = new Set<string>();
   for (const f of sourceFiles) {
     if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.relPath)) continue;
-    for (const m of f.content.matchAll(/(?:from\s+["']|require\(\s*["'])([^"'./][^"']*)/g)) {
-      const first = (m[1] ?? "").split("/")[0];
+    for (const m of f.content.matchAll(/(?:from\s+["'`]|require\(\s*["'`])([^"'`./][^"'`]*)/g)) {
+      const raw = m[1] ?? "";
+      // A template placeholder is dynamic by design: never resolve it.
+      if (raw.includes("${")) continue;
+      const first = raw.split("/")[0];
       if (first && !first.startsWith(".") && !first.startsWith("@") && !NODE_BUILTINS.has(first)) refs.add(first);
     }
-    for (const m of f.content.matchAll(/from\s+["'](@[^"'/]+\/[^"'/]+)/g)) {
-      if (!NODE_BUILTINS.has(m[1])) refs.add(m[1]);
+    for (const m of f.content.matchAll(/(?:from\s+|require\(\s*)["'`](@[^"'`/]+\/[^"'`/]+)/g)) {
+      const scoped = m[1] ?? "";
+      if (scoped.includes("${")) continue;
+      if (!NODE_BUILTINS.has(scoped)) refs.add(scoped);
     }
     // Bare side-effect imports (import "pkg") and dynamic import("pkg").
-    for (const m of f.content.matchAll(/import(?:\s*\(\s*|\s+)(["'])([^"'.][^"']*)\1/g)) {
+    for (const m of f.content.matchAll(/import(?:\s*\(\s*|\s+)(["'`])([^"'`.][^"'`]*)\1/g)) {
       const name = m[2] ?? "";
+      if (name.includes("${")) continue;
       const first = name.split("/")[0];
       if (first && !first.startsWith(".") && !first.startsWith("@") && !NODE_BUILTINS.has(first)) refs.add(first);
       const scoped = /^@[^/]+\/[^/]+/.exec(name)?.[0];
@@ -307,6 +359,13 @@ export class EvidenceEngine {
       };
     }
     const n = cfg.samples;
+    if (!Number.isSafeInteger(n) || n <= 0) {
+      const reason = "the base benchmark declares no usable sample count (termina.benchmark)";
+      return {
+        A: this.benchmarkUnavailable(stateIds.A, reason),
+        B: this.benchmarkUnavailable(stateIds.B, reason),
+      };
+    }
     const samples: Record<"A" | "B", number[]> = { A: [], B: [] };
     const out: Partial<Record<"A" | "B", EvidenceRecord>> = {};
 
@@ -519,11 +578,19 @@ export class EvidenceEngine {
     let changedFiles = 0;
     let bytes = 0;
     for (const c of changed) {
-      if (c.status === "deleted") continue;
+      if (c.status === "deleted") {
+        // A deletion removes every base line; it must count like an addition.
+        changedFiles++;
+        const buf = await this.deps.store.readBlob(this.deps.baseStateId, c.relPath);
+        if (buf) changedLines += buf.toString("utf8").split("\n").length;
+        continue;
+      }
       changedFiles++;
       const buf = await this.deps.store.readBlob(stateId, c.relPath);
       if (buf) {
         bytes += buf.length;
+        // Modified files count head lines (an approximation: exact
+        // added/removed needs an uncapped shared diff counter).
         changedLines += buf.toString("utf8").split("\n").length;
       }
     }
@@ -701,12 +768,11 @@ export interface TrajectorySignals {
  * commands are not logged; a missing test label is not a fail.
  */
 function parseTrajectoryLog(text: string, testLabel: string | null): TrajectorySignals {
-  const lines = text.split("\n");
+  // Parse each line once: remember records, then replay from the last run.
+  const records: Array<ReturnType<typeof parseSidecarRecord>> = text.split("\n").map((line) => (line.trim() ? parseSidecarRecord(line) : null));
   let start = 0;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-    const rec = parseSidecarRecord(line);
+  for (let i = records.length - 1; i >= 0; i--) {
+    const rec = records[i];
     if (rec && sidecarEventFromRecord(rec)?.t === "agent_start") {
       start = i;
       break;
@@ -720,10 +786,8 @@ function parseTrajectoryLog(text: string, testLabel: string | null): TrajectoryS
   let cancelled = 0;
   let testLabelSeen = false;
   const needle = testLabel && testLabel.trim() ? testLabel.trim() : "";
-  for (let i = start; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-    const rec = parseSidecarRecord(line);
+  for (let i = start; i < records.length; i++) {
+    const rec = records[i];
     if (!rec) continue;
     if (rec.timedOut === true) timedOut++;
     if (rec.cancelled === true) cancelled++;
@@ -786,6 +850,8 @@ export function rankProfiles(
   mineReason: Record<"A" | "B", string | null>,
   thresholdFraction = 0.05,
 ): ProfileVerdict[] {
+  // A non-finite threshold would silently disable ties; fall back to default.
+  const threshold = Number.isFinite(thresholdFraction) && thresholdFraction >= 0 ? thresholdFraction : 0.05;
   const rec = (label: "A" | "B", kind: EvidenceKind): EvidenceRecord | undefined => summary[label].find((r) => r.kind === kind);
   const verifyOk = (label: "A" | "B"): boolean => rec(label, "verify")?.status === "pass";
   const eligible = (label: "A" | "B", requireVerify: boolean): string => {
@@ -835,6 +901,9 @@ export function rankProfiles(
     if (el.A || el.B) {
       winner = "unavailable";
       reason = el.A && el.B ? "both candidates are ineligible" : el.A ? `candidate A is ineligible: ${el.A}` : `candidate B is ineligible: ${el.B}`;
+    } else if (apiFail.A && apiFail.B) {
+      winner = "tie";
+      reason = `both fail the API gate: A: ${apiFail.A}; B: ${apiFail.B}`;
     } else if (apiFail.B) {
       winner = "A";
       reason = `B fails the API gate: ${apiFail.B}`;
@@ -899,7 +968,6 @@ export function rankProfiles(
         const med = { A: medA, B: medB };
         const direction = bm.A.result.direction === "higher" ? 1 : -1;
         const effect = (med.B - med.A) / Math.max(med.A, med.B, 1e-9) * direction;
-        const threshold = thresholdFraction;
         if (Math.abs(effect) <= threshold) {
           winner = "tie";
           reason = `the effect (${(Math.abs(effect) * 100).toFixed(1)}%) does not exceed the ${threshold * 100}% threshold`;
@@ -930,7 +998,10 @@ function variability(rec: EvidenceRecord | undefined): number | null {
   const p25 = finiteQuartile(rec, "p25");
   const p75 = finiteQuartile(rec, "p75");
   if (median === null || p25 === null || p75 === null || p25 > p75) return null;
-  return (p75 - p25) / median;
+  if (p75 === p25) return 0;
+  if (median === 0) return Number.POSITIVE_INFINITY;
+  // Absolute spread: a negative median must not pass the bound check.
+  return Math.abs((p75 - p25) / median);
 }
 
 function finiteQuartile(rec: EvidenceRecord, key: "p25" | "p75"): number | null {

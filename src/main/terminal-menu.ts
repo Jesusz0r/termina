@@ -35,9 +35,15 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
   async function getAvailableShells(): Promise<{ name: string; path: string }[]> {
     if (shellsCache) return shellsCache;
     if (!shellsPromise) {
-      shellsPromise = window.termina.getShells().catch(() => []);
+      shellsPromise = window.termina.getShells();
     }
-    shellsCache = await shellsPromise;
+    try {
+      shellsCache = await shellsPromise;
+    } catch {
+      // A failed listing retries on the next open instead of caching [] forever.
+      shellsPromise = null;
+      return [];
+    }
     return shellsCache;
   }
 
@@ -80,7 +86,7 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
           return;
         }
         if (res.id && bindings.hasPane(res.id)) bindings.activatePane(res.id);
-      });
+      }).catch((err) => bindings.createErrorPane((err as Error).message));
     };
 
     const addItem = (label: string, desc: string, run: () => void) => {

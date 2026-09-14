@@ -41,7 +41,10 @@ function isUpdateInFlight(state: AppUpdateState): boolean {
   return state.status === "available" || state.status === "downloading" || state.status === "ready";
 }
 
-export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }) {
+export function createAppUpdater(opts: { send: (state: AppUpdateState) => void; updater?: AppUpdater }) {
+  // Injectable updater for isolated tests; production always resolves the
+  // real autoUpdater through the module require below.
+  const autoUpdater = (): AppUpdater => opts.updater ?? getAutoUpdater();
   let state: AppUpdateState = app.isPackaged
     ? { status: "current", currentVersion: currentVersion() }
     : { status: "disabled", currentVersion: currentVersion() };
@@ -73,6 +76,11 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
       checkTimeout = setTimeout(() => {
         checkTimeout = null;
         if (seq !== checkSeq) return resolve(state);
+        // The attempt timed out: supersede it so a late underlying
+        // completion cannot touch state, and release check ownership so
+        // manual/scheduled retries start a fresh attempt instead of
+        // re-reading this settled timeout.
+        checkSeq++;
         if (state.status === "checking") {
           setState({
             status: "error",
@@ -80,10 +88,11 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
             message: "The update check timed out.",
           });
         }
+        checkPromise = null;
         resolve(state);
       }, CHECK_TIMEOUT_MS);
 
-      void getAutoUpdater()
+      void autoUpdater()
         .checkForUpdates()
         .then((result) => {
           if (seq !== checkSeq) return resolve(state);
@@ -125,6 +134,10 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
     setState({ status: "current", currentVersion: currentVersion() });
   };
   const onDownloadProgress = (progress: ProgressInfo): void => {
+    // Late progress for a superseded or failed download must not resurrect
+    // a downloading label: only an active available/downloading attempt
+    // owns progress.
+    if (state.status !== "available" && state.status !== "downloading") return;
     if (!version && state.status === "available") version = state.version;
     if (!version) return;
     const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
@@ -134,16 +147,21 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
     setState({ status: "downloading", currentVersion: currentVersion(), version, percent });
   };
   const onUpdateDownloaded = (info: UpdateInfo): void => {
+    // A failed download reports through onError first; a late downloaded
+    // event for it (or any download outside an active attempt) must not
+    // mark bytes ready that were never verified for this attempt.
+    if (state.status !== "available" && state.status !== "downloading" && state.status !== "ready") return;
     version = info.version;
     setState({ status: "ready", currentVersion: currentVersion(), version });
   };
   const onError = (err: Error): void => {
     console.warn(`[update] ${err.message}`);
-    if (state.status === "downloading" && version) {
-      setState({ status: "available", currentVersion: currentVersion(), version });
-      return;
-    }
     if (state.status === "ready") return;
+    // A failed download is a recoverable error, not a return to "available":
+    // available/downloading/ready all refuse fresh checks and disable the
+    // menu, which would strand the updater with no working retry path. The
+    // error state re-enables the menu and lets the next scheduled or manual
+    // check start a new attempt through this same owner.
     setState({ status: "error", currentVersion: currentVersion(), message: err.message });
   };
 
@@ -167,7 +185,7 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
     },
 
     quitAndInstall() {
-      getAutoUpdater().quitAndInstall(false, true);
+      autoUpdater().quitAndInstall(false, true);
     },
 
     start() {
@@ -177,7 +195,7 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
         opts.send(state);
         return;
       }
-      const updater = getAutoUpdater();
+      const updater = autoUpdater();
       updater.autoDownload = true;
       updater.autoInstallOnAppQuit = true;
       updater.disableWebInstaller = true;
@@ -203,7 +221,7 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
       if (checkTimeout) clearTimeout(checkTimeout);
       checkTimeout = null;
       if (app?.isPackaged) {
-        const updater = getAutoUpdater();
+        const updater = autoUpdater();
         updater.off("update-available", onUpdateAvailable);
         updater.off("update-not-available", onUpdateNotAvailable);
         updater.off("download-progress", onDownloadProgress);

@@ -1,0 +1,11 @@
+{
+  "recordType": "task-settled",
+  "schemaVersion": 2,
+  "runId": "run-c",
+  "taskId": "task-1",
+  "outcome": {
+    "status": "failure",
+    "correctness": "incorrect"
+  },
+  "taskClass": "implement"
+}

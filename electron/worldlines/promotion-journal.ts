@@ -37,7 +37,7 @@ import type {
   PromotionRetentionUsage,
 } from "./types.js";
 import { boundedWorldlineEntries } from "./uncertain-comparison.js";
-import { errnoCode } from "./guards.js";
+import { errorCode } from "../../shared/guards.js";
 import { promotionIdentityOf, refreshBoundPromotionDirectory } from "./bindings.js";
 
 async function measurePromotionTreeBytes(path: string, limit: bigint): Promise<bigint> {
@@ -98,7 +98,7 @@ export async function measurePromotionRetention(worldsRoot: string): Promise<Pro
   try {
     rootInfo = await lstatPath(root, { bigint: true });
   } catch (error) {
-    if (errnoCode(error) === "ENOENT") return { journalCount: 0, bytes: 0n };
+    if (errorCode(error) === "ENOENT") return { journalCount: 0, bytes: 0n };
     throw error;
   }
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("promotion journal root is not an owned directory");
@@ -109,6 +109,7 @@ export async function measurePromotionRetention(worldsRoot: string): Promise<Pro
     root,
     MAX_PROMOTION_JOURNAL_ROOT_ENTRIES,
     `promotion journal root contains too many entries (${MAX_PROMOTION_JOURNAL_ROOT_ENTRIES})`,
+    MAX_PROMOTION_SCAN_WORK_BYTES,
   );
   for (const name of entries) {
     const child = join(root, name);

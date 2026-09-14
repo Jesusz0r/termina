@@ -1,9 +1,10 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProjectPathIndex, SearchGenerations, fuzzyMatch, fuzzyScore, listProjectSnapshot, rankProjectPaths, searchProjectFiles } from "../../../electron/quick-open.ts";
+import { ProjectPathIndex, SearchGenerations, fuzzyMatch, fuzzyScore, listProjectPaths, listProjectSnapshot, rankProjectPaths, readGitignoreFile, searchProjectFiles } from "../../../electron/quick-open.ts";
 
 describe("quick-open fuzzyScore", () => {
   it("rejects non-subsequences", () => {
@@ -308,19 +309,61 @@ describe("Quick Open path index", () => {
     }
   });
 
+  it("serves current waiters when the initiating query is cancelled (refs #169)", async () => {
+    const { root, cleanup } = fixture();
+    try {
+      const index = new ProjectPathIndex();
+      let cancelled = false;
+      const first = index.candidates(root, () => cancelled);
+      cancelled = true;
+      const second = index.candidates(root, () => false);
+      const [oldResult, currentResult] = await Promise.all([first, second]);
+      expect(currentResult.paths).toContain("top.ts");
+      expect(currentResult.paths).toContain("src/deep/b.ts");
+      expect(oldResult.paths).toContain("top.ts");
+      const retried = await index.candidates(root, () => false);
+      expect(retried.paths).toContain("src/deep/b.ts");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("fails a root-race loser closed instead of serving the wrong tree (refs #169)", async () => {
+    const { root, cleanup } = fixture();
+    const other = mkdtempSync(join(tmpdir(), "qo-index-other-"));
+    writeFileSync(join(other, "other.ts"), "x");
+    try {
+      const index = new ProjectPathIndex();
+      const forA = index.candidates(root);
+      const forB = index.candidates(other);
+      const [a, b] = await Promise.all([forA, forB]);
+      // The loser takes nothing; whoever owns the index serves its own tree.
+      expect([...a.paths, ...b.paths]).toContain("other.ts");
+      expect(a.paths).not.toContain("other.ts");
+      expect(b.paths).not.toContain("top.ts");
+      // And the loser's root still rebuilds cleanly on the next query.
+      expect((await index.candidates(root)).paths).toContain("top.ts");
+    } finally {
+      cleanup();
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
   it("discards a build that was invalidated while in flight", async () => {
     const { root, cleanup } = fixture();
     try {
       const index = new ProjectPathIndex();
       const view = index as unknown as { building: unknown; built: boolean };
       // No await between starting the build and invalidating, so the walk is
-      // deterministically still in flight: the stale result must be dropped.
+      // deterministically still in flight.
       const stale = index.candidates(root);
+      writeFileSync(join(root, "added-during-build.ts"), "x");
       index.invalidate();
-      await stale;
-      expect(view.built).toBe(false);
-      // And the next call rebuilds from disk instead of serving stale data.
-      expect((await index.candidates(root)).paths).toContain("top.ts");
+      // The pre-invalidation walk is dropped; the live waiter retries under
+      // the new generation instead of serving stale or empty results.
+      const rebuilt = await stale;
+      expect(rebuilt.paths).toContain("added-during-build.ts");
+      expect(view.built).toBe(true);
     } finally {
       cleanup();
     }
@@ -333,12 +376,14 @@ describe("Quick Open path index", () => {
       const view = index as unknown as { built: boolean };
       const stale = index.candidates(root);
       index.invalidate();
-      // A replacement starts and aborts; whichever build lands first, the
-      // pre-invalidation walk must not populate the index.
+      // A replacement starts and aborts without building; the pre-invalidation
+      // walk must not populate the index, but the live waiter retries under
+      // the new generation and serves a fresh walk.
       await index.candidates(root, () => true);
-      await stale;
       expect(view.built).toBe(false);
-      expect((await index.candidates(root)).paths).toContain("top.ts");
+      const rebuilt = await stale;
+      expect(view.built).toBe(true);
+      expect(rebuilt.paths).toContain("top.ts");
     } finally {
       cleanup();
     }
@@ -470,6 +515,86 @@ describe("quick-open gitignore", () => {
       expect(paths).not.toContain("sub/debug.log");
     } finally {
       cleanup();
+    }
+  });
+
+  it("keeps watcher patches under the cold walk's visibility rule (refs #175)", async () => {
+    const { root, cleanup } = fixture();
+    try {
+      const index = new ProjectPathIndex();
+      const cold = await index.candidates(root);
+      expect(cold.paths).not.toContain(".hidden");
+      // A watcher event must not surface what the cold walk skips: hidden
+      // leaves, hidden parents, and ignored segments alike.
+      index.noteAdded(root, ".hidden");
+      index.noteAdded(root, ".config/visible.ts");
+      index.noteAdded(root, "src/.nested.ts");
+      index.noteAdded(root, "node_modules/sneaked.ts");
+      index.noteAdded(root, "dist/sneaked.ts");
+      const warm = await index.candidates(root);
+      expect(warm.paths).not.toContain(".hidden");
+      expect(warm.paths).not.toContain(".config/visible.ts");
+      expect(warm.paths).not.toContain("src/.nested.ts");
+      expect(warm.paths).not.toContain("node_modules/sneaked.ts");
+      expect(warm.paths).not.toContain("dist/sneaked.ts");
+      // Visible patches still land.
+      index.noteAdded(root, "src/new.ts");
+      expect((await index.candidates(root)).paths).toContain("src/new.ts");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("quick-open ignore admission (refs #170)", () => {
+  it("reads normal files and treats missing/non-regular sources as absent", async () => {
+    const root = mkdtempSync(join(tmpdir(), "qo-ignore-"));
+    try {
+      writeFileSync(join(root, ".gitignore"), "*.log\n");
+      expect(await readGitignoreFile(join(root, ".gitignore"))).toBe("*.log\n");
+      expect(await readGitignoreFile(join(root, "does-not-exist"))).toBeNull();
+      expect(await readGitignoreFile(root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats oversized ignore files as missing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "qo-ignore-big-"));
+    try {
+      writeFileSync(join(root, "notes.log"), "x");
+      writeFileSync(join(root, ".gitignore"), `*.log\n#${"x".repeat(300 * 1024)}\n`);
+      expect(await readGitignoreFile(join(root, ".gitignore"))).toBeNull();
+      // The rules are dropped, so the walk lists what they would have hidden.
+      const { paths } = await listProjectPaths(root);
+      expect(paths).toContain("notes.log");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.platform !== "win32")("never blocks on a FIFO .gitignore", async () => {
+    const root = mkdtempSync(join(tmpdir(), "qo-ignore-fifo-"));
+    try {
+      writeFileSync(join(root, "visible.ts"), "x");
+      mkdirSync(join(root, "sub"), { recursive: true });
+      writeFileSync(join(root, "sub", "nested.ts"), "x");
+      expect(spawnSync("mkfifo", [join(root, ".gitignore")]).status).toBe(0);
+      expect(spawnSync("mkfifo", [join(root, "sub", ".gitignore")]).status).toBe(0);
+      const timeout = (what: string) =>
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`walk blocked on ${what}`)), 5000));
+      const listed = await Promise.race([listProjectPaths(root), timeout("listProjectPaths")]);
+      expect(listed.paths).toContain("visible.ts");
+      expect(listed.paths).toContain(join("sub", "nested.ts"));
+      const snap = await Promise.race([listProjectSnapshot(root), timeout("listProjectSnapshot")]);
+      expect(snap.entries).toContain("visible.ts");
+      const index = new ProjectPathIndex();
+      const cached = await Promise.race([index.candidates(root), timeout("index build")]);
+      expect(cached.paths).toContain("visible.ts");
+      // Cancellation still short-circuits without touching the FIFO.
+      expect((await listProjectPaths(root, { shouldStop: () => true })).paths).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
