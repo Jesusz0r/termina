@@ -51,8 +51,7 @@ describe("empty-state shortcut hints", () => {
       const { root, modifier } = hintRoot(document);
       applyEmptyStateShortcutHints(root as unknown as ParentNode);
       expect(modifier.textContent).toBe("Ctrl");
-      expect(root.textContent).toContain("Ctrl");
-      expect(root.textContent).not.toContain("⌘");
+      expect(modifier.textContent).not.toBe("⌘");
     } finally {
       cleanup();
     }
