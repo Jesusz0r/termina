@@ -5,6 +5,7 @@
  * entry mutation. Split from agent-core/auth.ts (issue #38).
  */
 import { errorCode, isRecord } from "../../shared/guards.ts";
+import { syncParentDir } from "../../shared/fsync.ts";
 import { randomBytes } from "node:crypto";
 import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -280,6 +281,11 @@ function writeAuth(data: AuthFile, binding: AuthPathBinding): void {
       || afterPublish.ino !== tempIdentity.ino
     ) throw new Error("auth published file identity changed");
     published = true;
+    // Crash durability for the directory entry: without this, a crash inside
+    // the flush window can revert auth.json to its pre-write content. This
+    // runs after published is set so a sync failure surfaces without
+    // triggering the unpublished-write cleanup above.
+    syncParentDir(path);
   } finally {
     if (fd !== null && !published) truncateAuthDescriptor(fd);
     if (tempCreated && !published && tempIdentity !== null) {
