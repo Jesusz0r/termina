@@ -408,19 +408,59 @@ export class PtyEgressScheduler {
    * retained until that marker is acknowledged by the hydrated renderer.
    */
   finish(terminalId: string, terminalGeneration: number, code = 0): Promise<boolean> {
+    const queue = this.beginFinish(terminalId, terminalGeneration, code);
+    if (!queue) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      queue.finishWaiters.push(resolve);
+      this.maybeFinishQueue(queue);
+      this.schedulePump();
+    });
+  }
+
+  /**
+   * Mark a naturally exited PTY, giving up after timeoutMs. Like finish(),
+   * but the waiter resolves false on timeout (and unregisters) instead of
+   * waiting forever for a wedged renderer. The queue itself is retained:
+   * the caller decides whether to cancel it. Crash/reload replay and
+   * acknowledgement still complete the queue normally when they arrive in
+   * budget; a timed-out waiter simply stops blocking teardown.
+   */
+  finishWithTimeout(terminalId: string, terminalGeneration: number, code = 0, timeoutMs: number): Promise<boolean> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0) throw new Error("invalid PTY egress finish timeout");
+    const queue = this.beginFinish(terminalId, terminalGeneration, code);
+    if (!queue) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const done = (delivered: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(delivered);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const index = queue.finishWaiters.indexOf(done);
+        if (index >= 0) queue.finishWaiters.splice(index, 1);
+        resolve(false);
+      }, timeoutMs);
+      queue.finishWaiters.push(done);
+      this.maybeFinishQueue(queue);
+      this.schedulePump();
+    });
+  }
+
+  /** Shared finish admission: register closing state and queue the exit marker. */
+  private beginFinish(terminalId: string, terminalGeneration: number, code: number): TerminalQueue | null {
     const queue = this.queues.get(terminalId);
-    if (this.disposed || !queue || queue.terminalGeneration !== terminalGeneration) return Promise.resolve(false);
+    if (this.disposed || !queue || queue.terminalGeneration !== terminalGeneration) return null;
     if (!queue.closing) {
       queue.closing = true;
       queue.finishCode = Number.isSafeInteger(code) ? code : 0;
       this.pauseSource(queue);
     }
     this.maybeQueueExit(queue);
-    return new Promise<boolean>((resolve) => {
-      queue.finishWaiters.push(resolve);
-      this.maybeFinishQueue(queue);
-      this.schedulePump();
-    });
+    return queue;
   }
 
   /** Cancel a terminal whose close is user-initiated or part of teardown. */

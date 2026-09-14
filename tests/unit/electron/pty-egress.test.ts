@@ -1129,4 +1129,71 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     slowAcceptedBytes: slowSends.reduce((sum, item) => sum + Buffer.byteLength(item.data), 0),
   }));
   }, 30_000);
+
+  it("bounds exit teardown for a wedged renderer without breaking reload recovery (refs #194)", async () => {
+    // Fast path: an acked exit resolves true inside the budget.
+    const sends: PtyEgressEvent[] = [];
+    const scheduler = testScheduler({
+      send: (id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) => {
+        sends.push({ kind: "data", id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data });
+        return true;
+      },
+      sendExit: (id, terminalGeneration, windowGeneration, rendererGeneration, sequence, code) => {
+        sends.push({ kind: "exit", id, terminalGeneration, windowGeneration, rendererGeneration, sequence, code });
+        return true;
+      },
+    });
+    scheduler.register("fast", 1, source());
+    ready(scheduler, "fast", 1, 1, 1);
+    assert.equal(scheduler.enqueue("fast", 1, "tail"), true);
+    const fastDone = scheduler.finishWithTimeout("fast", 1, 0, 5000);
+    await waitFor(() => sends.length === 1, "fast exit tail was not sent");
+    acknowledgeAll(scheduler, sends.filter((item) => item.kind === "data"));
+    await waitFor(() => sends.length === 2, "fast exit marker was not sent");
+    assert.equal(sends[1].kind, "exit");
+    acknowledgeAll(scheduler, [sends[1]]);
+    assert.equal(await fastDone, true);
+
+    // Wedged path: ready but never acking resolves false on timeout, keeps
+    // the queue until the caller cancels, and acks/crashes stay harmless.
+    scheduler.register("wedged", 2, source());
+    assert.equal(scheduler.hydrateTerminal("wedged", 2, 1, 1), true);
+    assert.equal(scheduler.enqueue("wedged", 2, "stuck"), true);
+    const wedgedDone = scheduler.finishWithTimeout("wedged", 2, 0, 20);
+    assert.equal(await wedgedDone, false);
+    assert.equal(terminalStats(scheduler, "wedged").closing, true);
+    assert.equal(scheduler.stats("wedged").retainedChunks > 0, true);
+    scheduler.cancel("wedged", 2);
+    assert.equal(terminalStats(scheduler, "wedged").terminalGeneration, 0);
+    assert.equal(scheduler.acknowledge("wedged", 2, 1, 1, 1), false);
+
+    // Crash/reload inside the budget still completes: the retained tail is
+    // replayed to the replacement document and the waiter resolves true.
+    scheduler.register("reload", 3, source());
+    assert.equal(scheduler.hydrateTerminal("reload", 3, 1, 1), true);
+    assert.equal(scheduler.enqueue("reload", 3, "tail"), true);
+    const reloadDone = scheduler.finishWithTimeout("reload", 3, 9, 5000);
+    await waitFor(() => sends.some((item) => item.kind === "data" && item.data === "tail"), "reload tail was not sent");
+    assert.equal(scheduler.setRendererReady(1, 1, false), true);
+    assert.equal(scheduler.setRendererReady(1, 2, true), true);
+    assert.equal(scheduler.hydrateTerminal("fast", 1, 1, 2), false, "settled terminal stays gone");
+    assert.equal(scheduler.hydrateTerminal("reload", 3, 1, 2), true);
+    await waitFor(
+      () => sends.filter((item) => item.kind === "data" && item.data === "tail").length === 2,
+      "retained tail was not replayed",
+    );
+    const replayed = sends.filter((item) => item.kind === "data" && item.data === "tail");
+    assert.equal(replayed[0].sequence, replayed[1].sequence);
+    acknowledgeAll(scheduler, [replayed[1]]);
+    await waitFor(() => sends.some((item) => item.kind === "exit" && item.id === "reload"), "reload exit was not sent");
+    const marker = sends.find((item) => item.kind === "exit" && item.id === "reload")!;
+    assert.equal(marker.code, 9);
+    acknowledgeAll(scheduler, [marker]);
+    assert.equal(await reloadDone, true);
+
+    // Unknown terminals fail closed; invalid budgets throw instead of arming.
+    assert.equal(await scheduler.finishWithTimeout("missing", 1, 0, 50), false);
+    assert.throws(() => scheduler.finishWithTimeout("reload", 3, 0, -1), /invalid PTY egress finish timeout/);
+    scheduler.dispose();
+  });
 });

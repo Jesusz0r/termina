@@ -135,6 +135,10 @@ function isChallengeProfile(value: unknown): value is ChallengeProfile {
   return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
 }
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
+/** Exit teardown waits this long for the renderer to acknowledge the PTY
+ *  tail before cancelling it: crash/reload cycles finish well inside, while
+ *  a wedged renderer cannot stall teardown (and subagent cleanup) forever. */
+const PTY_EXIT_DRAIN_TIMEOUT_MS = 10_000;
 const MAX_EXPLORER_ENTRIES = 2000;
 const MAX_VERIFY_OUTPUT = 200_000;
 /** Bound for one project snapshot context file (tree listing for a turn). */
@@ -2961,8 +2965,15 @@ class TerminaApp {
       console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
       // Keep the terminal in the live map while queued output drains.  An
       // exit notification overtaking PTY bytes changes TUI semantics, and a
-      // renderer reload must be able to receive the retained tail.
-      await this.ptyEgress.finish(inst.id, terminalGeneration, code);
+      // renderer reload must be able to receive the retained tail. A wedged
+      // renderer (ready but never acking) gets a bounded wait, then its
+      // retained output is cancelled so teardown — timeline release,
+      // subagent cleanup, dispatch re-pending — cannot stall forever.
+      const drained = await this.ptyEgress.finishWithTimeout(inst.id, terminalGeneration, code, PTY_EXIT_DRAIN_TIMEOUT_MS);
+      if (!drained) {
+        console.warn(`[main] terminal ${inst.id} exit drain timed out; dropping retained output`);
+        this.ptyEgress.cancel(inst.id, terminalGeneration);
+      }
       if (inst.captureTimer) {
         clearTimeout(inst.captureTimer);
         inst.captureTimer = null;
