@@ -119,7 +119,8 @@ const bridge: TerminaBridge = {
   getRuns: (terminalId) => ipcRenderer.invoke("worldline:runs", terminalId),
   reportFlush: (requestId, result) => ipcRenderer.invoke("editor:flush-report", requestId, result),
   reportUnsavedConfirm: (requestId, result) => ipcRenderer.invoke("editor:unsaved-report", requestId, result),
-  flushSave: (path, content, writerId, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:flush-save", path, content, writerId, owner),
+  flushSave: (path, content, writerId, owner: ProjectWorkspaceRef, restore) =>
+    ipcRenderer.invoke("file:flush-save", path, content, writerId, owner, restore === true),
   getWorldlines: (projectId) => ipcRenderer.invoke("worldline:list", projectId),
   getWorldlineDetails: (comparisonId, label) => ipcRenderer.invoke("worldline:details", comparisonId, label),
   getWorldlineFile: (comparisonId, label, relPath) => ipcRenderer.invoke("worldline:file", comparisonId, label, relPath),
@@ -155,7 +156,8 @@ const bridge: TerminaBridge = {
   projectActivate: (projectId) => ipcRenderer.invoke("project:activate", projectId),
   projectClose: (projectId) => ipcRenderer.invoke("project:close", projectId),
   openFile: (path, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:open", path, owner),
-  saveFile: (path, content, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:save", path, content, owner),
+  saveFile: (path, content, owner: ProjectWorkspaceRef, restore) =>
+    ipcRenderer.invoke("file:save", path, content, owner, restore === true),
 
   // ---- file explorer ----
   listDir: (projectId, absPath): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> => ipcRenderer.invoke("explorer:list-dir", projectId, absPath),

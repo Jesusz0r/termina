@@ -7940,7 +7940,7 @@ class TerminaApp {
       waiter.resolve(result);
     });
     /** The flush saves go through the lease holder (the preflight). */
-    ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string, owner: unknown) => {
+    ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string, owner: unknown, restore: unknown) => {
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
       // The TypeScript annotation is not runtime validation: null (or any
       // non-string/empty value) must never match an idle workspace's holder.
@@ -7954,11 +7954,7 @@ class TerminaApp {
       // cannot interleave while the depth is held.
       if (!this.joinWriteLease(managed.workspace.id, writerId)) return { ok: false, error: "the flush does not hold the write lease" };
       try {
-        // lstat: refuse a leaf swapped for a symlink after admission.
-        const info = await lstat(managed.path);
-        if (!info.isFile()) return { ok: false, error: "path is not a regular file" };
-        await this.durableReplaceFile(managed.path, content, info.mode & 0o777);
-        return { ok: true };
+        return await this.writeLeasedEditorFile(managed.path, content, restore === true);
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       } finally {
@@ -8057,7 +8053,9 @@ class TerminaApp {
       if (typeof absPath !== "string") return { ok: false, path: "", error: "invalid path" };
       return this.openFileInEditor(absPath, owner);
     });
-    ipcMain.handle("file:save", (_e, absPath: unknown, content: unknown, owner: unknown) => this.saveEditorFile(absPath, content, owner));
+    ipcMain.handle("file:save", (_e, absPath: unknown, content: unknown, owner: unknown, restore: unknown) =>
+      this.saveEditorFile(absPath, content, owner, restore),
+    );
 
     ipcMain.handle("explorer:list-dir", (_e, projectId: unknown, absPath: unknown) => {
       if (typeof projectId !== "string" || typeof absPath !== "string") return { entries: [], error: "invalid path" };
@@ -8251,11 +8249,35 @@ class TerminaApp {
   }
 
   /**
+   * Write one editor buffer under an already-held write lease. Restore
+   * recreates a missing regular file (and parents) then writes; ordinary
+   * save still refuses a missing path. Non-regular leaves are refused
+   * either way. Callers must hold the lease across this whole call.
+   */
+  private async writeLeasedEditorFile(path: string, content: string, restore: boolean): Promise<{ ok: boolean; error?: string }> {
+    if (restore) {
+      await mkdir(dirname(path), { recursive: true });
+    }
+    const st = await lstat(path).catch((err: unknown) => {
+      if (isErrno(err, "ENOENT")) return null;
+      throw err;
+    });
+    if (st === null) {
+      if (!restore) return { ok: false, error: "path is not a regular file" };
+    } else if (!st.isFile()) {
+      return { ok: false, error: "path is not a regular file" };
+    }
+    await this.durableReplaceFile(path, content, st === null ? undefined : st.mode & 0o777);
+    return { ok: true };
+  }
+
+  /**
    * Save one editor buffer. Holds a short write lease so a promotion apply
    * cannot land between the guard and the write, and re-checks the leaf
-   * with lstat immediately before writing.
+   * with lstat immediately before writing. Pass restore=true to recreate a
+   * missing regular file under that same lease.
    */
-  private async saveEditorFile(absPath: unknown, content: unknown, owner: unknown): Promise<{ ok: boolean; error?: string }> {
+  private async saveEditorFile(absPath: unknown, content: unknown, owner: unknown, restore: unknown): Promise<{ ok: boolean; error?: string }> {
     if (typeof absPath !== "string") return { ok: false, error: "invalid path" };
     if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
     const target = this.projectWorkspace(owner);
@@ -8266,13 +8288,7 @@ class TerminaApp {
     try {
       const managed = await this.managedPath(absPath, target.workspace.id);
       if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
-      const st = await lstat(managed.path).catch((err: unknown) => {
-        if (isErrno(err, "ENOENT")) return null;
-        throw err;
-      });
-      if (st === null || !st.isFile()) return { ok: false, error: "path is not a regular file" };
-      await this.durableReplaceFile(managed.path, content, st.mode & 0o777);
-      return { ok: true };
+      return await this.writeLeasedEditorFile(managed.path, content, restore === true);
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     } finally {

@@ -651,8 +651,9 @@ export interface TerminaBridge {
   reportFlush(requestId: string, result: { ok: boolean; failed: string[] }): Promise<void>;
   /** The renderer's answer to an unsaved-buffer confirm (save / discard / cancel). */
   reportUnsavedConfirm(requestId: string, result: { ok: boolean; cancelled?: boolean; error?: string }): Promise<void>;
-  /** Save a dirty model on behalf of the write-lease holder (the flush). */
-  flushSave(path: string, content: string, writerId: string, owner: ProjectWorkspaceRef): Promise<{ ok: boolean; error?: string }>;
+  /** Save a dirty model on behalf of the write-lease holder (the flush).
+   *  Pass restore to recreate a missing regular file under that same lease. */
+  flushSave(path: string, content: string, writerId: string, owner: ProjectWorkspaceRef, restore?: boolean): Promise<{ ok: boolean; error?: string }>;
 
   // Worldlines: candidates
   /** The live worldline candidates. */
@@ -717,7 +718,10 @@ export interface TerminaBridge {
   projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
   onProjectClosed(cb: (e: { projectId: string; activationGeneration: number }) => void): () => void;
   openFile(path: string, owner: ProjectWorkspaceRef): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }>;
-  saveFile(path: string, content: string, owner: ProjectWorkspaceRef): Promise<{ ok: boolean; error?: string }>;
+  /** Persist an editor buffer. Pass restore to recreate a missing regular
+   *  file (and parents) under the same write lease; ordinary save still
+   *  refuses a missing path. */
+  saveFile(path: string, content: string, owner: ProjectWorkspaceRef, restore?: boolean): Promise<{ ok: boolean; error?: string }>;
 
   // file explorer
   listDir(projectId: string, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }>;

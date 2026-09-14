@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 const editor = readFileSync(new URL("../../../src/editor.ts", import.meta.url), "utf8");
 const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+const preload = readFileSync(new URL("../../../electron/preload.ts", import.meta.url), "utf8");
 const css = readFileSync(new URL("../../../src/styles.css", import.meta.url), "utf8");
 
 /** Body of a class method or member, including nested blocks. */
@@ -49,15 +50,18 @@ describe("external deletion keeps dirty buffers (refs #127)", () => {
     expect(handler).toContain("view.editorMgr?.closeIfOpen(p.path)");
   });
 
-  it("restores the file through the existing create + save IPC when a deleted buffer saves", () => {
-    const restore = memberBody(editor, "private async restoreDeletedBeforeSave(");
-    expect(restore).toContain("this.deletedOnDisk.has(tab.key)");
-    expect(restore).toContain("this.relativePath(tab.key)");
-    expect(restore).toContain('window.termina.createEntry(tab.owner.projectId, rel, "file")');
-    expect(memberBody(editor, "private async saveActive()")).toContain("await this.restoreDeletedBeforeSave(live)");
-    expect(memberBody(editor, "async flushKeys(keys: string[], writerId?: string): Promise<{ ok: boolean; failed: string[] }>")).toContain(
-      "await this.restoreDeletedBeforeSave(live)",
-    );
+  it("restores a deleted buffer through one save IPC, not a renderer create-then-save", () => {
+    expect(editor).not.toContain("restoreDeletedBeforeSave");
+    expect(editor).not.toContain("createEntry");
+    const saveActive = memberBody(editor, "private async saveActive()");
+    expect(saveActive).toContain("const restore = this.deletedOnDisk.has(live.key)");
+    expect(saveActive).toContain("window.termina.saveFile(live.key, submittedText, live.owner, restore)");
+    const flushKeys = memberBody(editor, "async flushKeys(keys: string[], writerId?: string): Promise<{ ok: boolean; failed: string[] }>");
+    expect(flushKeys).toContain("const restore = this.deletedOnDisk.has(live.key)");
+    expect(flushKeys).toContain("window.termina.flushSave(live.key, submittedText, writerId, live.owner, restore)");
+    expect(flushKeys).toContain("window.termina.saveFile(live.key, submittedText, live.owner, restore)");
+    expect(preload).toContain('ipcRenderer.invoke("file:save", path, content, owner, restore === true)');
+    expect(preload).toContain('ipcRenderer.invoke("file:flush-save", path, content, writerId, owner, restore === true)');
   });
 
   it("clears the deletion marking when the file exists again", () => {
