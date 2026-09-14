@@ -60,6 +60,45 @@ describe("Terminal file link detection", () => {
     expect(links[1].path).toBe("scripts/dev.ts");
   });
 
+  it("strips both sides of a diff --git header", () => {
+    const links = parseTerminalFileLinks("diff --git a/src/main.ts b/src/main.ts");
+    expect(links.map((l) => l.path)).toEqual(["src/main.ts", "src/main.ts"]);
+  });
+
+  it("preserves literal a/ and b/ directories in ordinary references (refs #143)", () => {
+    const a = parseTerminalFileLinks("Open a/module.ts:10");
+    expect(a).toHaveLength(1);
+    expect(a[0].path).toBe("a/module.ts");
+    expect(a[0].line).toBe(10);
+    const b = parseTerminalFileLinks("Open b/module.ts:20");
+    expect(b).toHaveLength(1);
+    expect(b[0].path).toBe("b/module.ts");
+    expect(b[0].line).toBe(20);
+  });
+
+  it("preserves literal a/ prefixes in quoted and Markdown file targets", () => {
+    const quoted = parseTerminalFileLinks('See "a/module.ts:7" for details.');
+    expect(quoted).toHaveLength(1);
+    expect(quoted[0].path).toBe("a/module.ts");
+    const md = parseTerminalFileLinks("See [impl](a/module.ts:3) for details.");
+    expect(md).toHaveLength(1);
+    expect(md[0].path).toBe("a/module.ts");
+    expect(md[0].line).toBe(3);
+  });
+
+  it("never treats Markdown or quoted web URLs as local files (refs #143)", () => {
+    expect(parseTerminalFileLinks("[docs](https://example.com/readme.md)")).toHaveLength(0);
+    expect(parseTerminalFileLinks('"https://example.com/code.ts"')).toHaveLength(0);
+    expect(parseTerminalFileLinks("'http://localhost:5173/test.js'")).toHaveLength(0);
+    expect(parseTerminalFileLinks("[docs](ftp://example.com/readme.md)")).toHaveLength(0);
+  });
+
+  it("still links a file next to a web URL on the same line", () => {
+    const links = parseTerminalFileLinks("See https://example.com/readme.md and src/main.ts:42.");
+    expect(links).toHaveLength(1);
+    expect(links[0].path).toBe("src/main.ts");
+  });
+
   it("detects known files without extensions or dotfiles", () => {
     const text = "Files: Dockerfile, Makefile, .gitignore, and package.json.";
     const links = parseTerminalFileLinks(text);

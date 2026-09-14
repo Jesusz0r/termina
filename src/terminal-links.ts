@@ -42,8 +42,16 @@ function safeDecodeUri(uri: string): string {
 /**
  * Parses a target candidate into clean path, line, and column.
  * Returns null if the target does not look like a source file or known config.
+ *
+ * Only `file://` URIs are local files: any other scheme (`http://`, `https://`,
+ * …) is rejected here so quoted and Markdown web targets never become file links.
+ * A leading `a/` or `b/` is a Git diff prefix only when the caller observed a
+ * real diff header (`diffHeader: true`); ordinary paths keep it literally.
  */
-export function parseTargetReference(target: string): { path: string; line?: number; column?: number } | null {
+export function parseTargetReference(
+  target: string,
+  opts: { diffHeader?: boolean } = {},
+): { path: string; line?: number; column?: number } | null {
   let cleaned = target;
   if (!/\(\d+(?:,\s*\d+)?\)$/.test(target)) {
     cleaned = cleaned.replace(/[.,;!?:)]+$/, "");
@@ -51,6 +59,8 @@ export function parseTargetReference(target: string): { path: string; line?: num
     cleaned = cleaned.replace(/[.,;!?:]+$/, "");
   }
   if (!cleaned) return null;
+
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(cleaned) && !cleaned.startsWith("file://")) return null;
 
   if (cleaned.startsWith("file://")) {
     cleaned = cleaned.slice("file://".length);
@@ -84,7 +94,7 @@ export function parseTargetReference(target: string): { path: string; line?: num
     }
   }
 
-  const cleanPath = cleaned.replace(/^[ab]\//, "");
+  const cleanPath = opts.diffHeader ? cleaned.replace(/^[ab]\//, "") : cleaned;
   const baseName = cleanPath.split("/").pop() ?? "";
   const dotIdx = baseName.lastIndexOf(".");
   const ext = dotIdx > 0 ? baseName.slice(dotIdx + 1).toLowerCase() : "";
@@ -97,6 +107,17 @@ export function parseTargetReference(target: string): { path: string; line?: num
 
   if (!isRecognized) return null;
   return { path: cleanPath, line, column: col };
+}
+
+/**
+ * True when the match at `startIndex` is the path of a real Git diff header
+ * (`--- a/…`, `+++ b/…`, or either side of `diff --git a/… b/…`) rather than
+ * an ordinary reference to a directory literally named `a` or `b`.
+ */
+function isDiffHeaderTarget(lineText: string, startIndex: number): boolean {
+  const before = lineText.slice(0, startIndex);
+  const prefix = before.slice(before.lastIndexOf("\n") + 1);
+  return /^(---|\+\+\+)\s+$/.test(prefix) || /^diff --git\s+(\S+\s+)?$/.test(prefix);
 }
 
 /**
@@ -214,7 +235,9 @@ export function parseTerminalFileLinks(lineText: string): ParsedTerminalFileLink
     const endIndex = startIndex + raw.length;
     if (isOverlapping(startIndex, endIndex)) continue;
 
-    const parsedTarget = parseTargetReference(raw);
+    // Only the unquoted site can be a diff header: Markdown, quoted, and
+    // file:// targets carry their own syntax, so their `a/` / `b/` stays literal.
+    const parsedTarget = parseTargetReference(raw, { diffHeader: isDiffHeaderTarget(lineText, startIndex) });
     if (!parsedTarget) continue;
 
     links.push({
