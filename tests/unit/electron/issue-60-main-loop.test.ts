@@ -344,7 +344,7 @@ describe("issue #60 prompt bounded read", () => {
     expect(promptBlock).not.toContain("JSON.parse(");
     expect(promptBlock).not.toContain("readFile(payloadPath");
     const reader = sliceBetween(manager, "private async readPromptPayload(", "/** Support directories:");
-    expect(reader).toContain("readPromptPayloadFile(path");
+    expect(reader).toContain("readPromptPayloadResult(path");
     expect(reader).not.toContain("JSON.parse(");
   });
 });
