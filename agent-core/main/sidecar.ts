@@ -302,7 +302,7 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
       }
       let proofPath: string | undefined;
       try {
-        const sealedPath = activeSidecarPath + "." + Date.now().toString(36) + "-" + process.pid + "-" + randomUUID() + SIDECAR_SEALED_SUFFIX;
+        const sealedPath = join(eventsDir, "." + basename(activeSidecarPath) + "." + Date.now().toString(36) + "-" + process.pid + "-" + randomUUID() + SIDECAR_SEALED_SUFFIX);
         proofPath = sealedPath + SIDECAR_SEALED_PROOF_SUFFIX;
         const sealedName = basename(sealedPath);
         const identity = String(activeStats.dev) + ":" + String(activeStats.ino);

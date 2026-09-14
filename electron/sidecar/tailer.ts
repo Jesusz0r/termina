@@ -1264,6 +1264,24 @@ export class SidecarTailer {
     for (const candidate of candidates) {
       if (!pending.has(candidate.name)) pending.set(candidate.name, candidate);
     }
+    // An active read is administratively blocked while any sealed generation
+    // exists (see readSource's seal gate), so scheduling it can only no-op.
+    // Worse, a stale active partial from before the rotation would rank
+    // active first and end the pass, starving the sealed source forever.
+    // Active reads cannot run while a seal exists, so any active offset or
+    // partial now predates the rotation: no active byte has been delivered,
+    // and the pre-rotation bytes live in the seal while stream ownership
+    // stays. Reset to the start of the post-rotation inode and drain sealed
+    // candidates first; without the offset reset a stale offset at or past
+    // the new file size would hide the new bytes forever.
+    if ([...pending.values()].some((candidate) => !candidate.retained && !candidate.active)) {
+      this.partialRecords.delete(id);
+      this.oversizedRecords.delete(id);
+      this.offsets.set(id, 0);
+      for (const [name, candidate] of pending) {
+        if (candidate.active) pending.delete(name);
+      }
+    }
     while (pending.size > 0) {
       if (!this.isLive(id, generation) || this.quarantined.has(id)) return;
       if (this.segmentDrainPaths.has(id) && [...pending.values()].some((candidate) => !candidate.retained && !candidate.active)) {
