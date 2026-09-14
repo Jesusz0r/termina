@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as fs from "node:fs";
 import type { FSWatcher } from "node:fs";
-import { SidecarTailer } from "../../../electron/sidecar.ts";
+import { SidecarEventQueue, SidecarTailer } from "../../../electron/sidecar.ts";
+import type { SidecarEvent } from "../../../electron/sidecar.ts";
 import { createSidecarWriter } from "../../../agent-core/main/sidecar.ts";
 
 /** fs.watch-shaped fake that never fires; the recovery poll drives tails. */
@@ -116,4 +117,62 @@ describe("Wave 1 sidecar rotation regressions", () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 30000);
+});
+
+describe("Wave 1 sidecar queue dead-letter regressions", () => {
+  const boundary = (seq: number): SidecarEvent => ({ bridgeId: "bridge", seq, t: "agent_start", sessionId: String(seq) });
+
+  it("dead-letters a poison event so drain() resolves (refs #182)", async () => {
+    let handlerCalls = 0;
+    const deadLetters: Array<{ event: SidecarEvent; attempts: number }> = [];
+    const queue = new SidecarEventQueue(
+      async () => {
+        handlerCalls++;
+        throw new Error("poison handler always fails");
+      },
+      {
+        maxHandlerAttempts: 3,
+        onDeadLetter: (event, _error, attempts) => {
+          deadLetters.push({ event, attempts });
+        },
+      },
+    );
+    const first = queue.enqueueTracked(boundary(1));
+    const second = queue.enqueueTracked(boundary(2));
+    expect(first.accepted).toBe(true);
+    expect(second.accepted).toBe(true);
+
+    // Pre-fix this never resolved: the failing handler was retried forever.
+    await queue.drain();
+
+    expect(handlerCalls).toBe(6);
+    expect(deadLetters.map((entry) => [entry.event.seq, entry.attempts])).toEqual([[1, 3], [2, 3]]);
+    expect(queue.stats().deadLettered).toBe(2);
+    // A dead-lettered event is skipped, not replayed: its acknowledgement
+    // resolves so the tailer advances past the poison record.
+    await expect(first.completed).resolves.toBeUndefined();
+    await expect(second.completed).resolves.toBeUndefined();
+    queue.dispose();
+  }, 10000);
+
+  it("recovers transient handler failures without dead-lettering (refs #182)", async () => {
+    let handlerCalls = 0;
+    const delivered: number[] = [];
+    const queue = new SidecarEventQueue(
+      async (event) => {
+        handlerCalls++;
+        if (handlerCalls <= 2) throw new Error("transient failure");
+        delivered.push(event.seq);
+      },
+      { maxHandlerAttempts: 3, onDeadLetter: () => { throw new Error("must not dead-letter a transient"); } },
+    );
+    const delivery = queue.enqueueTracked(boundary(7));
+    expect(delivery.accepted).toBe(true);
+    await queue.drain();
+    await expect(delivery.completed).resolves.toBeUndefined();
+    expect(delivered).toEqual([7]);
+    expect(handlerCalls).toBe(3);
+    expect(queue.stats().deadLettered).toBe(0);
+    queue.dispose();
+  }, 10000);
 });

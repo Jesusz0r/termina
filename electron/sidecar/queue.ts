@@ -40,6 +40,22 @@ export interface SidecarEventQueueOptions {
   maxBytes?: number;
   maxInFlight?: number;
   onError?: (error: Error, event: SidecarEvent) => void;
+  /**
+   * Handler attempts before a deterministically failing event is dead-lettered
+   * (dropped) instead of retried forever. Defaults to 10 (~9 s of backoff).
+   * A poison event must never wedge project close or app shutdown, which
+   * await drain(); transients shorter than the budget still recover.
+   */
+  maxHandlerAttempts?: number;
+  /**
+   * Called once when an event is dead-lettered. Defaults to console.warn.
+   * A dead-lettered boundary event is LOST, not replayed: later events in the
+   * same run apply to whatever state the failed handler left behind.
+   * Non-idempotent boundary handlers (run-state resets) therefore depend on
+   * the next run boundary to re-establish state; replaying the poison event
+   * is not an option because it would re-poison the queue.
+   */
+  onDeadLetter?: (event: SidecarEvent, error: Error, attempts: number) => void;
 }
 
 
@@ -50,13 +66,20 @@ export interface SidecarEventQueueStats {
   bytes: number;
   inFlight: number;
   inFlightBytes: number;
+  /** Events dropped by the bounded-attempt dead-letter path. Never replayed. */
+  deadLettered: number;
 }
 
 
 export interface SidecarEventDelivery {
   /** False means the caller must leave the durable record at its cursor. */
   accepted: boolean;
-  /** Resolves only after the handler has completed successfully. */
+  /**
+   * Resolves after the handler completes successfully OR the event is
+   * dead-lettered (skipped after bounded handler attempts). Either way the
+   * caller must advance past the record: a dead-lettered event will never be
+   * redelivered, so its state transition is lost. Rejects only on dispose.
+   */
   completed?: Promise<void>;
 }
 
@@ -74,6 +97,9 @@ interface QueuedSidecarEvent {
 
 const SIDECAR_HANDLER_RETRY_MS = 50;
 
+/** Handler attempts before a poison event is dead-lettered. See options docs. */
+const SIDECAR_HANDLER_MAX_ATTEMPTS = 10;
+
 
 function sidecarEventBytes(event: SidecarEvent): number {
   // Events are already parsed and bounded by the tail read.  Keep admission
@@ -87,10 +113,12 @@ export class SidecarEventQueue {
   private readonly maxItems: number;
   private readonly maxBytes: number;
   private readonly maxInFlight: number;
+  private readonly maxHandlerAttempts: number;
   private readonly queue: QueuedSidecarEvent[] = [];
   private queuedBytes = 0;
   private inFlight = 0;
   private inFlightBytes = 0;
+  private deadLettered = 0;
   private disposed = false;
   private drainWaiters: Array<() => void> = [];
   private activeItems = new Set<QueuedSidecarEvent>();
@@ -103,13 +131,19 @@ export class SidecarEventQueue {
     this.maxItems = options.maxItems ?? SIDECAR_EVENT_QUEUE_HIGH_WATER_ITEMS;
     this.maxBytes = options.maxBytes ?? SIDECAR_EVENT_QUEUE_HIGH_WATER_BYTES;
     this.maxInFlight = options.maxInFlight ?? SIDECAR_EVENT_QUEUE_IN_FLIGHT_HIGH_WATER;
+    this.maxHandlerAttempts = options.maxHandlerAttempts ?? SIDECAR_HANDLER_MAX_ATTEMPTS;
     if (!Number.isSafeInteger(this.maxItems) || this.maxItems < 1) throw new Error("invalid sidecar queue item high-water mark");
     if (!Number.isSafeInteger(this.maxBytes) || this.maxBytes < 1) throw new Error("invalid sidecar queue byte high-water mark");
     if (!Number.isSafeInteger(this.maxInFlight) || this.maxInFlight < 1) throw new Error("invalid sidecar queue in-flight high-water mark");
+    if (!Number.isSafeInteger(this.maxHandlerAttempts) || this.maxHandlerAttempts < 1) throw new Error("invalid sidecar queue handler attempt bound");
     this.onError = options.onError ?? (() => {});
+    this.onDeadLetter = options.onDeadLetter ?? ((event, error, attempts) => {
+      console.warn(`[sidecar] ${event.t} seq ${event.seq} dead-lettered after ${attempts} handler attempts: ${error.message}`);
+    });
   }
 
   private readonly onError: (error: Error, event: SidecarEvent) => void;
+  private readonly onDeadLetter: (event: SidecarEvent, error: Error, attempts: number) => void;
 
   /** Admit one event. False means the caller must retry the same event. */
   enqueue(event: SidecarEvent): boolean {
@@ -174,6 +208,7 @@ export class SidecarEventQueue {
       bytes: this.queuedBytes + this.inFlightBytes,
       inFlight: this.inFlight,
       inFlightBytes: this.inFlightBytes,
+      deadLettered: this.deadLettered,
     };
   }
 
@@ -228,6 +263,21 @@ export class SidecarEventQueue {
           this.activeItems.delete(item);
           if (this.disposed) {
             item.reject(normalized);
+          } else if (item.attempts + 1 >= this.maxHandlerAttempts) {
+            // Dead-letter: a deterministically failing handler must not wedge
+            // the queue (and the close/shutdown drains awaiting it) forever.
+            // The event is SKIPPED, not replayed: resolve its acknowledgement
+            // so the tailer advances past the poison record, record the loss,
+            // and continue with the next event. See onDeadLetter docs for the
+            // non-idempotent boundary semantics this skip implies.
+            this.deadLettered++;
+            item.resolve();
+            try {
+              this.onDeadLetter(item.event, normalized, item.attempts + 1);
+            } catch {
+              /* Diagnostics must never break queue recovery. */
+            }
+            this.pump();
           } else {
             // Put the exact item back at the head. A later boundary may
             // never pass a failed one, and the tailer's durable cursor stays
