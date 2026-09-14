@@ -184,10 +184,20 @@ export class ReviewView {
     this.path = absPath;
     this.owner = null;
     this.nameEl.textContent = `${relPath}  ·  ${label}`;
-    const [base, cand] = await Promise.all([
-      window.termina.getWorldlineBaseFile(comparisonId, relPath),
-      window.termina.getWorldlineFile(comparisonId, label, relPath),
-    ]);
+    let base: { ok: boolean; content?: string; error?: string };
+    let cand: { ok: boolean; content?: string; error?: string };
+    try {
+      [base, cand] = await Promise.all([
+        window.termina.getWorldlineBaseFile(comparisonId, relPath),
+        window.termina.getWorldlineFile(comparisonId, label, relPath),
+      ]);
+    } catch (err) {
+      if (seq !== this.loadSeq) return;
+      const hint = document.getElementById("review-hint")!;
+      hint.textContent = `shared base → candidate ${label} — ${(err as Error).message}`;
+      toast(`could not load candidate diff: ${(err as Error).message}`, "error");
+      return;
+    }
     if (seq !== this.loadSeq) return;
     this.setDiff(base.ok && base.content !== undefined ? base.content : "", cand.ok && cand.content !== undefined ? cand.content : "");
     const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
@@ -209,10 +219,20 @@ export class ReviewView {
     this.path = aRoot ? `${aRoot}/${relPath}` : null;
     this.owner = null;
     this.nameEl.textContent = `${relPath}  ·  A ⇄ B`;
-    const [a, b] = await Promise.all([
-      window.termina.getWorldlineFile(comparisonId, "A", relPath),
-      window.termina.getWorldlineFile(comparisonId, "B", relPath),
-    ]);
+    let a: { ok: boolean; content?: string; error?: string };
+    let b: { ok: boolean; content?: string; error?: string };
+    try {
+      [a, b] = await Promise.all([
+        window.termina.getWorldlineFile(comparisonId, "A", relPath),
+        window.termina.getWorldlineFile(comparisonId, "B", relPath),
+      ]);
+    } catch (err) {
+      if (seq !== this.loadSeq) return;
+      const hint = document.getElementById("review-hint")!;
+      hint.textContent = `A ⇄ B — ${(err as Error).message}`;
+      toast(`could not load A ⇄ B diff: ${(err as Error).message}`, "error");
+      return;
+    }
     if (seq !== this.loadSeq) return;
     this.setDiff(a.ok && a.content !== undefined ? a.content : "", b.ok && b.content !== undefined ? b.content : "");
     const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
@@ -322,7 +342,13 @@ export class ReviewView {
 
   async revert(): Promise<void> {
     if (!this.terminalId || !this.path) return;
-    const res = await window.termina.reviewRevert(this.terminalId, this.path);
+    let res;
+    try {
+      res = await window.termina.reviewRevert(this.terminalId, this.path);
+    } catch (err) {
+      toast(`revert failed: ${(err as Error).message}`, "error");
+      return;
+    }
     if (!res.ok) {
       toast(res.error ?? "revert failed", "error");
       return;

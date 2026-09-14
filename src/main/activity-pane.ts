@@ -93,7 +93,9 @@ export function createActivityPane<TPane extends ActivityPaneState>(
     elements.planList.replaceChildren();
     for (const task of pane.plan) {
       const li = document.createElement("li");
-      li.className = `plan-task state-${task.state}`;
+      // IPC-shaped but cosmetic-only: an unknown state falls back to pending.
+      const state = task.state === "active" || task.state === "done" ? task.state : "pending";
+      li.className = `plan-task state-${state}`;
       const mark = document.createElement("span");
       mark.className = "plan-mark";
       mark.textContent = task.state === "done" ? "✓" : task.state === "active" ? "◐" : "○";
@@ -121,7 +123,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
           // Success needs no toast: main re-sends the plan and the row shows the worker.
           void window.termina.dispatchRun(pane.instanceId, task.text).then((res) => {
             if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
-          });
+          }).catch((err) => toast(`dispatch failed: ${(err as Error).message}`, "warning"));
         });
       }
       elements.planList.appendChild(li);
@@ -187,8 +189,10 @@ export function createActivityPane<TPane extends ActivityPaneState>(
         path.className = "path";
         li.append(badge, path);
       }
-      badge.className = `status-badge ${f.status}`;
-      badge.textContent = f.status === "created" ? "A" : f.status === "deleted" ? "D" : "M";
+      // IPC-shaped but cosmetic-only: an unknown status falls back to modified.
+      const status = f.status === "created" || f.status === "deleted" ? f.status : "modified";
+      badge.className = `status-badge ${status}`;
+      badge.textContent = status === "created" ? "A" : status === "deleted" ? "D" : "M";
       path.textContent = f.relPath;
       path.title = f.path;
       for (const mark of li.querySelectorAll(".review-mark")) mark.remove();
@@ -242,7 +246,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
     // Main owns the list: clear it there or the next push resurrects it.
     void window.termina.clearModified(pane.instanceId).then((res) => {
       if (!res.ok) toast(res.error ?? "could not clear the list", "warning");
-    });
+    }).catch((err) => toast(`could not clear the list: ${(err as Error).message}`, "warning"));
   };
 
   const onAcceptAll = (e: MouseEvent): void => {
@@ -275,7 +279,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
     // Success needs no toast: main re-sends the plan and each row shows its worker.
     void window.termina.dispatchRun(id).then((res) => {
       if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
-    });
+    }).catch((err) => toast(`dispatch failed: ${(err as Error).message}`, "warning"));
   };
 
   elements.btnClearModified.addEventListener("click", onClearModified);

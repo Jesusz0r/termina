@@ -123,18 +123,23 @@ export class TimelineView {
 
   /** The recorder state label (indexing / ready / paused / degraded / budget). */
   setRecorder(state: RecorderState, detail?: string | null): void {
-    this.recorderEl.textContent = state === "ready" ? "" : state;
-    this.recorderEl.className = `timeline-recorder rec-${state}`;
-    this.recorderEl.hidden = state === "ready";
+    // The state feeds a class name; an unknown value (stale cache, older main)
+    // falls back to paused rather than interpolating an arbitrary string.
+    const safe = state === "indexing" || state === "ready" || state === "paused" || state === "degraded" || state === "budget"
+      ? state
+      : "paused";
+    this.recorderEl.textContent = safe === "ready" ? "" : safe;
+    this.recorderEl.className = `timeline-recorder rec-${safe}`;
+    this.recorderEl.hidden = safe === "ready";
     const base =
-      state === "indexing"
+      safe === "indexing"
         ? "indexing the source for moment forking"
-        : state === "paused"
+        : safe === "paused"
           ? "moment forking is paused (no Git recording)"
-          : state === "degraded"
+          : safe === "degraded"
             ? "some moments could not be captured"
             : "the fork-point budget is evicting old moments";
-    this.recorderEl.title = state === "degraded" && detail ? `${base}: ${detail}` : base;
+    this.recorderEl.title = safe === "degraded" && detail ? `${base}: ${detail}` : base;
   }
 
   /** Drop evicted dots (their source states are gone). */

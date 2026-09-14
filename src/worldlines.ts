@@ -17,6 +17,12 @@ export const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry";
  *  true total; the overflow note points at Compare for the fuller listing. */
 export const MAX_INLINE_CHANGED_ROWS = 500;
 
+/** Known candidate states (WorldlineState): the state pill allowlists against these. */
+const KNOWN_CANDIDATE_STATES: ReadonlySet<string> = new Set([
+  "creating", "ready", "running", "settled", "verifying", "promoting",
+  "conflict", "cancelled", "error", "discarding", "discarded", "promoted",
+]);
+
 interface ViewHandlers {
   /** Open a base-to-candidate diff in Change Review. */
   onCompareBase(comparisonId: string, label: "A" | "B", relPath: string, absPath: string): void;
@@ -197,7 +203,9 @@ export class WorldlinesView {
     }
     for (const v of summary.profiles) {
       const chip = document.createElement("span");
-      chip.className = `verdict verdict-${v.winner}`;
+      // IPC-shaped but cosmetic-only: an unknown winner falls back to unavailable.
+      const winner = v.winner === "A" || v.winner === "B" || v.winner === "tie" ? v.winner : "unavailable";
+      chip.className = `verdict verdict-${winner}`;
       chip.textContent = chipText(v, summary);
       chip.title = v.reason;
       pair.verdictsEl.appendChild(chip);
@@ -223,7 +231,9 @@ export class WorldlinesView {
     const otherLabel = card.summary.label === "A" ? "B" : "A";
     for (const rec of records) {
       const line = document.createElement("div");
-      line.className = `evidence-line evidence-${rec.status}`;
+      // IPC-shaped but cosmetic-only: an unknown status falls back to unavailable.
+      const status = rec.status === "pass" || rec.status === "fail" ? rec.status : "unavailable";
+      line.className = `evidence-line evidence-${status}`;
       const detail = evidenceLineDetail(rec, recordOf(other, rec.kind), otherLabel);
       line.textContent = `${KIND_LABEL[rec.kind] ?? rec.kind}: ${rec.status}${detail ? ` (${detail})` : ""}`;
       line.title = rec.reason ?? "";
@@ -253,7 +263,10 @@ export class WorldlinesView {
     pair.runEl.title = `source run ${summary.sourceRunId}`;
     card.summary = summary;
     if (summary.terminalId) this.byTerminal.set(summary.terminalId, summary.label);
-    if (summary.terminalId && prev.terminalId && summary.terminalId !== prev.terminalId) {
+    // Drop the previous terminal on every transition — including to null when
+    // a candidate terminal closes without replacement — or the dead terminal
+    // keeps a stale A/B badge.
+    if (prev.terminalId && summary.terminalId !== prev.terminalId) {
       this.byTerminal.delete(prev.terminalId);
     }
     this.byRoot.set(summary.root, summary.label);
@@ -424,7 +437,8 @@ export class WorldlinesView {
     card.el.querySelector(".cand-meta")!.textContent =
       [s.model, s.thinkingLevel].filter(Boolean).join(" · ") || "model unknown";
     card.stateEl.textContent = s.state;
-    card.stateEl.className = `cand-state state-${s.state}`;
+    // IPC-shaped but cosmetic-only: an unknown state falls back to creating.
+    card.stateEl.className = `cand-state state-${KNOWN_CANDIDATE_STATES.has(s.state) ? s.state : "creating"}`;
     card.el.title = s.error ? `error: ${s.error}` : "";
     card.el.classList.toggle("has-error", s.state === "error" || s.state === "conflict");
     const verifyBtn = card.el.querySelector(".cand-verify") as HTMLButtonElement;
@@ -480,14 +494,22 @@ export class WorldlinesView {
       `Candidate B replays the original task against the run start with the ${profile} constraint. Candidate A stays the reference. This comparison is replaced by the challenge pair.`,
     ).then(async (r) => {
       if (!r.confirmed) return;
-      const res = await window.termina.challengeCandidate(comparisonId, "A", profile);
-      if (!res.ok) toast(`challenge failed: ${res.error ?? "unknown error"}`, "warning");
+      try {
+        const res = await window.termina.challengeCandidate(comparisonId, "A", profile);
+        if (!res.ok) toast(`challenge failed: ${res.error ?? "unknown error"}`, "warning");
+      } catch (err) {
+        toast(`challenge failed: ${(err as Error).message}`, "warning");
+      }
     });
   }
 
   private async evidence(comparisonId: string): Promise<void> {
-    const res = await window.termina.runEvidence(comparisonId);
-    if (!res.ok) toast(`evidence failed: ${res.error ?? "unknown error"}`, "warning");
+    try {
+      const res = await window.termina.runEvidence(comparisonId);
+      if (!res.ok) toast(`evidence failed: ${res.error ?? "unknown error"}`, "warning");
+    } catch (err) {
+      toast(`evidence failed: ${(err as Error).message}`, "warning");
+    }
   }
 
   private async promote(comparisonId: string, label: "A" | "B"): Promise<void> {
@@ -504,7 +526,13 @@ export class WorldlinesView {
   }
 
   private async runPromote(comparisonId: string, label: "A" | "B", force: boolean): Promise<void> {
-    const res = await window.termina.promoteWorldline(comparisonId, label, force);
+    let res;
+    try {
+      res = await window.termina.promoteWorldline(comparisonId, label, force);
+    } catch (err) {
+      toast(`promotion failed: ${(err as Error).message}`, "warning");
+      return;
+    }
     if (res.confirm) {
       const again = await showConfirm("Promote candidate", res.confirm);
       if (!again.confirmed) return;
@@ -518,24 +546,32 @@ export class WorldlinesView {
   private async verify(comparisonId: string, label: "A" | "B"): Promise<void> {
     const card = this.pairs.get(comparisonId)?.cards.get(label);
     if (!card) return;
-    let terminalId = card.summary.terminalId;
-    if (!terminalId || !this.handlers.isLiveTerminal(terminalId)) {
-      const opened = await window.termina.openWorldlineTerminal(comparisonId, label);
-      if (!opened.ok || !opened.terminalId) {
-        toast(opened.error ?? "open the candidate terminal before Verify", "warning");
-        return;
+    try {
+      let terminalId = card.summary.terminalId;
+      if (!terminalId || !this.handlers.isLiveTerminal(terminalId)) {
+        const opened = await window.termina.openWorldlineTerminal(comparisonId, label);
+        if (!opened.ok || !opened.terminalId) {
+          toast(opened.error ?? "open the candidate terminal before Verify", "warning");
+          return;
+        }
+        terminalId = opened.terminalId;
+        this.handlers.onOpenTerminal(terminalId);
       }
-      terminalId = opened.terminalId;
-      this.handlers.onOpenTerminal(terminalId);
+      const res = await window.termina.runVerify(terminalId);
+      if (!res.ok) toast(res.error ?? "verify failed to start", "warning");
+    } catch (err) {
+      toast(`verify failed to start: ${(err as Error).message}`, "warning");
     }
-    const res = await window.termina.runVerify(terminalId);
-    if (!res.ok) toast(res.error ?? "verify failed to start", "warning");
   }
 
   private async export(comparisonId: string, label: "A" | "B"): Promise<void> {
-    const res = await window.termina.exportWorldline(comparisonId, label);
-    if (!res.ok) toast(res.error ?? "export failed", "warning");
-    else this.recordExportPath(comparisonId, label, res.path);
+    try {
+      const res = await window.termina.exportWorldline(comparisonId, label);
+      if (!res.ok) toast(res.error ?? "export failed", "warning");
+      else this.recordExportPath(comparisonId, label, res.path);
+    } catch (err) {
+      toast(`export failed: ${(err as Error).message}`, "warning");
+    }
   }
 
   /** The bundle path used to live only in a vanishing toast. Keep it on the card. */
@@ -563,9 +599,13 @@ export class WorldlinesView {
       this.handlers.onOpenTerminal(liveId);
       return;
     }
-    const res = await window.termina.openWorldlineTerminal(comparisonId, label);
-    if (!res.ok) toast(res.error ?? "could not reopen the candidate", "warning");
-    else if (res.terminalId) this.handlers.onOpenTerminal(res.terminalId);
+    try {
+      const res = await window.termina.openWorldlineTerminal(comparisonId, label);
+      if (!res.ok) toast(res.error ?? "could not reopen the candidate", "warning");
+      else if (res.terminalId) this.handlers.onOpenTerminal(res.terminalId);
+    } catch (err) {
+      toast(`could not reopen the candidate: ${(err as Error).message}`, "warning");
+    }
   }
 
   private confirmDiscard(comparisonId: string): void {
@@ -573,7 +613,7 @@ export class WorldlinesView {
       if (!r.confirmed) return;
       void window.termina.discardWorldline(comparisonId).then((res) => {
         if (!res.ok) toast(res.error ?? "discard failed", "warning");
-      });
+      }).catch((err) => toast(`discard failed: ${(err as Error).message}`, "warning"));
     });
   }
 
@@ -652,8 +692,10 @@ export class WorldlinesView {
       const li = document.createElement("li");
       li.className = "cand-changed-item";
       const badge = document.createElement("span");
-      badge.className = `status-badge ${f.status}`;
-      badge.textContent = f.status === "created" ? "A" : f.status === "deleted" ? "D" : "M";
+      // IPC-shaped but cosmetic-only: an unknown status falls back to modified.
+      const status = f.status === "created" || f.status === "deleted" ? f.status : "modified";
+      badge.className = `status-badge ${status}`;
+      badge.textContent = status === "created" ? "A" : status === "deleted" ? "D" : "M";
       const path = document.createElement("span");
       path.className = "path";
       path.textContent = f.relPath;
