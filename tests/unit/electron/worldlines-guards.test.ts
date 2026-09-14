@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isInside, parseStorageSeq } from "../../../electron/worldlines/guards.ts";
+import { isComparisonDirectoryCollision, isInside, parseStorageSeq, requireStorageSeq } from "../../../electron/worldlines/guards.ts";
 
 function sourceFiles(root: string): string[] {
   const out: string[] = [];
@@ -45,6 +45,23 @@ describe("worldlines guards (issue #193)", () => {
     expect(parseStorageSeq("-1")).toBe(null);
     expect(parseStorageSeq("4.5")).toBe(null);
     expect(parseStorageSeq("9".repeat(30))).toBe(null);
+  });
+
+  it("requireStorageSeq rejects missing and zero B anchors", () => {
+    expect(requireStorageSeq("42", "b")).toBe(42);
+    expect(() => requireStorageSeq(undefined, "the alternative session address is missing"))
+      .toThrow(/the alternative session address is missing/);
+    expect(() => requireStorageSeq("0", "the alternative session address is missing"))
+      .toThrow(/the alternative session address is missing/);
+    expect(() => requireStorageSeq("abc", "this moment has no session address"))
+      .toThrow(/this moment has no session address/);
+  });
+
+  it("isComparisonDirectoryCollision uses errno, not a message regex", () => {
+    const collision = Object.assign(new Error("EEXIST: file already exists, mkdir"), { code: "EEXIST" });
+    expect(isComparisonDirectoryCollision(collision)).toBe(true);
+    expect(isComparisonDirectoryCollision(new Error("promotion directory cmp-1 already exists"))).toBe(false);
+    expect(isComparisonDirectoryCollision(new Error("already exists"))).toBe(false);
   });
 
   it("keeps a single errno/record inspector beside shared/guards.ts", () => {

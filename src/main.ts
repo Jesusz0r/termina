@@ -54,6 +54,7 @@ import { emptyShortcuts, isMacPlatform, shortcutForEvent } from "./settings-shor
 import { CommandDispatcher } from "./commands";
 import { PtySequenceLedger } from "./pty-sequence-ledger";
 import {
+  applyInstanceSummary,
   applyWorldlineHydration,
   applyWorldlineRemoval,
   beginWorldlineHydration,
@@ -64,9 +65,10 @@ import {
   updateWorldlinePaneTab,
   worldlineEventBelongsToProject,
 } from "./worldline-project-state";
+import { asKnownState, KNOWN_VERIFY_BADGE_STATES } from "./known-state";
 import { CHALLENGE_PROFILES, cssFontFamily, defaultAppPreferences, isTuiOwnedShortcut, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
+import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
 type EditorManagerInstance = import("./editor").EditorManager;
 type ReviewViewInstance = import("./review").ReviewView;
@@ -688,8 +690,10 @@ interface Pane {
   /** Monotonic token for the current timeline/prefix load. */
   timelineRequestToken: number;
   timelinePrefix: Pick<TimelinePrefix, "ok" | "error" | "open"> | null;
-  recorderState: string;
+  recorderState: RecorderState;
   recorderDetail: string | null;
+  /** True when this pane was created from the authoritative roster. */
+  fromRoster: boolean;
   plan: PlanTask[];
   planLoaded: boolean;
   planLoadAttempts: number;
@@ -718,7 +722,9 @@ const lastActivePane = new Map<string, string>();
 const pendingToolTargets = new Map<string, Array<{ path: string; workspaceId: string }>>();
 const MAX_PENDING_TOOL_TARGETS = 20;
 (window as unknown as Record<string, unknown>).__panes = panes;
-const closingPanes = new Set<string>();
+/** Close fence keyed by the PTY generation that was closed. A later
+ *  roster entry with a higher generation is a new life, not a stale push. */
+const closingPanes = new Map<string, { generation: number }>();
 let activeId: string | null = null;
 let projectCwd: string | null = null;
 const prefsBoot = await loadPreferencesWithRetry(() => window.termina.getPreferences());
@@ -958,6 +964,7 @@ function createPaneShell(instanceId: string): Pane {
     timelinePrefix: null,
     recorderState: "paused",
     recorderDetail: null,
+    fromRoster: true,
     plan: [],
     planLoaded: false,
     planLoadAttempts: 0,
@@ -995,6 +1002,7 @@ let errorSeq = 0;
 function createErrorPane(message: string): void {
   const id = `term-error-${++errorSeq}`;
   const pane = createPaneShell(id);
+  pane.fromRoster = false;
   pane.error = true;
   pane.nameEl.textContent = "error";
   pane.tabEl.title = "terminal failed to start";
@@ -1174,7 +1182,7 @@ async function closePane(instanceId: string): Promise<void> {
   const pane = panes.get(instanceId);
   if (!pane) return;
   const terminalGeneration = pane.generation;
-  closingPanes.add(instanceId);
+  closingPanes.set(instanceId, { generation: terminalGeneration });
   panes.delete(instanceId);
   for (const [projectId, activeInstanceId] of lastActivePane) {
     if (activeInstanceId === instanceId) lastActivePane.delete(projectId);
@@ -1187,9 +1195,9 @@ async function closePane(instanceId: string): Promise<void> {
   try {
     await window.termina.closeTerminal(instanceId, terminalGeneration);
   } catch (err) {
+    closingPanes.delete(instanceId);
     toast(`could not close the terminal: ${(err as Error).message}`, "warning");
   }
-  setTimeout(() => closingPanes.delete(instanceId), 3000);
   if (activeId === instanceId) {
     // Prefer another terminal of the same project. Never surface a
     // background project's terminal: its view is not in front.
@@ -1326,8 +1334,7 @@ function renderVerify(pane: Pane): void {
     return;
   }
   verifyBadge.hidden = false;
-  // IPC-shaped but cosmetic-only: an unknown state falls back to cancelled.
-  const badgeState = v.state === "pass" || v.state === "fail" || v.state === "timeout" || v.state === "running" ? v.state : "cancelled";
+  const badgeState = asKnownState(v.state, KNOWN_VERIFY_BADGE_STATES);
   verifyBadge.className = `verify-badge state-${badgeState}`;
   verifyBadge.replaceChildren();
   if (v.state === "running") {
@@ -1336,6 +1343,8 @@ function renderVerify(pane: Pane): void {
     spin.className = "verify-spinner";
     verifyBadge.appendChild(spin);
     verifyBadge.appendChild(document.createTextNode(` verifying · ${v.command ?? ""}`));
+  } else if (badgeState === "unknown") {
+    verifyBadge.textContent = "unknown";
   } else {
     verifyBadge.textContent =
       v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : v.state === "cancelled" ? `⏸ ${v.summary ?? "cancelled"}` : `✗ ${v.summary ?? "failing"}`;
@@ -2473,14 +2482,19 @@ window.termina.onPtyExit(({ id, generation, windowGeneration, rendererGeneration
   renderAcceptedPtyRecords(pane, result.records, id, generation, windowGeneration, rendererGeneration);
 });
 
-/** Lock the editor while a primary agent terminal of the workspace is busy.
- *  Candidate agents stay isolated: their writes cannot reach the primary. */
+/** Lock the editor while a busy agent is bound to the project's primary
+ *  workspace. Candidate trees have their own workspaceId from main. */
 function updateEditorLock(): void {
   if (!editorModule) return;
-  const busy = [...panes.values()].some(
-    (p) => p.busy && p.type === "agent" && !p.error && p.projectId === activeProjectId && worldlinesView.labelOfTerminal(p.instanceId) === null,
+  const view = activeProjectId ? projectViews.get(activeProjectId) : undefined;
+  if (!view) {
+    activeEditor().setLocked(false);
+    return;
+  }
+  const locked = [...panes.values()].some(
+    (p) => p.busy && p.type === "agent" && !p.error && p.projectId === activeProjectId && p.workspaceId === view.workspaceId,
   );
-  activeEditor().setLocked(busy);
+  activeEditor().setLocked(locked);
 }
 
 window.termina.onFlushRequest(({ requestId, writerId, projectId, workspaceId }) => {
@@ -2663,34 +2677,21 @@ window.termina.onToolTarget((p) => {
 });
 
 const lastChangePush = new Map<string, { at: number; changedLines?: number[] }>();
-const largeChangeFetch = new Set<string>();
+/** In-flight large-change fetch epoch per path. A newer onFileChanged
+ *  starts another fetch; stale results drop when the epoch no longer matches. */
+const largeChangeEpoch = new Map<string, number>();
 const MAX_LAST_CHANGE_PUSH = 500;
-/** A large-change read that never settles releases its key after this long. */
-const LARGE_CHANGE_FETCH_TIMEOUT_MS = 10_000;
+let changeEpochSeq = 0;
 const changeKey = (owner: ProjectWorkspaceRef, path: string): string => `${owner.projectId}\u0000${owner.workspaceId}\u0000${path}`;
 
 function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: EditorManagerInstance): void {
   const key = changeKey(owner, path);
-  if (largeChangeFetch.has(key)) return;
-  largeChangeFetch.add(key);
   const at = lastChangePush.get(key)?.at;
-  let settled = false;
-  const timer = setTimeout(() => {
-    // A hung read releases the key so the next push retries; without this the
-    // path goes deaf forever. The late result below drops via the settled flag
-    // so it cannot clear a newer fetch's marker.
-    settled = true;
-    largeChangeFetch.delete(key);
-  }, LARGE_CHANGE_FETCH_TIMEOUT_MS);
-  const settle = (): boolean => {
-    clearTimeout(timer);
-    if (settled) return false;
-    settled = true;
-    largeChangeFetch.delete(key);
-    return true;
-  };
+  const epoch = ++changeEpochSeq;
+  largeChangeEpoch.set(key, epoch);
   void window.termina.openFile(path, owner).then((res) => {
-    if (!settle()) return;
+    if (largeChangeEpoch.get(key) !== epoch) return;
+    largeChangeEpoch.delete(key);
     const latest = lastChangePush.get(key);
     if (latest !== undefined && latest.at !== at) {
       fetchLargeChange(path, owner, editor);
@@ -2699,8 +2700,10 @@ function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: Edit
     if (res.ok && projectViews.get(owner.projectId)?.editorMgr === editor) {
       editor.updateContent(path, res.content, res.changedLines ?? latest?.changedLines);
     }
-  }).catch(() => {
-    settle();
+  }).catch((err) => {
+    if (largeChangeEpoch.get(key) !== epoch) return;
+    largeChangeEpoch.delete(key);
+    toast(`could not refresh ${pathBasename(path)}: ${(err as Error).message}`, "warning");
   });
 }
 
@@ -2719,10 +2722,11 @@ window.termina.onFileChanged((p) => {
   }
   activityPane.dropStaleAcceptMarks(p.path);
   if (p.content !== undefined) {
+    largeChangeEpoch.delete(key);
     if (view.editorMgr) view.editorMgr.updateContent(p.path, p.content, p.changedLines);
   } else {
-    // The main process caps large pushes. Fetch once per path; a newer
-    // change while a fetch is in flight starts one follow-up fetch.
+    // Main omitted the bytes. A newer change bumps the fetch epoch so a
+    // hung read cannot block the next push.
     if (view.editorMgr) fetchLargeChange(p.path, owner, view.editorMgr);
   }
   if (activeProjectId !== p.projectId) return;
@@ -2735,7 +2739,9 @@ window.termina.onFileDeleted((p) => {
   const view = projectViews.get(p.projectId);
   if (!view || view.workspaceId !== p.workspaceId) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
-  lastChangePush.delete(changeKey(owner, p.path));
+  const key = changeKey(owner, p.path);
+  lastChangePush.delete(key);
+  largeChangeEpoch.delete(key);
   view.editorMgr?.closeIfOpen(p.path);
   activityPane.dropStaleAcceptMarks(p.path);
   if (activeProjectId !== p.projectId) return;
@@ -2848,30 +2854,35 @@ window.termina.onEvidenceUpdate((event) => {
 });
 
 window.termina.onInstances((list: InstanceSummary[]) => {
-  // Main normally removes a user-closed terminal from this authoritative list
-  // immediately. Also fence an older queued roster push so it cannot recreate
-  // the pane while the close IPC is in flight.
-  list = list.filter((instance) => !closingPanes.has(instance.id));
+  // Fence a queued roster push for a generation that is already closing.
+  // A higher generation is a new life of the same id.
+  const incoming = list;
+  list = incoming.filter((instance) => {
+    const fence = closingPanes.get(instance.id);
+    if (!fence) return true;
+    if (instance.generation > fence.generation) {
+      closingPanes.delete(instance.id);
+      return true;
+    }
+    return false;
+  });
+  for (const [id] of [...closingPanes]) {
+    if (!incoming.some((instance) => instance.id === id)) closingPanes.delete(id);
+  }
   const liveIds = new Set(list.map((inst) => inst.id));
 
-  // Reconcile and prune deceased background panes (candidates, dispatch workers, exited panes)
   let prunedPane = false;
   for (const [id, pane] of [...panes.entries()]) {
-    if (!liveIds.has(id)) {
-      if (pane.dispatchWorker || pane.worldlineLabel !== null || pane.exited || closingPanes.has(id)) {
-        panes.delete(id);
-        prunedPane = true;
-        for (const [projId, activeInstId] of lastActivePane) {
-          if (activeInstId === id) lastActivePane.delete(projId);
-        }
-        pane.view.dispose();
-        pane.container.remove();
-        pane.tabEl.remove();
-        if (activeId === id) {
-          activeId = null;
-        }
-      }
+    if (liveIds.has(id) || !pane.fromRoster) continue;
+    panes.delete(id);
+    prunedPane = true;
+    for (const [projId, activeInstId] of lastActivePane) {
+      if (activeInstId === id) lastActivePane.delete(projId);
     }
+    pane.view.dispose();
+    pane.container.remove();
+    pane.tabEl.remove();
+    if (activeId === id) activeId = null;
   }
   // A pruned pane takes its changed-file contributions with it.
   if (prunedPane) syncExplorerChanged();
@@ -2966,21 +2977,7 @@ async function boot(attempt = 0): Promise<void> {
       const pane = panes.get(inst.id);
       if (pane) {
         applyTerminalGeneration(pane, inst.generation);
-        pane.cwd = inst.cwd;
-        pane.workspaceId = inst.workspaceId ?? "";
-        pane.projectId = inst.projectId ?? null;
-        pane.type = inst.type;
-        const engine = inst.engine ?? (inst.type === "agent" ? "core" : undefined);
-        pane.engine = engine;
-        pane.view.setEngine(engine);
-        pane.shellName = inst.shellName;
-        // `terminals:list` is also the reload fallback when the push arrives
-        // before the invoke continuation. Reapply every main-owned field so
-        // modified/recorder/verify state cannot reset to renderer defaults.
-        pane.modified = inst.modified ?? [];
-        pane.recorderState = inst.recorderState ?? "paused";
-        pane.recorderDetail = inst.recorderDetail ?? null;
-        pane.verify = inst.verify ?? { state: "untested", command: null, summary: null };
+        applyInstanceSummary(pane, inst, { setEngine: (target, engine) => target.view.setEngine(engine) });
         updatePaneTab(pane);
       }
     }

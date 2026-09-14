@@ -210,11 +210,12 @@ check("concurrent close calls coalesce one confirmation and teardown", closeCoal
 check("reload hydration carries evidence and main-owned terminal state", main.includes("listWithEvidence")
   && main.includes("modified: [...t.modified.values()]")
   && main.includes("recorderState: t.recorderState")
-  && rendererState.includes("summary.modified")
-  && rendererState.includes("summary.recorderState")
-  && renderer.includes("pane.modified = inst.modified")
-  && renderer.includes("pane.recorderState = inst.recorderState")
-  && renderer.includes("pane.verify = inst.verify ??")
+  && rendererState.includes("export function applyInstanceSummary")
+  && rendererState.includes("pane.modified = summary.modified")
+  && rendererState.includes("pane.recorderState = summary.recorderState")
+  && rendererState.includes("pane.recorderDetail = summary.recorderDetail ?? null")
+  && rendererState.includes("pane.verify = summary.verify ??")
+  && renderer.includes("applyInstanceSummary(pane, inst,")
   && types.includes("modified: ModifiedFile[]")
   && types.includes("recorderState: RecorderState")
   && types.includes("evidence?: EvidenceSummary"));
@@ -278,7 +279,9 @@ check("terminal close persists before process exit", main.includes("saveTerminal
   && main.includes("!inst?.persist || inst.closed")
   && main.includes("this.saveTerminalRoster(owner)"));
 check("closing terminals cannot be rehydrated", main.includes("filter((t) => !t.closed)")
-  && renderer.includes("list.filter((instance) => !closingPanes.has(instance.id))"));
+  && renderer.includes("closingPanes.set(instanceId, { generation: terminalGeneration })")
+  && renderer.includes("instance.generation > fence.generation")
+  && renderer.includes("if (liveIds.has(id) || !pane.fromRoster) continue"));
 
 check("project close and quit share the unsaved-buffer gate", main.includes("async confirmClose(projectId?: string)")
   && main.includes("await this.confirmUnsavedEditorBuffers(projectId)")

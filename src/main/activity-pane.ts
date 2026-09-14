@@ -5,6 +5,7 @@
  * handoff, and tab-badge effects; all activity state lives here.
  */
 import { toast } from "../components/modals";
+import { asKnownState, KNOWN_FILE_STATUSES, KNOWN_PLAN_STATES } from "../known-state";
 import type { ModifiedFile, PlanTask } from "../../shared/types";
 
 export interface ActivityPaneState {
@@ -93,12 +94,11 @@ export function createActivityPane<TPane extends ActivityPaneState>(
     elements.planList.replaceChildren();
     for (const task of pane.plan) {
       const li = document.createElement("li");
-      // IPC-shaped but cosmetic-only: an unknown state falls back to pending.
-      const state = task.state === "active" || task.state === "done" ? task.state : "pending";
+      const state = asKnownState(task.state, KNOWN_PLAN_STATES);
       li.className = `plan-task state-${state}`;
       const mark = document.createElement("span");
       mark.className = "plan-mark";
-      mark.textContent = task.state === "done" ? "✓" : task.state === "active" ? "◐" : "○";
+      mark.textContent = state === "done" ? "✓" : state === "active" ? "◐" : state === "pending" ? "○" : "?";
       const text = document.createElement("span");
       text.className = "plan-text";
       text.textContent = task.text;
@@ -189,10 +189,9 @@ export function createActivityPane<TPane extends ActivityPaneState>(
         path.className = "path";
         li.append(badge, path);
       }
-      // IPC-shaped but cosmetic-only: an unknown status falls back to modified.
-      const status = f.status === "created" || f.status === "deleted" ? f.status : "modified";
+      const status = asKnownState(f.status, KNOWN_FILE_STATUSES);
       badge.className = `status-badge ${status}`;
-      badge.textContent = status === "created" ? "A" : status === "deleted" ? "D" : "M";
+      badge.textContent = status === "created" ? "A" : status === "deleted" ? "D" : status === "modified" ? "M" : "?";
       path.textContent = f.relPath;
       path.title = f.path;
       for (const mark of li.querySelectorAll(".review-mark")) mark.remove();

@@ -50,6 +50,8 @@ export async function writeForkedSession(
   });
   if (!replayed.ok) return replayed;
   const targetSeq = throughSeq ?? replayed.maxSeq;
+  // An explicit 0 is an empty prefix. Callers must not pass 0 as a stand-in
+  // for a missing address — WorldlineManager fails those forks closed.
   if (targetSeq === 0) return materializeEmptyFork(dest, options);
   if (targetSeq > replayed.maxSeq && !replayed.stopped) return { ok: false, error: "fork point is beyond the source maximum" };
   const images = referencedImageNames(replayed.messages);

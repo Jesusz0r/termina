@@ -4,6 +4,7 @@
  */
 
 import type { UnsavedCloseChoice } from "../../shared/unsaved-close";
+import { asKnownState, KNOWN_FILE_STATUSES } from "../known-state";
 
 interface ModalResult {
   cancelled?: boolean;
@@ -239,10 +240,9 @@ export function showFileListModal(
   for (const [relPath, status] of items.slice(0, MAX_FILE_LIST_MODAL_ROWS)) {
     const li = document.createElement("li");
     const badge = document.createElement("span");
-    // Upstream-typed but cosmetic-only: an unknown status falls back to modified.
-    const safe = status === "created" || status === "deleted" ? status : "modified";
+    const safe = asKnownState(status, KNOWN_FILE_STATUSES);
     badge.className = `status-badge ${safe}`;
-    badge.textContent = safe === "created" ? "A" : safe === "deleted" ? "D" : "M";
+    badge.textContent = safe === "created" ? "A" : safe === "deleted" ? "D" : safe === "modified" ? "M" : "?";
     const path = document.createElement("span");
     path.className = "path";
     path.textContent = relPath;

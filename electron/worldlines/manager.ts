@@ -119,8 +119,9 @@ import {
   refreshBoundPromotionDirectory,
 } from "./bindings.js";
 import {
+  isComparisonDirectoryCollision,
   isInside,
-  parseStorageSeq,
+  requireStorageSeq,
 } from "./guards.js";
 import {
   type BoundPromotionDirectory,
@@ -540,9 +541,14 @@ export class WorldlineManager {
       } catch (error) {
         // A persisted comparison may occupy this sequence after restart, or
         // another manager may have claimed it under the shared admission
-        // lease. Native requireMissing is the collision boundary; advance
-        // without ever opening or recursively reusing the existing tree.
-        if (/already exists/i.test(error instanceof Error ? error.message : String(error))) continue;
+        // lease. Collision is Node EEXIST or an already-present sibling leaf
+        // — never a core error-string sniff (Refs #269).
+        if (isComparisonDirectoryCollision(error)) continue;
+        try {
+          if ((await lstatPath(join(root.path, id))).isDirectory()) continue;
+        } catch {
+          /* Leaf is absent; the create failure is not a collision. */
+        }
         throw error;
       }
     }
@@ -791,7 +797,7 @@ export class WorldlineManager {
         throw new Error(`could not fork the reference session: ${uncertain}`);
       }
       this.ensureComparisonLive(ncmp);
-      const throughB = parseStorageSeq(run.promptParentEntryId) ?? 0;
+      const throughB = requireStorageSeq(run.promptParentEntryId, "the challenger session address is missing");
       const sourceB = run.sessionBranchFile ?? run.sessionFile ?? cand.sessionFile;
       const forkB = await this.forkCoreSession(ncmp, {
         sourceSessionFile: sourceB,
@@ -841,7 +847,7 @@ export class WorldlineManager {
   /** The ignored/generated writes a promotion would exclude (metadata).
    *  The runtime allowlist (node_modules, .venv, venv) is a template input,
    *  not a candidate write: it never counts. */
-  async ignoredWrites(comparisonId: string, label: "A" | "B"): Promise<{ count: number; bytes: number }> {
+  async ignoredWrites(comparisonId: string, label: "A" | "B"): Promise<{ count: number; bytes: number } | null> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { count: 0, bytes: 0 };
@@ -861,7 +867,7 @@ export class WorldlineManager {
       }
       return { count, bytes };
     } catch {
-      return { count: 0, bytes: 0 };
+      return null;
     }
   }
 
@@ -939,21 +945,30 @@ export class WorldlineManager {
       const ignored = await this.ignoredWrites(comparisonId, label);
       // Conflict status against the current primary source: capture P and
       // merge the candidate head against it (on demand, WORLDLINES §6.9).
-      let conflicts: string[] = [];
+      // Null means the check did not complete — never treat that as clean.
+      let conflicts: string[] | null = null;
+      let conflictError: string | null = null;
       primaryCommit = await this.deps.capturePrimary();
       if (primaryCommit && cmp.baseStateId) {
         try {
           const store = await this.deps.getStore();
-          if (store) {
+          if (!store) {
+            conflictError = "the snapshot store is unavailable";
+          } else {
             const wHead = await this.deps.captureHead(cand.dir, join(cand.dir, ".git"), cmp.baseStateId);
             await this.setCandidateHead(cmp.id, label, wHead.commit);
             const merged = await store.merge3(wHead.commit, primaryCommit);
             if (!merged.ok && merged.tree) conflicts = merged.conflicts;
             else if (!merged.ok && !merged.tree) conflicts = [merged.reason ?? "merge failed"];
+            else conflicts = [];
           }
-        } catch {
-          /* Conflict status can be incomplete. */
+        } catch (err) {
+          conflictError = err instanceof Error ? err.message : String(err);
         }
+      } else if (!primaryCommit) {
+        conflictError = "could not capture the primary";
+      } else {
+        conflictError = "the comparison base is missing";
       }
       return {
         ok: true,
@@ -977,9 +992,11 @@ export class WorldlineManager {
           changedFileCount: changed.total,
           dependencies: await this.dependencyChanges(cmp, cand),
           unownedEdits,
-          ignoredFiles: ignored.count,
-          ignoredBytes: ignored.bytes,
+          ignoredFiles: ignored?.count ?? null,
+          ignoredBytes: ignored?.bytes ?? null,
           primaryConflicts: conflicts,
+          conflictError,
+          version: cand.version,
           ageMs: Date.now() - cmp.createdAt,
         },
       };
@@ -1401,9 +1418,8 @@ export class WorldlineManager {
     const b = cmp.candidates.get("B")!;
     const destA = coreSessionFile(a.sessionDir, "session");
     const destB = coreSessionFile(b.sessionDir, "session");
-    const throughA = parseStorageSeq(run.settledEntryId);
-    if (throughA === null || throughA < 1) throw new Error("the settled session address is missing");
-    const throughB = parseStorageSeq(run.promptParentEntryId) ?? 0;
+    const throughA = requireStorageSeq(run.settledEntryId, "the settled session address is missing");
+    const throughB = requireStorageSeq(run.promptParentEntryId, "the alternative session address is missing");
     const forkA = await this.forkCoreSession(cmp, {
       sourceSessionFile: source,
       destinationSessionFile: destA,
@@ -2278,8 +2294,11 @@ export class WorldlineManager {
           const why = !verify ? "no evidence has been computed for this candidate" : summary?.stale ? "the evidence is stale (the candidate ran again)" : `the evidence is ${verify?.status}`;
           return askConfirm(`promote without current passing evidence? (${why})`);
         }
-        if ((ignored?.count ?? 0) > 0) {
-          return askConfirm(`${ignored!.count} ignored/generated file(s) (${((ignored!.bytes ?? 0) / 1024).toFixed(0)} kB) will be excluded from the promotion`);
+        if (ignored === null) {
+          return askConfirm("could not enumerate excluded files — promote anyway?");
+        }
+        if (ignored.count > 0) {
+          return askConfirm(`${ignored.count} ignored/generated file(s) (${(ignored.bytes / 1024).toFixed(0)} kB) will be excluded from the promotion`);
         }
       }
 
@@ -2740,8 +2759,7 @@ export class WorldlineManager {
       // The session branches at the dot's entry: later entries stay out.
       await this.createSupportDirs(cmp);
       {
-        const through = parseStorageSeq(opts.entryId);
-        if (through === null) throw new Error("this moment has no session address");
+        const through = requireStorageSeq(opts.entryId, "this moment has no session address");
         const dest = coreSessionFile(cand.sessionDir, "session");
         const fork = await this.forkCoreSession(cmp, {
           sourceSessionFile: opts.sessionFile,
@@ -3634,7 +3652,10 @@ export class WorldlineManager {
       try {
         const manifestPath = join(canonicalDir, "manifest.json");
         const manifestInfo = await lstatPath(manifestPath, { bigint: true });
-        if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink() || manifestInfo.size > BigInt(MAX_WORLDLINE_FILE_BYTES)) return;
+        if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink() || manifestInfo.size > BigInt(MAX_WORLDLINE_FILE_BYTES)) {
+          console.warn(`[worldlines] unproven comparison manifest retained: ${canonicalDir}`);
+          continue;
+        }
         adjacentBytes += manifestInfo.size;
         if (adjacentBytes > BigInt(MAX_STALE_SWEEP_BYTES)) return;
         manifest = parseComparisonManifest(JSON.parse(await readFile(manifestPath, "utf8")));

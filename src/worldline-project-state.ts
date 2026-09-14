@@ -1,4 +1,4 @@
-import { worldlineEventBelongsToProject, type InstanceSummary, type VerifyInfo, type WorldlineSummary } from "../shared/types";
+import { worldlineEventBelongsToProject, type InstanceSummary, type RecorderState, type VerifyInfo, type WorldlineSummary } from "../shared/types";
 export { worldlineEventBelongsToProject } from "../shared/types";
 
 export interface WorldlineProjectPane {
@@ -169,7 +169,8 @@ export interface WorldlineInstancePane extends WorldlineCandidateTestPane {
   dispatchWorker: boolean;
   dispatchTask: string | undefined;
   modified: import("../shared/types").ModifiedFile[];
-  recorderState: string;
+  recorderState: RecorderState;
+  recorderDetail: string | null;
   verify: VerifyInfo;
   model: string | null;
   thinkingLevel: string | null;
@@ -184,6 +185,33 @@ export interface WorldlineInstancesBindings<TPane extends WorldlineInstancePane>
   onProjectDiscovered?(pane: TPane, summary: InstanceSummary): void;
 }
 
+/** Copy main-owned InstanceSummary fields onto a pane. Boot and roster
+ *  push share this path so hydration cannot drift. Required fields are
+ *  not invented when missing. */
+export function applyInstanceSummary<TPane extends WorldlineInstancePane>(
+  pane: TPane,
+  summary: InstanceSummary,
+  bindings: Pick<WorldlineInstancesBindings<TPane>, "setEngine">,
+): void {
+  pane.cwd = summary.cwd;
+  pane.workspaceId = summary.workspaceId;
+  pane.projectId = summary.projectId ?? null;
+  pane.busy = summary.busy;
+  pane.type = summary.type;
+  pane.engine = summary.engine;
+  bindings.setEngine(pane, summary.engine);
+  pane.shellName = summary.shellName;
+  pane.dispatchWorker = summary.dispatchWorker === true;
+  pane.dispatchTask = summary.dispatchTask;
+  pane.modified = summary.modified;
+  pane.recorderState = summary.recorderState;
+  pane.recorderDetail = summary.recorderDetail ?? null;
+  pane.verify = summary.verify ?? { state: "untested", command: null, summary: null };
+  pane.model = summary.model ?? null;
+  pane.thinkingLevel = summary.thinkingLevel ?? null;
+  pane.usage = summary.usage ?? null;
+}
+
 /** Apply instance roster pushes before the generic visibility/activation
  * logic. The main renderer delegates this exact field/update ordering here. */
 export function handleWorldlineInstances<TPane extends WorldlineInstancePane>(
@@ -194,24 +222,8 @@ export function handleWorldlineInstances<TPane extends WorldlineInstancePane>(
   for (const summary of list) {
     let pane = bindings.paneById(summary.id);
     if (!pane) pane = bindings.createPane(summary.id);
-    pane.cwd = summary.cwd;
-    pane.workspaceId = summary.workspaceId ?? "";
-    pane.projectId = summary.projectId ?? null;
+    applyInstanceSummary(pane, summary, bindings);
     bindings.onProjectDiscovered?.(pane, summary);
-    pane.busy = summary.busy;
-    pane.type = summary.type;
-    const engine = summary.engine ?? (summary.type === "agent" ? "core" : undefined);
-    pane.engine = engine;
-    bindings.setEngine(pane, engine);
-    pane.shellName = summary.shellName;
-    pane.dispatchWorker = summary.dispatchWorker ?? false;
-    pane.dispatchTask = summary.dispatchTask;
-    pane.modified = summary.modified ?? [];
-    pane.recorderState = summary.recorderState ?? "paused";
-    pane.verify = summary.verify ?? { state: "untested", command: null, summary: null };
-    pane.model = summary.model ?? null;
-    pane.thinkingLevel = summary.thinkingLevel ?? null;
-    pane.usage = summary.usage ?? null;
     bindings.updatePaneTab(pane);
     handled++;
   }

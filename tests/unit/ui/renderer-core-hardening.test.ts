@@ -16,11 +16,12 @@ const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), 
 describe("renderer core hardening batch, items 2-10 (refs #217)", () => {
   it("allowlists IPC-shaped class names (item 2)", () => {
     expect(activityPane).toContain('`plan-task state-${state}`');
-    expect(activityPane).toContain('const state = task.state === "active" || task.state === "done" ? task.state : "pending"');
+    expect(activityPane).toContain("asKnownState(task.state, KNOWN_PLAN_STATES)");
     expect(activityPane).toContain('badge.className = `status-badge ${status}`');
     expect(worldlinesSrc).toContain('chip.className = `verdict verdict-${winner}`');
     expect(worldlinesSrc).toContain('line.className = `evidence-line evidence-${status}`');
-    expect(worldlinesSrc).toContain("KNOWN_CANDIDATE_STATES.has(s.state) ? s.state : \"creating\"");
+    expect(worldlinesSrc).toContain("asKnownState(s.state, KNOWN_CANDIDATE_STATES)");
+    expect(worldlinesSrc).not.toContain("KNOWN_CANDIDATE_STATES.has(s.state) ? s.state : \"creating\"");
     expect(modalsSrc).toContain('badge.className = `status-badge ${safe}`');
     expect(renderer).toContain('verifyBadge.className = `verify-badge state-${badgeState}`');
     expect(timelineSrc).toContain("this.recorderEl.className = `timeline-recorder rec-${safe}`");
@@ -46,10 +47,11 @@ describe("renderer core hardening batch, items 2-10 (refs #217)", () => {
     expect(renderer).toContain("let pendingActivateId: string | null = null;");
   });
 
-  it("releases a hung large-change fetch via timeout (item 5)", () => {
-    expect(renderer).toContain("LARGE_CHANGE_FETCH_TIMEOUT_MS = 10_000");
-    expect(renderer).toContain("largeChangeFetch.delete(key);\n  }, LARGE_CHANGE_FETCH_TIMEOUT_MS);");
-    expect(renderer).toContain("if (!settle()) return;");
+  it("releases a hung large-change fetch via epoch, not a wall-clock timeout (item 5 / #277)", () => {
+    expect(renderer).not.toContain("LARGE_CHANGE_FETCH_TIMEOUT_MS");
+    expect(renderer).toContain("const largeChangeEpoch = new Map<string, number>();");
+    expect(renderer).toContain("if (largeChangeEpoch.get(key) !== epoch) return;");
+    expect(renderer).toContain('toast(`could not refresh ${pathBasename(path)}: ${(err as Error).message}`, "warning")');
   });
 
   it("repositions the find bar on container resize (item 6)", () => {
@@ -158,12 +160,14 @@ describe("hardening behavior (refs #217)", () => {
       error: null,
     };
     view.upsertEvidence(evidence);
-    expect(panel.querySelector(".cand-state")!.className).toBe("cand-state state-creating");
-    expect(panel.querySelector(".verdict")!.className).toBe("verdict verdict-unavailable");
-    expect(panel.querySelector(".evidence-line")!.className).toBe("evidence-line evidence-unavailable");
+    expect(panel.querySelector(".cand-state")!.className).toBe("cand-state state-unknown");
+    expect(panel.querySelector(".cand-state")!.textContent).toBe("unknown");
+    expect(panel.querySelector(".verdict")!.className).toBe("verdict verdict-unknown");
+    expect(panel.querySelector(".verdict")!.textContent).toBe("unknown");
+    expect(panel.querySelector(".evidence-line")!.className).toBe("evidence-line evidence-unknown");
   });
 
-  it("falls back an unknown recorder state to paused", () => {
+  it("renders an unknown recorder state as unknown, not paused", () => {
     const container = fake.document.createElement("div");
     for (const id of ["timeline-dots", "timeline-count", "timeline-prefix", "timeline-recorder", "btn-timeline-play"]) {
       const el = fake.document.createElement("div");
@@ -173,7 +177,7 @@ describe("hardening behavior (refs #217)", () => {
     const view = new TimelineView(container as unknown as HTMLElement);
     view.setRecorder("evil-state" as "ready");
     const recorder = container.querySelector("#timeline-recorder")!;
-    expect(recorder.className).toBe("timeline-recorder rec-paused");
-    expect(recorder.textContent).toBe("paused");
+    expect(recorder.className).toBe("timeline-recorder rec-unknown");
+    expect(recorder.textContent).toBe("unknown");
   });
 });
