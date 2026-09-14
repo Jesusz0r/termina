@@ -15,6 +15,8 @@ const {
   CACHE_CAPABILITY_FEATURE,
   CACHE_POLICY_PROVENANCE,
   documentedCacheCapability,
+  documentedCacheRoute,
+  providerProtocol,
 } = auth;
 
 const {
@@ -144,7 +146,39 @@ describe("Agent Core Cache", () => {
       expect(documentedCacheCapability({ ...directOpenAiScope, provider: "xai", protocol: "openai-responses", route: "api.x.ai", model: "grok-4.6", feature: CACHE_CAPABILITY_FEATURE.ttl }).supported).toBeNull();
       expect(documentedCacheCapability({ ...directOpenAiScope, provider: "xai", protocol: "openai-responses", route: "api.x.ai", model: "grok-4.6", feature: CACHE_CAPABILITY_FEATURE.promptCacheKey }).supported).toBe(true);
       expect(documentedCacheCapability({ ...directOpenAiScope, feature: CACHE_CAPABILITY_FEATURE.ttl }).supported).toBe(true);
-      expect(documentedCacheCapability({ ...directOpenAiScope, provider: "google", protocol: "google-generate", route: "generativelanguage.googleapis.com", model: "gemini-3.7-flash", feature: CACHE_CAPABILITY_FEATURE.googleCachedContent }).supported).toBe(true);
+      expect(documentedCacheCapability({ ...directOpenAiScope, provider: "google", protocol: "google-generate", route: "generativelanguage.googleapis.com", model: "gemini-3.7-flash", feature: CACHE_CAPABILITY_FEATURE.googleCachedContent }).supported).toBeNull();
+      expect(documentedCacheCapability({ ...directOpenAiScope, provider: "xai", protocol: "openai-completions", route: "api.x.ai", model: "grok-4.6", feature: CACHE_CAPABILITY_FEATURE.xaiConversationHeader }).supported).toBeNull();
+    });
+
+    it("reaches documented OpenRouter/xAI branches from production-constructed scopes (refs #216)", () => {
+      const productionScope = (
+        provider: "openrouter" | "xai" | "google" | "opencode-zen",
+        model: string,
+        feature: string,
+      ) => ({
+        provider,
+        protocol: providerProtocol(provider, model),
+        route: documentedCacheRoute(provider),
+        model,
+        feature,
+      });
+
+      expect(documentedCacheRoute("openrouter")).toBe("https://openrouter.ai/api/v1");
+      expect(documentedCacheRoute("opencode-zen")).toBe("opencode-zen");
+      expect(documentedCacheRoute("opencode-go")).toBe("opencode-go");
+
+      expect(documentedCacheCapability(productionScope("openrouter", "openai/gpt-5.6-terra", CACHE_CAPABILITY_FEATURE.promptCacheKey)).supported).toBe(true);
+      expect(documentedCacheCapability(productionScope("openrouter", "openai/gpt-5.6-terra", CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint)).supported).toBe(true);
+      expect(documentedCacheCapability(productionScope("openrouter", "openai/gpt-5.6-terra", CACHE_CAPABILITY_FEATURE.promptCacheOptions)).supported).toBe(true);
+      expect(documentedCacheCapability(productionScope("openrouter", "openai/gpt-5.6-terra", CACHE_CAPABILITY_FEATURE.ttl)).supported).toBe(true);
+      expect(documentedCacheCapability(productionScope("openrouter", "anthropic/claude-sonnet-4.6", CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint)).supported).toBe(true);
+      expect(documentedCacheCapability(productionScope("openrouter", "anthropic/claude-sonnet-4.6", CACHE_CAPABILITY_FEATURE.promptCacheOptions)).supported).toBeNull();
+
+      expect(documentedCacheCapability(productionScope("xai", "grok-4.6", CACHE_CAPABILITY_FEATURE.promptCacheKey)).supported).toBe(true);
+      expect(documentedCacheCapability(productionScope("xai", "grok-4.6", CACHE_CAPABILITY_FEATURE.xaiConversationHeader)).supported).toBeNull();
+
+      expect(documentedCacheCapability(productionScope("google", "gemini-3.7-flash", CACHE_CAPABILITY_FEATURE.googleCachedContent)).supported).toBeNull();
+      expect(documentedCacheCapability(productionScope("opencode-zen", "gemini-3.7-flash", CACHE_CAPABILITY_FEATURE.googleCachedContent)).supported).toBeNull();
     });
 
     it("manages LRU capability cache correctly", () => {

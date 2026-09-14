@@ -50,10 +50,11 @@ describe("unwired surface removed, live cache surface kept (refs #203 item 1)", 
     ).toThrow(/cached content name/i);
   });
 
-  it("keeps the google-cached-content capability matrix row", () => {
+  it("does not claim native Gemini cache on unreachable google-generate scopes (refs #216)", () => {
     expect(CACHE_CAPABILITY_FEATURE.googleCachedContent).toBe("google-cached-content");
-    const scope = { provider: "google", protocol: "google-generate", route: "generativelanguage.googleapis.com", model: "gemini-3.7-flash", feature: CACHE_CAPABILITY_FEATURE.googleCachedContent } as const;
-    expect(documentedCacheCapability({ ...scope }).supported).toBe(true);
+    const native = { provider: "google", protocol: "google-generate", route: "generativelanguage.googleapis.com", model: "gemini-3.7-flash", feature: CACHE_CAPABILITY_FEATURE.googleCachedContent } as const;
+    expect(documentedCacheCapability(native).supported).toBeNull();
+    expect(documentedCacheCapability({ ...native, protocol: "openai-completions" }).supported).toBeNull();
   });
 });
 

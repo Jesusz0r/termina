@@ -347,9 +347,14 @@ function openBrowser(url: string): void {
 }
 
 
+/** Interactive login input. `secret: true` asks the TUI to mask, skip
+ * history, and echo a placeholder. Non-TTY stdin cannot mask and must not
+ * be used for key or code entry. */
+export type LoginInputOpts = { secret?: boolean };
+
 export type LoginIo = {
   write: (text: string) => void;
-  waitForCode?: () => Promise<string>;
+  waitForCode?: (opts?: LoginInputOpts) => Promise<string>;
   openUrl?: (url: string) => void;
   signal?: AbortSignal;
 };
@@ -373,7 +378,7 @@ async function collectCode(
   if (mode === "code") {
     if (!io.waitForCode) return { ok: false, error: "login failed: no code input" };
     io.write("paste the authorization code or redirect URL, then press enter\n");
-    const parsed = parseAuthorizationInput(await io.waitForCode());
+    const parsed = parseAuthorizationInput(await io.waitForCode({ secret: true }));
     if (parsed.state && parsed.state !== state) return { ok: false, error: "login failed: state mismatch" };
     if (!parsed.code) return { ok: false, error: "login failed: empty code" };
     return { ok: true, code: parsed.code };
@@ -415,7 +420,7 @@ async function loginKey(providerId: ProviderId, io: LoginIo, opts?: AuthWriteOpt
   if (!io.waitForCode) return { ok: false, error: "login failed: no key input" };
   const env = providerDefinition(providerId).envKeys[0] ?? "API_KEY";
   io.write(`paste the ${providerId} API key (${env}), then press enter\n`);
-  const key = (await io.waitForCode()).trim();
+  const key = (await io.waitForCode({ secret: true })).trim();
   if (!key) return { ok: false, error: "login failed: empty key" };
   return persistApiKey(providerId, key, opts);
 }
@@ -459,7 +464,7 @@ async function loginGithubCopilot(io: LoginIo, opts?: AuthWriteOpts): Promise<{ 
 async function loginGithubCopilotKey(io: LoginIo, opts?: AuthWriteOpts): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!io.waitForCode) return { ok: false, error: "login failed: no token input" };
   io.write("paste a GitHub token with Copilot access, then press enter\n");
-  const githubToken = (await io.waitForCode()).trim();
+  const githubToken = (await io.waitForCode({ secret: true })).trim();
   if (!githubToken) return { ok: false, error: "login failed: empty token" };
   const session = await exchangeGithubCopilotToken(githubToken, io.signal);
   if (!session.ok) return session;

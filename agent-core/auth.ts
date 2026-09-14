@@ -16,7 +16,7 @@ export { isOAuthToken, pickHeaders } from "./auth/providers/anthropic.ts";
 export { extractAccountId } from "./auth/providers/openai-codex.ts";
 export { zenWireProtocol } from "./auth/providers/opencode-zen.ts";
 export { AUTH_PROVIDER_ORDER, authPath, defaultLoginMode, googleNativeHeaders, isSupportedProvider, maskSecret, needsRefresh, openaiCodexClientVersion, providerProtocol, providerProtocolHeaders, redirectPort, requestHeaders, usesResponsesApi, validateCopilotApiUrl } from "./auth/endpoints.ts";
-export { CACHE_CAPABILITY_FEATURE, CACHE_POLICY_PROVENANCE, documentedCacheCapability, usesAnthropicCacheMarkers, usesOpenAIExplicitCache, usesPromptCacheKey, usesPromptCacheOptions } from "./auth/cache-policy.ts";
+export { CACHE_CAPABILITY_FEATURE, CACHE_POLICY_PROVENANCE, documentedCacheCapability, documentedCacheRoute, usesAnthropicCacheMarkers, usesOpenAIExplicitCache, usesPromptCacheKey, usesPromptCacheOptions } from "./auth/cache-policy.ts";
 export type { CacheCapabilityFeature, CacheCapabilityObservation, CacheCapabilityProvenance, CacheCapabilityScope, CacheCapabilitySource, CacheCapabilityStatus } from "./auth/cache-policy.ts";
 export { CACHE_KEY_MAX_LENGTH, cacheIdentityFor, cacheRouteDomain, cacheSessionHeaders, cacheSessionSeed, deriveCacheIdentityKey } from "./auth/cache-identity.ts";
 export type { CacheIdentity, CacheIdentityInputs, CacheRole } from "./auth/cache-identity.ts";
@@ -25,4 +25,4 @@ export { exchangeGithubCopilotToken, parseOauthToken, parseTokenResponse, pollGi
 export { DEFAULT_MODELS, authBanner, firstAuthenticatedProvider, hasEnvCredential, hasStoredCredential, parseModelRef, resolveAuth } from "./auth/resolve.ts";
 export type { ResolvedAuth } from "./auth/resolve.ts";
 export { browserOpenArgs, canOpenBrowser, loginPickerItems, parseAuthCommand, runLogin, runLogout } from "./auth/login.ts";
-export type { LoginIo, LoginKind, LoginPickerItem } from "./auth/login.ts";
+export type { LoginInputOpts, LoginIo, LoginKind, LoginPickerItem } from "./auth/login.ts";
