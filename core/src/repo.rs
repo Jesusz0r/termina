@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use git2::{ErrorCode, ObjectFormat, Oid, Repository, StatusOptions};
+use git2::{ErrorCode, ObjectFormat, Oid, Repository, RepositoryOpenFlags, StatusOptions};
 use base64::Engine as _;
 use serde_json::{Value, json};
 
@@ -20,7 +20,11 @@ use crate::{
     tree_lookup,
 };
 use crate::util::{
+    normalize_system_alias_path,
     open_repo,
+    require_utf8_git_path,
+    require_utf8_path_bytes,
+    require_utf8_rel_path,
     s,
 };
 
@@ -39,9 +43,15 @@ pub(crate) fn op_git_head(req: &Value) -> Result<Value, String> {
 
 pub(crate) fn op_git_top_level(req: &Value) -> Result<Value, String> {
     let root = PathBuf::from(s(req, "root")?);
-    let repo = match open_repo(&root) {
+    // Not-a-repo stays a null root so callers can distinguish absence from
+    // a repository that exists but cannot be opened. Every other open
+    // failure is an error; collapsing those to null forged "not a repo".
+    let root = normalize_system_alias_path(&root, "repository root")
+        .map_err(|err| format!("the Git repository could not be opened: {err}"))?;
+    let repo = match Repository::open_ext(&root, RepositoryOpenFlags::empty(), None::<&str>) {
         Ok(repo) => repo,
-        Err(_) => return Ok(json!({ "root": null })),
+        Err(err) if err.code() == ErrorCode::NotFound => return Ok(json!({ "root": null })),
+        Err(err) => return Err(format!("the Git repository could not be opened: {err}")),
     };
     let top = repo
         .workdir()
@@ -71,10 +81,7 @@ pub(crate) fn op_ls_tracked(req: &Value) -> Result<Value, String> {
     let index = repo.index().map_err(|e| e.to_string())?;
     let mut paths: Vec<String> = Vec::new();
     for entry in index.iter() {
-        paths.push(
-            String::from_utf8(entry.path.clone())
-                .map_err(|_| "a tracked path is not valid UTF-8".to_string())?,
-        );
+        paths.push(require_utf8_path_bytes(entry.path.clone(), "tracked")?);
     }
     Ok(json!({ "paths": paths }))
 }
@@ -89,7 +96,7 @@ pub(crate) fn op_repo_status(req: &Value) -> Result<Value, String> {
     let statuses = repo.statuses(None).map_err(|e| e.to_string())?;
     let mut changes: Vec<Value> = Vec::new();
     for status in statuses.iter() {
-        let Ok(path) = status.path() else { continue };
+        let path = require_utf8_git_path(status.path(), "status")?;
         let flags = status.status();
         let kind = if flags.is_wt_deleted() || flags.is_index_deleted() {
             "deleted"
@@ -128,16 +135,28 @@ pub(crate) fn op_repo_diff(req: &Value) -> Result<Value, String> {
     for delta in diff.deltas() {
         use git2::Delta;
         match delta.status() {
-            Delta::Added => changes.push(json!({ "relPath": delta.new_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "created" })),
-            Delta::Deleted => changes.push(json!({ "relPath": delta.old_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "deleted" })),
+            Delta::Added => {
+                let rel_path = require_utf8_rel_path(delta.new_file().path(), "diff")?;
+                changes.push(json!({ "relPath": rel_path, "status": "created" }));
+            }
+            Delta::Deleted => {
+                let rel_path = require_utf8_rel_path(delta.old_file().path(), "diff")?;
+                changes.push(json!({ "relPath": rel_path, "status": "deleted" }));
+            }
             Delta::Modified | Delta::Typechange | Delta::Conflicted => {
-                changes.push(json!({ "relPath": delta.new_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "modified" }))
+                let rel_path = require_utf8_rel_path(delta.new_file().path(), "diff")?;
+                changes.push(json!({ "relPath": rel_path, "status": "modified" }));
             }
             Delta::Renamed => {
-                changes.push(json!({ "relPath": delta.old_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "deleted" }));
-                changes.push(json!({ "relPath": delta.new_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "created" }));
+                let old_path = require_utf8_rel_path(delta.old_file().path(), "diff")?;
+                let new_path = require_utf8_rel_path(delta.new_file().path(), "diff")?;
+                changes.push(json!({ "relPath": old_path, "status": "deleted" }));
+                changes.push(json!({ "relPath": new_path, "status": "created" }));
             }
-            Delta::Copied => changes.push(json!({ "relPath": delta.new_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "created" })),
+            Delta::Copied => {
+                let rel_path = require_utf8_rel_path(delta.new_file().path(), "diff")?;
+                changes.push(json!({ "relPath": rel_path, "status": "created" }));
+            }
             Delta::Unmodified | Delta::Unreadable | Delta::Untracked | Delta::Ignored => {}
         }
     }
@@ -262,11 +281,13 @@ pub(crate) fn op_ls_ignored(req: &Value) -> Result<Value, String> {
                 .include_ignored(true),
         ))
         .map_err(|e| e.to_string())?;
-    let mut paths: Vec<String> = statuses
-        .iter()
-        .filter(|status| status.status().is_ignored())
-        .filter_map(|status| status.path().ok().map(String::from))
-        .collect();
+    let mut paths: Vec<String> = Vec::new();
+    for status in statuses.iter() {
+        if !status.status().is_ignored() {
+            continue;
+        }
+        paths.push(require_utf8_git_path(status.path(), "ignored")?);
+    }
     paths.sort();
     Ok(json!({ "paths": paths }))
 }

@@ -69,15 +69,16 @@ pub(crate) fn op_merge3(req: &Value) -> Result<Value, String> {
     let index = store
         .merge_trees(&base_tree, &ours_tree, &theirs_tree, None)
         .map_err(|e| format!("merge failed: {e}"))?;
-    let conflicts: Vec<String> = index
-        .conflicts()
-        .map_err(|e| e.to_string())?
-        .filter_map(|conflict| conflict.ok())
-        .filter_map(|conflict| {
-            let entry = conflict.our.or(conflict.their)?;
-            Some(String::from_utf8_lossy(&entry.path).into_owned())
-        })
-        .collect();
+    let mut conflicts: Vec<String> = Vec::new();
+    for conflict in index.conflicts().map_err(|e| e.to_string())? {
+        let conflict = conflict.map_err(|e| format!("merge conflict entry is unreadable: {e}"))?;
+        let entry = conflict
+            .our
+            .or(conflict.their)
+            .or(conflict.ancestor)
+            .ok_or_else(|| "merge conflict entry has no path".to_string())?;
+        conflicts.push(String::from_utf8_lossy(&entry.path).into_owned());
+    }
     if index.has_conflicts() {
         return Ok(json!({ "result": { "ok": false, "tree": null, "conflicts": conflicts } }));
     }
@@ -297,9 +298,9 @@ fn collect_reachable(repo: &Repository) -> Result<HashSet<Oid>, String> {
             continue;
         }
         reachable.insert(commit_oid);
-        let Ok(commit) = repo.find_commit(commit_oid) else {
-            continue;
-        };
+        let commit = repo
+            .find_commit(commit_oid)
+            .map_err(|e| format!("prune cannot walk missing commit {commit_oid}: {e}"))?;
         for parent in commit.parent_ids() {
             commits.push(parent);
         }
@@ -310,9 +311,9 @@ fn collect_reachable(repo: &Repository) -> Result<HashSet<Oid>, String> {
         if !reachable.insert(tree_oid) {
             continue;
         }
-        let Ok(tree) = repo.find_tree(tree_oid) else {
-            continue;
-        };
+        let tree = repo
+            .find_tree(tree_oid)
+            .map_err(|e| format!("prune cannot walk missing tree {tree_oid}: {e}"))?;
         for entry in tree.iter() {
             match entry.kind() {
                 Some(git2::ObjectType::Tree) => trees.push(entry.id()),
@@ -374,4 +375,115 @@ fn prune_unreachable(repo: &Repository) -> Result<(), String> {
     }
     fs::write(&marker, format!("{}", now_ms() / 1000)).ok();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_reachable;
+    use git2::{Repository, Signature};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    struct RepoFixture {
+        path: PathBuf,
+    }
+
+    impl RepoFixture {
+        fn new() -> Self {
+            loop {
+                let path = std::env::temp_dir().join(format!(
+                    "termina-prune-{}-{}",
+                    std::process::id(),
+                    SEQ.fetch_add(1, Ordering::Relaxed)
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => {
+                        Repository::init(&path).expect("init prune fixture");
+                        return Self { path };
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create prune fixture: {error}"),
+                }
+            }
+        }
+
+        fn open(&self) -> Repository {
+            Repository::open(&self.path).expect("open prune fixture")
+        }
+    }
+
+    impl Drop for RepoFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn write_commit(repo: &Repository, message: &str, parent: Option<git2::Oid>) -> git2::Oid {
+        let mut index = repo.index().expect("index");
+        let tree = index.write_tree().expect("write-tree");
+        let tree = repo.find_tree(tree).expect("find tree");
+        let sig = Signature::now("termina", "dev@termina.local").expect("signature");
+        let parents: Vec<git2::Commit> = parent
+            .map(|oid| repo.find_commit(oid).expect("parent commit"))
+            .into_iter()
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
+            .expect("commit")
+    }
+
+    #[test]
+    fn collect_reachable_fails_on_missing_parent_commit() {
+        let fixture = RepoFixture::new();
+        let repo = fixture.open();
+        fs::write(fixture.path.join("a.txt"), "a\n").expect("write a");
+        let mut index = repo.index().expect("index");
+        index
+            .add_path(std::path::Path::new("a.txt"))
+            .expect("add a");
+        index.write().expect("write index");
+        let parent = write_commit(&repo, "parent", None);
+
+        fs::write(fixture.path.join("a.txt"), "b\n").expect("write b");
+        let mut index = repo.index().expect("index");
+        index
+            .add_path(std::path::Path::new("a.txt"))
+            .expect("add b");
+        index.write().expect("write index");
+        write_commit(&repo, "child", Some(parent));
+
+        let hex = parent.to_string();
+        let object = repo.path().join("objects").join(&hex[0..2]).join(&hex[2..]);
+        drop(repo);
+        fs::remove_file(&object).expect("delete parent object");
+        let repo = fixture.open();
+
+        let err = collect_reachable(&repo).expect_err("missing parent must fail closed");
+        assert!(
+            err.contains("missing commit"),
+            "expected missing-commit prune error, got {err}"
+        );
+    }
+
+    #[test]
+    fn collect_reachable_fails_on_dangling_tree_ref() {
+        let fixture = RepoFixture::new();
+        let repo = fixture.open();
+        let refs = repo.path().join("refs").join("termina").join("merge");
+        fs::create_dir_all(&refs).expect("create merge ref dir");
+        fs::write(
+            refs.join("dead"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        )
+        .expect("write dangling tree pin");
+
+        let err = collect_reachable(&repo).expect_err("dangling tree pin must fail closed");
+        assert!(
+            err.contains("missing tree"),
+            "expected missing-tree prune error, got {err}"
+        );
+    }
 }
