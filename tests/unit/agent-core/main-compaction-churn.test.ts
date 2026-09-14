@@ -107,7 +107,8 @@ describe("compaction churn in the main loop", () => {
     }
   }, 30_000);
 
-  it("falls back to the current model when the cheap summary lane 401s", async () => {    const root = mkdtempSync(join(tmpdir(), "termina-summary-fallback-"));
+  it("falls back to the current model when the cheap summary lane 401s", async () => {
+    const root = mkdtempSync(join(tmpdir(), "termina-summary-fallback-"));
     const project = join(root, "project"), home = join(root, "home"), events = join(root, "events");
     for (const directory of [project, home, events]) mkdirSync(directory, { recursive: true });
     const terminal = "term-summary-fallback", session = "core-summary-fallback";
