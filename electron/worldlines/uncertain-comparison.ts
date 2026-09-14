@@ -120,8 +120,14 @@ function readComparisonManifest(dir: string): ComparisonManifest | null {
 
 /** Count every entry in an uncertain comparison tree, including files that
  * are not part of the normal candidate/session schema. Symlinks, special
- * entries, unreadable paths, and arithmetic overflow fail closed. */
-async function measureUncertainComparisonTree(root: string): Promise<UncertainComparisonMeasurement> {
+ * entries, unreadable paths, and arithmetic overflow fail closed.
+ *
+ * The walk is structural, not incidental (issue #192): proving a retained
+ * tree unchanged needs every file's stat, because a content-only write does
+ * not bump any ancestor directory time. A top-directory identity match can
+ * therefore never skip this walk. Admission latency grows with retained
+ * evidence, which is never auto-deleted. */
+async function measureUncertainComparisonTree(root: string, isClosing: () => boolean = () => false): Promise<UncertainComparisonMeasurement> {
   const digest = createHash("sha256");
   const initialWorkBytes = Buffer.byteLength(root, "utf8") + 1;
   if (initialWorkBytes > MAX_UNCERTAIN_SCAN_WORK_BYTES) {
@@ -160,7 +166,10 @@ async function measureUncertainComparisonTree(root: string): Promise<UncertainCo
     }
     digest.update(`${current.relative}\0${info.isDirectory() ? "d" : "f"}\0${JSON.stringify(uncertainIdentityOf(info))}\n`);
     if (!info.isDirectory()) {
-      if ((entries & 63) === 0) await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+      if ((entries & 63) === 0) {
+        if (isClosing()) return { ok: false, error: "worldline manager disposed" };
+        await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+      }
       continue;
     }
     let directory;
@@ -182,6 +191,7 @@ async function measureUncertainComparisonTree(root: string): Promise<UncertainCo
         if (children.length > MAX_UNCERTAIN_COMPARISON_ENTRIES) {
           return { ok: false, error: "uncertain comparison evidence contains too many entries; explicitly discard or export it before retrying" };
         }
+        if ((children.length & 63) === 0 && isClosing()) return { ok: false, error: "worldline manager disposed" };
       }
       children.sort().reverse();
       for (const name of children) {
@@ -312,7 +322,7 @@ function uncertainComparisonIsSafe(root: string, name: string, safeIds: Readonly
   return manifest !== null && manifest.status !== "uncertain" && manifest.uncertainSessionArtifacts.length === 0;
 }
 
-async function buildUncertainComparisonLedgerEntry(root: string, name: string, safeIds: ReadonlySet<string>): Promise<UncertainComparisonLedgerEntry | null> {
+async function buildUncertainComparisonLedgerEntry(root: string, name: string, safeIds: ReadonlySet<string>, isClosing: () => boolean = () => false): Promise<UncertainComparisonLedgerEntry | null> {
   let info: BigIntStats;
   try {
     info = await lstatPath(join(root, name), { bigint: true });
@@ -330,7 +340,7 @@ async function buildUncertainComparisonLedgerEntry(root: string, name: string, s
   if (uncertainComparisonIsSafe(root, name, safeIds)) {
     return { name, identity: uncertainIdentityOf(info), counted: false, bytes: 0, entries: 0, proof: "0".repeat(64) };
   }
-  const measured = await measureUncertainComparisonTree(join(root, name));
+  const measured = await measureUncertainComparisonTree(join(root, name), isClosing);
   if (!measured.ok) throw new Error(measured.error);
   return { name, identity: uncertainIdentityOf(info), counted: true, bytes: measured.bytes, entries: measured.entries, proof: measured.proof };
 }
@@ -420,7 +430,7 @@ async function writeUncertainComparisonUsageLedger(root: BoundPromotionDirectory
   });
 }
 
-async function readUncertainComparisonUsageLedger(root: string, safeIds: ReadonlySet<string>): Promise<UncertainComparisonUsageLedger | null> {
+async function readUncertainComparisonUsageLedger(root: string, safeIds: ReadonlySet<string>, isClosing: () => boolean = () => false): Promise<UncertainComparisonUsageLedger | null> {
   const path = join(root, UNCERTAIN_COMPARISON_USAGE_LEDGER);
   let info: BigIntStats;
   try {
@@ -481,7 +491,9 @@ async function readUncertainComparisonUsageLedger(root: string, safeIds: Readonl
       continue;
     }
     if (!sameUncertainIdentity(uncertainIdentityOf(current), entry.identity)) return null;
-    const measured = await measureUncertainComparisonTree(join(root, entry.name));
+    // A matching top identity still re-walks the whole tree: it cannot prove
+    // an unmodified tree, so the cached proof must be recomputed and compared.
+    const measured = await measureUncertainComparisonTree(join(root, entry.name), isClosing);
     if (!measured.ok || measured.bytes !== entry.bytes || measured.entries !== entry.entries || measured.proof !== entry.proof) return null;
   }
   return {
@@ -493,13 +505,13 @@ async function readUncertainComparisonUsageLedger(root: string, safeIds: Readonl
   };
 }
 
-async function buildUncertainComparisonUsageLedger(root: string, safeIds: ReadonlySet<string>, rootBinding: BoundPromotionDirectory, persist = true): Promise<UncertainComparisonUsageLedger> {
+async function buildUncertainComparisonUsageLedger(root: string, safeIds: ReadonlySet<string>, rootBinding: BoundPromotionDirectory, persist = true, isClosing: () => boolean = () => false): Promise<UncertainComparisonUsageLedger> {
   const rootInfo = await lstatPath(root, { bigint: true });
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("uncertain comparison evidence root is not an owned directory");
   const names = await uncertainComparisonRootNames(root);
   const entries: UncertainComparisonLedgerEntry[] = [];
   for (const name of names) {
-    const entry = await buildUncertainComparisonLedgerEntry(root, name, safeIds);
+    const entry = await buildUncertainComparisonLedgerEntry(root, name, safeIds, isClosing);
     if (entry) entries.push(entry);
   }
   const usage = uncertainComparisonUsageFromEntries(entries);
@@ -519,9 +531,10 @@ async function loadUncertainComparisonUsageLedger(
   safeIds: ReadonlySet<string>,
   rootBinding: BoundPromotionDirectory,
   options: { persist?: boolean } = {},
+  isClosing: () => boolean = () => false,
 ): Promise<UncertainComparisonUsageLedger> {
-  const existing = await readUncertainComparisonUsageLedger(root, safeIds);
-  return existing ?? buildUncertainComparisonUsageLedger(root, safeIds, rootBinding, options.persist !== false);
+  const existing = await readUncertainComparisonUsageLedger(root, safeIds, isClosing);
+  return existing ?? buildUncertainComparisonUsageLedger(root, safeIds, rootBinding, options.persist !== false, isClosing);
 }
 
 async function uncertainLedgerFileIdentity(root: string): Promise<UncertainComparisonIdentity | null> {
@@ -569,6 +582,14 @@ export class UncertainComparisonAdmissionOwner {
     return safeIds;
   }
 
+  /**
+   * Admit one creator transaction. Every admission re-walks every counted
+   * retained tree: top-directory identity cannot prove an unmodified tree,
+   * so the cached ledger is always re-proved, never trusted (issue #192).
+   * Creation latency therefore grows with retained evidence until the
+   * operator explicitly discards it. The walk yields to the event loop and
+   * aborts promptly when `isClosing` turns true.
+   */
   async acquire(isClosing: () => boolean): Promise<UncertainComparisonAdmissionOwnerResult> {
     const previous = this.queueTail;
     let releaseGate!: () => void;
@@ -594,7 +615,7 @@ export class UncertainComparisonAdmissionOwner {
       // while this work is in flight, the ledger file identity check below
       // selects its already-durable result instead of rescanning under lock.
       preparedFileIdentity = await uncertainLedgerFileIdentity(rootBinding.path);
-      preparedLedger = await loadUncertainComparisonUsageLedger(rootBinding.path, safeIds, rootBinding, { persist: false });
+      preparedLedger = await loadUncertainComparisonUsageLedger(rootBinding.path, safeIds, rootBinding, { persist: false }, isClosing);
     } catch (error) {
       finishWithoutLease();
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -620,7 +641,7 @@ export class UncertainComparisonAdmissionOwner {
       const currentFileIdentity = await uncertainLedgerFileIdentity(rootBinding.path);
       const ledger = sameUncertainLedgerFileIdentity(preparedFileIdentity, currentFileIdentity)
         ? preparedLedger
-        : await loadUncertainComparisonUsageLedger(rootBinding.path, this.safeIds(), rootBinding);
+        : await loadUncertainComparisonUsageLedger(rootBinding.path, this.safeIds(), rootBinding, {}, isClosing);
       const usage = ledger.usage;
       if (usage.count >= MAX_UNCERTAIN_COMPARISONS) {
         releaseLock();
