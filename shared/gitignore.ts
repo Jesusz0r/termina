@@ -3,7 +3,13 @@
  *
  * One pattern compiler. Walkers load .gitignore files; this module only
  * parses and matches. Escaped literals such as a leading "\!" stay
- * unsupported.
+ * unsupported, as do bracket character classes ("[" is a literal).
+ *
+ * Matching is bounded by construction: segments use a two-pointer glob
+ * scan (no nested backtracking quantifiers) and multi-segment patterns
+ * memoize on (pattern, path) positions, so a hostile .gitignore line can
+ * neither stall the main event loop nor blow the stack. Absurdly long
+ * lines drop out like invalid patterns.
  */
 export const IGNORED_SEGMENTS = new Set([
   "node_modules",
@@ -36,52 +42,123 @@ export const IGNORED_SEGMENTS = new Set([
   ".ios",
 ]);
 
+/** One segment of a compiled pattern body. A full "**" segment absorbs whole
+ *  directories; any other segment is a glob ("*", "?") matched literally. */
+export type GitignoreSegment = { globstar: true } | { globstar: false; source: string };
+
 /** One compiled pattern line of a .gitignore file. */
 export interface GitignoreRule {
   /** True for a "!" pattern. A match re-includes the path. */
   negated: boolean;
   /** True for a pattern with a trailing "/". Only directories match. */
   dirOnly: boolean;
-  /** Matches the path relative to the .gitignore directory. */
-  re: RegExp;
+  /** True when the pattern contains a "/": it anchors to the .gitignore directory. */
+  anchored: boolean;
+  /** Body segments. Unanchored rules hold exactly one non-globstar segment,
+   *  except a lone "**" which matches everything. */
+  segments: GitignoreSegment[];
 }
 
 /** Parsed rules of every known .gitignore. The key is the directory of the
  *  file relative to the root ("/"-separated; "" is the root itself). */
 export type GitignoreRules = Map<string, GitignoreRule[]>;
 
-/** Translate one pattern segment. Wildcards stay inside one segment. */
-function translateSegment(seg: string): string {
-  return seg
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\?/g, "[^/]");
+/** Lines past this length drop out: no legitimate ignore line is this long,
+ *  and it bounds memoized match state per rule. */
+const MAX_PATTERN_CHARS = 4096;
+
+/** Compile one pattern body (no "!", no trailing "/") into segments.
+ *  Returns null for an invalid or absurd pattern; one bad line drops out alone. */
+function compilePattern(body: string): GitignoreSegment[] | null {
+  if (body.length === 0 || body.length > MAX_PATTERN_CHARS) return null;
+  const segments: GitignoreSegment[] = [];
+  for (const seg of body.split("/")) {
+    if (seg === "**") segments.push({ globstar: true });
+    else segments.push({ globstar: false, source: seg });
+  }
+  return segments;
 }
 
-/** Compile one pattern body (no "!", no trailing "/") into a path regex.
- *  Returns null for an invalid pattern; one bad line drops out alone. */
-function compilePattern(body: string, anchored: boolean): RegExp | null {
-  const segs = body.split("/");
-  let src = "";
-  for (let i = 0; i < segs.length; i++) {
-    const seg = segs[i];
-    const last = i === segs.length - 1;
-    if (seg === "**") {
-      // A lone "**" matches everything. A trailing "**" matches the
-      // contents only. Any other "**" absorbs whole directories.
-      if (segs.length === 1) src += ".+";
-      else if (last) src += "/.*";
-      else src += "(?:[^/]+/)*";
-      continue;
+/**
+ * Glob-match one segment ("*" any run, "?" one char) with the classic
+ * two-pointer scan: backtracking returns only to the last star, so cost
+ * stays quadratic in the worst case instead of exponential like a naive
+ * `[^/]*`-per-star regex expansion.
+ */
+function matchSegment(pattern: string, name: string): boolean {
+  let px = 0;
+  let nx = 0;
+  let star = -1;
+  let mark = 0;
+  while (nx < name.length) {
+    if (px < pattern.length && (pattern[px] === "?" || pattern[px] === name[nx])) {
+      px++;
+      nx++;
+    } else if (px < pattern.length && pattern[px] === "*") {
+      star = px++;
+      mark = nx;
+    } else if (star !== -1) {
+      px = star + 1;
+      nx = ++mark;
+    } else {
+      return false;
     }
-    src += translateSegment(seg);
-    if (!last && segs[i + 1] !== "**") src += "/";
   }
-  try {
-    return new RegExp(`${anchored ? "^" : "^(?:.*/)?"}${src}$`);
-  } catch {
-    return null;
+  while (px < pattern.length && pattern[px] === "*") px++;
+  return px === pattern.length;
+}
+
+/**
+ * Match compiled segments against one relative path. Unanchored rules match
+ * the basename only (equivalent to Git's any-depth suffix match for a
+ * slash-free pattern). A mid-pattern "**" absorbs zero or more segments; a
+ * trailing "**" requires at least one, so `cache/**` matches the contents
+ * but not the directory itself. Memoized on (pattern, path) positions, so
+ * repeated globstars cannot cause exponential backtracking.
+ */
+function matchCompiledRule(rule: GitignoreRule, posixRel: string): boolean {
+  const pathSegs = posixRel.split("/");
+  if (!rule.anchored) {
+    const only = rule.segments[0]!;
+    if (only.globstar) return true;
+    return matchSegment(only.source, pathSegs[pathSegs.length - 1]!);
   }
+  const segments = rule.segments;
+  // Fast path: no globstar means a pairwise segment match, no state at all.
+  if (!segments.some((seg) => seg.globstar)) {
+    if (segments.length !== pathSegs.length) return false;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]!;
+      if (!seg.globstar && !matchSegment(seg.source, pathSegs[i]!)) return false;
+    }
+    return true;
+  }
+  const memo = new Map<number, boolean>();
+  const stride = pathSegs.length + 1;
+  const match = (pi: number, si: number): boolean => {
+    const key = pi * stride + si;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+    let out = false;
+    if (pi === segments.length) {
+      out = si === pathSegs.length;
+    } else {
+      const seg = segments[pi]!;
+      if (seg.globstar) {
+        if (pi === segments.length - 1) {
+          // Trailing "**": contents only, never the directory itself.
+          out = si < pathSegs.length;
+        } else {
+          out = match(pi + 1, si) || (si < pathSegs.length && match(pi, si + 1));
+        }
+      } else {
+        out = si < pathSegs.length && matchSegment(seg.source, pathSegs[si]!) && match(pi + 1, si + 1);
+      }
+    }
+    memo.set(key, out);
+    return out;
+  };
+  return match(0, 0);
 }
 
 /** Parse one .gitignore source into ordered rules. Comments, blank lines,
@@ -100,8 +177,8 @@ export function parseGitignore(source: string): GitignoreRule[] {
     const anchored = body.includes("/");
     const stripped = anchored && body.startsWith("/") ? body.slice(1) : body;
     if (!stripped) continue;
-    const re = compilePattern(stripped, anchored);
-    if (re) rules.push({ negated, dirOnly, re });
+    const segments = compilePattern(stripped);
+    if (segments) rules.push({ negated, dirOnly, anchored, segments });
   }
   return rules;
 }
@@ -134,7 +211,7 @@ export function matchGitignore(rules: GitignoreRules, posixRelPath: string): boo
       if (sub.length === 0) continue;
       for (const rule of layer.rules) {
         if (rule.dirOnly && !isDir) continue;
-        if (rule.re.test(sub)) ignored = !rule.negated;
+        if (matchCompiledRule(rule, sub)) ignored = !rule.negated;
       }
     }
     if (ignored && isDir) return true;
