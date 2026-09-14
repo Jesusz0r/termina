@@ -3,8 +3,17 @@
  * https-only, test-only http loopback, and blocked special-use hosts.
  * Parse-time checks stay literal and offline. Resolve-at-connect is a
  * separate hop check so MCP config parse never touches the network.
+ *
+ * One resolver contract (#158, #159): the precheck (resolvedHostError) and
+ * the dial-path lookup (createValidatedLookup) share the address rule and
+ * the test-loopback bypass. The precheck rejects early under the operation
+ * deadline; the dial path re-validates the answers the socket actually uses,
+ * so a rebinding hostname cannot slip a private address between the two.
+ * Validation never substitutes addresses or touches TLS: SNI and hostname
+ * verification still see the original hostname.
  */
-import { lookup } from "node:dns/promises";
+import { lookup as callbackLookup, type LookupAddress, type LookupOptions } from "node:dns";
+import { lookup as promisesLookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 
 const HOST_NOT_ALLOWED = "error: URL host not allowed";
@@ -73,23 +82,137 @@ export function outboundUrlError(url: string): string | null {
 /**
  * Resolve a hostname just before connect. Literal IPs and test-only
  * loopback skip the network. A name that answers with any restricted
- * address fails closed. Lookup failure is not treated as private: the
- * hop still has to survive fetch/connect.
+ * address fails closed, as do lookup failures and empty answers: there is
+ * nothing safe to connect to. An aborted signal fails without resolving or
+ * waiting for a late answer; callers map the abort to interrupted/timed-out.
  */
-export async function resolvedHostError(hostname: string): Promise<string | null> {
+export async function resolvedHostError(
+  hostname: string,
+  opts?: { signal?: AbortSignal; lookup?: (host: string) => Promise<readonly LookupAddress[]> },
+): Promise<string | null> {
   if (process.env.TERMINA_CORE_TEST === "1" && isTestLoopbackHost(hostname)) return null;
   const host = normalizeHost(hostname);
   if (!host) return HOST_NOT_ALLOWED;
   if (restrictedNetworkHost(host)) return HOST_NOT_ALLOWED;
   if (isIP(host)) return null;
+  if (opts?.signal?.aborted) return dnsAbortMessage(opts.signal);
+  const lookup = opts?.lookup ?? ((name: string) => promisesLookup(name, { all: true }));
+  let answers: readonly LookupAddress[];
   try {
-    const answers = await lookup(host, { all: true });
-    if (answers.length === 0) return null;
-    for (const answer of answers) {
-      if (restrictedNetworkHost(answer.address)) return HOST_NOT_ALLOWED;
-    }
-    return null;
-  } catch {
-    return null;
+    answers = await raceSignal(lookup(host), opts?.signal);
+  } catch (err) {
+    if (isDnsAbort(err)) return dnsAbortMessage(opts?.signal);
+    return unresolvableError(host);
   }
+  if (answers.length === 0) return unresolvableError(host);
+  for (const answer of answers) {
+    if (restrictedNetworkHost(answer.address)) return HOST_NOT_ALLOWED;
+  }
+  return null;
+}
+
+/** Abort sentinel: already-aborted callers map it to interrupted/timed-out. */
+export const DNS_LOOKUP_ABORTED = "error: DNS lookup aborted";
+export const DNS_LOOKUP_TIMED_OUT = "error: DNS lookup timed out";
+
+function dnsAbortMessage(signal?: AbortSignal): string {
+  const reason = signal?.reason as { name?: unknown } | undefined;
+  return reason?.name === "TimeoutError" ? DNS_LOOKUP_TIMED_OUT : DNS_LOOKUP_ABORTED;
+}
+
+function unresolvableError(host: string): string {
+  const display = host.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 128) || "(invalid host)";
+  return `error: could not resolve ${display}`;
+}
+
+class DnsAbort extends Error {
+  constructor() {
+    super("DNS lookup aborted");
+    this.name = "DnsAbort";
+  }
+}
+
+function isDnsAbort(err: unknown): boolean {
+  return err instanceof DnsAbort;
+}
+
+/** Race a lookup against an abort signal; late completion is safely ignored. */
+function raceSignal<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal || signal.aborted) return task;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new DnsAbort());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    task.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+export type CallbackDnsLookup = (
+  hostname: string,
+  options: LookupOptions,
+  callback: (err: Error | null, addresses: LookupAddress[] | string, family?: number) => void,
+) => void;
+
+function validatedAddresses(host: string, answers: readonly LookupAddress[]): string | null {
+  if (answers.length === 0) return `no addresses for ${host}`;
+  for (const answer of answers) {
+    if (restrictedNetworkHost(answer.address)) return "URL host not allowed";
+  }
+  return null;
+}
+
+/**
+ * Dial-path lookup for http(s) transports (#158). Resolves fresh on every
+ * connection (never pinned), validates the full answer set the socket will
+ * use, and fails closed on restricted, empty, or failed lookups. Literal and
+ * test-loopback handling mirrors the precheck. TLS is untouched: only name
+ * resolution is wrapped, never SNI or certificate verification.
+ */
+export function createValidatedLookup(dnsImpl: CallbackDnsLookup = callbackLookup): CallbackDnsLookup {
+  return (hostname, options, callback) => {
+    if (process.env.TERMINA_CORE_TEST === "1" && isTestLoopbackHost(hostname)) {
+      dnsImpl(hostname, options, callback);
+      return;
+    }
+    const host = normalizeHost(hostname);
+    if (!host || restrictedNetworkHost(host)) {
+      callback(new Error("URL host not allowed"), "", 0);
+      return;
+    }
+    // Always resolve the full set: undici-style happy eyeballs may dial any
+    // answered address, so validating only the first would leave a gap.
+    dnsImpl(hostname, { ...options, all: true }, (err, answers) => {
+      if (err) {
+        callback(err, "", 0);
+        return;
+      }
+      const list = (Array.isArray(answers) ? answers : []) as LookupAddress[];
+      const blocked = validatedAddresses(host, list);
+      if (blocked) {
+        callback(new Error(blocked), "", 0);
+        return;
+      }
+      if ((options as { all?: unknown }).all === true) callback(null, list);
+      else callback(null, list[0]!.address, list[0]!.family);
+    });
+  };
+}
+
+/** Shared dial-path lookup; per-test fakes go through createValidatedLookup. */
+export const validatedLookup: CallbackDnsLookup = createValidatedLookup();
+
+/** AbortError-shaped rejection so callers map DNS aborts like fetch aborts. */
+export function dnsAbortError(): Error {
+  return Object.assign(new Error("DNS lookup aborted"), { name: "AbortError" });
 }

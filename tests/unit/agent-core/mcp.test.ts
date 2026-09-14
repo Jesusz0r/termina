@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
+import { createServer } from "node:http";
 import * as mcp from "../../../agent-core/mcp.ts";
 
 const {
@@ -195,32 +196,45 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
     });
 
     it("freezes the selected tool binding in live McpSession", async () => {
-      const previousFetch = globalThis.fetch;
-      globalThis.fetch = async (_input: any, init: any = {}) => {
-        const request = JSON.parse(String(init.body ?? "{}"));
-        const result = request.method === "tools/list"
-          ? {
-              tools: [
-                tool({ server: "session-server", original: "session-tool", description: "z-definition" }),
-                tool({
-                  server: "session-server",
-                  original: "session-tool",
-                  description: "a-definition",
-                  input_schema: { properties: { value: { type: "string" } }, type: "object" },
-                }),
-              ],
-            }
-          : request.method === "initialize"
-            ? { protocolVersion: mcp.MCP_PROTOCOL, capabilities: {}, serverInfo: { name: "session", version: "1" } }
-            : {};
-        return new Response(JSON.stringify({ jsonrpc: "2.0", ...(request.id === undefined ? {} : { id: request.id }), result }), {
-          status: 200,
-          headers: { "content-type": "application/json", "mcp-session-id": "session-test" },
+      const originalTestFlag = process.env.TERMINA_CORE_TEST;
+      process.env.TERMINA_CORE_TEST = "1";
+      const server = createServer((req, res) => {
+        let raw = "";
+        req.on("data", (chunk) => {
+          raw += chunk;
         });
-      };
+        req.on("end", () => {
+          const request = JSON.parse(raw || "{}");
+          const result = request.method === "tools/list"
+            ? {
+                tools: [
+                  tool({ server: "session-server", original: "session-tool", description: "z-definition" }),
+                  tool({
+                    server: "session-server",
+                    original: "session-tool",
+                    description: "a-definition",
+                    input_schema: { properties: { value: { type: "string" } }, type: "object" },
+                  }),
+                ],
+              }
+            : request.method === "initialize"
+              ? { protocolVersion: mcp.MCP_PROTOCOL, capabilities: {}, serverInfo: { name: "session", version: "1" } }
+              : {};
+          const payload = JSON.stringify({
+            jsonrpc: "2.0",
+            ...(request.id === undefined ? {} : { id: request.id }),
+            result,
+          });
+          res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "session-test" });
+          res.end(payload);
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       try {
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("loopback server did not bind");
         const session = await mcp.startMcp(
-          [{ name: "session", args: [], env: {}, url: "https://mcp.invalid/session" }],
+          [{ name: "session", args: [], env: {}, url: `http://127.0.0.1:${address.port}/session` }],
           { projectRoot: ".", confineCwd: () => "." },
         );
         expect(Object.isFrozen(session.tools)).toBe(true);
@@ -230,7 +244,9 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
         expect(session.notes.some((note: string) => note.includes("mcp tool conflict") && note.includes("2 definitions"))).toBe(true);
         session.shutdown();
       } finally {
-        globalThis.fetch = previousFetch;
+        server.close();
+        if (originalTestFlag === undefined) delete process.env.TERMINA_CORE_TEST;
+        else process.env.TERMINA_CORE_TEST = originalTestFlag;
       }
     });
   });

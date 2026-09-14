@@ -186,7 +186,8 @@ import {
   shellQuote,
 } from "./main/files.ts";
 import { isDirectRunFrom, trustedPath } from "./main/env.ts";
-import { outboundUrlError, resolvedHostError } from "./main/url.ts";
+import { DNS_LOOKUP_ABORTED, DNS_LOOKUP_TIMED_OUT, dnsAbortError, outboundUrlError, resolvedHostError } from "./main/url.ts";
+import { policyRequest } from "./main/policy-fetch.ts";
 import { grepFiles } from "./main/grep.ts";
 import {
   editProjectFile,
@@ -1620,134 +1621,121 @@ export async function fetchUrl(
     isError: true,
     repro,
   });
-  let current = url;
-  for (let hop = 0; hop <= FETCH_REDIRECT_CAP; hop++) {
-    const bad = fetchUrlError(current);
-    if (bad) return fail(bad);
-    let hopHost: string;
-    try {
-      hopHost = new URL(current).hostname;
-    } catch {
-      return fail("error: invalid URL");
-    }
-    const resolved = await resolvedHostError(hopHost);
-    if (resolved) return fail(resolved);
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeoutMs);
-    const poll = setInterval(() => {
-      if (shouldStop()) ac.abort();
-    }, 50);
+  // One operation deadline for DNS, connect, TLS, redirects, and body: the
+  // abort below races the resolve precheck as well as the socket (#159).
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  const poll = setInterval(() => {
     if (shouldStop()) ac.abort();
-    try {
-      const res = await fetch(current, {
-        method: "GET",
-        redirect: "manual",
-        signal: ac.signal,
-        headers: { accept: "text/*, application/json, application/xml;q=0.9, */*;q=0.1" },
-      });
-      if (res.status >= 300 && res.status < 400) {
-        const loc = res.headers.get("location");
-        try {
-          await res.body?.cancel();
-        } catch {
-          /* best effort: redirect bodies are never retained */
-        }
-        if (!loc) return fail("error: redirect without location");
-        try {
-          current = new URL(loc, current).href;
-        } catch {
-          return fail("error: invalid redirect location");
-        }
-        continue;
+  }, 50);
+  if (shouldStop()) ac.abort();
+  try {
+    let current = url;
+    for (let hop = 0; hop <= FETCH_REDIRECT_CAP; hop++) {
+      const bad = fetchUrlError(current);
+      if (bad) return fail(bad);
+      let hopHost: string;
+      try {
+        hopHost = new URL(current).hostname;
+      } catch {
+        return fail("error: invalid URL");
       }
-      if (!res.ok) {
-        const detailAccumulator = new BoundedTextAccumulator({ maxBytes: 2 * 1024, direction: "head", marker: "" });
-        let detailSeen = 0;
-        if (res.body) {
-          const reader = res.body.getReader();
+      try {
+        // An already-requested stop fails before DNS, never after it.
+        if (shouldStop()) throw dnsAbortError();
+        const resolved = await resolvedHostError(hopHost, { signal: ac.signal });
+        if (resolved === DNS_LOOKUP_ABORTED || resolved === DNS_LOOKUP_TIMED_OUT) throw dnsAbortError();
+        if (resolved) return fail(resolved);
+        const res = await policyRequest({
+          url: current,
+          method: "GET",
+          headers: { accept: "text/*, application/json, application/xml;q=0.9, */*;q=0.1" },
+          signal: ac.signal,
+        });
+        if (res.status >= 300 && res.status < 400) {
+          res.cancel();
+          const loc = res.headers.get("location");
+          if (!loc) return fail("error: redirect without location");
           try {
-            for (;;) {
-              const next = await reader.read();
-              if (next.done) break;
-              detailAccumulator.push(next.value);
-              detailSeen += next.value.byteLength;
-              if (detailSeen > 2 * 1024) {
-                await reader.cancel();
-                break;
-              }
-            }
-          } finally {
-            reader.releaseLock();
+            current = new URL(loc, current).href;
+          } catch {
+            return fail("error: invalid redirect location");
           }
+          continue;
         }
-        const detailResult = detailAccumulator.finish();
-        const detail = detailResult.text.trim();
-        const errorBody = `error: HTTP ${res.status}${detail ? `: ${detail}` : ""}`;
-        if (detailResult.truncated) {
-          return logicalToolText(errorBody, {
-            maxBytes: FETCH_CAP_BYTES,
-            state: "failed",
-            isError: true,
-            forceMarker: true,
-            marker: continuation,
-            continuation,
-            repro,
-          });
-        }
-        return fail(errorBody);
-      }
-      const body = new BoundedTextAccumulator({ maxBytes: FETCH_CAP_BYTES, direction: "head", marker: "" });
-      let sourceTruncated = false;
-      let bodySeen = 0;
-      if (res.body) {
-        const reader = res.body.getReader();
-        try {
-          for (;;) {
-            const next = await reader.read();
-            if (next.done) break;
-            body.push(next.value);
-            bodySeen += next.value.byteLength;
-            if (bodySeen > FETCH_CAP_BYTES) {
-              sourceTruncated = true;
-              await reader.cancel();
+        if (res.status < 200 || res.status >= 300) {
+          const detailAccumulator = new BoundedTextAccumulator({ maxBytes: 2 * 1024, direction: "head", marker: "" });
+          let detailSeen = 0;
+          for await (const chunk of res.body) {
+            const bytes = chunk as Uint8Array;
+            detailAccumulator.push(bytes);
+            detailSeen += bytes.byteLength;
+            if (detailSeen > 2 * 1024) {
+              res.cancel();
               break;
             }
           }
-        } finally {
-          reader.releaseLock();
+          const detailResult = detailAccumulator.finish();
+          const detail = detailResult.text.trim();
+          const errorBody = `error: HTTP ${res.status}${detail ? `: ${detail}` : ""}`;
+          if (detailResult.truncated) {
+            return logicalToolText(errorBody, {
+              maxBytes: FETCH_CAP_BYTES,
+              state: "failed",
+              isError: true,
+              forceMarker: true,
+              marker: continuation,
+              continuation,
+              repro,
+            });
+          }
+          return fail(errorBody);
         }
+        const body = new BoundedTextAccumulator({ maxBytes: FETCH_CAP_BYTES, direction: "head", marker: "" });
+        let sourceTruncated = false;
+        let bodySeen = 0;
+        for await (const chunk of res.body) {
+          const bytes = chunk as Uint8Array;
+          body.push(bytes);
+          bodySeen += bytes.byteLength;
+          if (bodySeen > FETCH_CAP_BYTES) {
+            sourceTruncated = true;
+            res.cancel();
+            break;
+          }
+        }
+        const bodyResult = body.finish();
+        const result = logicalToolText(bodyResult.text, {
+          maxBytes: FETCH_CAP_BYTES,
+          state: "complete",
+          isError: false,
+          forceMarker: sourceTruncated || bodyResult.truncated,
+          marker: continuation,
+          continuation: sourceTruncated || bodyResult.truncated ? continuation : null,
+          repro,
+        });
+        return Object.freeze({
+          ...result,
+          inputBytes: bodyResult.inputBytes,
+          retainedBytes: bodyResult.retainedBytes,
+          omittedBytes: bodyResult.omittedBytes,
+          truncated: result.truncated || sourceTruncated || bodyResult.truncated,
+        });
+      } catch (err) {
+        const stopRequested = shouldStop();
+        const msg = stopCallbackFailed
+          ? "error: stop callback failed"
+          : (err as Error).name === "AbortError" || /aborted/i.test((err as Error).message)
+          ? stopRequested ? "error: interrupted" : "error: timed out"
+          : `error: ${(err as Error).message}`;
+        return fail(msg, stopCallbackFailed ? "failed" : stopRequested ? "interrupted" : /timed out/i.test(msg) ? "timeout" : "failed");
       }
-      const bodyResult = body.finish();
-      const result = logicalToolText(bodyResult.text, {
-        maxBytes: FETCH_CAP_BYTES,
-        state: "complete",
-        isError: false,
-        forceMarker: sourceTruncated || bodyResult.truncated,
-        marker: continuation,
-        continuation: sourceTruncated || bodyResult.truncated ? continuation : null,
-        repro,
-      });
-      return Object.freeze({
-        ...result,
-        inputBytes: bodyResult.inputBytes,
-        retainedBytes: bodyResult.retainedBytes,
-        omittedBytes: bodyResult.omittedBytes,
-        truncated: result.truncated || sourceTruncated || bodyResult.truncated,
-      });
-    } catch (err) {
-      const stopRequested = shouldStop();
-      const msg = stopCallbackFailed
-        ? "error: stop callback failed"
-        : (err as Error).name === "AbortError" || /aborted/i.test((err as Error).message)
-        ? stopRequested ? "error: interrupted" : "error: timed out"
-        : `error: ${(err as Error).message}`;
-      return fail(msg, stopCallbackFailed ? "failed" : stopRequested ? "interrupted" : /timed out/i.test(msg) ? "timeout" : "failed");
-    } finally {
-      clearTimeout(timer);
-      clearInterval(poll);
     }
+    return fail("error: too many redirects");
+  } finally {
+    clearTimeout(timer);
+    clearInterval(poll);
   }
-  return fail("error: too many redirects");
 }
 
 let permissionMode: PermissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";

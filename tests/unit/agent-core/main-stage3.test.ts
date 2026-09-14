@@ -73,45 +73,35 @@ describe("Agent Core Main Stage 3 Contracts", () => {
       assert.match(jsGrep.content, /truncated|Grep again/);
       assert.ok(!jsGrep.content.includes("\uFFFD"));
     
-      const originalFetch = globalThis.fetch;
-      globalThis.fetch = async () => new Response(new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode("prefix-é-"));
-          controller.enqueue(new TextEncoder().encode("😀-suffix"));
-          controller.close();
-        },
-      }), { status: 200, headers: { "content-type": "text/plain" } });
-      try {
-        const fetched = await main.fetchUrl("https://example.com/data");
-        assert.equal(fetched.state, "complete");
-        assert.equal(fetched.content, "prefix-é-😀-suffix");
-        assert.ok(!fetched.content.includes("\uFFFD"));
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
+    const { createServer: createStage3Server } = await import("node:http");
+    const utf8Server = createStage3Server((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      // Split a multibyte character across chunks; the transport must
+      // reassemble code points instead of surfacing replacements.
+      res.write(new TextEncoder().encode("prefix-é-"));
+      res.write(new TextEncoder().encode("😀-suffix"));
+      res.end();
+    });
+    await new Promise<void>((resolve) => utf8Server.listen(0, "127.0.0.1", resolve));
+    try {
+      const utf8Address = utf8Server.address();
+      if (!utf8Address || typeof utf8Address === "string") throw new Error("loopback server did not bind");
+      const fetched = await main.fetchUrl(`http://127.0.0.1:${utf8Address.port}/data`);
+      assert.equal(fetched.state, "complete");
+      assert.equal(fetched.content, "prefix-é-😀-suffix");
+      assert.ok(!fetched.content.includes("\uFFFD"));
+    } finally {
+      utf8Server.close();
+    }
     
-      globalThis.fetch = async (_url, init = {}) => {
-        const signal = init.signal;
-        return await new Promise((_resolve, reject) => {
-          const abort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
-          if (signal?.aborted) {
-            abort();
-            return;
-          }
-          signal?.addEventListener("abort", abort, { once: true });
-        });
-      };
-      try {
-        const failedFetch = await main.fetchUrl("https://example.com/stop-callback", {
-          timeoutMs: 200,
-          shouldStop: () => { throw new Error("stop callback failed"); },
-        });
-        assert.equal(failedFetch.state, "failed");
-        assert.equal(failedFetch.isError, true);
-        assert.match(failedFetch.content, /stop callback failed/);
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
+    // A throwing stop callback fails the fetch before any transport work.
+    const failedFetch = await main.fetchUrl("https://example.com/stop-callback", {
+      timeoutMs: 200,
+      shouldStop: () => { throw new Error("stop callback failed"); },
+    });
+    assert.equal(failedFetch.state, "failed");
+    assert.equal(failedFetch.isError, true);
+    assert.match(failedFetch.content, /stop callback failed/);
     
       const processResult = await main.runBash("printf out; printf err >&2; exit 7", { cwd: root });
       assert.equal(processResult.exitCode, 7);
