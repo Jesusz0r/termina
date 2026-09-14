@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as worldlines from "../../electron/worldlines/index.js";
+import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -32,7 +33,7 @@ function seed(worlds: string, primaryRoot: string, name: string, rel: string): s
 }
 
 export default async function run(log: (message: string) => void): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "termina-promotion-lock-"));
+  const root = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "termina-promotion-lock-")));
   try {
     const worlds = join(root, "worlds");
     const primary = join(root, "primary");

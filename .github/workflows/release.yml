@@ -26,7 +26,12 @@ jobs:
       # packageManager pins pnpm; corepack activates that exact version.
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      # Artifact prerequisite for the gate below: the release graph needs
+      # the built core and bundles before it can validate staging.
       - run: pnpm run build
+      # Canonical release gate (package.json test:release): app + test
+      # typechecks, unit tests, Rust tests, then the portable native suites.
+      # The macOS build job adds the platform spike and live gates.
       - run: pnpm run test:release
 
   build:
@@ -64,6 +69,9 @@ jobs:
       # Stages the bundled node runtime and the core binary.
       - run: node --experimental-strip-types scripts/prepare-resources.ts
       - name: Run macOS release gate
+        # macOS-only layer (package.json test:release-macos): the platform
+        # spike plus the sandbox-live and built-Electron smoke gates,
+        # before anything is packaged.
         if: matrix.os == 'macos-15'
         run: pnpm run test:release-macos
       - name: Package

@@ -1,120 +1,75 @@
-// @ts-nocheck
 /**
- * Probe core op latency directly over the stdio protocol.
+ * Spike: probe core op latency through the canonical SnapshotStore client.
+ *
+ * Runs through the spike runner (`pnpm run spike -- core-latency-probe`).
+ * The fixture root is tracked for runner-owned teardown and removed in a
+ * finally after the store is destroyed and the shared core is disposed.
  */
-import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SnapshotStore, disposeWorldlineGitCore } from "../../electron/worldline-git.js";
+import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
-const dir = mkdtempSync(join(tmpdir(), "core-probe-"));
-const fixture = join(dir, "fixture");
-const FILE_COUNT = Number(process.env.PERF_FILES ?? 200);
-mkdirSync(fixture, { recursive: true });
-for (let i = 0; i < FILE_COUNT; i++) {
-  writeFileSync(join(fixture, `file-${i}.ts`), `export const v${i} = ${i};\n`);
-}
-execFileSync("git", ["init", "-q"], { cwd: fixture });
-execFileSync("git", ["config", "user.email", "t@t"], { cwd: fixture });
-execFileSync("git", ["config", "user.name", "t"], { cwd: fixture });
-execFileSync("git", ["add", "-A"], { cwd: fixture });
-execFileSync("git", ["commit", "-qm", "init"], { cwd: fixture });
-const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture, encoding: "utf8" }).trim();
-
-const child = spawn(join(process.cwd(), "core/target/release/termina-core"), []);
-child.stdout.setEncoding("utf8");
-let buffer = "";
-const pending = new Map();
-let seq = 0;
-child.stdout.on("data", (chunk) => {
-  buffer += chunk;
-  let nl;
-  while ((nl = buffer.indexOf("\n")) !== -1) {
-    const line = buffer.slice(0, nl);
-    buffer = buffer.slice(nl + 1);
-    if (!line.trim()) continue;
-    try {
-      const msg = JSON.parse(line);
-      const p = pending.get(msg.requestId);
-      if (p) {
-        pending.delete(msg.requestId);
-        p(msg);
-      } else {
-        console.error("unmatched reply:", line.slice(0, 120));
-      }
-    } catch (e) {
-      console.error("bad line:", line.slice(0, 120));
+export default async function run(log: (msg: string) => void) {
+  const dir = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "core-probe-")));
+  try {
+    const fixture = join(dir, "fixture");
+    const FILE_COUNT = Number(process.env.PERF_FILES ?? 200);
+    mkdirSync(fixture, { recursive: true });
+    for (let i = 0; i < FILE_COUNT; i++) {
+      writeFileSync(join(fixture, `file-${i}.ts`), `export const v${i} = ${i};\n`);
     }
+    execFileSync("git", ["init", "-q"], { cwd: fixture });
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: fixture });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: fixture });
+    execFileSync("git", ["add", "-A"], { cwd: fixture });
+    execFileSync("git", ["commit", "-qm", "init"], { cwd: fixture });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture, encoding: "utf8" }).trim();
+
+    const timeOp = async (label: string, fn: () => Promise<unknown>): Promise<void> => {
+      // warmup
+      await fn();
+      const samples: number[] = [];
+      for (let i = 0; i < 20; i++) {
+        const t0 = performance.now();
+        await fn();
+        samples.push(performance.now() - t0);
+      }
+      samples.sort((a, b) => a - b);
+      log(`${label.padEnd(28)} median ${samples[10].toFixed(2)} min ${samples[0].toFixed(2)}`);
+    };
+
+    const store = await SnapshotStore.create(join(dir, "store"), fixture, join(fixture, ".git"), "sha1");
+    try {
+      log("store created");
+
+      // Baseline: a full capture round trip.
+      await timeOp("full capture first-pass", () => store.capture(head, null));
+
+      // Warm full capture.
+      await timeOp("full capture (stat-cache)", () => store.capture(head, null));
+
+      // Chain incrementals.
+      let parent = (await store.capture(head, null)).commit;
+      const incTime = async (): Promise<number> => {
+        for (let k = 0; k < 10; k++) writeFileSync(join(fixture, `file-${k}.ts`), `export const v${k} = ${Math.random()};\n`);
+        const hints = Array.from({ length: 10 }, (_, k) => `file-${k}.ts`);
+        const t0 = performance.now();
+        parent = (await store.captureIncremental(parent, hints, [])).commit;
+        return performance.now() - t0;
+      };
+      await incTime();
+      const samples: number[] = [];
+      for (let i = 0; i < 20; i++) samples.push(await incTime());
+      samples.sort((a, b) => a - b);
+      log(`${"incremental (10 hints)".padEnd(28)} median ${samples[10].toFixed(2)} min ${samples[0].toFixed(2)}`);
+    } finally {
+      await store.destroy();
+    }
+  } finally {
+    disposeWorldlineGitCore();
+    rmSync(dir, { recursive: true, force: true });
   }
-});
-function request(op, params) {
-  const id = `r${++seq}`;
-  return new Promise((resolve) => {
-    pending.set(id, (msg) => {
-      if (!msg.ok) throw new Error(`${op} failed: ${msg.error}`);
-      resolve(msg);
-    });
-    child.stdin.write(JSON.stringify({ op, requestId: id, ...params }) + "\n");
-  });
 }
-const timeOp = async (label, fn) => {
-  // warmup
-  await fn();
-  const samples = [];
-  for (let i = 0; i < 20; i++) {
-    const t0 = performance.now();
-    await fn();
-    samples.push(performance.now() - t0);
-  }
-  samples.sort((a, b) => a - b);
-  console.log(label.padEnd(28), "median", samples[10].toFixed(2), "min", samples[0].toFixed(2));
-};
-
-// store create
-const storeDir = join(dir, "store");
-const created = await request("store-create", { storeDir, sourceGitDir: join(fixture, ".git"), objectFormat: "sha1" });
-const storeRequest = (op, params = {}) => request(op, {
-  ...params,
-  storeDir,
-  sourceRoot: fixture,
-  sourceGitDir: join(fixture, ".git"),
-  objectFormat: "sha1",
-  storeGeneration: created.storeGeneration,
-  storeIdentity: created.storeIdentity,
-  storeGitIdentity: created.storeGitIdentity,
-  storeGitObjectsIdentity: created.storeGitObjectsIdentity,
-  storeGitObjectsInfoIdentity: created.storeGitObjectsInfoIdentity,
-  storeGitObjectsPackIdentity: created.storeGitObjectsPackIdentity,
-  storeGitRefsIdentity: created.storeGitRefsIdentity,
-  storeGitRefsHeadsIdentity: created.storeGitRefsHeadsIdentity,
-  storeGitRefsTagsIdentity: created.storeGitRefsTagsIdentity,
-});
-console.log("store created");
-
-// Baseline: a full capture round trip.
-await timeOp("full capture first-pass", () =>
-  storeRequest("capture", { head }));
-
-// Warm full capture.
-await timeOp("full capture (stat-cache)", () =>
-  storeRequest("capture", { head }));
-
-// Chain incrementals.
-let state = await storeRequest("capture", { head });
-let parent = state.state.commit;
-const incTime = async () => {
-  for (let k = 0; k < 10; k++) writeFileSync(join(fixture, `file-${k}.ts`), `export const v${k} = ${Math.random()};\n`);
-  const hints = Array.from({ length: 10 }, (_, k) => `file-${k}.ts`);
-  const t0 = performance.now();
-  const res = await storeRequest("capture-incremental", { parentCommit: parent, hints });
-  const dt = performance.now() - t0;
-  parent = res.state.commit;
-  return dt;
-};
-await incTime();
-const samples = [];
-for (let i = 0; i < 20; i++) samples.push(await incTime());
-samples.sort((a, b) => a - b);
-console.log("incremental (10 hints)".padEnd(28), "median", samples[10].toFixed(2), "min", samples[0].toFixed(2));
-
-process.exit(0);

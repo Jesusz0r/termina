@@ -1,14 +1,14 @@
 #!/bin/sh
 # Render the Termina app icon: build/icon.svg -> icon.icns + icon.png.
-# Chromium (render-icon.mjs) rasterizes the SVG with real transparency;
-# sips and iconutil build the icns from the master.
+# Chromium (render-icon.ts via node type stripping) rasterizes the SVG with
+# real transparency; sips and iconutil build the icns from the master.
 set -e
 cd "$(dirname "$0")/.."
 
 ICON_SET="build/icon.iconset"
 MASTER="build/icon-master.png"
 
-node scripts/render-icon.mjs "$MASTER"
+node --experimental-strip-types scripts/render-icon.ts "$MASTER"
 
 rm -rf "$ICON_SET"
 mkdir -p "$ICON_SET"

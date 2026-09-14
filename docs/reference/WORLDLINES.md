@@ -391,8 +391,10 @@ pins. Make cleanup idempotent and retry stale app-owned resources on startup.
 
 ### Are external side effects isolated?
 
-Not completely. Deny network by default except the active model provider. A
-one-run explicit grant can allow a required domain. Worldlines must warn that
+Not completely. Live candidates keep network access for the model provider
+(a per-provider allowlist is not expressible in the sandbox language);
+evidence and candidate-Verify runs are fully offline unless the immutable
+evidence contract explicitly grants a domain. Worldlines must warn that
 commands can still affect an allowed remote service. Never present filesystem
 isolation as a full security sandbox for external systems.
 
@@ -776,7 +778,9 @@ Run candidate agent, shell, dispatch, Verify, and child processes under one poli
   sibling candidate;
 - close nonessential inherited file descriptors;
 - deny process inspection and signals outside the candidate process group;
-- deny network except the active model provider by default;
+- keep network access for live candidates (a per-provider allowlist is not
+  expressible in the profile language); deny all evidence and
+  candidate-Verify network by default;
 - apply bounded memory, CPU time, file-size, process-count, open-file, and
   output limits; and
 - keep every descendant in a tracked process group whose supervisor terminates
@@ -1457,8 +1461,9 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
   refs, config, hooks, and worktree metadata while preserving read-only object
   access.
 - Block signals and process inspection outside the candidate group.
-- Deny candidate network except the active model provider and deny all Verify
-  network without an explicit evidence grant.
+- Assert live candidates keep network access for the model provider (a
+  per-provider allowlist is not expressible in the profile language) and
+  deny all evidence and candidate-Verify network.
 - Give A and B independent Git indexes, refs, runtime files, homes, caches,
   sessions, and temporary directories.
 - Enforce memory, CPU time, file-size, process-count, output, and free-space

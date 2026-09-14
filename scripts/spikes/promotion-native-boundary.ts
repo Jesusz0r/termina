@@ -18,6 +18,7 @@ import {
   SnapshotStore,
 } from "../../electron/worldline-git.js";
 import { disposeWorldlineGitCore } from "../../electron/worldline-git.js";
+import { settleSpikeChild, trackSpikeChild, trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 // The native pause/release seam is test-only and must be enabled by this
 // spike itself so the race regressions cannot silently become no-ops.
@@ -69,10 +70,10 @@ type FreshCoreResponse = {
 // admission behavior without leaving an unowned core alive if a probe fails.
 const freshCoreChildren = new Set<ReturnType<typeof spawn>>();
 const freshCoreRequest = (binary: string, request: Record<string, unknown>): Promise<FreshCoreResponse> => new Promise((resolve, reject) => {
-  const child = spawn(binary, [], {
+  const child = trackSpikeChild(spawn(binary, [], {
     env: { ...process.env, TERMINA_CORE_TEST: "1" },
     stdio: ["pipe", "pipe", "pipe"],
-  });
+  }));
   freshCoreChildren.add(child);
   let stdout = "";
   let stderr = "";
@@ -114,7 +115,7 @@ const freshCoreRequest = (binary: string, request: Record<string, unknown>): Pro
 });
 
 export default async function run(log: (message: string) => void): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "termina-promotion-native-test-"));
+  const root = trackSpikeFixtureRoot(mkdtempSync(join(tmpdir(), "termina-promotion-native-test-")));
   try {
     const canonicalRoot = realpathSync(root);
     const journalRoot = join(canonicalRoot, "promotion-journal");
@@ -1552,8 +1553,9 @@ export default async function run(log: (message: string) => void): Promise<void>
     log("PASS bound journal read rejects symlinked operation directories");
   } finally {
     const { rmSync } = await import("node:fs");
-    for (const child of freshCoreChildren) child.kill();
+    const pending = [...freshCoreChildren];
     freshCoreChildren.clear();
+    await Promise.all(pending.map((child) => settleSpikeChild(child)));
     rmSync(root, { recursive: true, force: true });
     disposeWorldlineGitCore();
   }

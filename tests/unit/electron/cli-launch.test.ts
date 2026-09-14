@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { resolve } from "node:path";
-import { statSync, existsSync, readFileSync } from "node:fs";
+import { describe, it, expect, afterEach } from "vitest";
+import { resolve, join, dirname } from "node:path";
+import { statSync, existsSync, readFileSync, realpathSync, mkdtempSync, mkdirSync, copyFileSync, chmodSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { parseTargetCwdFromArgv, getCliSourcePath, quoteAppleScriptString } from "../../../electron/cli-install.ts";
 import { quoteShellArg } from "../../../shared/terminal-control.ts";
@@ -110,5 +111,157 @@ describe("CLI Launch and Argument Parsing", () => {
     expect(source).toMatch(/quoteShellArg\(source\)/);
     expect(source).toMatch(/quoteAppleScriptString\(command\)/);
     expect(source).not.toMatch(/ln -sf '\$\{source\}'/);
+  });
+});
+
+describe("Linux launcher target resolution (#129)", () => {
+  const repoRoot = resolve(__dirname, "../../..");
+  const launcherSource = resolve(repoRoot, "bin/termina");
+  // Every launch below is a bounded owned fixture: the timeout turns any
+  // self-exec regression into a fast failure instead of a hung suite.
+  const LAUNCH_TIMEOUT_MS = 15_000;
+  const fixtures: string[] = [];
+  afterEach(() => {
+    while (fixtures.length > 0) rmSync(fixtures.pop()!, { recursive: true, force: true });
+  });
+
+  /** Owned fixture: a `bin/termina` launcher copy plus a marker executable. */
+  function makeFixture(): { root: string; launcher: string; markerBin: string; marker: string } {
+    const root = mkdtempSync(join(tmpdir(), "termina-cli-launch-"));
+    fixtures.push(root);
+    mkdirSync(join(root, "bin"), { recursive: true });
+    mkdirSync(join(root, "app"), { recursive: true });
+    const launcher = join(root, "bin", "termina");
+    copyFileSync(launcherSource, launcher);
+    chmodSync(launcher, 0o755);
+    const marker = join(root, "marker");
+    const markerBin = join(root, "app", "real");
+    writeFileSync(markerBin, `#!/bin/sh\necho "launched: $@" >> "${marker}"\n`);
+    chmodSync(markerBin, 0o755);
+    return { root, launcher, markerBin, marker };
+  }
+
+  function linuxEnv(extra: Record<string, string | undefined>): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = { ...process.env, OSTYPE: "linux-gnu", ...extra };
+    for (const [key, value] of Object.entries(extra)) {
+      if (value === undefined) delete env[key];
+    }
+    return env;
+  }
+
+  function launchFails(file: string, args: string[], env: NodeJS.ProcessEnv): { status: number | null; stderr: string } {
+    try {
+      execFileSync(file, args, { encoding: "utf8", env, timeout: LAUNCH_TIMEOUT_MS });
+      throw new Error("expected the launcher to fail");
+    } catch (error) {
+      if (error instanceof Error && error.message === "expected the launcher to fail") throw error;
+      const execError = error as { status?: number | null; stderr?: string };
+      return { status: execError.status ?? null, stderr: String(execError.stderr ?? "") };
+    }
+  }
+
+  it("honors TERMINA_BIN first with the launcher first in PATH (no-arg)", () => {
+    const { launcher, markerBin, marker } = makeFixture();
+    const binDir = dirname(launcher);
+    execFileSync("termina", [], {
+      encoding: "utf8",
+      env: linuxEnv({ PATH: `${binDir}:${process.env.PATH ?? ""}`, TERMINA_BIN: markerBin }),
+      timeout: LAUNCH_TIMEOUT_MS,
+    });
+    expect(readFileSync(marker, "utf8")).toBe("launched: \n");
+  });
+
+  it("normalizes a path argument before execing TERMINA_BIN", () => {
+    const { root, launcher, markerBin, marker } = makeFixture();
+    execFileSync(launcher, ["."], {
+      encoding: "utf8",
+      cwd: root,
+      env: linuxEnv({ PATH: `${dirname(launcher)}:${process.env.PATH ?? ""}`, TERMINA_BIN: markerBin }),
+      timeout: LAUNCH_TIMEOUT_MS,
+    });
+    // The launcher resolves through the kernel cwd, which is canonical
+    // (/tmp -> /private/tmp on macOS); compare against the same form.
+    expect(readFileSync(marker, "utf8")).toBe(`launched: ${realpathSync(root)}\n`);
+  });
+
+  it("rejects self-resolution without looping", () => {
+    const { launcher } = makeFixture();
+    const binDir = dirname(launcher);
+    const failed = launchFails("termina", [], linuxEnv({ PATH: `${binDir}:/usr/bin:/bin`, TERMINA_BIN: undefined }));
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain("TERMINA_BIN");
+  });
+
+  it("rejects symlink self-resolution without looping", () => {
+    const { root, launcher } = makeFixture();
+    const linkDir = join(root, "link");
+    mkdirSync(linkDir, { recursive: true });
+    const link = join(linkDir, "termina");
+    symlinkSync(launcher, link);
+    const failed = launchFails(link, ["."], {
+      ...linuxEnv({ PATH: `${linkDir}:/usr/bin:/bin`, TERMINA_BIN: undefined }),
+    });
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain("TERMINA_BIN");
+  });
+
+  it("rejects a TERMINA_BIN that resolves to the launcher itself", () => {
+    const { launcher } = makeFixture();
+    const binDir = dirname(launcher);
+    // Without self-rejection this execs forever; the timeout turns a
+    // regression into a failure (status null) instead of a hung suite.
+    const failed = launchFails(launcher, [], linuxEnv({ PATH: `${binDir}:/usr/bin:/bin`, TERMINA_BIN: launcher }));
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain("TERMINA_BIN");
+  });
+
+  it("rejects a TERMINA_BIN symlink alias of the launcher", () => {
+    const { root, launcher } = makeFixture();
+    const alias = join(root, "app", "alias");
+    symlinkSync(launcher, alias);
+    const failed = launchFails(launcher, ["."], {
+      ...linuxEnv({ PATH: `${dirname(launcher)}:/usr/bin:/bin`, TERMINA_BIN: alias }),
+    });
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain("TERMINA_BIN");
+  });
+
+  it("fails clearly for missing and invalid executables", () => {
+    const { root, launcher } = makeFixture();
+    const binDir = dirname(launcher);
+    const emptyDir = join(root, "empty");
+    // Nothing named termina on PATH and no TERMINA_BIN.
+    const missing = launchFails(launcher, [], linuxEnv({ PATH: `${emptyDir}:/usr/bin:/bin`, TERMINA_BIN: undefined }));
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain("TERMINA_BIN");
+    // An invalid TERMINA_BIN (a directory) cannot loop either.
+    const invalid = launchFails("termina", [], linuxEnv({ PATH: `${binDir}:/usr/bin:/bin`, TERMINA_BIN: root }));
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).toContain("TERMINA_BIN");
+  });
+
+  it("still discovers a distinct PATH binary and prefers explicit TERMINA_BIN", () => {
+    const { root, launcher, markerBin, marker } = makeFixture();
+    const otherDir = join(root, "other");
+    mkdirSync(otherDir, { recursive: true });
+    const otherBin = join(otherDir, "termina");
+    const otherMarker = join(root, "other-marker");
+    writeFileSync(otherBin, `#!/bin/sh\necho "other: $@" >> "${otherMarker}"\n`);
+    chmodSync(otherBin, 0o755);
+    // PATH discovery of a real (non-launcher) binary keeps working.
+    execFileSync(launcher, ["sub/dir"], {
+      encoding: "utf8",
+      cwd: root,
+      env: linuxEnv({ PATH: `${otherDir}:/usr/bin:/bin`, TERMINA_BIN: undefined }),
+      timeout: LAUNCH_TIMEOUT_MS,
+    });
+    expect(readFileSync(otherMarker, "utf8")).toBe(`other: ${join(realpathSync(root), "sub", "dir")}\n`);
+    // An explicit TERMINA_BIN wins over PATH discovery.
+    execFileSync(launcher, [], {
+      encoding: "utf8",
+      env: linuxEnv({ PATH: `${otherDir}:${dirname(launcher)}:/usr/bin:/bin`, TERMINA_BIN: markerBin }),
+      timeout: LAUNCH_TIMEOUT_MS,
+    });
+    expect(readFileSync(marker, "utf8")).toBe("launched: \n");
   });
 });
