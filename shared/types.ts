@@ -193,6 +193,15 @@ export interface PtyExitPayload {
   code: number;
 }
 
+/** DECSET 2004 restored once at renderer attach, before PTY replay. */
+export interface PtyModesPayload {
+  id: string;
+  generation: number;
+  windowGeneration: number;
+  rendererGeneration: number;
+  bracketedPasteMode: boolean;
+}
+
 export interface InstanceSummary {
   id: string;
   /** PTY generation used by the egress handshake and close fence. */
@@ -562,6 +571,7 @@ export interface TerminaBridge {
   // push events (main → renderer)
   onPtyData(cb: (e: PtyDataPayload) => void): () => void;
   onPtyExit(cb: (e: PtyExitPayload) => void): () => void;
+  onPtyModes(cb: (e: PtyModesPayload) => void): () => void;
   onMenuCommand(cb: (cmd: { command: MenuCommand }) => void): () => void;
   onToolTarget(cb: (p: ToolTargetPayload) => void): () => void;
   onFileChanged(cb: (p: FileChangedPayload) => void): () => void;

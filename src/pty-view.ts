@@ -5,6 +5,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { cssFontFamily, type TerminalPasteResult, type ThemeId } from "../shared/types";
+import { BRACKETED_PASTE_DISABLE_CSI, BRACKETED_PASTE_ENABLE_CSI } from "../shared/terminal-control";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { terminalTheme } from "./terminal-themes";
@@ -386,15 +387,7 @@ export class PtyView {
       return;
     }
     if (result.kind === "text" && result.text) {
-      // Agent TUIs enable bracketed paste before the renderer attaches, so
-      // xterm can miss that mode sequence and treat multiline paste as Enter
-      // presses. Bracket it explicitly to keep the paste as one editor block.
-      if (this.engine && /[\r\n]/.test(result.text)) {
-        const text = result.text.replace(/\r?\n/g, "\r");
-        this.sendInput(`\x1b[200~${text}\x1b[201~`);
-      } else {
-        this.term.paste(result.text);
-      }
+      this.term.paste(result.text);
     } else if (result.kind === "image") this.sendInput("\x1b[201~");
     if (result.kind === "image" && result.queued) toast("queued for next prompt", "info");
     if (focus) this.focus();
@@ -417,6 +410,15 @@ export class PtyView {
     if (this.disposed || this.engine === engine) return;
     this.engine = engine;
     this.term.options.theme = terminalTheme(this.themeId, this.engine);
+  }
+
+  /**
+   * Apply DECSET 2004 into this xterm only (not the PTY). Called once per
+   * attach from the hydrate handshake so term.paste wraps correctly.
+   */
+  setBracketedPasteMode(enabled: boolean): void {
+    if (this.disposed) return;
+    this.term.write(enabled ? BRACKETED_PASTE_ENABLE_CSI : BRACKETED_PASTE_DISABLE_CSI);
   }
 
   setFontSize(size: number): void {

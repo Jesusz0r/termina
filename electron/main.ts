@@ -7588,11 +7588,52 @@ class TerminaApp {
     }
   }
 
+  /**
+   * Push the surviving DECSET 2004 state before replayed chunks. Late attach
+   * otherwise misses `\x1b[?2004h` that egress already retired.
+   */
+  private sendPtyModes(
+    id: string,
+    terminalGeneration: number,
+    windowGeneration: number,
+    rendererGeneration: number,
+  ): boolean {
+    const inst = this.terminals.get(id);
+    const win = this.win;
+    if (
+      !inst
+      || inst.generation !== terminalGeneration
+      || !win
+      || !this.rendererReady
+      || !this.isCurrentPtyDocument(win, windowGeneration, rendererGeneration)
+    ) return false;
+    try {
+      if (win.isDestroyed() || win.webContents.isDestroyed()) return false;
+      if (win.webContents.isCrashed()) {
+        this.reloadPtyDocument(win, windowGeneration);
+        return false;
+      }
+      win.webContents.send("pty:modes", {
+        id,
+        generation: terminalGeneration,
+        windowGeneration,
+        rendererGeneration,
+        bracketedPasteMode: inst.bracketedPasteMode,
+      });
+      return true;
+    } catch {
+      this.reloadPtyDocument(win, windowGeneration);
+      return false;
+    }
+  }
+
   /** Enqueue PTY output in the single fair, lossless delivery path. */
   private sendPtyData(id: string, terminalGeneration: number, data: string): boolean {
     const inst = this.terminals.get(id);
     if (this.disposed || !inst || inst.closed || inst.generation !== terminalGeneration) return false;
-    return this.ptyEgress.enqueue(id, terminalGeneration, data);
+    const accepted = this.ptyEgress.enqueue(id, terminalGeneration, data);
+    if (accepted) inst.notePtyOutput(data);
+    return accepted;
   }
 
   private registerIpc(): void {
@@ -7770,6 +7811,15 @@ class TerminaApp {
         this.rendererReady = true;
         this.ptyEgress.setRendererReady(this.rendererWindowGeneration, this.rendererGeneration, true);
       }
+      // Restore DECSET 2004 before the first replayed quantum so xterm's
+      // paste wrapper matches the child's mode. Pump is scheduled after this
+      // send, so the renderer applies the CSI before writing PTY bytes.
+      this.sendPtyModes(
+        id,
+        generation,
+        this.rendererWindowGeneration,
+        this.rendererGeneration,
+      );
       this.ptyEgress.hydrateTerminal(
         id,
         generation,
