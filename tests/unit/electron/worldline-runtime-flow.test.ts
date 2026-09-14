@@ -50,7 +50,6 @@ interface FlowComparison {
   uncertainSessionArtifacts: unknown[];
   manifestWriteFailed: boolean;
   teardownPromise: null;
-  uncertainAdmissionLease: null;
   removeUncertainRequested: boolean;
   createdAt: number;
   candidates: Map<string, FlowCandidate>;
@@ -152,7 +151,6 @@ describe("Worldline Runtime Flow Suite", () => {
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
       teardownPromise: null,
-      uncertainAdmissionLease: null,
       removeUncertainRequested: false,
       createdAt: Date.now(),
       candidates: new Map([[candidate.label, candidate]]),

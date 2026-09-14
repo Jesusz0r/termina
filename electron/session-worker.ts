@@ -158,7 +158,7 @@ async function exportPatch(msg: ExportPatchRequest): Promise<void> {
         (typeof f.before === "string" || f.before === null) &&
         (typeof f.after === "string" || f.after === null))
       .slice(0, MAX_EXPORT_FILES);
-    // buildUnifiedPatch stubs oversized/binary files itself; the slice above
+    // buildUnifiedPatch excludes listed-only stubs itself; the slice above
     // bounds the file count the builder ever sees.
     post({ op: "export-patch-result", requestId: msg.requestId, ok: true, patch: buildUnifiedPatch(files) });
   } catch (err) {

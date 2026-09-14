@@ -89,8 +89,6 @@ export interface ComparisonState {
   manifestWriteFailed: boolean;
   /** Teardown has closed admission and is draining worker-backed forks. */
   teardownPromise: Promise<void> | null;
-  /** Admission lease held while this comparison is being created. */
-  uncertainAdmissionLease: UncertainComparisonAdmissionLease | null;
   removeUncertainRequested: boolean;
   /** When the pair started (ms epoch). */
   createdAt: number;
@@ -304,7 +302,6 @@ export interface PromoteSeed {
   engine: "core";
 }
 
-/** One recorded run (WORLDLINES §6.5). */
 /** One recorded run (WORLDLINES §6.5). */
 export interface RunRecord {
   id: string;

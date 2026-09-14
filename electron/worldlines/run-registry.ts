@@ -10,6 +10,9 @@ import { MAX_RETAINED_RUNS, MAX_RUNS_PER_TERMINAL } from "./limits.js";
 import type { RunRecord } from "./types.js";
 import type { RunSummary } from "../../shared/types.js";
 
+/** A wedged native discard must not hang shutdown past this bound. */
+const MAX_DISCARD_DRAIN_MS = 10_000;
+
 /** Narrow manager capabilities the registry needs for reclamation. */
 export interface RunRegistryDeps {
   releaseState(stateId: string): Promise<void>;
@@ -118,7 +121,9 @@ export class RunRegistry {
 
   /**
    * Drop the oldest disposable records. Never drop an open run or the
-   * source of a live comparison.
+   * source of a live comparison. When nothing is disposable (only open
+   * runs, e.g. a lost settle event), shed the oldest open runs' prompt
+   * text instead: the records stay addressable while their bulk is freed.
    */
   private evictOverflow(terminalId: string, pinned: Set<string>): void {
     const list = this.runsByTerminal.get(terminalId);
@@ -139,13 +144,27 @@ export class RunRegistry {
       if (records.length === 0) this.runsByTerminal.delete(victim.terminalId);
       this.discardRun(victim);
     }
+    this.shedUnsettledPromptText();
+  }
+
+  /** Null the prompt bulk of over-cap open runs, oldest first. The records
+   * (states, sessions, replay flags) stay intact; only display text goes. */
+  private shedUnsettledPromptText(): void {
+    const overage = this.runsById.size - MAX_RETAINED_RUNS;
+    if (overage <= 0) return;
+    const open = [...this.runsById.values()]
+      .filter((run) => run.settledAt === null && run.promptText !== null)
+      .sort((a, b) => a.startedAt - b.startedAt);
+    for (const run of open.slice(0, overage)) {
+      run.promptText = null;
+    }
   }
 
   private discardRun(run: RunRecord | undefined): void {
     if (!run) return;
     this.runsById.delete(run.id);
-    if (run.startStateId) void this.deps.releaseState(run.startStateId);
-    if (run.settledStateId && run.settledStateId !== run.startStateId) void this.deps.releaseState(run.settledStateId);
+    if (run.startStateId) void this.deps.releaseState(run.startStateId).catch(() => undefined);
+    if (run.settledStateId && run.settledStateId !== run.startStateId) void this.deps.releaseState(run.settledStateId).catch(() => undefined);
     if (run.promptPayloadFile && run.promptEventsDir) {
       // The manager does not own the primary events-root capability. Delegate
       // to Main's bound leaf owner; when it is unavailable, retaining the
@@ -170,8 +189,21 @@ export class RunRegistry {
 
   /** Drain native durable core-bundle reclamation before app shutdown. */
   async drainDiscards(): Promise<void> {
+    // A wedged native discard must not hang shutdown: bound the drain.
+    const deadline = Date.now() + MAX_DISCARD_DRAIN_MS;
     while (this.retainedSessionDiscards.size > 0) {
-      await Promise.all([...this.retainedSessionDiscards].map((task) => task.catch(() => undefined)));
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), remaining);
+      });
+      const drained = await Promise.race([
+        Promise.all([...this.retainedSessionDiscards].map((task) => task.catch(() => undefined))).then((): "drained" => "drained"),
+        timeout,
+      ]);
+      if (timer) clearTimeout(timer);
+      if (drained === "timeout") break;
     }
   }
 

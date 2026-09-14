@@ -17,6 +17,8 @@ import type { ExportPatchFile } from "./worldlines/export.js";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 /** Bound retained operations so a slow worker cannot retain an unbounded chain of closures. */
 const SESSION_WORKER_QUEUE_HIGH_WATER = 128;
+/** A wedged worker must not hang the export IPC forever. */
+const EXPORT_PATCH_TIMEOUT_MS = 60_000;
 
 export interface CoreSessionForkOpts {
   sourceSessionFile: string;
@@ -349,15 +351,26 @@ export class SessionForkClient {
     return new Promise((resolve, reject) => {
       const requestId = `export-patch-${++this.seq}`;
       const worker = this.ensure();
+      const timer = setTimeout(() => {
+        // A late worker reply finds no pending entry and is dropped.
+        if (this.takePending(requestId)) reject(new Error("export patch timed out"));
+      }, EXPORT_PATCH_TIMEOUT_MS);
       this.pending.set(requestId, {
         kind: "export-patch",
-        resolve: (value) => resolve(value as ExportPatchResult),
-        reject,
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value as ExportPatchResult);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
       });
       try {
         const msg: ExportPatchRequest = { ...payload, op: "export-patch", requestId };
         worker.postMessage(msg);
       } catch (err) {
+        clearTimeout(timer);
         this.takePending(requestId);
         reject(err instanceof Error ? err : new Error(String(err)));
       }
