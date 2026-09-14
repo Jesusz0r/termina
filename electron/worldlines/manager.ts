@@ -2245,7 +2245,7 @@ export class WorldlineManager {
         journal.paths = paths;
         await writePromotionJournal(journalBinding!, journal);
         if (before.state.type === "file") {
-          reservePromotionOperationBytes(promotionBudget, before.bytes!.byteLength, `before-image ${rel}`);
+          reservePromotionOperationBytes(promotionBudget, before.size!, `before-image ${rel}`);
           const sourceParentPlan = parentPlans.get(resolve(dirname(abs)));
           if (!sourceParentPlan) throw new Error(`promotion before-image parent was not pre-bound: ${dirname(abs)}`);
           const sourceParent = await promotionParentIdentity(abs, canonicalPrimaryRoot, this.deps.canonicalPath, sourceParentPlan);
@@ -2282,11 +2282,11 @@ export class WorldlineManager {
         journal.paths = paths;
         await writePromotionJournal(journalBinding!, journal);
         if (before.state.type === "file") {
-          reservePromotionOperationBytes(promotionBudget, before.bytes!.byteLength, `before-image ${rel}`);
+          reservePromotionOperationBytes(promotionBudget, before.size!, `before-image ${rel}`);
           // A deletion is retired into journal-owned evidence during apply;
           // reserve that second file copy as well so the operation cap covers
           // both rollback input and preservation-first retention.
-          reservePromotionOperationBytes(promotionBudget, before.bytes!.byteLength, `retained delete ${rel}`);
+          reservePromotionOperationBytes(promotionBudget, before.size!, `retained delete ${rel}`);
           const sourceParentPlan = parentPlans.get(resolve(dirname(abs)));
           if (!sourceParentPlan) throw new Error(`promotion before-image parent was not pre-bound: ${dirname(abs)}`);
           const sourceParent = await promotionParentIdentity(abs, canonicalPrimaryRoot, this.deps.canonicalPath, sourceParentPlan);

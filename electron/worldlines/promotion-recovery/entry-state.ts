@@ -7,9 +7,11 @@
 import { boundPromotionCopyFile, type BoundPromotionExpectedLeaf } from "../../worldline-git.js";
 import { promotionIdentityOf } from "../bindings.js";
 import { errnoCode, isInside } from "../guards.js";
+import { MAX_PROMOTION_FILE_BYTES } from "../limits.js";
 import { type BoundPromotionDirectory, type CanonicalPath, type PromotionDirectoryPlan, type PromotionEntryState } from "../types.js";
+import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat as lstatPath, open as openFile, readlink } from "node:fs/promises";
+import { lstat as lstatPath, open as openFile, readlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ensureBoundRelativeDirectory } from "./bound-dirs.js";
 import { isSafePromotionRelativePath, promotionNoFollowFlag, sha256Hex, statIdentityEqual } from "./primitives.js";
@@ -17,7 +19,31 @@ import { isSafePromotionRelativePath, promotionNoFollowFlag, sha256Hex, statIden
 type PromotionParentIdentity = { path: string; dev: number; ino: number; capability?: string };
 
 
-export async function readPromotionEntry(abs: string): Promise<{ state: PromotionEntryState; bytes?: Buffer }> {
+const MAX_PROMOTION_FILE_MIB = MAX_PROMOTION_FILE_BYTES / (1024 * 1024);
+
+/** Hash one open file without retaining its bytes. The running total fails
+ * closed past the single-file cap, so a file that grows mid-read cannot
+ * turn into an unbounded main-process allocation. */
+async function hashPromotionFile(handle: FileHandle, abs: string): Promise<{ hash: string; size: number }> {
+  const digest = createHash("sha256");
+  const chunk = Buffer.alloc(64 * 1024);
+  let size = 0;
+  let position = 0;
+  while (true) {
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+    if (bytesRead === 0) break;
+    size += bytesRead;
+    if (!Number.isSafeInteger(size) || size > MAX_PROMOTION_FILE_BYTES) {
+      throw new Error(`promotion file exceeds its ${MAX_PROMOTION_FILE_MIB} MiB single-file bound: ${abs}`);
+    }
+    digest.update(chunk.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+  return { hash: digest.digest("hex"), size };
+}
+
+
+export async function readPromotionEntry(abs: string): Promise<{ state: PromotionEntryState; size?: number }> {
   let pathInfo;
   try {
     pathInfo = await lstatPath(abs);
@@ -32,17 +58,25 @@ export async function readPromotionEntry(abs: string): Promise<{ state: Promotio
     return { state: { type: "symlink", target } };
   }
   if (pathInfo.isFile()) {
+    // Fail closed before buffering: a single huge tracked file must never
+    // become a gigabyte main-process allocation.
+    if (!Number.isSafeInteger(pathInfo.size) || pathInfo.size > MAX_PROMOTION_FILE_BYTES) {
+      throw new Error(`promotion file exceeds its ${MAX_PROMOTION_FILE_MIB} MiB single-file bound: ${abs}`);
+    }
     const handle = await openFile(abs, fsConstants.O_RDONLY | promotionNoFollowFlag());
     try {
       const before = await handle.stat();
       if (!before.isFile()) throw new Error(`filesystem entry changed type while reading: ${abs}`);
-      const bytes = await handle.readFile();
+      if (!Number.isSafeInteger(before.size) || before.size > MAX_PROMOTION_FILE_BYTES) {
+        throw new Error(`promotion file exceeds its ${MAX_PROMOTION_FILE_MIB} MiB single-file bound: ${abs}`);
+      }
+      const { hash, size } = await hashPromotionFile(handle, abs);
       const after = await handle.stat();
       const pathAfter = await lstatPath(abs);
       if (!after.isFile() || !pathAfter.isFile() || !statIdentityEqual(before, after) || before.dev !== pathAfter.dev || before.ino !== pathAfter.ino) {
         throw new Error(`filesystem entry changed while reading: ${abs}`);
       }
-      return { state: { type: "file", mode: before.mode & 0o777, hash: sha256Hex(bytes) }, bytes };
+      return { state: { type: "file", mode: before.mode & 0o777, hash }, size };
     } finally {
       await handle.close();
     }
@@ -148,13 +182,13 @@ export async function boundPromotionExpectedLeaf(abs: string, expected: Promotio
   const info = await lstatPath(abs, { bigint: true });
   const identity = { dev: String(info.dev), ino: String(info.ino) };
   if (expected.type === "file") {
-    if (!observed.bytes) throw new Error(`${field} file bytes were not read`);
+    if (observed.size === undefined) throw new Error(`${field} file size was not read`);
     return {
       identity,
       state: {
         type: "file",
         mode: expected.mode ?? Number(info.mode & 0o777n),
-        size: String(observed.bytes.byteLength),
+        size: String(observed.size),
         sha256: expected.hash,
       },
     };

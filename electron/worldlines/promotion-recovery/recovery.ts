@@ -251,7 +251,7 @@ async function rollbackPromotionPaths(
           // persisted image identity. Read only to derive a one-time expected
           // descriptor; the native copy below still rejects a replacement.
           const saved = await readPromotionEntry(savedPath);
-          if (saved.state.type !== "file" || saved.state.hash !== beforeState.hash || !saved.bytes) throw new Error(`before-image is corrupt at ${p.rel}`);
+          if (saved.state.type !== "file" || saved.state.hash !== beforeState.hash || saved.size === undefined) throw new Error(`before-image is corrupt at ${p.rel}`);
           beforeExpected = await boundPromotionExpectedLeaf(savedPath, beforeState, `before-image ${p.rel}`);
         }
       }
