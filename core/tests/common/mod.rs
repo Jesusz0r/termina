@@ -4,6 +4,8 @@
 //! protocol, and promotion identity/state builders. Every helper keeps
 //! blocking work bounded and reaps owned children before fixture removal.
 
+#![allow(dead_code)]
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
