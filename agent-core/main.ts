@@ -1980,7 +1980,12 @@ async function confirmProtectedMutationNow(inputPath: string | undefined): Promi
   // A headless child enforces its parent's Mine marks: user-owned files stay
   // off-limits across the process boundary with no channel to widen them.
   const policyTid = activeSubagent ? activeSubagent.task.parentTerminalId : terminalId;
-  if (!readProtectedPaths(eventsDir, policyTid).has(target) || protectedTaskApprovals.has(target)) return true;
+  if (protectedTaskApprovals.has(target)) return true;
+  const protectedPaths = readProtectedPaths(eventsDir, policyTid);
+  // Fail closed: an unreadable policy denies the mutation (#218). Only a
+  // missing policy file reads as empty (allowed).
+  if (protectedPaths === null) return false;
+  if (!protectedPaths.has(target)) return true;
   const label = relative(canonicalCwd, target) || target;
   if (activeSubagent && !surface?.active()) return requestParentApproval("protected", label);
   if (!surface?.active()) return false;

@@ -5,7 +5,7 @@
  * payloads, and startup-control consume/format. Split from
  * agent-core/host.ts (issue #38).
  */
-import { isErrno } from "../../shared/guards.ts";
+import { errorCode, isErrno } from "../../shared/guards.ts";
 import { HAS_PLAN_TASK } from "../../shared/plan-task.ts";
 import { BoundedTextAccumulator, type BoundedText, type BoundedTextMarkerDetails, type CompletionState } from "../tool-output.ts";
 import { createHash, type Hash } from "node:crypto";
@@ -322,30 +322,41 @@ export function readContextFiles(eventsDir: string, terminalId: string): string 
 }
 
 
-/** Read the machine-only Mine policy used by mutation tool gates. */
-export function readProtectedPaths(eventsDir: string, terminalId: string): ReadonlySet<string> {
+/**
+ * Read the machine-only Mine policy used by mutation tool gates.
+ *
+ * Fail-closed (#218): null when the policy cannot be established (unreadable
+ * file, short read, mid-read size change, corrupt or non-array JSON,
+ * oversize file, non-regular file, invalid identity). Only a missing file
+ * (ENOENT) yields an empty set, meaning no policy. Callers must deny the
+ * mutation on null. Platforms without O_NOFOLLOW fall back to a plain open
+ * with the same fd validation; only the symlink-proofing is degraded there.
+ */
+export function readProtectedPaths(eventsDir: string, terminalId: string): ReadonlySet<string> | null {
   const paths = new Set<string>();
-  if (!eventsDir || !ACK_ID.test(terminalId) || OPEN_NOFOLLOW_READ === null) return paths;
+  if (!eventsDir || !ACK_ID.test(terminalId)) return null;
+  const flags = OPEN_NOFOLLOW_READ === null ? "r" : OPEN_NOFOLLOW_READ;
   let fd: number | undefined;
   try {
-    fd = openSync(join(eventsDir, `mine-${terminalId}.json`), OPEN_NOFOLLOW_READ);
+    fd = openSync(join(eventsDir, `mine-${terminalId}.json`), flags);
     const info = fstatSync(fd);
-    if (!info.isFile() || info.size <= 0 || info.size > PROTECTED_PATHS_BYTES) return paths;
+    if (!info.isFile() || info.size <= 0 || info.size > PROTECTED_PATHS_BYTES) return null;
     const data = Buffer.allocUnsafe(info.size);
     let offset = 0;
     while (offset < data.length) {
       const count = readSync(fd, data, offset, data.length - offset, offset);
-      if (count <= 0) return new Set();
+      if (count <= 0) return null;
       offset += count;
     }
-    if (fstatSync(fd).size !== info.size) return new Set();
-    const parsed = JSON.parse(data.toString("utf8"));
-    if (!Array.isArray(parsed)) return paths;
+    if (fstatSync(fd).size !== info.size) return null;
+    const parsed: unknown = JSON.parse(data.toString("utf8"));
+    if (!Array.isArray(parsed)) return null;
     for (const value of parsed) {
       if (typeof value === "string" && isAbsolute(value) && value.length <= 4096) paths.add(value);
     }
-  } catch {
-    return new Set();
+  } catch (err) {
+    if (errorCode(err) === "ENOENT" && fd === undefined) return new Set<string>();
+    return null;
   } finally {
     if (fd !== undefined) {
       try { closeSync(fd); } catch { /* best effort */ }
