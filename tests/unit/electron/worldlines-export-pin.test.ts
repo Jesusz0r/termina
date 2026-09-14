@@ -50,14 +50,17 @@ describe("export head pinning (issue #191)", () => {
 
   it("records the pinned head in metadata.json for a stable candidate", async () => {
     const { ctx, worldsRoot } = await makeCtx([
-      { ok: true, commit: "h1", tree: "t1" },
-      { ok: true, commit: "h1", tree: "t1" },
+      // Real captures never repeat a commit (timestamps); the shared tree
+      // is what proves the candidate stood still.
+      { ok: true, commit: "h1a", tree: "t1" },
+      { ok: true, commit: "h1b", tree: "t1" },
     ]);
     try {
       const result = await exportCandidateRun(ctx, "cmp-191", "A");
       expect(result.ok).toBe(true);
-      const metadata = JSON.parse(await readFile(join(result.path!, "metadata.json"), "utf8")) as { headStateId?: string };
-      expect(metadata.headStateId).toBe("h1");
+      const metadata = JSON.parse(await readFile(join(result.path!, "metadata.json"), "utf8")) as { headStateId?: string; headTree?: string };
+      expect(metadata.headStateId).toBe("h1a");
+      expect(metadata.headTree).toBe("t1");
       const patch = await readFile(join(result.path!, "candidate.patch"), "utf8");
       expect(patch).toContain("diff --git a/F.ts b/F.ts");
     } finally {
@@ -67,8 +70,8 @@ describe("export head pinning (issue #191)", () => {
 
   it("refuses to write a bundle when the head moves mid-gather", async () => {
     const { ctx, worldsRoot } = await makeCtx([
-      { ok: true, commit: "h1", tree: "t1" },
-      { ok: true, commit: "h2", tree: "t2" },
+      { ok: true, commit: "h1a", tree: "t1" },
+      { ok: true, commit: "h2b", tree: "t2" },
     ]);
     try {
       const result = await exportCandidateRun(ctx, "cmp-191", "A");
@@ -90,7 +93,7 @@ describe("export head pinning (issue #191)", () => {
       await rm(stable.worldsRoot, { recursive: true, force: true });
     }
     const moved = await makeCtx([
-      { ok: true, commit: "h1", tree: "t1" },
+      { ok: true, commit: "h1a", tree: "t1" },
       { ok: false, error: "recording is not available" },
     ]);
     try {
@@ -120,8 +123,8 @@ describe("export head pinning (issue #191)", () => {
     const worldsRoot = join(link, "worlds");
     const { ctx } = await makeCtx(
       [
-        { ok: true, commit: "h1", tree: "t1" },
-        { ok: true, commit: "h1", tree: "t1" },
+        { ok: true, commit: "h1a", tree: "t1" },
+        { ok: true, commit: "h1b", tree: "t1" },
       ],
       "running",
       worldsRoot,
@@ -144,8 +147,8 @@ describe("export head pinning (issue #191)", () => {
     mockCommitted.mockResolvedValue([]);
     mockTree.mockResolvedValue([]);
     const { ctx, worldsRoot } = await makeCtx([
-      { ok: true, commit: "h1", tree: "t1" },
-      { ok: true, commit: "h1", tree: "t1" },
+      { ok: true, commit: "h1a", tree: "t1" },
+      { ok: true, commit: "h1b", tree: "t1" },
     ]);
     ctx.fileOf = async (_cid, _label, relPath) => ({ ok: true, content: `after-${relPath}\n` });
     ctx.baseFileOf = async (_cid, relPath) => ({ ok: true, content: `before-${relPath}\n` });
@@ -169,8 +172,8 @@ describe("export head pinning (issue #191)", () => {
     mockCommitted.mockResolvedValue([]);
     mockTree.mockResolvedValue([]);
     const { ctx, worldsRoot } = await makeCtx([
-      { ok: true, commit: "h1", tree: "t1" },
-      { ok: true, commit: "h1", tree: "t1" },
+      { ok: true, commit: "h1a", tree: "t1" },
+      { ok: true, commit: "h1b", tree: "t1" },
     ]);
     ctx.fileOf = async () => ({ ok: true, content: "x\n", mode: "100755" });
     try {

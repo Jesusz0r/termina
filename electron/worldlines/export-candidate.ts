@@ -60,9 +60,11 @@ export async function exportCandidateRun(
   // manager-generated id shape even though lookup already gates it.
   if (!/^cmp-[0-9]+$/.test(comparisonId)) return { ok: false, error: "invalid comparison" };
   // Pin the worktree head before any gather read: a running candidate can
-  // move mid-gather and mix moments into one bundle.
+  // move mid-gather and mix moments into one bundle. Stillness is proven by
+  // the content-addressed tree: synthetic capture commits embed wall-clock
+  // timestamps, so two captures of identical bytes never share a commit.
   const startHead = await ctx.captureHead(comparisonId, label);
-  if (!startHead.ok || !startHead.commit) {
+  if (!startHead.ok || !startHead.commit || !startHead.tree) {
     return { ok: false, error: `could not pin the candidate head: ${startHead.error ?? "unknown error"}` };
   }
   let changed: WorldlineChangedFile[];
@@ -152,10 +154,10 @@ export async function exportCandidateRun(
     return { ok: false, error: "the candidate was discarded during export" };
   }
   const endHead = await ctx.captureHead(comparisonId, label);
-  if (!endHead.ok || !endHead.commit) {
+  if (!endHead.ok || !endHead.commit || !endHead.tree) {
     return { ok: false, error: `could not re-verify the candidate head: ${endHead.error ?? "unknown error"}` };
   }
-  if (endHead.commit !== startHead.commit) {
+  if (endHead.tree !== startHead.tree) {
     return { ok: false, error: "the candidate changed during export; retry when it settles" };
   }
   const exportsRoot = join(ctx.worldsRoot, "exports");
@@ -181,6 +183,7 @@ export async function exportCandidateRun(
       model: cmp.model,
       baseCommit: cmp.baseCommit,
       headStateId: startHead.commit,
+      headTree: startHead.tree,
       exportedAt: new Date().toISOString(),
       files: changed.length,
       truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,
