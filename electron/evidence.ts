@@ -146,8 +146,9 @@ function normalizeSignature(text: string): string {
 
 /**
  * Strip block and line comments, keeping comment markers inside string
- * literals (notably `//` in URLs) intact. Unterminated constructs compare
- * literally, which fails closed toward "changed".
+ * literals (notably `//` in URLs) intact. Unterminated strings and line
+ * comments compare literally, which fails closed toward "changed"; an
+ * unterminated block comment drops its tail instead.
  */
 function stripComments(text: string): string {
   let out = "";
