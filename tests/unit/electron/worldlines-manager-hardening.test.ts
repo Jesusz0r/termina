@@ -98,7 +98,7 @@ describe("manager hardening (issue #202)", () => {
           ["A", { label: "A", role: "reference", headCommit: Promise.resolve() }],
           ["B", { label: "B", role: "alternative", headCommit: Promise.resolve() }],
         ]),
-      } as ComparisonState);
+      } as unknown as ComparisonState);
       manager.recordRun({
         id: "run-1",
         terminalId: "term-0",
