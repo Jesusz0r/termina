@@ -111,7 +111,10 @@ interface FakeApp {
   joinWriteLease: (wsId: string, requesterId: string) => boolean;
   releaseWriteLease: (wsId: string, requesterId: string) => void;
   acquireWriteLease: (wsId: string, requesterId: string, timeoutMs?: number) => Promise<LeaseResult>;
+  grantLeaseWaiter: (ws: FakeWorkspace) => void;
+  leaseWaiters: Map<string, Array<{ requesterId: string; settled: boolean; timer: ReturnType<typeof setTimeout> }>>;
   durableReplaceFile: (path: string, data: string | Buffer, mode?: number) => Promise<void>;
+  sweepReplaceTemps: (path: string) => Promise<void>;
   projectOfWorkspace: (id: string) => null;
   projectIsSwitching: (id: string | undefined) => boolean;
   terminalsOnWorkspace: (ws: FakeWorkspace) => unknown[];
@@ -123,6 +126,9 @@ const realAcquire = loadMethod("acquireWriteLease", "private async acquireWriteL
   requesterId: string,
   timeoutMs?: number,
 ) => Promise<LeaseResult>;
+const realGrant = loadMethod("grantLeaseWaiter", "private grantLeaseWaiter(", [], []) as (
+  ws: FakeWorkspace,
+) => void;
 const realJoin = loadMethod("joinWriteLease", "private joinWriteLease(", [], []) as (
   wsId: string,
   requesterId: string,
@@ -160,8 +166,11 @@ function makeHarness(opts: { durableReplace?: (path: string, data: string | Buff
     releaseWriteLease: (wsId: string, requesterId: string) => realRelease.call(app, wsId, requesterId),
     acquireWriteLease: (wsId: string, requesterId: string, timeoutMs?: number) =>
       realAcquire.call(app, wsId, requesterId, timeoutMs),
+    grantLeaseWaiter: (target: FakeWorkspace) => realGrant.call(app, target),
+    leaseWaiters: new Map(),
     durableReplaceFile: opts.durableReplace ?? ((path: string, data: string | Buffer, mode?: number) =>
       realDurableReplace.call(app, path, data, mode)),
+    sweepReplaceTemps: async (_path: string) => undefined,
     projectOfWorkspace: (_id: string): null => null,
     projectIsSwitching: (_id: string | undefined): boolean => false,
     terminalsOnWorkspace: (_ws: FakeWorkspace): unknown[] => [],

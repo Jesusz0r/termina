@@ -164,13 +164,17 @@ describe("mid-teardown creation gates (refs #214)", () => {
     expect(h.created).toHaveLength(1);
   });
 
-  it("gates an unresolvable project id against the active project", async () => {
-    // Unknown ids currently fall back to the active project (#219 item 3
-    // fails them closed outright); either way a switching target refuses.
-    const h = makeHarness({ switching: new Set(["proj-live"]), activeId: "proj-live" });
+  it("fails an unresolvable project id closed (refs #219 item 3)", async () => {
+    // Unknown ids never fall back to the active project: the terminal would
+    // otherwise land in a project the caller never named.
+    const h = makeHarness({ switching: new Set([]), activeId: "proj-live" });
     const result = await terminalsCreate.call(h.app, {}, { projectId: "proj-unknown" });
-    expect(result).toEqual({ ok: false, error: "the project is changing" });
+    expect(result).toEqual({ ok: false, error: "unknown project" });
     expect(h.created).toHaveLength(0);
+    const switching = makeHarness({ switching: new Set(["proj-live"]), activeId: "proj-live" });
+    const gated = await terminalsCreate.call(switching.app, {}, { projectId: "proj-unknown" });
+    expect(gated).toEqual({ ok: false, error: "unknown project" });
+    expect(switching.created).toHaveLength(0);
   });
 
   it("leaves createTerminal itself ungated for internal callers", () => {

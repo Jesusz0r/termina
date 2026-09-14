@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { open as realOpen, rename as realRename, rm as realRm } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { open as realOpen, readdir as realReaddir, rename as realRename, rm as realRm } from "node:fs/promises";
 import { randomUUID as realRandomUUID } from "node:crypto";
 import { syncParentDir as realSyncParentDir } from "../../../shared/fsync.ts";
+import { isErrno as realIsErrno } from "../../../shared/guards.ts";
 import ts from "typescript";
 
 /**
@@ -70,6 +71,7 @@ interface ScriptedFs {
   renamed: Array<{ temp: string; path: string }>;
   parentSynced: string[];
   removed: string[];
+  swept: string[];
   renameError: Error | null;
   openError: Error | null;
 }
@@ -82,6 +84,7 @@ function makeScriptedFs(): { fs: ScriptedFs; fakes: Record<string, unknown> } {
     renamed: [],
     parentSynced: [],
     removed: [],
+    swept: [],
     renameError: null,
     openError: null,
   };
@@ -139,6 +142,23 @@ const loadReal = (): DurableReplaceFile =>
     [realOpen, realRename, realRm, realSyncParentDir, realRandomUUID],
   ) as DurableReplaceFile;
 
+/** Fake `this` for the extracted method: the success path sweeps crash litter. */
+const scriptedThis = (fs: ScriptedFs): { sweepReplaceTemps: (path: string) => Promise<void> } => ({
+  sweepReplaceTemps: async (path: string) => {
+    fs.events.push("sweep");
+    fs.swept.push(path);
+  },
+});
+
+/** The real crash-litter reaper, for the real-filesystem suite. */
+const realSweep = loadMethod(
+  "sweepReplaceTemps",
+  "private async sweepReplaceTemps(",
+  ["dirname", "basename", "readdir", "rm", "join", "isErrno"],
+  [dirname, basename, realReaddir, realRm, join, realIsErrno],
+) as (path: string) => Promise<void>;
+const realThis = { sweepReplaceTemps: (path: string) => realSweep(path) };
+
 let dir = "";
 beforeEach(() => {
   dir = mkdtempSync(join(realpathSync(tmpdir()), "durable-replace-"));
@@ -152,13 +172,14 @@ describe("durableReplaceFile sequence", () => {
     const { fs, fakes } = makeScriptedFs();
     const durableReplaceFile = loadScripted(fakes);
     const target = join(dir, "note.txt");
-    await durableReplaceFile(target, "new-content", 0o640);
-    expect(fs.events).toEqual(["open", "writeFile", "sync", "close", "rename", "syncParentDir"]);
+    await durableReplaceFile.call(scriptedThis(fs), target, "new-content", 0o640);
+    expect(fs.events).toEqual(["open", "writeFile", "sync", "close", "rename", "syncParentDir", "sweep"]);
     const temp = `${target}.${process.pid}.fixed-uuid.tmp`;
     expect(fs.openArgs).toEqual([{ temp, flags: "wx", mode: 0o640 }]);
     expect(fs.written).toEqual(["new-content"]);
     expect(fs.renamed).toEqual([{ temp, path: target }]);
     expect(fs.parentSynced).toEqual([target]);
+    expect(fs.swept).toEqual([target]);
     expect(fs.removed).toEqual([]);
   });
 
@@ -167,7 +188,7 @@ describe("durableReplaceFile sequence", () => {
     const durableReplaceFile = loadScripted(fakes);
     const target = join(dir, "blob.bin");
     const bytes = Buffer.from([0x00, 0x01, 0xff, 0xfe]);
-    await durableReplaceFile(target, bytes);
+    await durableReplaceFile.call(scriptedThis(fs), target, bytes);
     expect(fs.openArgs[0]?.mode).toBe(0o666);
     expect(fs.written).toHaveLength(1);
     expect(Buffer.from(fs.written[0] as Buffer)).toEqual(bytes);
@@ -178,18 +199,20 @@ describe("durableReplaceFile sequence", () => {
     fs.renameError = new Error("rename blew up");
     const durableReplaceFile = loadScripted(fakes);
     const target = join(dir, "note.txt");
-    await expect(durableReplaceFile(target, "new")).rejects.toThrow("rename blew up");
+    await expect(durableReplaceFile.call(scriptedThis(fs), target, "new")).rejects.toThrow("rename blew up");
     expect(fs.removed).toEqual([`${target}.${process.pid}.fixed-uuid.tmp`]);
     expect(fs.parentSynced).toEqual([]);
+    expect(fs.swept).toEqual([]);
   });
 
   it("renames nothing when the temp cannot be created", async () => {
     const { fs, fakes } = makeScriptedFs();
     fs.openError = new Error("EACCES");
     const durableReplaceFile = loadScripted(fakes);
-    await expect(durableReplaceFile(join(dir, "note.txt"), "new")).rejects.toThrow("EACCES");
+    await expect(durableReplaceFile.call(scriptedThis(fs), join(dir, "note.txt"), "new")).rejects.toThrow("EACCES");
     expect(fs.renamed).toEqual([]);
     expect(fs.parentSynced).toEqual([]);
+    expect(fs.swept).toEqual([]);
   });
 });
 
@@ -198,7 +221,7 @@ describe("durableReplaceFile on a real filesystem", () => {
     const durableReplaceFile = loadReal();
     const target = join(dir, "note.txt");
     writeFileSync(target, "old", { mode: 0o640 });
-    await durableReplaceFile(target, "new-content", 0o640);
+    await durableReplaceFile.call(realThis, target, "new-content", 0o640);
     expect(readFileSync(target, "utf8")).toBe("new-content");
     expect(readdirSync(dir)).toEqual(["note.txt"]);
     expect(statSync(target).isFile()).toBe(true);
@@ -208,7 +231,7 @@ describe("durableReplaceFile on a real filesystem", () => {
     const durableReplaceFile = loadReal();
     const target = join(dir, "blob.bin");
     const bytes = Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe, 0x80, 0x89, 0x50]);
-    await durableReplaceFile(target, bytes);
+    await durableReplaceFile.call(realThis, target, bytes);
     expect(readFileSync(target)).toEqual(bytes);
     expect(readdirSync(dir)).toEqual(["blob.bin"]);
   });
