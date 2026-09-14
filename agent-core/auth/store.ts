@@ -22,7 +22,25 @@ let cached: { path: string; mtimeMs: number; data: AuthFile } | null = null;
 export const refreshFlights = new Map<string, Promise<{ ok: true } | { ok: false; error: string }>>();
 
 
+/**
+ * Stored auth needs POSIX file semantics throughout: FIFO witnesses
+ * (`/usr/bin/mkfifo`), exact 0600 modes, O_NOFOLLOW/O_DIRECTORY, and
+ * descriptor-anchored parents. Windows has none of these, so every
+ * credential write fails there — fail fast with one explicit error instead
+ * of a cascade of platform symptoms. Reads (including env-var credentials)
+ * keep working.
+ */
+export function assertStoredAuthSupported(): void {
+  if (process.platform === "win32") {
+    throw new Error(
+      "stored auth requires POSIX file semantics — credential storage is not supported on this platform; use environment-variable credentials instead",
+    );
+  }
+}
+
+
 function withLock<T>(fn: (binding: AuthPathBinding) => T): T {
+  assertStoredAuthSupported();
   const path = resolve(authPath());
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const binding = authPathBinding(path);

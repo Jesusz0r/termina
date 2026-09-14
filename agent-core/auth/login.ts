@@ -14,7 +14,7 @@ import { resolve } from "node:path";
 import { ANTHROPIC_CLIENT_ID, ANTHROPIC_SCOPES, OPENAI_CODEX_CLIENT_ID, OPENAI_CODEX_SCOPES, authPath, authorizeUrl, defaultLoginMode, isSupportedProvider, redirectPath, redirectPort, redirectUri } from "./endpoints.ts";
 import { exchangeAnthropic, exchangeCodex, exchangeGithubCopilotToken, exchangeOpenRouter, persistApiKey, persistOauth, pollGithubDeviceToken, pollXaiDeviceToken, requestGithubDeviceCode, requestXaiDeviceCode } from "./oauth.ts";
 import { authBanner, resolveAuth } from "./resolve.ts";
-import { modifyProvider, readAuth, type AuthWriteOpts } from "./store.ts";
+import { modifyProvider, readAuth, type AuthWriteOpts, assertStoredAuthSupported } from "./store.ts";
 
 
 export type LoginKind = "oauth" | "key";
@@ -473,6 +473,13 @@ export async function runLogin(
 ): Promise<{ ok: true; summary: string } | { ok: false; error: string }> {
   if (!isSupportedProvider(providerId)) {
     return { ok: false, error: `unsupported provider: ${providerId} (supported: ${SUPPORTED_PROVIDERS.join(", ")})` };
+  }
+  // Before any browser/device flow: a successful sign-in the store cannot
+  // persist is worse than refusing up front.
+  try {
+    assertStoredAuthSupported();
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
   }
   // A corrupt store refuses every write. Ask once, up front — before any
   // browser flow — whether to discard the named file; the flag is decided
