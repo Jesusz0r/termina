@@ -19,7 +19,7 @@ export function showConfirm(title: string, message: string): Promise<ModalResult
     makeModal(title, message, [
       { label: "Cancel", primary: false, onClick: () => resolve({ cancelled: true }) },
       { label: "OK", primary: true, onClick: () => resolve({ confirmed: true }) },
-    ]);
+    ], undefined, { role: "alertdialog" });
   });
 }
 
@@ -30,7 +30,7 @@ export function showUnsavedConfirm(title: string, message: string): Promise<Unsa
       { label: "Cancel", primary: false, onClick: () => resolve("cancel") },
       { label: "Discard", primary: false, onClick: () => resolve("discard") },
       { label: "Save", primary: true, onClick: () => resolve("save") },
-    ]);
+    ], undefined, { role: "alertdialog" });
   });
 }
 
@@ -40,7 +40,7 @@ export function showInput(title: string, placeholder: string, prefill: string): 
     input.type = "text";
     input.placeholder = placeholder ?? "";
     input.value = prefill ?? "";
-    const modal = makeModal(title, "", [
+    const { modal } = makeModal(title, "", [
       { label: "Cancel", primary: false, onClick: () => resolve({ cancelled: true }) },
       { label: "OK", primary: true, onClick: () => resolve({ cancelled: false, value: input.value }) },
     ], input);
@@ -63,25 +63,35 @@ interface ModalButton {
   onClick: () => void;
 }
 
-function makeModal(title: string, message: string, buttons: ModalButton[], bodyEl?: HTMLElement): HTMLElement {
+interface MakeModalOptions {
+  role?: "dialog" | "alertdialog";
+  className?: string;
+}
+
+let titleSeq = 0;
+
+function makeModal(
+  title: string,
+  message: string,
+  buttons: ModalButton[],
+  bodyEl?: HTMLElement,
+  options?: MakeModalOptions,
+): { modal: HTMLElement; close: () => void } {
+  const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.tabIndex = -1;
 
-  // Esc cancels: click the first Cancel button if present.
-  backdrop.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      const cancel = [...modal.querySelectorAll(".modal-btn")].find((b) => b.textContent === "Cancel") as HTMLElement | undefined;
-      if (cancel) cancel.click();
-    }
-  });
-
   const modal = document.createElement("div");
-  modal.className = "modal";
+  modal.className = options?.className ? `modal ${options.className}` : "modal";
+  modal.setAttribute("role", options?.role ?? "dialog");
+  modal.setAttribute("aria-modal", "true");
 
   const titleEl = document.createElement("div");
   titleEl.className = "modal-title";
+  titleEl.id = `modal-title-${++titleSeq}`;
   titleEl.textContent = title;
+  modal.setAttribute("aria-labelledby", titleEl.id);
   modal.appendChild(titleEl);
 
   const body = document.createElement("div");
@@ -94,6 +104,19 @@ function makeModal(title: string, message: string, buttons: ModalButton[], bodyE
   if (bodyEl) body.appendChild(bodyEl);
   modal.appendChild(body);
 
+  const dismiss = (): void => {
+    close(backdrop, previous);
+  };
+
+  // Esc dismisses: Cancel if present, otherwise Close (file-list).
+  backdrop.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const actions = [...modal.querySelectorAll(".modal-btn")] as HTMLElement[];
+    const cancel = actions.find((b) => b.textContent === "Cancel")
+      ?? actions.find((b) => b.textContent === "Close");
+    cancel?.click();
+  });
+
   const footer = document.createElement("div");
   footer.className = "modal-footer";
   for (const b of buttons) {
@@ -102,7 +125,7 @@ function makeModal(title: string, message: string, buttons: ModalButton[], bodyE
     btn.className = `modal-btn${b.primary ? " primary" : ""}`;
     btn.textContent = b.label;
     btn.addEventListener("click", () => {
-      close(backdrop);
+      dismiss();
       b.onClick();
     });
     footer.appendChild(btn);
@@ -112,11 +135,12 @@ function makeModal(title: string, message: string, buttons: ModalButton[], bodyE
   backdrop.appendChild(modal);
   root.appendChild(backdrop);
   backdrop.focus();
-  return modal;
+  return { modal, close: dismiss };
 }
 
-function close(backdrop: HTMLElement): void {
+function close(backdrop: HTMLElement, previous: HTMLElement | null): void {
   backdrop.remove();
+  if (previous?.isConnected) previous.focus();
 }
 
 // -------------------------------------------------------------- focus trap --
@@ -133,8 +157,8 @@ function topmostBackdrop(): HTMLElement | null {
 
 /** Trap Tab inside the topmost modal backdrop, so keyboard focus cannot leave
  *  for the background tree or editor. Installed once: every modal backdrop
- *  (makeModal, file-list, settings) lives in #modal-root. Only keystrokes
- *  already inside the backdrop are trapped — background surfaces keep Tab. */
+ *  (makeModal, settings) lives in #modal-root. Only keystrokes already inside
+ *  the backdrop are trapped — background surfaces keep Tab. */
 function trapTab(event: KeyboardEvent): void {
   if (event.key !== "Tab" || event.defaultPrevented) return;
   const top = topmostBackdrop();
@@ -224,20 +248,10 @@ export function showFileListModal(
   onPick: (relPath: string) => void,
   listing?: { truncated?: boolean; total?: number },
 ): void {
-  const root = document.getElementById("modal-root")!;
-  const backdrop = document.createElement("div");
-  backdrop.className = "modal-backdrop";
-  backdrop.tabIndex = -1;
-  const modal = document.createElement("div");
-  modal.className = "modal worldline-list-modal";
-  const titleEl = document.createElement("div");
-  titleEl.className = "modal-title";
-  titleEl.textContent = title;
-  const body = document.createElement("div");
-  body.className = "modal-body";
   const list = document.createElement("ul");
   list.className = "worldline-list";
-  for (const [relPath, status] of items.slice(0, MAX_FILE_LIST_MODAL_ROWS)) {
+  const shown = items.slice(0, MAX_FILE_LIST_MODAL_ROWS);
+  for (const [relPath, status] of shown) {
     const li = document.createElement("li");
     const badge = document.createElement("span");
     const safe = asKnownState(status, KNOWN_FILE_STATUSES);
@@ -247,13 +261,9 @@ export function showFileListModal(
     path.className = "path";
     path.textContent = relPath;
     li.append(badge, path);
-    li.addEventListener("click", () => {
-      backdrop.remove();
-      onPick(relPath);
-    });
     list.appendChild(li);
   }
-  const shownCount = Math.min(items.length, MAX_FILE_LIST_MODAL_ROWS);
+  const shownCount = shown.length;
   const total = listing?.total ?? items.length;
   if (listing?.truncated === true || total > shownCount || items.length > MAX_FILE_LIST_MODAL_ROWS) {
     const more = document.createElement("li");
@@ -263,19 +273,14 @@ export function showFileListModal(
       : `…listing truncated — showing first ${shownCount}`;
     list.appendChild(more);
   }
-  body.appendChild(list);
-  const footer = document.createElement("div");
-  footer.className = "modal-footer";
-  const closeBtn = document.createElement("button");
-  closeBtn.className = "modal-btn";
-  closeBtn.textContent = "Close";
-  closeBtn.addEventListener("click", () => backdrop.remove());
-  footer.appendChild(closeBtn);
-  modal.append(titleEl, body, footer);
-  backdrop.append(modal);
-  root.appendChild(backdrop);
-  backdrop.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") backdrop.remove();
-  });
-  backdrop.focus();
+  const { close: dismiss } = makeModal(title, "", [
+    { label: "Close", primary: false, onClick: () => {} },
+  ], list, { className: "worldline-list-modal" });
+  for (let i = 0; i < shown.length; i++) {
+    const relPath = shown[i][0];
+    list.children[i].addEventListener("click", () => {
+      dismiss();
+      onPick(relPath);
+    });
+  }
 }
