@@ -1,4 +1,5 @@
 import type { EffortLevelMap } from "../capabilities.ts";
+import type { ProviderId } from "../../auth.ts";
 import { modelLeaf } from "./identity.ts";
 
 export function gpt56ReasoningContext(model: string): "all_turns" | undefined {
@@ -68,5 +69,21 @@ export function openaiEffortLevelMap(model: string): EffortLevelMap {
     map.xhigh = "xhigh";
   }
   if (id.includes("5.6") || /gpt-[6-9]/.test(id)) map.max = "max";
+  return map;
+}
+
+/**
+ * Shared OpenAI Responses effort defaults plus per-provider wire tweaks.
+ */
+export function openaiProviderEffortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
+  const id = model.toLowerCase();
+  const map = openaiEffortLevelMap(model);
+  // Preserve provider restrictions after applying the shared model defaults.
+  // O-series rules take precedence even if a catalog id contains another family.
+  if (!/(?:^|\/)o[0-9]/.test(id) && /gpt-(?:5\.[3-6]|[6-9])|codex/.test(id)) {
+    if (provider === "openai-codex" || provider === "github-copilot") map.minimal = "low";
+    if (provider === "github-copilot") map.off = null;
+    else if (provider === "openrouter" && id.includes("codex") && !/gpt-[6-9]/.test(id)) delete map.off;
+  }
   return map;
 }

@@ -1,11 +1,12 @@
 import { grokEffortLevelMap, nonReasoningGrok } from "./families/xai.ts";
-import { openaiEffortLevelMap } from "./families/openai.ts";
+import { openaiProviderEffortLevelMap } from "./families/openai.ts";
 import type { ProviderId, ProviderProtocol } from "../auth.ts";
 import type { ModelInfo } from "../models.ts";
 import { modelLeaf } from "./families/identity.ts";
 import { claudeThinkingApi, claudeEffortLevelMap, opus45ComposesEffort } from "./families/anthropic.ts";
 import { gemini25Model, gemini3Model, geminiEffortLevelMap, modelLooksGemini } from "./families/google.ts";
-import { glmReasoningFamily, relayCompletionsFamily } from "./families/relay.ts";
+import { glmEffortLevelMap, glmReasoningFamily, relayCompletionsEffortLevelMap, relayCompletionsFamily } from "./families/relay.ts";
+import { museSparkEffortLevelMap, museSparkReasoningFamily } from "./families/muse-spark.ts";
 
 export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
@@ -80,51 +81,59 @@ export function effortControlFor(provider: ProviderId, model: string, protocol: 
   return usesModelEffort(provider, model, protocol) ? "explicit" : "provider-default";
 }
 
-function effortLevelMap(provider: ProviderId, model: string, protocol: ProviderProtocol): EffortLevelMap {
-  const id = model.toLowerCase();
-  const map: EffortLevelMap = {};
-  if ((gemini3Model(model) || gemini25Model(model)) && (provider === "google" || protocol === "google-generate")) {
-    return geminiEffortLevelMap(model);
-  }
+type EffortMapRule = {
+  match: (provider: ProviderId, model: string, protocol: ProviderProtocol) => boolean;
+  map: (provider: ProviderId, model: string, protocol: ProviderProtocol) => EffortLevelMap;
+};
 
-  if (claudeThinkingApi(model) === "adaptive") {
-    return claudeEffortLevelMap(model);
-  }
-
-  if (opus45ComposesEffort(model)) {
+/**
+ * First match wins. A new family is one row here — predicate and map live
+ * in families/, next to the live-doc URLs they were verified against.
+ * Unknown routes fall through to {} (provider default).
+ */
+const EFFORT_MAP_RULES: readonly EffortMapRule[] = [
+  {
+    match: (provider, model, protocol) =>
+      (gemini3Model(model) || gemini25Model(model)) && (provider === "google" || protocol === "google-generate"),
+    map: (_provider, model) => geminiEffortLevelMap(model),
+  },
+  {
+    match: (_provider, model) => claudeThinkingApi(model) === "adaptive",
+    map: (_provider, model) => claudeEffortLevelMap(model),
+  },
+  {
     // Minimal has no documented effort wire value, so it rides low like the
     // adaptive map; the level list itself is unchanged.
-    return { minimal: "low" };
-  }
+    match: (_provider, model) => opus45ComposesEffort(model),
+    map: () => ({ minimal: "low" }),
+  },
+  {
+    match: (_provider, model) => glmReasoningFamily(model),
+    map: (_provider, _model, protocol) => glmEffortLevelMap(protocol),
+  },
+  {
+    match: (provider, model, protocol) => usesRelayCompletionsEffort(provider, model, protocol),
+    map: () => relayCompletionsEffortLevelMap(),
+  },
+  {
+    match: (_provider, model) => responsesReasoningFamily(model) && model.toLowerCase().includes("grok"),
+    map: (_provider, model) => grokEffortLevelMap(model),
+  },
+  {
+    match: (_provider, model) => responsesReasoningFamily(model) && museSparkReasoningFamily(model),
+    map: () => museSparkEffortLevelMap(),
+  },
+  {
+    match: (_provider, model) => responsesReasoningFamily(model),
+    map: (provider, model) => openaiProviderEffortLevelMap(provider, model),
+  },
+];
 
-  if (glmReasoningFamily(model)) {
-    map.off = null;
-    map.minimal = null;
-    map.low = null;
-    map.medium = null;
-    if (protocol === "openai-responses" || protocol === "openai-codex-responses") map.xhigh = "xhigh";
-    else map.max = "max";
-    return map;
+function effortLevelMap(provider: ProviderId, model: string, protocol: ProviderProtocol): EffortLevelMap {
+  for (const rule of EFFORT_MAP_RULES) {
+    if (rule.match(provider, model, protocol)) return rule.map(provider, model, protocol);
   }
-  if (usesRelayCompletionsEffort(provider, model, protocol)) {
-    // Core subset only: the relay publishes no per-model metadata, so
-    // minimal and xhigh stay hidden rather than risking a provider 400.
-    map.minimal = null;
-    map.xhigh = null;
-    map.max = "max";
-    return map;
-  }
-  if (!responsesReasoningFamily(model)) return map;
-  if (id.includes("grok")) return grokEffortLevelMap(model);
-  const openaiMap = openaiEffortLevelMap(model);
-  // Preserve provider restrictions after applying the shared model defaults.
-  // O-series rules take precedence even if a catalog id contains another family.
-  if (!/(?:^|\/)o[0-9]/.test(id) && /gpt-(?:5\.[3-6]|[6-9])|codex/.test(id)) {
-    if (provider === "openai-codex" || provider === "github-copilot") openaiMap.minimal = "low";
-    if (provider === "github-copilot") openaiMap.off = null;
-    else if (provider === "openrouter" && id.includes("codex") && !/gpt-[6-9]/.test(id)) delete openaiMap.off;
-  }
-  return openaiMap;
+  return {};
 }
 
 export function supportedEffortLevels(provider: ProviderId, model: string, protocol: ProviderProtocol): EffortLevel[] {

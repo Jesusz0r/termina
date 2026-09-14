@@ -4210,9 +4210,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("reasoningEffortFor zen GLM is high", reasoningEffortFor("opencode-zen", "glm-5.2", "high", auth.providerProtocol("opencode-zen", "glm-5.2")) === "high");
     check(
       "Zen Muse Spark exposes Responses effort",
-      supportedEffortLevels("opencode-zen", "muse-spark-1.3-contributor-free", auth.providerProtocol("opencode-zen", "muse-spark-1.3-contributor-free")).join(" ") === "off minimal low medium high" &&
+      supportedEffortLevels("opencode-zen", "muse-spark-1.3-contributor-free", auth.providerProtocol("opencode-zen", "muse-spark-1.3-contributor-free")).join(" ") === "minimal low medium high xhigh" &&
         supportedEffortLevels("opencode-zen", "opencode-zen/muse-spark-1.3-contributor-free", auth.providerProtocol("opencode-zen", "opencode-zen/muse-spark-1.3-contributor-free")).join(" ") ===
-          "off minimal low medium high",
+          "minimal low medium high xhigh",
     );
     check(
       "reasoningEffortFor zen Muse Spark is sent",
