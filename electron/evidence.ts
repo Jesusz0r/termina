@@ -184,16 +184,22 @@ function referencedPackages(sourceFiles: Array<{ relPath: string; content: strin
   const refs = new Set<string>();
   for (const f of sourceFiles) {
     if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.relPath)) continue;
-    for (const m of f.content.matchAll(/(?:from\s+["']|require\(\s*["'])([^"'./][^"']*)/g)) {
-      const first = (m[1] ?? "").split("/")[0];
+    for (const m of f.content.matchAll(/(?:from\s+["'`]|require\(\s*["'`])([^"'`./][^"'`]*)/g)) {
+      const raw = m[1] ?? "";
+      // A template placeholder is dynamic by design: never resolve it.
+      if (raw.includes("${")) continue;
+      const first = raw.split("/")[0];
       if (first && !first.startsWith(".") && !first.startsWith("@") && !NODE_BUILTINS.has(first)) refs.add(first);
     }
-    for (const m of f.content.matchAll(/from\s+["'](@[^"'/]+\/[^"'/]+)/g)) {
-      if (!NODE_BUILTINS.has(m[1])) refs.add(m[1]);
+    for (const m of f.content.matchAll(/(?:from\s+|require\(\s*)["'`](@[^"'`/]+\/[^"'`/]+)/g)) {
+      const scoped = m[1] ?? "";
+      if (scoped.includes("${")) continue;
+      if (!NODE_BUILTINS.has(scoped)) refs.add(scoped);
     }
     // Bare side-effect imports (import "pkg") and dynamic import("pkg").
-    for (const m of f.content.matchAll(/import(?:\s*\(\s*|\s+)(["'])([^"'.][^"']*)\1/g)) {
+    for (const m of f.content.matchAll(/import(?:\s*\(\s*|\s+)(["'`])([^"'`.][^"'`]*)\1/g)) {
       const name = m[2] ?? "";
+      if (name.includes("${")) continue;
       const first = name.split("/")[0];
       if (first && !first.startsWith(".") && !first.startsWith("@") && !NODE_BUILTINS.has(first)) refs.add(first);
       const scoped = /^@[^/]+\/[^/]+/.exec(name)?.[0];
