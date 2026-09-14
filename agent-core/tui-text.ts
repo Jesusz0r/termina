@@ -283,7 +283,9 @@ export function truncateMiddle(text: string, maxCells: number): string {
   const ell = "…";
   const keep = maxCells - 1;
   const head = Math.max(1, Math.ceil(keep / 2));
-  const tail = Math.max(1, keep - head);
+  // No floor on tail: head already takes at least one cell, so forcing tail
+  // to 1 overshoots by a cell when keep is 1 (maxCells 2 -> `a…b` is 3).
+  const tail = keep - head;
   const gs = splitGraphemes(text);
   let left = "";
   let used = 0;

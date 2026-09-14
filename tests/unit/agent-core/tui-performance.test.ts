@@ -234,3 +234,27 @@ describe("agent-core TUI paste batching (#224)", () => {
     expect(submitted).toEqual(["a\nb\nc"]);
   });
 });
+
+describe("agent-core TUI truncateMiddle budget (#226)", () => {
+  it("never exceeds its cell budget", async () => {
+    const { cellWidth, truncateMiddle } = await import("../../../agent-core/tui-text.ts");
+    const inputs = [
+      "ascii-title-label",
+      "mixed-日本語-title",
+      "with\ttab\tchars",
+      "emoji-🎉-party-time",
+      "sem-CJK-中文字符-long",
+    ];
+    for (const text of inputs) {
+      for (let maxCells = 1; maxCells <= 8; maxCells++) {
+        const out = truncateMiddle(text, maxCells);
+        expect(cellWidth(out), `${JSON.stringify(text)} @ ${maxCells}`).toBeLessThanOrEqual(maxCells);
+      }
+    }
+  });
+
+  it("keeps head-heavy output for a 2-cell budget", async () => {
+    const { truncateMiddle } = await import("../../../agent-core/tui-text.ts");
+    expect(truncateMiddle("abcdef", 2)).toBe("a…");
+  });
+});
