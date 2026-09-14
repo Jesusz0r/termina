@@ -33,10 +33,11 @@ export class TimelineView {
   private eventsBySeq = new Map<number, TimelineEvent>();
   /** seq → on-demand progress. Dropped on reset, setEvents, and eviction. */
   private progressCache = new Map<number, TimelineProgress>();
-  /** seqs with an in-flight progress fetch. Prevents duplicate core calls. */
-  private progressInFlight = new Set<number>();
-  /** Invalidates progress requests when the visible project/timeline changes. */
-  private progressEpoch = 0;
+  /** seq → owning request token for each in-flight progress fetch. Prevents
+   *  duplicate core calls, and a late completion applies only while its token
+   *  still owns the marker — so an evict/refresh/reset that retired the marker
+   *  can never be overwritten by the stale result. */
+  private progressInFlight = new Map<number, object>();
   private hoverSeq: number | null = null;
   private hoverTimer: ReturnType<typeof setTimeout> | null = null;
   private activeSeq: number | null = null;
@@ -138,7 +139,13 @@ export class TimelineView {
 
   /** Drop evicted dots (their source states are gone). */
   evict(seqs: number[]): void {
-    if (seqs.length > 0) this.progressEpoch++;
+    if (seqs.length > 0) {
+      // Retire every pending marker: an eviction invalidates in-flight lookups
+      // (their dots may be gone), and a late completion that clears nothing
+      // would strand its surviving dot's hover lookup forever. The next hover
+      // simply refetches.
+      this.progressInFlight.clear();
+    }
     const gone = new Set(seqs);
     const hadDotFocus = this.timelineHasDotFocus();
     this.events = this.events.filter((e) => !gone.has(e.seq));
@@ -147,7 +154,6 @@ export class TimelineView {
       this.dots.delete(seq);
       this.eventsBySeq.delete(seq);
       this.progressCache.delete(seq);
-      this.progressInFlight.delete(seq);
     }
     if (this.activeSeq !== null && gone.has(this.activeSeq)) this.activeSeq = null;
     if (this.tabStopSeq !== null && gone.has(this.tabStopSeq)) this.setTabStop(this.activeSeq ?? this.newestSeq());
@@ -158,7 +164,6 @@ export class TimelineView {
   }
 
   setEvents(events: TimelineEvent[]): void {
-    this.progressEpoch++;
     this.stopReplay();
     this.clearHover();
     this.progressCache.clear();
@@ -453,11 +458,13 @@ export class TimelineView {
       this.hoverTimer = null;
       if (this.hoverSeq !== seq) return;
       if (this.progressInFlight.has(seq)) return;
-      this.progressInFlight.add(seq);
-      const epoch = this.progressEpoch;
+      const token = {};
+      this.progressInFlight.set(seq, token);
       void this.onProgress(seq).then(
         (progress) => {
-          if (this.progressEpoch !== epoch) return;
+          // A retired marker means an evict/refresh/reset (or a newer request)
+          // owns this seq now: the stale result applies to nothing.
+          if (this.progressInFlight.get(seq) !== token) return;
           this.progressInFlight.delete(seq);
           if (progress.ok) this.progressCache.set(seq, progress);
           if (this.hoverSeq !== seq) return;
@@ -466,7 +473,7 @@ export class TimelineView {
           if (latest && dot) this.setDotLabel(dot, latest, progress);
         },
         () => {
-          if (this.progressEpoch !== epoch) return;
+          if (this.progressInFlight.get(seq) !== token) return;
           this.progressInFlight.delete(seq);
         },
       );
