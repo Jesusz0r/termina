@@ -8,6 +8,7 @@
  */
 import { CHALLENGE_PROFILES, type ChallengeProfile, type WorldlineSummary, type WorldlineDetails, type WorldlineChangedFile, type EvidenceSummary } from "../shared/types";
 import { showConfirm, showFileListModal, toast } from "./components/modals";
+import { asKnownState, KNOWN_CANDIDATE_STATES, KNOWN_EVIDENCE_STATUSES, KNOWN_FILE_STATUSES, KNOWN_PROFILE_WINNERS } from "./known-state";
 import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf, worldlineHeaderSummary } from "./worldline-evidence";
 
 /** Orientation caption on every A/B pair header: A kept the run, B is the retry. */
@@ -21,12 +22,6 @@ export const MAX_INLINE_CHANGED_ROWS = 500;
 function changedFileTotal(d: WorldlineDetails): number {
   return d.changedFileCount ?? d.changedFiles.length;
 }
-
-/** Known candidate states (WorldlineState): the state pill allowlists against these. */
-const KNOWN_CANDIDATE_STATES: ReadonlySet<string> = new Set([
-  "creating", "ready", "running", "settled", "verifying", "promoting",
-  "conflict", "cancelled", "error", "discarding", "discarded", "promoted",
-]);
 
 interface ViewHandlers {
   /** Open a base-to-candidate diff in Change Review. */
@@ -208,10 +203,9 @@ export class WorldlinesView {
     }
     for (const v of summary.profiles) {
       const chip = document.createElement("span");
-      // IPC-shaped but cosmetic-only: an unknown winner falls back to unavailable.
-      const winner = v.winner === "A" || v.winner === "B" || v.winner === "tie" ? v.winner : "unavailable";
+      const winner = asKnownState(v.winner, KNOWN_PROFILE_WINNERS);
       chip.className = `verdict verdict-${winner}`;
-      chip.textContent = chipText(v, summary);
+      chip.textContent = winner === "unknown" ? "unknown" : chipText(v, summary);
       chip.title = v.reason;
       pair.verdictsEl.appendChild(chip);
     }
@@ -236,11 +230,10 @@ export class WorldlinesView {
     const otherLabel = card.summary.label === "A" ? "B" : "A";
     for (const rec of records) {
       const line = document.createElement("div");
-      // IPC-shaped but cosmetic-only: an unknown status falls back to unavailable.
-      const status = rec.status === "pass" || rec.status === "fail" ? rec.status : "unavailable";
+      const status = asKnownState(rec.status, KNOWN_EVIDENCE_STATUSES);
       line.className = `evidence-line evidence-${status}`;
       const detail = evidenceLineDetail(rec, recordOf(other, rec.kind), otherLabel);
-      line.textContent = `${KIND_LABEL[rec.kind] ?? rec.kind}: ${rec.status}${detail ? ` (${detail})` : ""}`;
+      line.textContent = `${KIND_LABEL[rec.kind] ?? rec.kind}: ${status}${detail ? ` (${detail})` : ""}`;
       line.title = rec.reason ?? "";
       evidenceEl.appendChild(line);
     }
@@ -276,6 +269,9 @@ export class WorldlinesView {
     }
     this.byRoot.set(summary.root, summary.label);
     this.renderCard(card);
+    if (!card.detailsBody.hidden && card.detailsVersion !== summary.version && !card.detailsLoading) {
+      void this.loadDetails(summary.comparisonId, summary.label);
+    }
     this.refreshSummary();
   }
 
@@ -441,9 +437,9 @@ export class WorldlinesView {
     card.el.querySelector(".cand-role")!.textContent = s.role;
     card.el.querySelector(".cand-meta")!.textContent =
       [s.model, s.thinkingLevel].filter(Boolean).join(" · ") || "model unknown";
-    card.stateEl.textContent = s.state;
-    // IPC-shaped but cosmetic-only: an unknown state falls back to creating.
-    card.stateEl.className = `cand-state state-${KNOWN_CANDIDATE_STATES.has(s.state) ? s.state : "creating"}`;
+    const state = asKnownState(s.state, KNOWN_CANDIDATE_STATES);
+    card.stateEl.textContent = state;
+    card.stateEl.className = `cand-state state-${state}`;
     card.el.title = s.error ? `error: ${s.error}` : "";
     card.el.classList.toggle("has-error", s.state === "error" || s.state === "conflict");
     const verifyBtn = card.el.querySelector(".cand-verify") as HTMLButtonElement;
@@ -631,14 +627,20 @@ export class WorldlinesView {
       return;
     }
     card.detailsBody.hidden = false;
-    if (card.details || card.detailsLoading) return;
+    if (card.details && card.detailsVersion === card.summary.version) return;
+    await this.loadDetails(comparisonId, label);
+  }
+
+  private async loadDetails(comparisonId: string, label: "A" | "B"): Promise<void> {
+    const card = this.pairs.get(comparisonId)?.cards.get(label);
+    if (!card || card.detailsLoading) return;
     card.detailsLoading = true;
     card.changedList.replaceChildren();
     const li = document.createElement("li");
     li.className = "cand-loading";
-    li.textContent = "computing…";
+    li.textContent = card.detailsVersion !== card.summary.version && card.details ? "updating…" : "computing…";
     card.changedList.appendChild(li);
-    const res = await this.fetchDetailsStable(comparisonId, label);
+    const res = await this.fetchDetailsOnce(comparisonId, label);
     card.detailsLoading = false;
     if (!res.ok || !res.details) {
       card.changedList.replaceChildren();
@@ -649,31 +651,23 @@ export class WorldlinesView {
       return;
     }
     card.details = res.details;
-    card.detailsVersion = card.summary.version;
+    card.detailsVersion = res.details.version;
     this.fillDetails(card, res.details);
   }
 
-  /** Fetch the details of one candidate. A version bump during the request
-   *  means the answer describes the old head; retry until stable instead of
-   *  stranding the panel on a stale result. */
-  private async fetchDetailsStable(
+  /** One details fetch. The payload carries the candidate version it
+   *  describes; a mismatch shows "updating…" instead of a blind retry. */
+  private async fetchDetailsOnce(
     comparisonId: string,
     label: "A" | "B",
   ): Promise<{ ok: boolean; details?: WorldlineDetails; error?: string }> {
     const card = this.pairs.get(comparisonId)?.cards.get(label);
     if (!card) return { ok: false, error: "the candidate is gone" };
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const version = card.summary.version;
-      let res: { ok: boolean; details?: WorldlineDetails; error?: string };
-      try {
-        res = await window.termina.getWorldlineDetails(comparisonId, label);
-      } catch (err) {
-        // A rejected IPC call is final; retrying cannot fix it.
-        return { ok: false, error: (err as Error).message };
-      }
-      if (card.summary.version === version) return res;
+    try {
+      return await window.termina.getWorldlineDetails(comparisonId, label);
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
     }
-    return { ok: false, error: "the candidate keeps updating — expand again" };
   }
 
   private fillDetails(card: CandidateCard, d: WorldlineDetails): void {
@@ -683,7 +677,13 @@ export class WorldlinesView {
     const total = changedFileTotal(d);
     const rendered = d.changedFiles.slice(0, MAX_INLINE_CHANGED_ROWS);
     const renderedCount = rendered.length;
-    statsEl.textContent = `${d.sourceFiles} files · ${formatBytes(d.sourceBytes)} · ${total} changed · ${age} old`;
+    const notes: string[] = [];
+    if (d.version !== card.summary.version) notes.push("updating…");
+    if (d.primaryConflicts === null) notes.push(d.conflictError ? `conflict check unavailable: ${d.conflictError}` : "conflict check unavailable");
+    else if (d.primaryConflicts.length > 0) notes.push(`conflicts: ${d.primaryConflicts.join(", ")}`);
+    if (d.ignoredFiles === null) notes.push("ignored-file list unavailable");
+    else if (d.ignoredFiles > 0) notes.push(`${d.ignoredFiles} ignored (${formatBytes(d.ignoredBytes ?? 0)})`);
+    statsEl.textContent = `${d.sourceFiles} files · ${formatBytes(d.sourceBytes)} · ${total} changed · ${age} old${notes.length ? ` · ${notes.join(" · ")}` : ""}`;
     depsEl.textContent = "";
     for (const dep of d.dependencies) {
       const parts: string[] = [];
@@ -700,10 +700,9 @@ export class WorldlinesView {
       const li = document.createElement("li");
       li.className = "cand-changed-item";
       const badge = document.createElement("span");
-      // IPC-shaped but cosmetic-only: an unknown status falls back to modified.
-      const status = f.status === "created" || f.status === "deleted" ? f.status : "modified";
+      const status = asKnownState(f.status, KNOWN_FILE_STATUSES);
       badge.className = `status-badge ${status}`;
-      badge.textContent = status === "created" ? "A" : status === "deleted" ? "D" : "M";
+      badge.textContent = status === "created" ? "A" : status === "deleted" ? "D" : status === "modified" ? "M" : "?";
       const path = document.createElement("span");
       path.className = "path";
       path.textContent = f.relPath;
@@ -724,6 +723,7 @@ export class WorldlinesView {
         : `…listing truncated — showing first ${renderedCount}`;
       card.changedList.appendChild(more);
     }
+    card.filledVersion = d.version;
   }
 
   /** The candidate's changed files versus the shared base. */
@@ -782,11 +782,15 @@ export class WorldlinesView {
     const card = this.pairs.get(comparisonId)?.cards.get(label);
     if (!card) return null;
     if (card.details && card.detailsVersion === card.summary.version) return card.details;
-    const res = await this.fetchDetailsStable(comparisonId, label);
-    if (res.ok && res.details) {
+    const res = await this.fetchDetailsOnce(comparisonId, label);
+    if (res.ok && res.details && res.details.version === card.summary.version) {
       card.details = res.details;
-      card.detailsVersion = card.summary.version;
+      card.detailsVersion = res.details.version;
       return res.details;
+    }
+    if (res.ok && res.details) {
+      toast("the candidate is still updating — try again", "warning");
+      return null;
     }
     toast(res.error ?? "details unavailable", "warning");
     return null;

@@ -1271,7 +1271,8 @@ body {
   border-color: var(--red);
 }
 
-.timeline-recorder.rec-paused {
+.timeline-recorder.rec-paused,
+.timeline-recorder.rec-unknown {
   color: var(--text-dim);
 }
 
@@ -1439,7 +1440,8 @@ body {
   font-size: 11px;
 }
 
-.plan-task.state-pending .plan-mark {
+.plan-task.state-pending .plan-mark,
+.plan-task.state-unknown .plan-mark {
   color: var(--text-dim);
 }
 
@@ -1547,6 +1549,11 @@ body {
 .status-badge.deleted {
   background: var(--badge-del-bg);
   color: var(--red);
+}
+
+.status-badge.unknown {
+  background: var(--bg-hover);
+  color: var(--text-dim);
 }
 
 #modified-list .path {
@@ -1725,7 +1732,8 @@ body {
 }
 
 .cand-state.state-cancelled,
-.cand-state.state-discarded {
+.cand-state.state-discarded,
+.cand-state.state-unknown {
   color: var(--text-dim);
 }
 
@@ -1844,7 +1852,8 @@ body {
   border-color: var(--yellow);
 }
 
-.verdict-unavailable {
+.verdict-unavailable,
+.verdict-unknown {
   color: var(--text-dim);
 }
 
@@ -1890,7 +1899,8 @@ body {
   color: var(--red);
 }
 
-.evidence-line.evidence-unavailable {
+.evidence-line.evidence-unavailable,
+.evidence-line.evidence-unknown {
   color: var(--text-dim);
 }
 
@@ -2647,6 +2657,10 @@ body {
 
 #verify-badge.state-running {
   background: rgba(0, 0, 0, 0.22);
+}
+
+#verify-badge.state-unknown {
+  color: var(--text-dim);
 }
 
 .verify-spinner {

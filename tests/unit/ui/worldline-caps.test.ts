@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorldlineChangedFile, WorldlineDetails, WorldlineSummary } from "../../../shared/types";
 import { installFakeDom, type FakeDocument, type FakeEl } from "./fake-dom.ts";
@@ -59,6 +60,7 @@ function details(label: "A" | "B", fileCount: number, opts?: { truncated?: boole
     ignoredFiles: 0,
     ignoredBytes: 0,
     primaryConflicts: [],
+    version: 1,
   };
 }
 
@@ -216,5 +218,35 @@ describe("worldline changed-file caps (refs #213)", () => {
     const abNote = fake.modalRoot.querySelector(".worldline-more")!;
     expect(abNote.textContent).toBe("…first 500 of 10000 — listing truncated");
     expect(abNote.textContent).not.toMatch(/browse further|Compare/);
+  });
+
+  it("surfaces an unknown conflict check instead of a clean empty list", async () => {
+    const panel = makePanel();
+    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
+    view.bind({});
+    view.upsert(summary("A"));
+    view.upsert(summary("B"));
+    pendingDetails = {
+      ...details("A", 1),
+      primaryConflicts: null,
+      conflictError: "the snapshot store is unavailable",
+      ignoredFiles: null,
+      ignoredBytes: null,
+    };
+    panel.querySelectorAll(".candidate-card")[0].querySelectorAll(".cand-details")[0].click();
+    const card = panel.querySelectorAll(".candidate-card")[0];
+    await vi.waitFor(() => {
+      expect(card.querySelector(".cand-stats")!.textContent).toContain("conflict check unavailable");
+    });
+    expect(card.querySelector(".cand-stats")!.textContent).toContain("the snapshot store is unavailable");
+    expect(card.querySelector(".cand-stats")!.textContent).toContain("ignored-file list unavailable");
+  });
+
+  it("fetches details once and versions the payload", () => {
+    const src = readFileSync(new URL("../../../src/worldlines.ts", import.meta.url), "utf8");
+    expect(src).not.toContain("function fetchDetailsStable");
+    expect(src).not.toContain("the candidate keeps updating — expand again");
+    expect(src).toContain("fetchDetailsOnce");
+    expect(src).toContain("card.detailsVersion = res.details.version");
   });
 });

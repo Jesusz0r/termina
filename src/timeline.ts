@@ -8,6 +8,7 @@
  * Cmd/Ctrl+Enter forks it, Escape stops a replay.
  */
 import type { TimelineEvent, RecorderState, TimelinePrefix, TimelineProgress } from "../shared/types";
+import { asKnownState, KNOWN_RECORDER_STATES } from "./known-state";
 
 export const MAX_TIMELINE_EVENTS = 400;
 
@@ -123,11 +124,7 @@ export class TimelineView {
 
   /** The recorder state label (indexing / ready / paused / degraded / budget). */
   setRecorder(state: RecorderState, detail?: string | null): void {
-    // The state feeds a class name; an unknown value (stale cache, older main)
-    // falls back to paused rather than interpolating an arbitrary string.
-    const safe = state === "indexing" || state === "ready" || state === "paused" || state === "degraded" || state === "budget"
-      ? state
-      : "paused";
+    const safe = asKnownState(state, KNOWN_RECORDER_STATES);
     this.recorderEl.textContent = safe === "ready" ? "" : safe;
     this.recorderEl.className = `timeline-recorder rec-${safe}`;
     this.recorderEl.hidden = safe === "ready";
@@ -138,7 +135,9 @@ export class TimelineView {
           ? "moment forking is paused (no Git recording)"
           : safe === "degraded"
             ? "some moments could not be captured"
-            : "the fork-point budget is evicting old moments";
+            : safe === "budget"
+              ? "the fork-point budget is evicting old moments"
+              : "recorder state is unknown";
     this.recorderEl.title = safe === "degraded" && detail ? `${base}: ${detail}` : base;
   }
 

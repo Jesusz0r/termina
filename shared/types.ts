@@ -520,11 +520,15 @@ export interface WorldlineDetails {
   ageMs: number;
   /** Unowned edits of the source run (collaborative provenance). */
   unownedEdits: number;
-  /** Ignored/generated writes (metadata only). */
-  ignoredFiles: number;
-  ignoredBytes: number;
-  /** Merge conflicts against the current primary source. */
-  primaryConflicts: string[];
+  /** Ignored/generated writes (metadata only). Null when the list could not be computed. */
+  ignoredFiles: number | null;
+  ignoredBytes: number | null;
+  /** Merge conflicts against the current primary source. Null when the check could not run. */
+  primaryConflicts: string[] | null;
+  /** Why primaryConflicts is unknown, when it is. */
+  conflictError?: string | null;
+  /** Candidate version this payload was computed for. */
+  version: number;
 }
 
 export interface FolderOpenedPayload {
