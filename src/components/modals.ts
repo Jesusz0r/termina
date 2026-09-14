@@ -39,10 +39,17 @@ export function showInput(title: string, placeholder: string, prefill: string): 
     input.type = "text";
     input.placeholder = placeholder ?? "";
     input.value = prefill ?? "";
-    makeModal(title, "", [
+    const modal = makeModal(title, "", [
       { label: "Cancel", primary: false, onClick: () => resolve({ cancelled: true }) },
       { label: "OK", primary: true, onClick: () => resolve({ cancelled: false, value: input.value }) },
     ], input);
+    // Enter confirms through the OK button's own close+resolve path, so
+    // keyboard users can complete create/rename without tabbing to OK.
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing) return;
+      e.preventDefault();
+      (modal.querySelector(".modal-btn.primary") as HTMLElement | null)?.click();
+    });
     input.focus();
   });
 }
