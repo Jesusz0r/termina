@@ -178,6 +178,33 @@ export function toast(message: string, type: "info" | "warning" | "error" = "inf
   setTimeout(() => el.remove(), 5000);
 }
 
+/** Stays until dismiss(). Reuses the toast stack; optional Retry-style action. */
+export function stickyToast(
+  message: string,
+  type: "warning" | "error",
+  action?: { label: string; onClick: () => void },
+): { dismiss: () => void } {
+  const el = document.createElement("div");
+  el.className = `toast toast-${type}`;
+  const text = document.createElement("span");
+  text.textContent = message;
+  el.appendChild(text);
+  if (action) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-action";
+    btn.textContent = action.label;
+    btn.addEventListener("click", action.onClick);
+    el.appendChild(btn);
+  }
+  ensureToastContainer().appendChild(el);
+  return {
+    dismiss() {
+      el.remove();
+    },
+  };
+}
+
 /** Copy text and report the result with a toast. */
 export function copyText(text: string, okMessage: string): void {
   navigator.clipboard.writeText(text)

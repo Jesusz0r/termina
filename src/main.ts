@@ -45,7 +45,8 @@ import { ActivityTabs } from "./activity-tabs";
 import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { projectChangedPaths } from "./explorer-file";
-import { showUnsavedConfirm, toast } from "./components/modals";
+import { showUnsavedConfirm, stickyToast, toast } from "./components/modals";
+import { loadPreferencesWithRetry } from "./preferences-boot";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { showContextMenu, type ContextMenuItem } from "./components/context-menu";
 import { SettingsView } from "./settings";
@@ -720,9 +721,13 @@ const MAX_PENDING_TOOL_TARGETS = 20;
 const closingPanes = new Set<string>();
 let activeId: string | null = null;
 let projectCwd: string | null = null;
-let preferences: AppPreferences = normalizeAppPreferences(await window.termina.getPreferences().catch(() => defaultAppPreferences()));
-let committedPreferences: AppPreferences = preferences;
+const prefsBoot = await loadPreferencesWithRetry(() => window.termina.getPreferences());
+// Visual fallback only. Never treat this as the user's committed prefs.
+let preferences: AppPreferences = prefsBoot.ok ? prefsBoot.preferences : defaultAppPreferences();
+let committedPreferences: AppPreferences | null = prefsBoot.ok ? preferences : null;
 let preferenceGeneration = 0;
+let prefsLoadInFlight = false;
+let prefsLoadBanner: { dismiss: () => void } | null = null;
 
 function applyTerminalGeneration(pane: Pane, generation: number): void {
   if (pane.generation === generation) return;
@@ -771,12 +776,18 @@ function paintPreferences(prefs: AppPreferences): void {
 }
 
 function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean, confirmReset = false): void {
+  if (persist && !committedPreferences) {
+    toast("Could not load settings", "error");
+    return;
+  }
   const generation = ++preferenceGeneration;
   const preview = normalizeAppPreferences(next);
   preferences = preview;
   paintPreferences(preferences);
   if (persist) {
-    const patch = userPatch(committedPreferences, preview);
+    const baseline = committedPreferences;
+    if (!baseline) return;
+    const patch = userPatch(baseline, preview);
     // A reset always persists, even with an empty patch: that is the write
     // that clears an unreadable prefs file back to defaults.
     if (Object.keys(patch).length > 0 || confirmReset) {
@@ -788,12 +799,12 @@ function applyPreferences(next: AppPreferences, persist: boolean, activateShortc
         paintPreferences(preferences);
       }).catch(() => {
         if (generation !== preferenceGeneration) return;
-        preferences = committedPreferences;
+        preferences = baseline;
         paintPreferences(preferences);
         toast("Could not save settings", "error");
       });
     } else if (activateShortcuts) {
-      void window.termina.setKeyboardShortcuts(committedPreferences.shortcuts).catch(() => undefined);
+      void window.termina.setKeyboardShortcuts(baseline.shortcuts).catch(() => undefined);
     }
   } else {
     committedPreferences = preview;
@@ -822,12 +833,41 @@ const settingsView = new SettingsView({
   onReset: (next) => applyPreferences(next, true, false, true),
   onOpen: () => void window.termina.setKeyboardShortcuts(emptyShortcuts()).catch(() => undefined),
   onClose: (next) => applyPreferences(next, true, true),
+  onRetryLoad: () => void retryPreferences(),
 });
 
-applyPreferences(preferences, false, true);
+function showPrefsLoadBanner(): void {
+  if (prefsLoadBanner) return;
+  prefsLoadBanner = stickyToast("Could not load settings", "warning", {
+    label: "Retry",
+    onClick: () => void retryPreferences(),
+  });
+}
+
+function dismissPrefsLoadBanner(): void {
+  prefsLoadBanner?.dismiss();
+  prefsLoadBanner = null;
+}
+
+async function retryPreferences(): Promise<void> {
+  if (prefsLoadInFlight || committedPreferences) return;
+  prefsLoadInFlight = true;
+  try {
+    const result = await loadPreferencesWithRetry(() => window.termina.getPreferences());
+    if (!result.ok) return;
+    applyPreferences(result.preferences, false, true);
+    dismissPrefsLoadBanner();
+    settingsView.setLoaded(result.preferences);
+  } finally {
+    prefsLoadInFlight = false;
+  }
+}
+
+if (committedPreferences) applyPreferences(preferences, false, true);
+else showPrefsLoadBanner();
 // The e2e suite opens settings through this hook (the menu owns the
 // visible entry).
-(window as unknown as Record<string, unknown>).__openSettings = () => settingsView.open(preferences);
+(window as unknown as Record<string, unknown>).__openSettings = () => settingsView.open(committedPreferences);
 
 function createPaneShell(instanceId: string): Pane {
   const container = document.createElement("div");
@@ -938,7 +978,7 @@ function createPaneShell(instanceId: string): Pane {
       { label: "Copy", action: () => { view.copySelection(); } },
       { label: "Paste", action: () => { void view.pasteClipboard(); } },
     ];
-    if (pane.engine === "core") {
+    if (pane.engine === "core" && committedPreferences) {
       items.push({ separator: true });
       items.push({
         label: committedPreferences.showThinking ? "Hide Thinking" : "Show Thinking",
@@ -1837,6 +1877,10 @@ commands.register("new-terminal", () => {
 commands.register("next-terminal", () => cycleTerminals(1));
 commands.register("previous-terminal", () => cycleTerminals(-1));
 commands.register("toggle-thinking", () => {
+  if (!committedPreferences) {
+    toast("Could not load settings", "error");
+    return;
+  }
   const next = !committedPreferences.showThinking;
   void window.termina.updatePreferences({ patch: { showThinking: next }, activateShortcuts: false }).then((saved) => {
     applyPreferences(saved, false, false);
@@ -2151,7 +2195,7 @@ commands.register("content-search", () => quickOpen.open("content"));
 commands.register("command-palette", () => quickOpen.open("actions"));
 
 // Settings
-commands.register("open-settings", () => settingsView.open(preferences));
+commands.register("open-settings", () => settingsView.open(committedPreferences));
 
 window.termina.onMenuCommand((cmd) => {
   commands.execute(cmd.command);

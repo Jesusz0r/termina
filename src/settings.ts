@@ -17,6 +17,8 @@ interface SettingsCallbacks {
   onReset: (preferences: AppPreferences) => void;
   onOpen: () => void;
   onClose: (preferences: AppPreferences) => void;
+  /** Re-fetch prefs after a boot/read failure. Not a persist path. */
+  onRetryLoad: () => void;
 }
 
 const THEME_OPTIONS: Array<{ id: ThemeId; label: string; description: string }> = [
@@ -32,6 +34,8 @@ export class SettingsView {
   private activeSection: "general" | "appearance" | "shortcuts" = "appearance";
   private recording: ShortcutCommand | null = null;
   private captureError: string | null = null;
+  /** True when the boot prefs read has not succeeded. Do not treat defaults as saved. */
+  private unavailable = false;
 
   constructor(private readonly callbacks: SettingsCallbacks) {
     this.preferences = defaultAppPreferences();
@@ -42,16 +46,17 @@ export class SettingsView {
     return this.backdrop !== null;
   }
 
-  open(preferences: AppPreferences): void {
+  open(preferences: AppPreferences | null): void {
     if (this.backdrop) {
       this.backdrop.focus();
       return;
     }
-    this.preferences = normalizeAppPreferences(preferences);
+    this.unavailable = preferences === null;
+    if (preferences) this.preferences = normalizeAppPreferences(preferences);
     this.recording = null;
     this.captureError = null;
     this.activeSection = "appearance";
-    this.callbacks.onOpen();
+    if (!this.unavailable) this.callbacks.onOpen();
 
     const backdrop = document.createElement("div");
     backdrop.className = "settings-backdrop";
@@ -82,10 +87,22 @@ export class SettingsView {
   close(): void {
     if (!this.backdrop) return;
     const current = this.preferences;
+    const unavailable = this.unavailable;
     this.backdrop.remove();
     this.backdrop = null;
     this.recording = null;
-    this.callbacks.onClose(current);
+    // An unread session must not persist the constructor defaults as a patch.
+    if (!unavailable) this.callbacks.onClose(current);
+  }
+
+  /** Apply a successful re-fetch. Unlocks the form if the modal is open. */
+  setLoaded(preferences: AppPreferences): void {
+    this.unavailable = false;
+    this.preferences = normalizeAppPreferences(preferences);
+    if (!this.backdrop) return;
+    this.callbacks.onOpen();
+    const modal = this.backdrop.querySelector(".settings-modal");
+    if (modal instanceof HTMLElement) this.render(modal);
   }
 
   private notify(): void {
@@ -117,6 +134,11 @@ export class SettingsView {
     close.addEventListener("click", () => this.close());
     header.append(heading, close);
     modal.appendChild(header);
+
+    if (this.unavailable) {
+      this.renderUnavailable(modal);
+      return;
+    }
 
     const body = document.createElement("div");
     body.className = "settings-body";
@@ -160,6 +182,21 @@ export class SettingsView {
     });
     footer.append(hint, reset);
     modal.appendChild(footer);
+  }
+
+  private renderUnavailable(modal: HTMLElement): void {
+    const banner = document.createElement("div");
+    banner.className = "settings-load-banner";
+    banner.setAttribute("role", "status");
+    const text = document.createElement("span");
+    text.textContent = "Could not load settings. Retry to use your saved preferences.";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "settings-load-retry";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => this.callbacks.onRetryLoad());
+    banner.append(text, retry);
+    modal.appendChild(banner);
   }
 
   private renderGeneral(content: HTMLElement): void {
