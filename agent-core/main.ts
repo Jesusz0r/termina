@@ -221,6 +221,11 @@ import {
   type ToolUse,
 } from "./main/tools.ts";
 import { createFrontMatter } from "./main/front-matter.ts";
+import {
+  recordGateObservation,
+  settleGateVerdict,
+  type GateToolObservation,
+} from "./main/settle-gate.ts";
 import { renderHistoryTranscript, type ContentBlock } from "./main/history-view.ts";
 import { shouldAutoOpenLogin } from "./main/login-hint.ts";
 import {
@@ -1959,24 +1964,25 @@ async function confirmProtectedMutation(inputPath: string | undefined): Promise<
 }
 
 async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolOutcome> {
-  if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
-  if (!clientTools.some((tool) => tool.name === use.name)) return done(use, `error: unknown tool ${use.name}`, true);
+  const notExecuted = (text: string): ToolOutcome => ({ ...done(use, text, true), executed: false });
+  if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
+  if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
     return done(use, got);
   }
   if (use.name === "write_file") {
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
-      if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
-      if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
+      if (!(await confirmProtectedMutation(use.input.path))) return notExecuted("error: protected file edit denied");
+      if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
       const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
       return done(use, got.content, got.isError);
     });
   }
   if (use.name === "edit") {
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
-      if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
-      if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
+      if (!(await confirmProtectedMutation(use.input.path))) return notExecuted("error: protected file edit denied");
+      if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
       const got = editProjectFile(
         canonicalCwd,
         use.input.path,
@@ -2004,8 +2010,8 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   }
   if (use.name === "bash") {
     const command = use.input.command ?? "";
-    if (!(await confirmBash(command))) return done(use, "error: bash denied", true);
-    if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
+    if (!(await confirmBash(command))) return notExecuted("error: bash denied");
+    if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
     const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
     return done(use, got);
   }
@@ -4867,6 +4873,9 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let taskFailure: string | null = null;
   let taskOutcomeStatus = "success";
   let toolErrorObserved = false;
+  const gateObservations: GateToolObservation[] = [];
+  let gateNudged = false;
+  let lastAssistantText = "";
   let retriedOverflow = false;
   let retriedProviderTermination = false;
   let terminatedDiagnostics: string | null = null;
@@ -5008,7 +5017,9 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       assistantMsg.sseq = persist({ type: "message", message: { role: "assistant", content: result.blocks } });
       history.push(assistantMsg);
       syncIndicators();
-      const plan = planTextIfChanged(visibleAssistantText(result.blocks), lastPlanText);
+      const assistantText = visibleAssistantText(result.blocks);
+      lastAssistantText = assistantText;
+      const plan = planTextIfChanged(assistantText, lastPlanText);
       if (plan) {
         lastPlanText = plan;
         sidecar.logEvent({ t: "plan", text: plan });
@@ -5081,6 +5092,24 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           resumePaused = true;
           continue;
         }
+        if (!interrupted && taskOutcomeStatus === "success") {
+          const verdict = settleGateVerdict(
+            { observations: gateObservations, finalText: lastAssistantText },
+            gateNudged,
+          );
+          if (verdict.decision === "nudge") {
+            gateNudged = true;
+            pushMessage("user", verdict.nudge);
+            out(`\n(settle gate: ${verdict.detail})\n`);
+            continue;
+          }
+          if (verdict.decision === "fail") {
+            taskOutcomeStatus = "failure";
+            taskFailure = `settle gate: ${verdict.detail}`;
+            out(`\n(settle gate: ${verdict.detail})\n`);
+            break;
+          }
+        }
         break;
       }
       const outcomes: ToolOutcome[] = [];
@@ -5121,6 +5150,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           const item = settled[ci]!;
           if (item.status === "fulfilled") {
             const outcome = item.value;
+            const entry = wave[ci]!;
+            if (!inputErrors[entry.index] && entry.duplicateOf === undefined) {
+              recordGateObservation(gateObservations, chunk[ci]!, outcome);
+            }
             if (outcome.isError || (outcome.bounded?.state !== undefined && outcome.bounded.state !== "complete")) {
               toolErrorObserved = true;
             }
@@ -5240,6 +5273,15 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   } else if (toolErrorObserved && taskOutcomeStatus === "success") {
     taskOutcomeStatus = "failure";
     taskFailure ??= "tool error";
+  }
+  if (!interrupted && !storageFailure && taskOutcomeStatus === "success") {
+    // Final enforcement for loop exits that bypassed the in-loop nudge
+    // (e.g. the subagent turn-budget break). No grace turn remains here.
+    const verdict = settleGateVerdict({ observations: gateObservations, finalText: lastAssistantText }, true);
+    if (verdict.decision !== "pass") {
+      taskOutcomeStatus = "failure";
+      taskFailure = `settle gate: ${verdict.detail}`;
+    }
   }
   sidecar.logEvent({
     t: "agent_settled",

@@ -17,13 +17,14 @@ function jsonLines(path: string): Row[] {
  * belongs to this fixture, including HOME, authentication, events and traces. */
 async function scenario(toolProgram: string, check: (result: {
   root: string; output: string; messages: Row[]; requests: Row[]; traces: Row[]; events: Row[];
-}) => void, timeoutMs = 40_000): Promise<void> {
+}) => void, timeoutMs = 40_000, extraFiles: Record<string, string> = {}): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "termina-tool-loop-"));
   const project = join(root, "project");
   const home = join(root, "home");
   const events = join(root, "events");
   for (const dir of [project, home, events]) mkdirSync(dir, { recursive: true });
   writeFileSync(join(project, "file.txt"), "original\n");
+  for (const [name, content] of Object.entries(extraFiles)) writeFileSync(join(project, name), content);
   const terminalId = "term-tool-loop";
   const sessionId = "core-tool-loop";
   const sessionFile = join(events, sessionId, "current", "session.jsonl");
@@ -155,11 +156,26 @@ describe("real tool loop regressions", () => {
       if (turn === 4) return [{ name: "read_file", input: { path: "file.txt" } }];
       if (turn === 5) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "fixed" } }];
       return [];`, (result) => {
-      expect(result.requests).toHaveLength(6);
+      // The edit lands, but no check command is ever observed: the settle
+      // gate spends one grace nudge (7th request) and then fails the run.
+      expect(result.requests).toHaveLength(7);
+      expect(JSON.stringify(result.requests[6])).toContain("Settle gate");
+      expect(result.events.find((row) => row.t === "agent_settled")?.error).toContain("settle gate");
       expect(result.traces.some((row) => row.status === "stalled")).toBe(false);
       expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("fixed\n");
       expectPaired(result.messages);
     });
+  });
+
+  it("settles success when edits are covered by an observed check", async () => {
+    await scenario(`if (turn === 1) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "fixed" } }];
+      if (turn === 2) return [{ name: "bash", input: { command: "make check" } }];
+      return [];`, (result) => {
+      expect(result.requests).toHaveLength(3);
+      expect(result.events.find((row) => row.t === "agent_settled")?.error).toBeNull();
+      expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("fixed\n");
+      expectPaired(result.messages);
+    }, 40_000, { Makefile: "check:\n\ttrue\n" });
   });
 
   it("rejects missing or wrongly typed mutation arguments without changing files", async () => {
