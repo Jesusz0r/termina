@@ -60,6 +60,12 @@ export function paletteRowDetail(command: CommandId, category: string, shortcut:
   return command === "quick-open" ? `${base} · ${QUICK_OPEN_TERMINAL_NOTE}` : base;
 }
 
+const QUICK_OPEN_RESULTS_ID = "quick-open-results";
+
+function optionId(index: number): string {
+  return `quick-open-opt-${index}`;
+}
+
 export class QuickOpen {
   private root: HTMLElement | null = null;
   private input: HTMLInputElement | null = null;
@@ -124,9 +130,16 @@ export class QuickOpen {
     const input = document.createElement("input");
     input.className = "search-input";
     input.type = "text";
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    input.setAttribute("aria-haspopup", "listbox");
+    input.setAttribute("aria-controls", QUICK_OPEN_RESULTS_ID);
 
     const results = document.createElement("div");
     results.className = "search-results";
+    results.id = QUICK_OPEN_RESULTS_ID;
+    results.setAttribute("role", "listbox");
 
     modal.append(title, input, results);
     backdrop.appendChild(modal);
@@ -135,17 +148,13 @@ export class QuickOpen {
     this.input = input;
     this.resultsEl = results;
 
-    const close = (): void => {
-      if (this.searchTimer) clearTimeout(this.searchTimer);
-      backdrop.style.display = "none";
-    };
     backdrop.addEventListener("click", (e) => {
-      if (e.target === backdrop) close();
+      if (e.target === backdrop) this.dismiss();
     });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        close();
+        this.dismiss();
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
         this.move(1);
@@ -155,7 +164,7 @@ export class QuickOpen {
       } else if (e.key === "Enter") {
         e.preventDefault();
         this.activate();
-        close();
+        this.dismiss();
       }
     });
     input.addEventListener("input", () => {
@@ -173,17 +182,46 @@ export class QuickOpen {
     });
   }
 
+  private dismiss(): void {
+    if (this.searchTimer) {
+      clearTimeout(this.searchTimer);
+      this.searchTimer = null;
+    }
+    if (this.root) this.root.style.display = "none";
+    this.input?.setAttribute("aria-expanded", "false");
+    this.input?.removeAttribute("aria-activedescendant");
+  }
+
+  private optionEls(): HTMLElement[] {
+    if (!this.resultsEl) return [];
+    return [...this.resultsEl.querySelectorAll<HTMLElement>('[role="option"]')];
+  }
+
   private move(delta: 1 | -1): void {
     if (this.rows.length === 0) return;
     this.selected = (this.selected + delta + this.rows.length) % this.rows.length;
-    this.highlight();
+    this.syncComboboxAria();
   }
 
-  private highlight(): void {
-    const kids = this.resultsEl?.children;
-    if (!kids) return;
-    for (let i = 0; i < kids.length; i++) kids[i]!.classList.toggle("selected", i === this.selected);
-    kids[this.selected]?.scrollIntoView({ block: "nearest" });
+  /** Keep highlight class, aria-selected, and aria-activedescendant in lockstep. */
+  private syncComboboxAria(): void {
+    const input = this.input;
+    if (!input) return;
+    const options = this.optionEls();
+    const shown = options.length > 0;
+    input.setAttribute("aria-expanded", shown ? "true" : "false");
+    for (let i = 0; i < options.length; i++) {
+      const selected = i === this.selected;
+      options[i]!.classList.toggle("selected", selected);
+      options[i]!.setAttribute("aria-selected", selected ? "true" : "false");
+    }
+    const active = shown ? options[this.selected] : undefined;
+    if (active) {
+      input.setAttribute("aria-activedescendant", active.id);
+      if (typeof active.scrollIntoView === "function") active.scrollIntoView({ block: "nearest" });
+    } else {
+      input.removeAttribute("aria-activedescendant");
+    }
   }
 
   private activate(): void {
@@ -203,6 +241,7 @@ export class QuickOpen {
       loading.className = "search-empty";
       loading.textContent = "searching…";
       list.appendChild(loading);
+      this.syncComboboxAria();
     }
     let res;
     try {
@@ -238,6 +277,7 @@ export class QuickOpen {
       loading.className = "search-empty";
       loading.textContent = "searching…";
       list.appendChild(loading);
+      this.syncComboboxAria();
     }
     let res;
     try {
@@ -299,6 +339,9 @@ export class QuickOpen {
     for (const [i, row] of this.rows.entries()) {
       const el = document.createElement("div");
       el.className = "search-hit clickable" + (i === this.selected ? " selected" : "");
+      el.id = optionId(i);
+      el.setAttribute("role", "option");
+      el.setAttribute("aria-selected", i === this.selected ? "true" : "false");
       const text = document.createElement("span");
       text.className = "search-text";
       // Match indices address the relPath; the label is its basename suffix.
@@ -310,10 +353,11 @@ export class QuickOpen {
       el.addEventListener("click", () => {
         this.selected = i;
         this.activate();
-        this.root!.style.display = "none";
+        this.dismiss();
       });
       list.appendChild(el);
     }
+    this.syncComboboxAria();
   }
 
   private showEmpty(message: string): void {
@@ -324,5 +368,6 @@ export class QuickOpen {
     empty.className = "search-empty";
     empty.textContent = message;
     list.appendChild(empty);
+    this.syncComboboxAria();
   }
 }
