@@ -252,6 +252,8 @@ import {
   estimateReclaimTokens,
   makePruneRevision,
   planPruneStubs as planReclaimStubs,
+  pruneCooldownHolds,
+  type PruneCooldown,
   type PrunePick as ReclaimPick,
 } from "./reclaim.ts";
 import {
@@ -2486,6 +2488,9 @@ let lastBilledTokens: number | null = null;
 let lastCacheReadShare: number | null = null;
 let lastRequestFollowedRevision = false;
 let pendingReclaimEvidence: Record<string, unknown> | null = null;
+// Growth-based prune pacing: set after each applied prune, cleared by
+// summarize/truncate/continuity resets. See pruneCooldownHolds.
+let pruneCooldown: PruneCooldown | null = null;
 
 function recordRevision(kind: RevisionKind): void {
   revisions++;
@@ -2624,8 +2629,41 @@ function reclaimEvidenceForRevision(
   };
 }
 
-/** Plan and durably apply the canonical reclaim receipt before changing the view. */
-async function reclaim(): Promise<number> {
+/** Plan and durably apply the canonical reclaim receipt before changing the view.
+ * Automatic loop calls pace back-to-back prunes by token growth; explicit
+ * intents (overflow retry, /compact) pass ignoreCooldown. */
+async function reclaim(ignoreCooldown = false): Promise<number> {
+  const usable = usableTokens();
+  if (!ignoreCooldown && pruneCooldown !== null) {
+    // Growth-based pacing, not turn-based: hold until new pressure exceeds
+    // what the last prune reclaimed plus one hysteresis band of noise.
+    // Must-fit always proceeds so pacing can never force an overflow.
+    const current = totalTokens();
+    const margin = Math.ceil(usable * (HIGH_WATER - LOW_WATER));
+    if (Math.max(current, lastBilledTokens ?? 0) < usable &&
+        pruneCooldownHolds(pruneCooldown, current, margin)) {
+      pendingReclaimEvidence = {
+        attempted: false,
+        planned: false,
+        applied: false,
+        recovered: null,
+        revisionId: null,
+        targetCount: 0,
+        reclaimedBytes: 0,
+        reclaimedTokens: 0,
+        source: null,
+        recovery: null,
+        error: null,
+        targets: [],
+        skipped: "prune-cooldown",
+        growthTokens: current - pruneCooldown.baseTotal,
+        cooldownReclaimedTokens: pruneCooldown.reclaimedTokens,
+        cooldownMarginTokens: margin,
+      };
+      return 0;
+    }
+    pruneCooldown = null;
+  }
   const plan = planReclaimStubs(
     history.map((message) => ({
       role: message.role,
@@ -2638,7 +2676,7 @@ async function reclaim(): Promise<number> {
       // occupies the provider window for this logical prompt.
       systemTokens: estimateReclaimTokens(frontMatter.systemPrompt()) + activeOverlayTokens(),
       toolSchemaTokens: toolSchemaTokens(),
-      usable: usableTokens(),
+      usable,
       protectTokens: protectTokens(),
       fillTokens: lastBilledTokens ?? undefined,
     },
@@ -2682,6 +2720,10 @@ async function reclaim(): Promise<number> {
   pendingReclaimEvidence = reclaimEvidenceForRevision(revision, before, true);
   installReplayedHistory(before);
   recordRevision("prune");
+  pruneCooldown = {
+    baseTotal: totalTokens(),
+    reclaimedTokens: revision.targets.reduce((sum, target) => sum + target.reclaimedTokens, 0),
+  };
   syncIndicators();
   return revision.targets.length;
 }
@@ -2702,6 +2744,7 @@ function truncate(): boolean {
   persist({ type: "revision", kind: "truncate", dropped: cut });
   history.splice(0, cut);
   recordRevision("truncate");
+  pruneCooldown = null;
   syncIndicators();
   return true;
 }
@@ -2796,6 +2839,7 @@ async function summarize(required = false): Promise<boolean> {
     const m: Message = { role: "user", content: handoff, tokens: handoffTokens, sseq };
     history.unshift(m);
     recordRevision("summarize");
+    pruneCooldown = null;
     syncIndicators();
     await writeSummaryTrace({
       status: "ok",
@@ -4100,6 +4144,7 @@ function resetUsageContinuity(): void {
   lastBilledTokens = null;
   lastCacheReadShare = null;
   lastRequestFollowedRevision = false;
+  pruneCooldown = null;
   cacheFlipTally = emptyCacheFlipTally();
 }
 
@@ -4925,7 +4970,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         if (!retriedOverflow && isContextOverflowMessage(providerMessage)) {
           await writeMainTrace({ status: "overflow", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt });
           retriedOverflow = true;
-          await reclaim();
+          await reclaim(true);
           await summarize(true);
           truncate();
           try {
@@ -6202,7 +6247,7 @@ function dispatchLine(line: string): void {
     }
     void (async () => {
       try {
-        const n = await reclaim();
+        const n = await reclaim(true);
         const summed = await summarize(true);
         syncIndicators();
         out(`(compacted${n ? `; reclaimed ${n}` : ""}${summed ? "; summarized" : ""})\n`);
