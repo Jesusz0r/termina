@@ -190,7 +190,7 @@ async function makeFixture(opts: {
     version: 1,
     error: null,
   };
-  await writeFile(cand.sessionFile, "{}\n");
+  await writeFile(cand.sessionFile!, "{}\n");
   const cmp: ComparisonState = {
     id: comparisonId,
     dir: cmpDir,
