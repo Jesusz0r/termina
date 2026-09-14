@@ -268,7 +268,7 @@ export function settleGateVerdict(
     const section = checksSectionState(input.finalText);
     const fileNote = files.length > 0 ? ` Changed files: ${files.slice(0, 8).join(", ")}${files.length > 8 ? "…" : ""}.` : "";
     const detail = section === "present"
-      ? `no checks observed despite a checks section naming ${edits} edited file(s)`
+      ? `no checks observed — ${edits} file(s) changed (checks section present, but no check ran)`
       : `no checks observed — ${edits} file(s) changed (${section} checks section)`;
     return trip(
       "no-checks",

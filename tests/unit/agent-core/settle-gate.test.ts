@@ -201,6 +201,15 @@ describe("settleGateVerdict", () => {
     expect(second.reason).toBe("no-checks");
   });
 
+  it("reports a present checks section without checks as section-but-no-run", () => {
+    const input = { observations: [edit], finalText: "## Checks\n- none run yet, see below\n" };
+    const verdict = settleGateVerdict(input, false);
+    expect(verdict.decision).toBe("nudge");
+    if (verdict.decision !== "nudge") throw new Error("expected nudge");
+    expect(verdict.reason).toBe("no-checks");
+    expect(verdict.detail).toBe("no checks observed — 1 file(s) changed (checks section present, but no check ran)");
+  });
+
   it("confronts claimed-but-unobserved verification", () => {
     const input = { observations: [edit], finalText: "All tests pass." };
     const first = settleGateVerdict(input, false);
