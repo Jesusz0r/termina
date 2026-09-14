@@ -158,8 +158,9 @@ describe("searchSessionFiles bounds", () => {
       const text = `start-${"q".repeat(250)}`;
       expect(text).toHaveLength(MAX_SESSION_SEARCH_QUERY);
       const file = sessionFile(dir, "s.jsonl", text);
-      const hits = await searchSessionFiles(searchOpts([file], `${text}-not-in-text`));
+      const { hits, error } = await searchSessionFiles(searchOpts([file], `${text}-not-in-text`));
       expect(hits).toHaveLength(1);
+      expect(error).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -172,11 +173,99 @@ describe("searchSessionFiles bounds", () => {
       for (let i = 0; i < 50; i++) files.push(sessionFile(dir, `quiet-${i}.jsonl`, "nothing relevant here"));
       const loud = sessionFile(dir, "loud.jsonl", "the marker phrasing");
       // Control: the 51st file matches when it is inside the searched prefix.
-      expect(await searchSessionFiles(searchOpts([loud], "marker"))).toHaveLength(1);
+      expect((await searchSessionFiles(searchOpts([loud], "marker"))).hits).toHaveLength(1);
       // Past the cap it is never opened.
-      expect(await searchSessionFiles(searchOpts([...files, loud], "marker"))).toHaveLength(0);
+      expect((await searchSessionFiles(searchOpts([...files, loud], "marker"))).hits).toHaveLength(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("searchSessionFiles walk errors", () => {
+  function messageLine(content: string): string {
+    return `${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content } })}\n`;
+  }
+
+  function searchOpts(files: SessionFileEntry[], query: string) {
+    return {
+      query,
+      files,
+      projectCwd: "/proj",
+      canonicalize: (p: string) => p,
+      isProjectFile: () => false,
+    };
+  }
+
+  it("returns hits so far plus listing uncertainty when a later segment is unreadable", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const root = mkdtempSync(join(tmpdir(), "ssw-"));
+    const current = join(root, "core-walk-1", "current");
+    const locked = join(current, "session.jsonl");
+    try {
+      mkdirSync(current, { recursive: true });
+      const part = join(current, "part-000001.jsonl");
+      writeFileSync(part, messageLine("first segment has the marker phrasing"));
+      writeFileSync(locked, messageLine("second segment also mentions marker"));
+      chmodSync(locked, 0o000);
+      const result = await searchSessionFiles(
+        searchOpts(
+          [{ path: locked, name: "core-walk-1/current/session.jsonl", mtimeMs: 1, segments: [part, locked] }],
+          "marker",
+        ),
+      );
+      expect(result.hits).toHaveLength(1);
+      expect(result.hits[0]?.text).toMatch(/first segment/);
+      expect(result.error).toMatch(/session listing uncertain/);
+    } finally {
+      try {
+        chmodSync(locked, 0o700);
+      } catch {
+        /* best-effort restore before the recursive remove */
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a vanished segment as a race, not uncertainty", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ssw-"));
+    try {
+      const goodPath = join(dir, "good.jsonl");
+      writeFileSync(goodPath, messageLine("the marker phrasing"));
+      const good: SessionFileEntry = { path: goodPath, name: "good.jsonl", mtimeMs: 1 };
+      const missing: SessionFileEntry = { path: join(dir, "gone.jsonl"), name: "gone.jsonl", mtimeMs: 1 };
+      const result = await searchSessionFiles(searchOpts([good, missing], "marker"));
+      expect(result.hits).toHaveLength(1);
+      expect(result.error).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("marks uncertainty when segment listing fails, keeping earlier hits", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ssw-"));
+    try {
+      const goodPath = join(root, "good.jsonl");
+      writeFileSync(goodPath, messageLine("the marker phrasing"));
+      const current = join(root, "core-broken", "current");
+      mkdirSync(current, { recursive: true });
+      const active = join(current, "session.jsonl");
+      writeFileSync(active, messageLine("hidden by a malformed bundle"));
+      writeFileSync(join(current, "weird.jsonl"), "{}\n");
+      const result = await searchSessionFiles(
+        searchOpts(
+          [
+            { path: goodPath, name: "good.jsonl", mtimeMs: 1 },
+            { path: active, name: "core-broken/current/session.jsonl", mtimeMs: 2, segments: [active] },
+          ],
+          "marker",
+        ),
+      );
+      expect(result.hits).toHaveLength(1);
+      expect(result.hits[0]?.sessionFile).toBe("good.jsonl");
+      expect(result.error).toMatch(/session listing uncertain/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
