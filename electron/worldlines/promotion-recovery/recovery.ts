@@ -5,7 +5,7 @@
  * Split from promotion-recovery.ts (issue #38).
  */
 import { parseSessionBundlePath } from "../../../agent-core/session.js";
-import { boundPromotionCopyFile, boundPromotionCreateSymlink, boundPromotionInstallDirectory, boundPromotionListDirectories, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionTransition, boundPromotionWriteFile, disposeWorldlineGitCore, readBoundPromotionJournal, type BoundPromotionExpectedLeaf, type PromotionFsIdentity } from "../../worldline-git.js";
+import { boundPromotionCopyFile, boundPromotionCreateSymlink, boundPromotionInstallDirectory, boundPromotionListDirectories, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionTransition, boundPromotionWriteFile, disposeWorldlineGitCore, readBoundPromotionJournal, type BoundPromotionExpectedLeaf, type PromotionFsIdentity } from "../../worldline-git.js";
 import { promotionIdentityOf } from "../bindings.js";
 import { errnoCode, isInside } from "../guards.js";
 import { promotionJournalAdmissionOwnerFor, releasePromotionJournalAdmissionOwner } from "../promotion-journal.js";
@@ -17,8 +17,134 @@ import { assertBoundPromotionDirectory, ensureBoundDirectory, ensureBoundRelativ
 import { assertPromotionState, boundPromotionExpectedLeaf, promotionDestination, promotionDestinationComponents, promotionParentComponents, promotionParentIdentity, promotionSourceComponents, promotionStatesEqual, readPromotionEntry } from "./entry-state.js";
 import { createPromotionArtifactManifest, parsePromotionArtifactManifest, runPromotionRecoveryTestHook, validatePromotionJournalHeader, validatePromotionJournalPaths, validatePromotionRollbackTemps, writePromotionJournal } from "./journals.js";
 import type { PromotionRollbackTemp } from "./journals.js";
-import { sha256Hex, withPromotionTransaction } from "./primitives.js";
+import { SHA256_HEX, isSafePromotionRelativePath, sha256Hex, withPromotionTransaction } from "./primitives.js";
 
+
+/** Bytes bound for the adopted journal.json read when persisting a recovery marker. */
+const RECOVERY_MARKER_JOURNAL_MAX_BYTES = 8 * 1024 * 1024;
+
+type RecoveryMarkerInput = { rel: string; present: boolean; dev: string; ino: string; size: string; mtimeNs: string };
+
+type RecoveryMarker = { status: "done" | "rolled-back"; at: number; digest: string; inputs: RecoveryMarkerInput[] };
+
+/** Parse a recovery marker, or null when it is absent or malformed (re-verify). */
+function parseRecoveryMarker(value: unknown): RecoveryMarker | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (record.status !== "done" && record.status !== "rolled-back") return null;
+  if (typeof record.at !== "number" || !Number.isSafeInteger(record.at) || record.at <= 0) return null;
+  if (typeof record.digest !== "string" || !SHA256_HEX.test(record.digest)) return null;
+  if (!Array.isArray(record.inputs) || record.inputs.length > 2000) return null;
+  const inputs: RecoveryMarkerInput[] = [];
+  for (const raw of record.inputs) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const entry = raw as Record<string, unknown>;
+    if (typeof entry.rel !== "string" || !isSafePromotionRelativePath(entry.rel)) return null;
+    if (typeof entry.present !== "boolean") return null;
+    for (const key of ["dev", "ino", "size", "mtimeNs"] as const) {
+      if (typeof entry[key] !== "string" || !/^\d+$/.test(entry[key] as string)) return null;
+    }
+    inputs.push({
+      rel: entry.rel,
+      present: entry.present,
+      dev: entry.dev as string,
+      ino: entry.ino as string,
+      size: entry.size as string,
+      mtimeNs: entry.mtimeNs as string,
+    });
+  }
+  return { status: record.status, at: record.at, digest: record.digest, inputs };
+}
+
+/** The journal digest the marker binds: everything except the marker itself. */
+function recoveryMarkerDigest(journal: Record<string, unknown>): string {
+  const rest = { ...journal };
+  delete rest.recovery;
+  return sha256Hex(Buffer.from(JSON.stringify(rest), "utf8"));
+}
+
+/** The current lstat identity of every journaled input (no content reads). */
+async function collectRecoveryMarkerInputs(primaryRoot: string, rels: string[]): Promise<RecoveryMarkerInput[]> {
+  const inputs: RecoveryMarkerInput[] = [];
+  for (const rel of rels) {
+    let info;
+    try {
+      info = await lstatPath(join(primaryRoot, rel), { bigint: true });
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT") {
+        inputs.push({ rel, present: false, dev: "0", ino: "0", size: "0", mtimeNs: "0" });
+        continue;
+      }
+      throw error;
+    }
+    inputs.push({ rel, present: true, dev: String(info.dev), ino: String(info.ino), size: String(info.size), mtimeNs: String(info.mtimeNs) });
+  }
+  return inputs;
+}
+
+/** True when the journal was already recovered and neither it nor its inputs
+ * changed identity since. Any doubt re-verifies fully. */
+async function recoveryMarkerValid(journal: Record<string, unknown>, primaryRoot: string): Promise<boolean> {
+  try {
+    const marker = parseRecoveryMarker(journal.recovery);
+    if (!marker) return false;
+    if (recoveryMarkerDigest(journal) !== marker.digest) return false;
+    const paths = validatePromotionJournalPaths(journal);
+    if (paths.length !== marker.inputs.length) return false;
+    const current = await collectRecoveryMarkerInputs(primaryRoot, paths.map((p) => p.rel));
+    return current.every((entry, index) => {
+      const expected = marker.inputs[index]!;
+      return entry.rel === expected.rel
+        && entry.present === expected.present
+        && entry.dev === expected.dev
+        && entry.ino === expected.ino
+        && entry.size === expected.size
+        && entry.mtimeNs === expected.mtimeNs;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Persist a recovery completion marker through the existing bound writer.
+ * The marker never authorizes deletion: it only lets later opens skip
+ * repeated re-hashing while the journal and its inputs keep identity.
+ * Failure keeps the journal unmarked, which re-verifies next open.
+ */
+async function markPromotionJournalRecovered(
+  journalBinding: PromotionJournalBinding,
+  journal: Record<string, unknown>,
+  primaryRoot: string,
+  status: "done" | "rolled-back",
+): Promise<void> {
+  const paths = validatePromotionJournalPaths(journal);
+  const inputs = await collectRecoveryMarkerInputs(primaryRoot, paths.map((p) => p.rel));
+  const digest = recoveryMarkerDigest(journal);
+  journal.recovery = { status, at: Date.now(), digest, inputs };
+  // Adopt the current journal.json expectation first: recovery opens an
+  // existing file, so the chained writer needs its identity, size, and hash.
+  const info = await lstatPath(join(journalBinding.directory.path, "journal.json"), { bigint: true });
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error("promotion journal file changed before recovery marker");
+  const current = await boundPromotionReadFile({
+    root: journalBinding.directory.path,
+    rootIdentity: promotionIdentityOf(journalBinding.directory),
+    components: ["journal.json"],
+    parentIdentity: promotionIdentityOf(journalBinding.directory),
+    expectedIdentity: { dev: String(info.dev), ino: String(info.ino) },
+    maxBytes: RECOVERY_MARKER_JOURNAL_MAX_BYTES,
+  });
+  journalBinding.journalFile = {
+    identity: current.identity,
+    state: {
+      type: "file",
+      mode: Number(info.mode & 0o777n),
+      size: String(current.content.byteLength),
+      sha256: sha256Hex(current.content),
+    },
+  };
+  await writePromotionJournal(journalBinding, journal);
+}
 
 async function verifyInstalledBundleAgainstManifest(bundleDir: string, manifest: PromotionArtifactManifest): Promise<boolean> {
   if (manifest.status !== "created") return true;
@@ -529,10 +655,16 @@ async function recoverPromotionJournalsUnderTransaction(worldsRoot: string, cont
         name: entry.name,
         journalFile: null,
       };
+      // A verified marker skips repeated re-hashing: the journal was already
+      // completed or rolled back and neither it nor its inputs changed since.
+      if (await recoveryMarkerValid(journal, primaryRoot)) continue;
       if (phase === "applied") {
         const completed = await tryCompleteAppliedPromotion(dir.path, journal, primaryRoot, filesystemCanonicalPath, recoveryBinding);
         if (completed) {
           console.warn(`[worldline] promotion journal completed with artifacts retained: ${dir.path}`);
+          await markPromotionJournalRecovered(recoveryBinding, journal, primaryRoot, "done").catch((error) => {
+            console.warn(`[worldline] promotion recovery marker retained: ${error instanceof Error ? error.message : String(error)}`);
+          });
           continue;
         }
       }
@@ -551,6 +683,9 @@ async function recoverPromotionJournalsUnderTransaction(worldsRoot: string, cont
         // provenance to destroy a live agent session, and Node cannot make
         // the final remove sink descriptor-relative.
         console.warn(`[worldline] promotion journal recovered with artifacts retained: ${dir.path}`);
+        await markPromotionJournalRecovered(recoveryBinding, journal, primaryRoot, "rolled-back").catch((error) => {
+          console.warn(`[worldline] promotion recovery marker retained: ${error instanceof Error ? error.message : String(error)}`);
+        });
       } else {
         console.warn(`[worldline] promotion recovery conflict: ${dir.path} — kept every version`);
       }
