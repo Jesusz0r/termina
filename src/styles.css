@@ -3056,6 +3056,44 @@ body {
   margin-left: auto;
 }
 
+.settings-load-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 20px 20px;
+  padding: 10px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--yellow);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-load-retry,
+.toast-action {
+  flex: 0 0 auto;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.settings-load-retry:hover,
+.settings-load-retry:focus-visible,
+.toast-action:hover,
+.toast-action:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+  outline: none;
+}
+
 /* ------------------------------------------------------------------ modals */
 
 #modal-root {
@@ -3332,6 +3370,9 @@ body {
 }
 
 .toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
