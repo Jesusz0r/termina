@@ -1836,7 +1836,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       usage: null,
       ttftMs: 1,
       turnMs: 2,
-      revisions: 0,
+      revisions: { count: 0, kinds: [] },
       wasteTokens: 0,
       wasteCause: null,
       cache: null,
@@ -2282,10 +2282,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "DEFAULT_MODELS opencode-zen is gpt-5.6 sol/luna",
       DEFAULT_MODELS["opencode-zen"].main === "gpt-5.6-sol" && DEFAULT_MODELS["opencode-zen"].summary === "gpt-5.6-luna",
     );
-    check("parseModelRef grok is xai", parseModelRef("grok-4.6").provider === "xai" && parseModelRef("grok-4.6").model === "grok-4.6");
+    check("parseModelRef grok is xai", parseModelRef("grok-4.6")?.provider === "xai" && parseModelRef("grok-4.6")?.model === "grok-4.6");
     check(
       "parseModelRef openai-codex prefix",
-      parseModelRef("openai-codex/gpt-5.6-sol").provider === "openai-codex" && parseModelRef("openai-codex/gpt-5.6-sol").model === "gpt-5.6-sol",
+      parseModelRef("openai-codex/gpt-5.6-sol")?.provider === "openai-codex" && parseModelRef("openai-codex/gpt-5.6-sol")?.model === "gpt-5.6-sol",
     );
     check("parseModelRef provider override", parseModelRef("gpt-5", "openai-codex").provider === "openai-codex");
     check("parseModelRef gpt defaults to openai", parseModelRef("gpt-5")?.provider === "openai");
