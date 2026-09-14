@@ -60,6 +60,10 @@ for await (const line of input) {
     });
     continue;
   }
+  if (request.op === "malformed-line") {
+    process.stdout.write("not-json{\n");
+    continue;
+  }
   if (request.op === "stderr-flood") {
     stderrFlood(marker, () => {
       process.stdout.write(`${JSON.stringify({ requestId: request.requestId, ok: true, state: { value: "drained" } })}\n`);
