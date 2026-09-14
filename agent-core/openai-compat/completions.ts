@@ -8,6 +8,12 @@ import type { CompletionMessage, CompletionsOpts, KernelMessage, ToolDef } from 
 import { gemini25Model } from "../models/families/google.ts";
 
 
+/** Fail closed: never invent a tool result for an unmatched call. */
+export function unmatchedToolCallError(callId: string): Error {
+  return new Error(`provider protocol error: unmatched tool call: ${callId}`);
+}
+
+
 export function imageDataUrl(b: Record<string, unknown>): string | null {
   const source = b.source;
   if (!source || typeof source !== "object") return null;
@@ -49,14 +55,8 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
   const openToolCalls: string[] = [];
 
   const flushOpenToolCalls = (): void => {
-    while (openToolCalls.length > 0) {
-      const toolCallId = openToolCalls.shift()!;
-      out.push({
-        role: "tool",
-        tool_call_id: toolCallId,
-        content: "(interrupted)",
-      });
-    }
+    const toolCallId = openToolCalls[0];
+    if (toolCallId) throw unmatchedToolCallError(toolCallId);
   };
 
   for (const m of messages) {
@@ -71,6 +71,11 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
       const toolCalls: NonNullable<CompletionMessage["tool_calls"]> = [];
       for (const b of m.content) {
         if (b.type === "text") text += blockText(b);
+        // Anthropic server tools are not OpenAI function_calls; fail closed.
+        // https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools
+        if (b.type === "server_tool_use") {
+          throw unmatchedToolCallError(String(b.id ?? b.type));
+        }
         if (b.type === "tool_use") {
           const id = String(b.id ?? "");
           if (!id) continue;

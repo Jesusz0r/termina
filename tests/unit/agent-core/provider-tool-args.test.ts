@@ -378,7 +378,10 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
 
       const turn2 = compat.toCompletionsMessages("", [
         { role: "assistant", content: turn1.blocks },
-        { role: "user", content: [{ type: "tool_result", tool_use_id: "call-1", output: "contents" }] },
+        { role: "user", content: [
+          { type: "tool_result", tool_use_id: "call-1", output: "contents" },
+          { type: "tool_result", tool_use_id: "call-2", output: "ok" },
+        ] },
       ]);
       const replayed = turn2.find((message: any) => message.role === "assistant")?.tool_calls;
       expect(replayed?.[0]?.extra_content).toEqual({ google: { thought_signature: "sig-1" } });
