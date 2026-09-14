@@ -504,6 +504,9 @@ describe("Wave 1 quarantine launch-scope regressions", () => {
       expect(marker.state).toBe("quarantined");
       expect(marker.producerPid).toBe(process.pid);
       expect("bootId" in marker).toBe(true);
+      // Drain the writer's bounded retry timer before cleanup: every retry
+      // re-creates the events dir, which races recursive removal (ENOTEMPTY).
+      await waitFor(() => writer.isWriteStopped(), 15000, "writer did not stop after bounded retries");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
