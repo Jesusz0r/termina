@@ -6,6 +6,7 @@
  * through a narrow host. Split from components/explorer.ts (issue #38)
  * with no behavior change.
  */
+import { canonicalizePath } from "../../shared/canonical-path";
 import { findTypeAheadIndex, isTypeAheadKey, parentRowRel } from "../explorer-file";
 import type { ExplorerEntry } from "../../shared/types";
 import type { DirView } from "./explorer-rows";
@@ -202,7 +203,7 @@ export class ExplorerKeyboard {
         e.preventDefault();
         this.resetTypeAhead();
         if (entry.type === "dir") {
-          const view = this.host.dirViews.get(entry.path);
+          const view = this.host.dirViews.get(canonicalizePath(entry.path));
           if (view && !view.state.expanded) void this.host.setDirExpanded(entry.path, true);
           // Already open: step into the first child, if it is mounted.
           else {
@@ -218,7 +219,7 @@ export class ExplorerKeyboard {
         if (!entry) return;
         e.preventDefault();
         this.resetTypeAhead();
-        const view = entry.type === "dir" ? this.host.dirViews.get(entry.path) : undefined;
+        const view = entry.type === "dir" ? this.host.dirViews.get(canonicalizePath(entry.path)) : undefined;
         if (view?.state.expanded) {
           void this.host.setDirExpanded(entry.path, false);
           return;
@@ -235,7 +236,7 @@ export class ExplorerKeyboard {
         e.preventDefault();
         this.resetTypeAhead();
         if (entry.type === "dir") {
-          const view = this.host.dirViews.get(entry.path);
+          const view = this.host.dirViews.get(canonicalizePath(entry.path));
           void this.host.setDirExpanded(entry.path, !(view?.state.expanded ?? false));
         } else {
           // Same as double-click: open pinned, not as a preview.

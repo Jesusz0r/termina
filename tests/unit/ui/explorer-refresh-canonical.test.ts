@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
 const refresh = readFileSync(new URL("../../../src/components/explorer-refresh.ts", import.meta.url), "utf8");
+const explorer = readFileSync(new URL("../../../src/components/explorer.ts", import.meta.url), "utf8");
+const keyboard = readFileSync(new URL("../../../src/components/explorer-keyboard.ts", import.meta.url), "utf8");
 
 /** Body of a class method, including nested blocks. */
 function methodBody(source: string, signature: string): string {
@@ -37,5 +39,15 @@ describe("explorer refresh keys by canonicalizePath (refs #273)", () => {
     expect(refresh).not.toContain("/var vs");
     expect(refresh).not.toContain("/private/var");
     expect(methodBody(refresh, "pruneCollapsedDescendants(absPath: string): void")).toContain("canonicalizePath(absPath)");
+  });
+
+  it("keys explorer dirViews by canonicalizePath at set/get", () => {
+    expect(explorer).toContain('from "../../shared/canonical-path"');
+    expect(explorer).toContain("this.dirViews.set(canonicalizePath(entry.path)");
+    expect(explorer).toContain("this.dirViews.get(canonicalizePath(absPath))");
+    expect(explorer).toContain("this.dirViews.get(canonicalizePath(child.path))");
+    expect(explorer).not.toContain("this.dirViews.set(entry.path");
+    expect(keyboard).toContain("this.host.dirViews.get(canonicalizePath(entry.path))");
+    expect(keyboard).not.toContain("this.host.dirViews.get(entry.path)");
   });
 });

@@ -30,20 +30,34 @@ describe("editor keys tabs by canonicalizePath (refs #273)", () => {
 
   it("canonicalizes the opened path before the tab exists, not after the read", () => {
     const body = openFile();
-    expect(body).toContain("const key = canonicalizePath(path)");
-    expect(body.indexOf("const key = canonicalizePath(path)")).toBeLessThan(body.indexOf("this.tabs.get(key)"));
+    expect(body).toContain("let key = canonicalizePath(path)");
+    expect(body.indexOf("let key = canonicalizePath(path)")).toBeLessThan(body.indexOf("this.tabs.get(key)"));
     expect(body).toContain("acquireSharedFileModel(key, owner)");
-    expect(body).toContain("window.termina.openFile(key, owner)");
+    // Original path: main realpaths it; a rewritten /private/tmp key is not required.
+    expect(body).toContain("window.termina.openFile(path, owner)");
   });
 
-  it("has no alias table or learn-after-open path", () => {
+  it("retargets to res.path above the version check so a lost-race tab still hears watcher pushes (refs #209)", () => {
+    const body = openFile();
+    const retarget = body.indexOf("this.retargetTab(");
+    const versionCheck = body.indexOf("model.getAlternativeVersionId() === initialVersionId");
+    expect(retarget).toBeGreaterThanOrEqual(0);
+    expect(versionCheck).toBeGreaterThanOrEqual(0);
+    expect(retarget).toBeLessThan(versionCheck);
+    expect(body).toContain("typeof res.path === \"string\" && res.path");
+    expect(body).toContain("canonicalizePath(res.path)");
+    expect(body).toContain("if (resolved !== key) key = this.retargetTab(key, resolved)");
+    expect(body).toContain("lost a race with a user edit");
+  });
+
+  it("has no alias table", () => {
     expect(editor).not.toContain("canonicalKeys");
-    expect(editor).not.toContain("canonicalKeys.set");
-    expect(openFile()).not.toContain("res.path !== key");
+    expect(methodBody(editor, "private retargetTab(from: string, to: string): string")).toContain("this.tabs.set(to, tab)");
   });
 
   it("routes watcher and deletion pushes through canonicalizePath", () => {
     expect(methodBody(editor, "private resolveKey(path: string): string | null")).toContain("canonicalizePath(path)");
+    expect(methodBody(editor, "private resolveKey(path: string): string | null")).toContain("this.tabs.has(key)");
     for (const signature of [
       "updateContent(path: string, content: string, changedLines?: number[]): void",
       "closeIfOpen(path: string): void",
