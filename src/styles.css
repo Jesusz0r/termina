@@ -968,6 +968,14 @@ body {
   cursor: pointer;
 }
 
+/* Clear sits beside Accept all; a hairline + inset keeps them from
+ * reading as one control. Tokens only — no new chrome color. */
+#btn-clear-modified {
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
 #btn-clear-modified:hover,
 #btn-accept-all:hover,
 #btn-clear-modified:focus-visible,
@@ -2592,6 +2600,13 @@ body {
 #statusbar .muted {
   color: var(--on-accent);
   opacity: 0.72;
+}
+
+/* Light --on-accent at 0.72 composites to ~3.44:1 on --accent (#0969da).
+ * Opaque white is ~5.19:1 (WCAG AA). Dark / HC / atom already pass. */
+html[data-theme="light"] #statusbar .muted {
+  color: #ffffff;
+  opacity: 1;
 }
 
 #statusbar #status-cwd {
