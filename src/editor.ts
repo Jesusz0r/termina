@@ -331,10 +331,11 @@ export class EditorManager {
     const res = await window.termina.openFile(path, owner);
     if (res.ok) {
       const current = this.tabs.get(key);
+      // Learn the canonical alias whenever the tab still owns this model —
+      // above the version check, so the lost-race conflict branch learns it
+      // too and the tab keeps hearing canonical-path watcher pushes.
+      if (current?.model === model && res.path !== key) this.canonicalKeys.set(res.path, key);
       if (current?.model === model && model.getAlternativeVersionId() === initialVersionId) {
-        // Learn the canonical alias so watcher pushes under the canonical
-        // path find this tab.
-        if (res.path !== key) this.canonicalKeys.set(res.path, key);
         model.setValue(res.content);
         tab.savedVersionId = model.getAlternativeVersionId();
         // Paint the last watcher transition even though this open has no
