@@ -786,8 +786,8 @@ export class WorldlineManager {
         action: "structured",
         content: [{ type: "text", text: challengedPrompt(payload.text, profile) }, ...payload.images],
       });
-      await this.launchCandidate(ncmp, nA, [], wHead.commit);
-      await this.launchCandidate(ncmp, nB, cmp.model && cmp.model.includes("/") ? ["--model", cmp.model] : [], ncmp.baseStateId);
+      await this.launchCandidate(ncmp, nA, wHead.commit);
+      await this.launchCandidate(ncmp, nB, ncmp.baseStateId);
       ncmp.phase = "running";
       ncmp.readyTimer = setTimeout(() => {
         if (ncmp.phase !== "running") return;
@@ -1530,16 +1530,12 @@ export class WorldlineManager {
   /** Launch both candidate agent terminals inside their sandboxes. */
   private async launchCandidates(cmp: ComparisonState, run: RunRecord): Promise<void> {
     for (const cand of cmp.candidates.values()) {
-      // Candidate B replays with the captured model and thinking level.
-      // A bare model id is ambiguous across providers; pass only the
-      // provider-qualified form.
-      const extra: string[] = [];
-      if (cand.label === "B" && run.model && run.model.includes("/")) extra.push("--model", run.model);
-      if (cand.label === "B" && run.thinkingLevel) extra.push("--thinking", run.thinkingLevel);
+      // Both candidates inherit the captured model and thinking level
+      // through the candidate env; B additionally replays the task.
       // The moment chain of each candidate seeds from its own head: A is
       // the settled state, B is the run start.
       const head = cand.label === "A" ? run.settledStateId : run.startStateId;
-      await this.launchCandidate(cmp, cand, extra, head);
+      await this.launchCandidate(cmp, cand, head);
     }
   }
 
@@ -1584,7 +1580,6 @@ export class WorldlineManager {
   private async candidateLaunch(
     cmp: ComparisonState,
     cand: CandidateState,
-    _extraArgs: string[],
   ): Promise<{ cmd: string; args: string[]; env: Record<string, string | undefined> }> {
     await refreshComparisonBindings(cmp);
     // A moment comparison has a single candidate: no sibling to deny (the
@@ -1642,6 +1637,9 @@ export class WorldlineManager {
       ...(model && cut > 0
         ? { TERMINA_CORE_PROVIDER: model.slice(0, cut), TERMINA_CORE_MODEL: model.slice(cut + 1) }
         : {}),
+      // Candidates replay the recorded effort, like primary spawns. There are
+      // no --model/--thinking CLI flags; the env is the contract.
+      ...(cmp.thinkingLevel ? { TERMINA_CORE_EFFORT: cmp.thinkingLevel } : {}),
     };
     const launch = candidateSandboxLaunch(cand.profilePath, [
       this.deps.electronExecPath,
@@ -2725,13 +2723,11 @@ export class WorldlineManager {
         await this.copyCoreResources(cmp);
       }
       this.ensureComparisonLive(cmp);
-      // A moment candidate starts with no prompt: the user continues it.
-      // Replay the captured model and thinking level of that moment.
+      // A moment candidate starts with no prompt: the user continues it. It
+      // inherits the captured model and thinking level of that moment
+      // through the candidate env.
       await this.writeControl(cand, { opId: randomUUID(), action: "none" });
-      const extra: string[] = [];
-      if (opts.model && opts.model.includes("/")) extra.push("--model", opts.model);
-      if (opts.thinkingLevel) extra.push("--thinking", opts.thinkingLevel);
-      await this.launchCandidate(cmp, cand, extra, opts.stateId);
+      await this.launchCandidate(cmp, cand, opts.stateId);
       cmp.phase = "running";
       cmp.readyTimer = setTimeout(() => {
         if (cmp.phase !== "running") return;
@@ -2749,7 +2745,7 @@ export class WorldlineManager {
   }
 
   /** Launch one candidate inside its sandbox (A or a moment candidate). */
-  private async launchCandidate(cmp: ComparisonState, cand: CandidateState, extraArgs: string[], headStateId: string | null): Promise<void> {
+  private async launchCandidate(cmp: ComparisonState, cand: CandidateState, headStateId: string | null): Promise<void> {
     const attempt: CandidateLaunchAttempt = {
       comparisonId: cmp.id,
       label: cand.label,
@@ -2775,7 +2771,7 @@ export class WorldlineManager {
 
     const operation = (async (): Promise<void> => {
       this.ensureCandidateLaunchLive(cmp, cand, attempt);
-      const { cmd, args, env } = await this.candidateLaunch(cmp, cand, extraArgs);
+      const { cmd, args, env } = await this.candidateLaunch(cmp, cand);
       this.ensureCandidateLaunchLive(cmp, cand, attempt);
       cand.headStateId = headStateId ?? cand.headStateId ?? cmp.baseStateId;
       const workspaceId = this.deps.createCandidateWorkspace(cand.dir, cand.headStateId, cmp.id);
@@ -3207,7 +3203,7 @@ export class WorldlineManager {
     let launchedPid: number | null = null;
     let launchedLstart: string | null = null;
     try {
-      const { cmd, args, env } = await this.candidateLaunch(cmp, cand, []);
+      const { cmd, args, env } = await this.candidateLaunch(cmp, cand);
       // A reopen gets a new control operation. Matching this operation is the
       // durable identity boundary that excludes a stale/replayed ready line
       // from the previous candidate process.
