@@ -3,8 +3,8 @@ import { openaiEffortLevelMap } from "./families/openai.ts";
 import type { ProviderId, ProviderProtocol } from "../auth.ts";
 import type { ModelInfo } from "../models.ts";
 import { modelLeaf } from "./families/identity.ts";
-import { claudeThinkingApi, claudeEffortLevelMap } from "./families/anthropic.ts";
-import { gemini25Model, gemini3Model, geminiEffortLevelMap } from "./families/google.ts";
+import { claudeThinkingApi, claudeEffortLevelMap, opus45ComposesEffort } from "./families/anthropic.ts";
+import { gemini25Model, gemini3Model, geminiEffortLevelMap, modelLooksGemini } from "./families/google.ts";
 import { glmReasoningFamily, relayCompletionsFamily } from "./families/relay.ts";
 
 export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -65,7 +65,10 @@ export function usesModelEffort(provider: ProviderId, model: string, protocol: P
     return true;
   }
   if (usesRelayCompletionsEffort(provider, model, protocol)) return true;
-  return glmReasoningFamily(model);
+  // GLM effort is only sent on the Responses/Completions wire shapes; on
+  // Messages the value is dropped, so the level must not be offered there.
+  if (!glmReasoningFamily(model)) return false;
+  return protocol === "openai-responses" || protocol === "openai-codex-responses" || protocol === "openai-completions";
 }
 
 /**
@@ -86,6 +89,12 @@ function effortLevelMap(provider: ProviderId, model: string, protocol: ProviderP
 
   if (claudeThinkingApi(model) === "adaptive") {
     return claudeEffortLevelMap(model);
+  }
+
+  if (opus45ComposesEffort(model)) {
+    // Minimal has no documented effort wire value, so it rides low like the
+    // adaptive map; the level list itself is unchanged.
+    return { minimal: "low" };
   }
 
   if (glmReasoningFamily(model)) {
@@ -191,7 +200,10 @@ export function adaptiveEffortFor(
   effort: EffortLevel,
   protocol: ProviderProtocol,
 ): ReasoningEffort | undefined {
-  if (!usesAnthropicThinking(provider, model, protocol) || claudeThinkingApi(model) !== "adaptive") return undefined;
+  if (!usesAnthropicThinking(provider, model, protocol)) return undefined;
+  // Opus 4.5 composes output effort with budget thinking; every other
+  // budget model takes depth from budget_tokens alone.
+  if (claudeThinkingApi(model) !== "adaptive" && !opus45ComposesEffort(model)) return undefined;
   const actual = clampEffortLevel(provider, model, effort, protocol);
   if (actual === "off") return undefined;
   const mapped = effortLevelMap(provider, model, protocol)[actual];
@@ -215,12 +227,6 @@ export function catalogOutputLimit(entry: ModelInfo | undefined): number | null 
     return null;
   }
   return Math.floor(entry.outputLimit);
-}
-
-/** Catalog-reported wire reasoning levels, or null when the catalog is silent. */
-export function catalogReasoningLevels(entry: ModelInfo | undefined): string[] | null {
-  if (!entry || !Array.isArray(entry.reasoningLevels) || entry.reasoningLevels.length === 0) return null;
-  return [...entry.reasoningLevels];
 }
 
 /** Catalog-reported tool support, or null when the catalog is silent. */
@@ -292,8 +298,9 @@ export function defaultContextWindow(provider: ProviderId, model: string): numbe
   const leaf = modelLeaf(model);
   if (id.includes("haiku")) return 200_000;
   if (provider === "xai" || leaf.startsWith("grok")) return 500_000;
-  // Gemini's documented input window is 2^20, not a round 1M.
-  if (provider === "google") return 1_048_576;
+  // Gemini's documented input window is 2^20, not a round 1M. Non-Gemini
+  // ids on the Google provider (Gemma, image tiers) take the floor.
+  if (provider === "google") return modelLooksGemini(model) ? 1_048_576 : UNKNOWN_CONTEXT_FLOOR;
   if (provider === "anthropic") return 1_000_000;
   // A named OpenAI family carries a documented window; anything else — every
   // relay id the catalog did not describe — takes the conservative floor.

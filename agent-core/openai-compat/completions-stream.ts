@@ -52,7 +52,7 @@ export function completionResultFromEvents(
     const choices = ev.choices;
     if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== "object") continue;
     const choice = choices[0] as { delta?: Record<string, unknown>; finish_reason?: unknown };
-    if (typeof choice.finish_reason === "string") stopReason = choice.finish_reason;
+    if (typeof choice.finish_reason === "string" && choice.finish_reason) stopReason = choice.finish_reason;
     const delta = choice.delta ?? {};
     const live = completionLiveDelta(ev);
     if (live?.text) {

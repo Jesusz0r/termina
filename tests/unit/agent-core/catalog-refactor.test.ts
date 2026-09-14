@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, filterCatalogModels, formatCatalogLines, parseModelsPayload, type CatalogModel } from "../../../agent-core/models.ts";
-import { catalogOutputLimit, catalogReasoningLevels, catalogSupportsTools } from "../../../agent-core/models/capabilities.ts";
+import { catalogOutputLimit, catalogSupportsTools } from "../../../agent-core/models/capabilities.ts";
 
 describe("catalog provider policy composition", () => {
   it("keeps Copilot metadata scoped to Copilot and preserves top-level context precedence", () => {
@@ -93,8 +93,6 @@ describe("catalog provider policy composition", () => {
     expect(catalogOutputLimit(undefined)).toBeNull();
     expect(catalogOutputLimit({ id: "m" })).toBeNull();
     expect(catalogOutputLimit({ id: "m", outputLimit: 64000 })).toBe(64000);
-    expect(catalogReasoningLevels(undefined)).toBeNull();
-    expect(catalogReasoningLevels({ id: "m", reasoningLevels: ["low", "medium"] })).toEqual(["low", "medium"]);
     expect(catalogSupportsTools(undefined)).toBeNull();
     expect(catalogSupportsTools({ id: "m" })).toBeNull();
     expect(catalogSupportsTools({ id: "m", supportedParameters: ["tools", "temperature"] })).toBe(true);

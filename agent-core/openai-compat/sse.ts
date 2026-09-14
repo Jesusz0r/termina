@@ -104,10 +104,9 @@ function takeSseEvents(
   }
   if (flush) {
     const tail = buffer.trim();
-    if (tail) {
-      if (!tail.startsWith("data:")) throw new Error("provider SSE ended with a nonempty incomplete EOF tail");
-      pushSseLine(tail, state, filter);
-    }
+    // Ignore a non-data tail at EOF exactly like the line loop does: a
+    // truncated final line is not an event.
+    if (tail && tail.startsWith("data:")) pushSseLine(tail, state, filter);
     return { buffer: "", bytes: 0 };
   }
   return { buffer, bytes: Math.max(0, bufferBytes) };

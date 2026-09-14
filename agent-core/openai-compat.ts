@@ -13,7 +13,6 @@ export { completionsBody, toCompletionsMessages, toCompletionsTools } from "./op
 export { isTruncatedStopReason, responsesBody, stripResponsesBreakpoints, toResponsesInput, toResponsesTools } from "./openai-compat/responses.ts";
 export { usageFromOpenAI } from "./openai-compat/usage.ts";
 export { completionLiveDelta, completionResultFromEvents, textFromCompletionPayload } from "./openai-compat/completions-stream.ts";
-export { responsesLiveDelta, responsesResultFromEvents, textFromResponsesPayload } from "./openai-compat/responses-stream.ts";
+export { responsesLiveDelta, responsesResultFromEvents } from "./openai-compat/responses-stream.ts";
 export { MAX_SSE_BUFFER_BYTES, MAX_SSE_EVENT_COUNT, MAX_SSE_PAYLOAD_BYTES, readSseJson } from "./openai-compat/sse.ts";
-export { GOOGLE_CACHED_CONTENT_MAX_BYTES, googleCachedContentCreateRequest, googleCachedContentDeleteRequest, googleCachedContentGetRequest, googleCachedContentUpdateRequest, googleGenerateBody, googleLiveDelta, googleResultFromEvents, isGoogleCacheTtl, isGoogleCachedContentName, parseGoogleCachedContent, parseGoogleCachedContentDeleteResponse, textFromGooglePayload } from "./openai-compat/google.ts";
-export type { GoogleCachedContent, GoogleCachedContentCreateInput, GoogleCachedContentRequest } from "./openai-compat/google.ts";
+export { googleGenerateBody, googleLiveDelta, googleResultFromEvents, isGoogleCachedContentName } from "./openai-compat/google.ts";

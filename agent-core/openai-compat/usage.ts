@@ -73,9 +73,16 @@ const USD_TICKS_PER_USD = 10_000_000_000;
 /** Exact billed cost from an xAI-style usage payload; null when unreported. */
 function reportedCostUsd(u: Record<string, unknown>): number | null {
   const ticks = u.cost_in_usd_ticks;
-  if (typeof ticks !== "number" || !Number.isFinite(ticks) || ticks < 0) return null;
-  const usd = ticks / USD_TICKS_PER_USD;
-  return Number.isFinite(usd) && usd >= 0 ? usd : null;
+  if (typeof ticks === "number" && Number.isFinite(ticks) && ticks >= 0) {
+    const usd = ticks / USD_TICKS_PER_USD;
+    if (Number.isFinite(usd) && usd >= 0) return usd;
+  }
+  // OpenRouter reports the billed total directly as usage.cost (USD) on both
+  // streaming (final chunk) and non-streaming responses.
+  // https://openrouter.ai/docs/cookbook/administration/usage-accounting
+  const cost = u.cost;
+  if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) return cost;
+  return null;
 }
 
 
