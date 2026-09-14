@@ -5,7 +5,7 @@
  * Split from agent-core/openai-compat.ts (issue #38).
  */
 import type { CompletionMessage, CompletionsOpts, KernelMessage, ToolDef } from "./types.ts";
-import { gemini25Model } from "../models/families/google.ts";
+import { gemini25Model, modelLooksGemini } from "../models/families/google.ts";
 
 
 /** Fail closed: never invent a tool result for an unmatched call. */
@@ -127,17 +127,12 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
 }
 
 
-export function isGeminiModel(model: string): boolean {
-  return /(?:^|\/)gemini(?:[-/:]|$)/i.test(model.trim());
-}
-
-
 export function applyCacheOpts(body: Record<string, unknown>, opts?: CompletionsOpts, model = ""): void {
   // Gemini's OpenAI-compatible endpoint does not document prompt_cache_key.
   // Callers may still use this generic serializer for another route, so use
   // both the explicit provider and the model route hint supplied by the
   // caller rather than guessing from arbitrary provider metadata.
-  const geminiRoute = opts?.provider === "google" || isGeminiModel(model);
+  const geminiRoute = opts?.provider === "google" || modelLooksGemini(model);
   const zenRoute = opts?.provider === "opencode-zen";
   if (opts?.cacheKey && !geminiRoute && !zenRoute) body.prompt_cache_key = opts.cacheKey;
   // OpenRouter documents session_id for sticky routing. Do not leak that

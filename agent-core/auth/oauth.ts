@@ -125,7 +125,7 @@ type RefreshResult = { ok: true } | { ok: false; error: string };
 async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
   try {
     const got = readAuth();
-    if (!got.ok) return { ok: false, error: "auth expired — run /login" };
+    if (!got.ok) return { ok: false, error: "auth store unreadable — run /login" };
     const entry = got.data[providerId];
     if (!isRecord(entry) || entry.type !== "oauth" || typeof entry.refresh !== "string") {
       return { ok: false, error: "auth expired — run /login" };
@@ -172,12 +172,12 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
     } else {
       return { ok: true };
     }
-    if (!parsed.ok) return { ok: false, error: "auth expired — run /login" };
+    if (!parsed.ok) return { ok: false, error: `auth refresh returned an invalid token response: ${parsed.error}` };
     const stored = persistOauth(providerId, parsed, extra);
-    if (!stored.ok) return { ok: false, error: "auth expired — run /login" };
+    if (!stored.ok) return { ok: false, error: `auth refresh persist failed: ${stored.error}` };
     return { ok: true };
   } catch (error) {
-    return { ok: false, error: authHttpError(error) ?? "auth expired — run /login" };
+    return { ok: false, error: authHttpError(error) ?? `auth refresh failed: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
 
@@ -196,7 +196,10 @@ function waitForRefresh(flight: Promise<RefreshResult>, signal?: AbortSignal): P
     const onAbort = () => finish({ ok: false, error: AUTH_REQUEST_CANCELLED });
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
-    void flight.then(finish, () => finish({ ok: false, error: "auth expired — run /login" }));
+    void flight.then(finish, (error) => finish({
+      ok: false,
+      error: `auth refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+    }));
   });
 }
 

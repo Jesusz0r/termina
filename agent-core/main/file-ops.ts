@@ -21,6 +21,7 @@ import { IGNORED_SEGMENTS, parseGitignore, type GitignoreRules } from "../../sha
 import {
   BoundedTextAccumulator,
   logicalToolText,
+  utf8BytePrefix,
   type CompletionState,
   type ToolTextResult,
 } from "../tool-output.ts";
@@ -134,30 +135,7 @@ function lastNewlineIndex(buf: Buffer): number {
 
 /** Number of source bytes ending at a complete UTF-8 code-point boundary. */
 function completeUtf8Boundary(value: Uint8Array): number {
-  let cursor = 0;
-  while (cursor < value.byteLength) {
-    const first = value[cursor]!;
-    let length = 0;
-    if (first <= 0x7f) length = 1;
-    else if (first >= 0xc2 && first <= 0xdf) length = 2;
-    else if (first >= 0xe0 && first <= 0xef) length = 3;
-    else if (first >= 0xf0 && first <= 0xf4) length = 4;
-    else break;
-    if (cursor + length > value.byteLength) break;
-    const second = value[cursor + 1];
-    if (length >= 2) {
-      if (second === undefined || (second & 0xc0) !== 0x80) break;
-      if (first === 0xe0 && second < 0xa0) break;
-      if (first === 0xed && second >= 0xa0) break;
-      if (first === 0xf0 && second < 0x90) break;
-      if (first === 0xf4 && second >= 0x90) break;
-      for (let i = 2; i < length; i += 1) {
-        if ((value[cursor + i]! & 0xc0) !== 0x80) return cursor;
-      }
-    }
-    cursor += length;
-  }
-  return cursor;
+  return utf8BytePrefix(value, value.byteLength).byteLength;
 }
 
 function scanTimedOut(started: number): boolean {
@@ -430,47 +408,6 @@ function renderNumberedView(args: {
   });
 }
 
-function renderPlainView(args: {
-  text: string;
-  from: number;
-  until: number;
-  sourceBoundary: number;
-  decodeTruncated: boolean;
-  repro: string;
-}): ToolTextResult {
-  const rawComplete = args.from + args.sourceBoundary >= args.until;
-  const full = emitPlainPage(args.text, READ_CAP_BYTES);
-  if (!args.decodeTruncated && rawComplete && full.emittedBytes >= args.sourceBoundary) {
-    return logicalToolText(full.body, {
-      maxBytes: READ_CAP_BYTES,
-      state: "complete",
-      isError: false,
-      marker: null,
-      repro: args.repro,
-    });
-  }
-  const probeTruncated = `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${maxSameWidth(args.until)}]`;
-  const probeInvalid = `[invalid UTF-8 omitted — continue with read_file offset ${maxSameWidth(args.until)}]`;
-  const probeBytes = Math.max(Buffer.byteLength(probeTruncated, "utf8"), Buffer.byteLength(probeInvalid, "utf8"));
-  const bodyLimit = Math.max(1024, READ_CAP_BYTES - probeBytes - 1);
-  const page = emitPlainPage(args.text, bodyLimit);
-  let nextOffset = args.from + Math.min(page.emittedBytes, args.sourceBoundary);
-  if (nextOffset <= args.from && args.until > args.from) nextOffset = args.from + 1;
-  const marker = nextOffset < args.until
-    ? `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset}]`
-    : `[invalid UTF-8 omitted — continue with read_file offset ${nextOffset}]`;
-  const unreadable = nextOffset >= args.until && args.decodeTruncated;
-  return logicalToolText(page.body, {
-    maxBytes: READ_CAP_BYTES,
-    state: unreadable ? "unreadable" : "complete",
-    isError: unreadable,
-    forceMarker: true,
-    marker,
-    continuation: marker,
-    repro: args.repro,
-  });
-}
-
 export function readTextView(
   abs: string,
   opts: { offset: number; startLine?: number; endLine?: number; pointerReserve?: number },
@@ -586,52 +523,6 @@ export function nestedAgentsPointer(cwd: string, fileAbs: string): string | null
     dir = parent;
   }
   return null;
-}
-
-export function readFileResult(abs: string, offset: number): ToolTextResult {
-  const repro = `read_file(${JSON.stringify(abs)})`;
-  const fail = (content: string): ToolTextResult => logicalToolText(content, {
-    maxBytes: READ_CAP_BYTES,
-    state: "failed",
-    isError: true,
-    repro,
-  });
-  let fd: number | undefined;
-  try {
-    const opened = openRegularFile(abs);
-    if ("error" in opened) return fail(opened.error);
-    fd = opened.fd;
-    const size = opened.size;
-    const head = Buffer.alloc(Math.min(4096, size));
-    if (head.length > 0) readSync(fd, head, 0, head.length, 0);
-    if (head.includes(0)) return fail("error: binary file");
-    if (offset >= size) return logicalToolText("", {
-      maxBytes: READ_CAP_BYTES,
-      state: "complete",
-      isError: false,
-      repro,
-    });
-    const want = Math.min(READ_CAP_BYTES, Math.max(0, size - offset));
-    const slice = Buffer.alloc(want);
-    if (want > 0) readSync(fd, slice, 0, want, offset);
-    const safe = new BoundedTextAccumulator({ maxBytes: READ_CAP_BYTES, direction: "head", marker: "" });
-    safe.push(slice);
-    const text = safe.finish();
-    const completeBytes = completeUtf8Boundary(slice);
-    const sourceBoundary = Math.min(text.retainedBytes, completeBytes);
-    return renderPlainView({
-      text: text.text,
-      from: offset,
-      until: size,
-      sourceBoundary,
-      decodeTruncated: text.truncated,
-      repro,
-    });
-  } catch (err) {
-    return fail(`error: ${(err as Error).message}`);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
 }
 
 export function readProjectFile(

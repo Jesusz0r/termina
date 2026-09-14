@@ -92,7 +92,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       formatNumberedText,
       listProjectDir,
       editMissDiagnostic,
-      readFileResult,
+      readTextView,
       expandFileTags,
     } = await import("../../../agent-core/main/file-ops.ts");
     const {
@@ -235,7 +235,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("offset unsafe integer errors", typeof parseOffset(Number.MAX_SAFE_INTEGER + 1) === "object");
     writeFileSync(join(root, "bin.dat"), Buffer.from([1, 0, 2, 3]));
     check("NUL in first 4 KB errors", readProjectFile(root, { path: "bin.dat" }).isError === true);
-    check("readFileResult does not require whole file API", !readFileResult(join(root, "ok.txt"), 0).isError);
+    check("readTextView does not require whole file API", !readTextView(join(root, "ok.txt"), { offset: 0 }).isError);
     check("formatNumberedText prefixes 1-based lines", formatNumberedText("a\nb\n", 1) === "     1|a\n     2|b");
     check("formatNumberedText strips CR", formatNumberedText("a\r\nb\r\n", 1) === "     1|a\n     2|b");
     check("read_file numbers lines", readProjectFile(root, { path: "ok.txt" }).content === "     1|hello");
@@ -1959,7 +1959,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       maskSecret,
       authBanner,
       resetAuthCache,
-      isOAuthToken,
       requestHeaders,
       extractAccountId,
       defaultLoginMode,
@@ -2011,11 +2010,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("browser open rejects a non-https URL", browserOpenArgs("http://example.com/auth", "win32") === null);
     check("browser open rejects a file URL", browserOpenArgs("file:///tmp/x", "darwin") === null);
     
-    check("pickHeaders oat uses bearer", pickHeaders("sk-ant-oat-secret").authorization === "Bearer sk-ant-oat-secret");
-    check("pickHeaders oat sets betas", Boolean(pickHeaders("sk-ant-oat-secret")["anthropic-beta"]));
+    check("pickHeaders unsourced oat uses x-api-key", pickHeaders("sk-ant-oat-secret")["x-api-key"] === "sk-ant-oat-secret");
+    check("pickHeaders unsourced oat has no bearer", pickHeaders("sk-ant-oat-secret").authorization === undefined);
+    check("pickHeaders oauth extra uses bearer", pickHeaders("sk-ant-oat-secret", { type: "oauth" }).authorization === "Bearer sk-ant-oat-secret");
+    check("pickHeaders oauth extra sets betas", Boolean(pickHeaders("sk-ant-oat-secret", { type: "oauth" })["anthropic-beta"]));
     check("pickHeaders api key uses x-api-key", pickHeaders("sk-ant-api-x")["x-api-key"] === "sk-ant-api-x");
     check("pickHeaders api key has no bearer", pickHeaders("sk-ant-api-x").authorization === undefined);
-    check("isOAuthToken sniffs oat", isOAuthToken("prefix-sk-ant-oat-zz") === true);
     
     check("needsRefresh past is true", needsRefresh(Date.now() - 1000) === true);
     check("needsRefresh future is false", needsRefresh(Date.now() + 60_000) === false);
@@ -2288,7 +2288,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       parseModelRef("openai-codex/gpt-5.6-sol").provider === "openai-codex" && parseModelRef("openai-codex/gpt-5.6-sol").model === "gpt-5.6-sol",
     );
     check("parseModelRef provider override", parseModelRef("gpt-5", "openai-codex").provider === "openai-codex");
-    check("parseModelRef gpt defaults to openai", parseModelRef("gpt-5").provider === "openai");
+    check("parseModelRef gpt defaults to openai", parseModelRef("gpt-5")?.provider === "openai");
+    check("parseModelRef unknown id fails closed", parseModelRef("mystery-model") === null);
     check("defaultLoginMode xai is device", defaultLoginMode("xai") === "device");
     check("defaultLoginMode openai is key", defaultLoginMode("openai") === "key");
     check("providerProtocol xai is responses", providerProtocol("xai") === "openai-responses");
@@ -3977,10 +3978,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     // With no catalog loaded, the static fallback still answers (offline path).
     check("context: fallback answers without a catalog", rw({ ...base, catalogContext: undefined }) === FALLBACK);
     check("context: fallback answers for a relay", rw({ ...base, provider: "opencode-go", model: "glm-5.1" }) === 128_000);
-    // Degenerate catalog values must not win.
-    check("context: tiny catalog value is ignored", rw({ ...base, catalogContext: 100 }) === FALLBACK);
+    // Garbage (0 / NaN) must not win; documented small windows must.
+    check("context: 4k catalog window is accepted", rw({ ...base, catalogContext: 4_000 }) === 4_000);
+    check("context: zero catalog value is ignored", rw({ ...base, catalogContext: 0 }) === FALLBACK);
     check("context: non-finite catalog value is ignored", rw({ ...base, catalogContext: Number.NaN }) === FALLBACK);
-    check("context: tiny env value is ignored", rw({ ...base, env: "10" }) === FALLBACK);
+    check("context: zero env value is ignored", rw({ ...base, env: "0" }) === FALLBACK);
 
     // The pricing and context provider mappings must NOT be the same function.
     // Copilot is billed as OpenAI but serves its own model list (claude, grok,

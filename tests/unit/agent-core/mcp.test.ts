@@ -186,6 +186,20 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
       expect(JSON.stringify(mcp.mergeClientTools(kernel, defs))).toBe(before);
     });
 
+    it("skips malformed MCP schemas and reports a diagnostic", () => {
+      const bad = tool({ server: "bad-server", original: "bad-tool", input_schema: { type: "array" } });
+      const good = tool({ server: "ok-server", original: "ok-tool" });
+      expect(mcp.normalizeInputSchema({ type: "array" })).toEqual({
+        ok: false,
+        error: "mcp schema type must be object, got array",
+      });
+      expect(mcp.normalizeInputSchema(null).ok).toBe(false);
+      const discovered = mcp.normalizeMcpDiscovery([bad, good]);
+      expect(discovered.tools.map((row) => row.original)).toEqual(["ok-tool"]);
+      expect(discovered.conflicts.some((note) => note.includes("mcp schema invalid") && note.includes("bad-tool"))).toBe(true);
+      expect(JSON.stringify(discovered.tools)).not.toContain("\"properties\":{}");
+    });
+
     it("snapshots tool records instead of retaining discovery objects", () => {
       const discovered = [tool({ server: "snapshot-server", original: "snapshot-tool" })];
       const selected = selectMcpTools(discovered);

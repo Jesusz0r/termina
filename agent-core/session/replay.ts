@@ -10,7 +10,7 @@ import { readSync } from "node:fs";
 import { combinedSegmentFingerprint, enforceSessionBundleLimit, fingerprintOpenSessionBundle, listCurrentSegments, openStableSessionBundle, recoverActiveSegment, validateOpenSegmentAccess } from "./bundles.ts";
 import { closeOpenSessionBundle } from "./descriptors.ts";
 import type { OpenSessionBundle, OpenSessionSegment } from "./descriptors.ts";
-import { MAX_SESSION_RECORD_BYTES, READ_CHUNK, RECEIPT_ID, UTF8_DECODER, YIELD_EVERY_BYTES, YIELD_EVERY_RECORDS, cancellation, cloneJson, formatStub, inspectEntry, integerAtLeast, parseSessionBundlePath, recoveryKey, sessionBlockBytes, sessionBlockHash, sessionBundleLimit, validateSessionReclaimReceipt, yieldToEventLoop } from "./primitives.ts";
+import { MAX_SESSION_RECORD_BYTES, READ_CHUNK, RECEIPT_ID, UTF8_DECODER, YIELD_EVERY_BYTES, YIELD_EVERY_RECORDS, cancellation, cloneJson, formatStub, inspectEntry, integerAtLeast, isSessionBudgetExceeded, parseSessionBundlePath, recoveryKey, sessionBlockBytes, sessionBlockHash, sessionBudgetExceeded, sessionBundleLimit, validateSessionReclaimReceipt, yieldToEventLoop } from "./primitives.ts";
 import type { ReplayContent, ReplayMessage, ReplayRecovery, ReplaySessionBundleOptions, ReplayState, SessionOperationOptions, SessionReclaimReceipt, SessionReclaimReceiptTarget, SessionResult } from "./primitives.ts";
 
 
@@ -363,12 +363,12 @@ async function readSegmentIntoState(
     if (cancelledBeforeChunk) return cancelledBeforeChunk;
     const remainingSegment = segment.size - position;
     if (remainingSegment < 0 || readBudget.remaining < 0) {
-      return { ok: false, error: "session bundle exceeds MAX_SESSION_BUNDLE_BYTES" };
+      return sessionBudgetExceeded();
     }
     let n = 0;
     if (remainingSegment > 0) {
       const length = Math.min(chunk.length, remainingSegment, readBudget.remaining);
-      if (length < 1) return { ok: false, error: "session bundle exceeds MAX_SESSION_BUNDLE_BYTES" };
+      if (length < 1) return sessionBudgetExceeded();
       n = readSync(segment.fd, chunk, 0, length, position);
       if (n < 1) return { ok: false, error: `session segment changed while reading: ${segment.name}` };
       position += n;
@@ -510,7 +510,7 @@ export async function replaySessionBundle(
     if (cancelledBeforeFingerprint) return cancelledBeforeFingerprint;
     const opened = openStableSessionBundle(parsed, recovered, limit.limit, opts);
     if (!opened.ok) {
-      if (opened.error.includes("MAX_SESSION_BUNDLE_BYTES")) return opened;
+      if (isSessionBudgetExceeded(opened)) return opened;
       lastRaceError = opened.error;
       if (attempt < 2) continue;
       return opened;
@@ -536,7 +536,7 @@ export async function replaySessionBundle(
         );
         if (!got.ok) {
           if (opts?.signal?.aborted) return got;
-          if (got.error.includes("MAX_SESSION_BUNDLE_BYTES")) return got;
+          if (isSessionBudgetExceeded(got)) return got;
           lastRaceError = got.error;
           if (attempt < 2) retry = true;
           else return got;
@@ -548,7 +548,7 @@ export async function replaySessionBundle(
       if (retry) continue;
       const parsedIdentity = combinedSegmentFingerprint(opened.bundle, segmentFingerprints);
       if (!parsedIdentity.ok) {
-        if (parsedIdentity.error.includes("MAX_SESSION_BUNDLE_BYTES")) return parsedIdentity;
+        if (isSessionBudgetExceeded(parsedIdentity)) return parsedIdentity;
         lastRaceError = parsedIdentity.error;
         if (attempt < 2) continue;
         return parsedIdentity;
@@ -561,7 +561,7 @@ export async function replaySessionBundle(
       // parser consumed them; the final pass closes that TOCTOU window.
       const afterIdentity = fingerprintOpenSessionBundle(opened.bundle, limit.limit);
       if (!afterIdentity.ok) {
-        if (afterIdentity.error.includes("MAX_SESSION_BUNDLE_BYTES")) return afterIdentity;
+        if (isSessionBudgetExceeded(afterIdentity)) return afterIdentity;
         lastRaceError = afterIdentity.error;
         if (attempt < 2) continue;
         return afterIdentity;

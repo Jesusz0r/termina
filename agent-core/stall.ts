@@ -14,6 +14,7 @@
  * import cycle.
  */
 import { hashCacheDiagnostic } from "./cache.ts";
+import { READ_TOOLS } from "./tool-dispatch.ts";
 
 /** Consecutive identical tool turns before recovery guidance (then a stop if ignored). */
 export const STALL_TURNS = 3;
@@ -206,8 +207,6 @@ function repeatedCycle(turns: readonly string[]): ToolLoopTracker["warnedCycle"]
   return null;
 }
 
-/** Same observational set as tool-dispatch READ_TOOLS; listed here to keep stall.ts acyclic. */
-const OBSERVATIONAL_TOOLS = new Set(["read_file", "grep", "glob", "fetch"]);
 
 function recoveryGuidance(calls: readonly ToolTurnCall[]): string {
   const prefix =
@@ -226,7 +225,7 @@ function recoveryGuidance(calls: readonly ToolTurnCall[]): string {
     return prefix +
       "For empty searches, broaden the pattern or scope, or list files before searching again." + suffix;
   }
-  if (calls.length > 0 && calls.every((call) => OBSERVATIONAL_TOOLS.has(call.name) && call.isError !== true)) {
+  if (calls.length > 0 && calls.every((call) => READ_TOOLS.has(call.name) && call.isError !== true)) {
     const tools = [...new Set(calls.map((call) => call.name))].join("/");
     return prefix +
       `You already have this ${tools} result. Do not call ${tools} again with the same arguments. ` +

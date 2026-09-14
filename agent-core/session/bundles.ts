@@ -12,7 +12,7 @@ import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, 
 import { basename, dirname, join, resolve } from "node:path";
 import { anchoredChildPath, closeOpenSessionBundle, fsyncDirectory, fsyncDirectoryAndParent, fsyncDirectoryDescriptor, noFollowFlags, openDirectoryAnchor, sameVersion, statIdentity, validateDirectoryAnchor, validateSegment } from "./descriptors.ts";
 import type { DirectoryAnchor, OpenSessionBundle, OpenSessionSegment, StableIdentity } from "./descriptors.ts";
-import { ACTIVE_NAME, CORE_SESSION_ID, CURRENT_DIR, MAX_EMPTY_SESSION_ADMISSION_BYTES, MAX_EMPTY_SESSION_ADMISSION_ENTRIES, MAX_EMPTY_SESSION_ADMISSION_WORK_BYTES, MAX_RETAINED_EMPTY_SESSION_BUNDLES, READ_CHUNK, RETAINED_STAGING_OWNER_BYTES, RETAINED_STAGING_OWNER_NAME, TEMP_BUNDLE_NAME, UNBOUND_CLEANUP_ERROR, errMsg, inspectEntry, isCoreSessionId, isSafeImageName, parseSessionBundlePath, partFileName, partNumber, sessionRotateStamp } from "./primitives.ts";
+import { ACTIVE_NAME, CORE_SESSION_ID, CURRENT_DIR, MAX_EMPTY_SESSION_ADMISSION_BYTES, MAX_EMPTY_SESSION_ADMISSION_ENTRIES, MAX_EMPTY_SESSION_ADMISSION_WORK_BYTES, MAX_RETAINED_EMPTY_SESSION_BUNDLES, READ_CHUNK, RETAINED_STAGING_OWNER_BYTES, RETAINED_STAGING_OWNER_NAME, TEMP_BUNDLE_NAME, UNBOUND_CLEANUP_ERROR, errMsg, inspectEntry, isCoreSessionId, isSafeImageName, parseSessionBundlePath, partFileName, partNumber, sessionBudgetExceeded, sessionRotateStamp } from "./primitives.ts";
 import type { SessionBundlePaths, SessionFailure, SessionOperationOptions, SessionResult, SessionTestHooks } from "./primitives.ts";
 
 
@@ -101,7 +101,7 @@ export function enforceSessionBundleLimit(listing: CurrentListing, limit: number
   const counted = currentListingBytes(listing);
   if (!counted.ok) return counted;
   if (counted.bytes > limit) {
-    return { ok: false, error: `session bundle exceeds MAX_SESSION_BUNDLE_BYTES (${counted.bytes} bytes)` };
+    return sessionBudgetExceeded(`session bundle exceeds MAX_SESSION_BUNDLE_BYTES (${counted.bytes} bytes)`);
   }
   return counted;
 }
@@ -196,9 +196,9 @@ export function openStableSessionBundle(
   options?: SessionOperationOptions,
 ): SessionResult<{ bundle: OpenSessionBundle }> {
   const bundle: OpenSessionBundle = { anchors: [], segments: [] };
-  const fail = (error: string): SessionFailure => {
+  const fail = (error: string | SessionFailure): SessionFailure => {
     closeOpenSessionBundle(bundle);
-    return { ok: false, error };
+    return typeof error === "string" ? { ok: false, error } : error;
   };
   for (const [path, label] of [
     [parsed.projectDir, "session project directory"],
@@ -231,7 +231,9 @@ export function openStableSessionBundle(
         throw new Error(`invalid session segment: ${basename(item.path)}`);
       }
       const size = Number(opened.size);
-      if (total > limit - size) throw new Error(`session bundle exceeds MAX_SESSION_BUNDLE_BYTES (${total + size} bytes)`);
+      if (total > limit - size) {
+        return fail(sessionBudgetExceeded(`session bundle exceeds MAX_SESSION_BUNDLE_BYTES (${total + size} bytes)`));
+      }
       const segment: OpenSessionSegment = {
         path: item.path,
         name: basename(item.path),
@@ -266,12 +268,12 @@ export function fingerprintOpenSessionBundle(bundle: OpenSessionBundle, limit: n
   for (const segment of bundle.segments) {
     const stableBefore = validateOpenSegmentAccess(bundle, segment);
     if (!stableBefore.ok) return stableBefore;
-    if (segment.size > remaining) return { ok: false, error: "session bundle exceeds MAX_SESSION_BUNDLE_BYTES" };
+    if (segment.size > remaining) return sessionBudgetExceeded();
     const hash = createHash("sha256");
     let position = 0;
     while (position < segment.size) {
       const length = Math.min(chunk.length, segment.size - position, remaining);
-      if (length < 1) return { ok: false, error: "session bundle exceeds MAX_SESSION_BUNDLE_BYTES" };
+      if (length < 1) return sessionBudgetExceeded();
       const n = readSync(segment.fd, chunk, 0, length, position);
       if (n < 1) return { ok: false, error: `session segment changed while hashing: ${segment.name}` };
       hash.update(chunk.subarray(0, n));

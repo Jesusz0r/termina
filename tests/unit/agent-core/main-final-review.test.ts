@@ -57,7 +57,6 @@ describe("Agent Core Main Final Review Contracts", () => {
       for (const result of [
         fileOps.readTextView(unicodePath, { offset: 0 }),
         fileOps.readTextView(unicodePath, { offset: 0, startLine: 1 }),
-        fileOps.readFileResult(unicodePath, 0),
       ]) {
         assert.equal(result.isError, false);
         assert.equal(result.state, "complete");

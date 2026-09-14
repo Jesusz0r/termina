@@ -12,7 +12,7 @@ import { basename, join } from "node:path";
 import { createCurrentDir, createSessionBundleWithAdmission, currentHasContent, listCurrentSegments, recoverActiveSegment, renameCurrentUnique, retainUnboundCleanup } from "./bundles.ts";
 import { anchoredChildPath, fsyncDirectory, openDirectoryAnchor, validateDirectoryAnchor } from "./descriptors.ts";
 import type { DirectoryAnchor } from "./descriptors.ts";
-import { ACTIVE_NAME, ARCHIVE_PREFIX, BAD_PREFIX, CURRENT_DIR, MAX_SESSION_BUNDLE_BYTES, MAX_SESSION_RECORD_BYTES, MAX_SESSION_SEGMENT_BYTES, READ_CHUNK, errMsg, inspectEntry, isCoreSessionId, parseSessionBundlePath, partFileName, sessionBundleLimit, yieldToEventLoop } from "./primitives.ts";
+import { ACTIVE_NAME, ARCHIVE_PREFIX, BAD_PREFIX, CURRENT_DIR, MAX_SESSION_BUNDLE_BYTES, MAX_SESSION_RECORD_BYTES, MAX_SESSION_SEGMENT_BYTES, READ_CHUNK, errMsg, inspectEntry, isCoreSessionId, parseSessionBundlePath, partFileName, sessionBudgetExceeded, sessionBundleLimit, yieldToEventLoop } from "./primitives.ts";
 import type { EmptySessionBundleInspection, LogicalSessionEntry, SessionBundlePaths, SessionOperationOptions, SessionResult, SessionTestHooks } from "./primitives.ts";
 
 
@@ -470,10 +470,9 @@ export class SessionWriter {
     // writer stays usable (a smaller record may still fit — no poison).
     const retained = this.sealedBytes + this.activeBytes;
     if (retained + encoded.line.length > this.bundleLimit) {
-      return {
-        ok: false,
-        error: `session bundle exceeds MAX_SESSION_BUNDLE_BYTES (${retained + encoded.line.length} bytes); append rejected before mutation`,
-      };
+      return sessionBudgetExceeded(
+        `session bundle exceeds MAX_SESSION_BUNDLE_BYTES (${retained + encoded.line.length} bytes); append rejected before mutation`,
+      );
     }
     if (this.activeBytes + encoded.line.length > MAX_SESSION_SEGMENT_BYTES) {
       const rolled = this.roll();

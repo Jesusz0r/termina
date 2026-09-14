@@ -451,7 +451,7 @@ export interface TraceAttemptInput {
   readonly cache?: TraceCacheInput | null;
   readonly toolOutcomes?: readonly unknown[];
   readonly reclaimEvidence?: unknown;
-  readonly revisions?: TraceRevisionsInput | number | null;
+  readonly revisions?: TraceRevisionsInput | null;
   readonly wasteTokens?: unknown;
   readonly wasteCause?: string | null;
   /** Raw provider failure message for this attempt; null when not observed. */

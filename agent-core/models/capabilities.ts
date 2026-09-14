@@ -2,7 +2,7 @@ import { grokEffortLevelMap, nonReasoningGrok } from "./families/xai.ts";
 import { openaiProviderEffortLevelMap } from "./families/openai.ts";
 import type { ProviderId, ProviderProtocol } from "../auth.ts";
 import type { ModelInfo } from "../models.ts";
-import { modelLeaf } from "./families/identity.ts";
+import { gptVersion, modelLeaf, oSeriesModel } from "./families/identity.ts";
 import { claudeThinkingApi, claudeEffortLevelMap, opus45ComposesEffort } from "./families/anthropic.ts";
 import { gemini25Model, gemini3Model, geminiEffortLevelMap, modelLooksGemini } from "./families/google.ts";
 import { glmEffortLevelMap, glmReasoningFamily, relayCompletionsEffortLevelMap, relayCompletionsFamily } from "./families/relay.ts";
@@ -31,19 +31,18 @@ const RESPONSES_REASONING_FAMILIES: readonly RegExp[] = [
   /codex/,
   /grok/,
   /muse-spark/,
-  /(?:^|\/)o[0-9]/,
 ];
 
 function responsesReasoningFamily(model: string): boolean {
   const id = model.toLowerCase();
-  return RESPONSES_REASONING_FAMILIES.some((family) => family.test(id));
+  return RESPONSES_REASONING_FAMILIES.some((family) => family.test(id)) || oSeriesModel(model);
 }
 
 function responsesReasoningModel(model: string): boolean {
   const id = model.toLowerCase();
   // xAI's explicitly non-reasoning Grok variants reject reasoning.effort.
   if (nonReasoningGrok(model)) return false;
-  return responsesReasoningFamily(model) || claudeThinkingApi(model) !== "none" || /gemini-[3-9]/.test(id);
+  return responsesReasoningFamily(model) || claudeThinkingApi(model) !== "none" || gemini3Model(id);
 }
 
 /** Relay chat/completions models with a known reasoning contract. */
@@ -58,9 +57,19 @@ export function usesAnthropicThinking(_provider: ProviderId, model: string, prot
   return protocol === "anthropic-messages" && claudeThinkingApi(model) !== "none";
 }
 
+function wireEffortProtocol(protocol: ProviderProtocol): boolean {
+  return protocol === "openai-responses" || protocol === "openai-codex-responses" || protocol === "openai-completions";
+}
+
 /** Effort that this protocol actually sends. Login id is not enough. */
-export function usesModelEffort(provider: ProviderId, model: string, protocol: ProviderProtocol): boolean {
+export function usesModelEffort(
+  provider: ProviderId,
+  model: string,
+  protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
+): boolean {
   if (usesAnthropicThinking(provider, model, protocol)) return true;
+  if (reasoningLevels && reasoningLevels.length > 0) return wireEffortProtocol(protocol);
   if ((protocol === "openai-responses" || protocol === "openai-codex-responses") && responsesReasoningModel(model)) return true;
   if ((gemini3Model(model) || gemini25Model(model)) && (provider === "google" || protocol === "google-generate")) {
     return true;
@@ -69,7 +78,7 @@ export function usesModelEffort(provider: ProviderId, model: string, protocol: P
   // GLM effort is only sent on the Responses/Completions wire shapes; on
   // Messages the value is dropped, so the level must not be offered there.
   if (!glmReasoningFamily(model)) return false;
-  return protocol === "openai-responses" || protocol === "openai-codex-responses" || protocol === "openai-completions";
+  return wireEffortProtocol(protocol);
 }
 
 /**
@@ -77,8 +86,13 @@ export function usesModelEffort(provider: ProviderId, model: string, protocol: P
  * provider applies its own default with no wire control ("provider-default").
  * Never presented as disabled: unknown is not off.
  */
-export function effortControlFor(provider: ProviderId, model: string, protocol: ProviderProtocol): "explicit" | "provider-default" {
-  return usesModelEffort(provider, model, protocol) ? "explicit" : "provider-default";
+export function effortControlFor(
+  provider: ProviderId,
+  model: string,
+  protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
+): "explicit" | "provider-default" {
+  return usesModelEffort(provider, model, protocol, reasoningLevels) ? "explicit" : "provider-default";
 }
 
 type EffortMapRule = {
@@ -129,16 +143,50 @@ const EFFORT_MAP_RULES: readonly EffortMapRule[] = [
   },
 ];
 
-function effortLevelMap(provider: ProviderId, model: string, protocol: ProviderProtocol): EffortLevelMap {
+/**
+ * Codex `/models` reports `supported_reasoning_levels[].effort` as wire
+ * values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+ * and newer strings such as `ultra`).
+ * https://developers.openai.com/api/docs/guides/reasoning
+ * https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs
+ *
+ * Unknown catalog strings are ignored rather than invented as UI levels.
+ */
+export function effortMapFromReasoningLevels(levels: readonly string[]): EffortLevelMap {
+  const allowed = new Set(levels.map((level) => level.trim().toLowerCase()).filter(Boolean));
+  const map: EffortLevelMap = {};
+  for (const level of EFFORT_LEVELS) {
+    const wire = level === "off" ? "none" : level;
+    if (!allowed.has(wire) && !allowed.has(level)) {
+      map[level] = null;
+    } else if (level === "xhigh" || level === "max") {
+      map[level] = level;
+    }
+  }
+  return map;
+}
+
+function effortLevelMap(
+  provider: ProviderId,
+  model: string,
+  protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
+): EffortLevelMap {
+  if (reasoningLevels && reasoningLevels.length > 0) return effortMapFromReasoningLevels(reasoningLevels);
   for (const rule of EFFORT_MAP_RULES) {
     if (rule.match(provider, model, protocol)) return rule.map(provider, model, protocol);
   }
   return {};
 }
 
-export function supportedEffortLevels(provider: ProviderId, model: string, protocol: ProviderProtocol): EffortLevel[] {
-  if (!usesModelEffort(provider, model, protocol)) return ["off"];
-  const map = effortLevelMap(provider, model, protocol);
+export function supportedEffortLevels(
+  provider: ProviderId,
+  model: string,
+  protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
+): EffortLevel[] {
+  if (!usesModelEffort(provider, model, protocol, reasoningLevels)) return ["off"];
+  const map = effortLevelMap(provider, model, protocol, reasoningLevels);
   return EFFORT_LEVELS.filter((level) => {
     const mapped = map[level];
     if (mapped === null) return false;
@@ -147,8 +195,14 @@ export function supportedEffortLevels(provider: ProviderId, model: string, proto
   });
 }
 
-export function clampEffortLevel(provider: ProviderId, model: string, effort: EffortLevel, protocol: ProviderProtocol): EffortLevel {
-  const available = supportedEffortLevels(provider, model, protocol);
+export function clampEffortLevel(
+  provider: ProviderId,
+  model: string,
+  effort: EffortLevel,
+  protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
+): EffortLevel {
+  const available = supportedEffortLevels(provider, model, protocol, reasoningLevels);
   if (available.includes(effort)) return effort;
   const requested = EFFORT_LEVELS.indexOf(effort);
   for (let i = requested; i < EFFORT_LEVELS.length; i++) {
@@ -160,8 +214,14 @@ export function clampEffortLevel(provider: ProviderId, model: string, effort: Ef
   return "off";
 }
 
-export function thinkingEnabledFor(provider: ProviderId, model: string, effort: EffortLevel, protocol: ProviderProtocol): boolean {
-  return clampEffortLevel(provider, model, effort, protocol) !== "off";
+export function thinkingEnabledFor(
+  provider: ProviderId,
+  model: string,
+  effort: EffortLevel,
+  protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
+): boolean {
+  return clampEffortLevel(provider, model, effort, protocol, reasoningLevels) !== "off";
 }
 
 export function reasoningEffortFor(
@@ -169,10 +229,11 @@ export function reasoningEffortFor(
   model: string,
   effort: EffortLevel,
   protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
 ): ReasoningEffort | undefined {
-  if (usesAnthropicThinking(provider, model, protocol) || !usesModelEffort(provider, model, protocol)) return undefined;
-  const actual = clampEffortLevel(provider, model, effort, protocol);
-  const mapped = effortLevelMap(provider, model, protocol)[actual];
+  if (usesAnthropicThinking(provider, model, protocol) || !usesModelEffort(provider, model, protocol, reasoningLevels)) return undefined;
+  const actual = clampEffortLevel(provider, model, effort, protocol, reasoningLevels);
+  const mapped = effortLevelMap(provider, model, protocol, reasoningLevels)[actual];
   if (typeof mapped === "string") return mapped as ReasoningEffort;
   return actual === "off" ? "none" : actual;
 }
@@ -219,8 +280,14 @@ export function adaptiveEffortFor(
   return (typeof mapped === "string" ? mapped : actual) as ReasoningEffort;
 }
 
-export function effectiveEffortFor(provider: ProviderId, model: string, effort: EffortLevel, protocol: ProviderProtocol): EffortLevel {
-  return clampEffortLevel(provider, model, effort, protocol);
+export function effectiveEffortFor(
+  provider: ProviderId,
+  model: string,
+  effort: EffortLevel,
+  protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
+): EffortLevel {
+  return clampEffortLevel(provider, model, effort, protocol, reasoningLevels);
 }
 
 /** Grok rejects OpenAI encrypted-reasoning include, including on Zen and OpenRouter. */
@@ -230,12 +297,26 @@ export function includeEncryptedReasoning(provider: ProviderId, model: string): 
   return true;
 }
 
+/**
+ * Accept a documented context window. 0/NaN/non-finite are garbage; a
+ * catalog-reported 4k window is valid (relay qwen spans 4k–10M).
+ */
+export function acceptedContextWindow(raw: unknown): number | undefined {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return n;
+}
+
+/** Accept a catalog-reported max-completion size. One owner for the 1k floor. */
+export function acceptedOutputLimit(raw: unknown): number | undefined {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1_000) return undefined;
+  return Math.floor(n);
+}
+
 /** Catalog-reported max completion tokens, or null when the catalog is silent. */
 export function catalogOutputLimit(entry: ModelInfo | undefined): number | null {
-  if (!entry || typeof entry.outputLimit !== "number" || !Number.isFinite(entry.outputLimit) || entry.outputLimit < 1_000) {
-    return null;
-  }
-  return Math.floor(entry.outputLimit);
+  return acceptedOutputLimit(entry?.outputLimit) ?? null;
 }
 
 /** Catalog-reported tool support, or null when the catalog is silent. */
@@ -272,10 +353,13 @@ function openaiContextWindow(leaf: string): number | null {
   // Only the documented gpt-6 id: one data point is not a generation trend, and
   // a future gpt-6 tier must not inherit the flagship's window by accident.
   if (leaf.startsWith("gpt-6-astra")) return 1_050_000;
+  const version = gptVersion(leaf);
   // 5.4 through 5.9 are all documented at 1.05M, so the range generalizes.
-  if (/^gpt-5\.[4-9]/.test(leaf) && !/-(?:mini|nano)$/.test(leaf)) return 1_050_000;
-  if (/^gpt-5/.test(leaf)) return 400_000;
-  if (/^o[0-9]/.test(leaf)) return 200_000;
+  if (version && version.major === 5 && version.minor >= 4 && version.minor <= 9 && !/-(?:mini|nano)$/.test(leaf)) {
+    return 1_050_000;
+  }
+  if (version && version.major === 5) return 400_000;
+  if (oSeriesModel(leaf)) return 200_000;
   if (/^gpt-4o/.test(leaf)) return 128_000;
   // An undocumented id (a future generation) falls through to the floor rather
   // than inheriting a window it was never documented to have.

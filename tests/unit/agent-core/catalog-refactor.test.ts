@@ -99,6 +99,18 @@ describe("catalog provider policy composition", () => {
     expect(catalogSupportsTools({ id: "m", supportedParameters: ["temperature"] })).toBe(false);
   });
 
+  it("keeps documented small context windows and rejects garbage", () => {
+    expect(parseModelsPayload([{ id: "qwen-tiny", context_length: 4096 }], "opencode-go")).toEqual([
+      { id: "qwen-tiny", context: 4096 },
+    ]);
+    expect(parseModelsPayload([{ id: "qwen-zero", context_length: 0 }], "opencode-go")).toEqual([
+      { id: "qwen-zero" },
+    ]);
+    expect(parseModelsPayload([{ id: "qwen-nan", context_length: Number.NaN }], "opencode-go")).toEqual([
+      { id: "qwen-nan" },
+    ]);
+  });
+
   it("applies generic filtering, duplicate handling and caps with permissive provider policies", () => {
     const rows = [null, [], { id: "text-embedding-3-small" }, { id: "big-pickle" },
       { id: "big-pickle" }, { id: "x".repeat(201) },

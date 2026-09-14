@@ -12,8 +12,17 @@ import { MAX_MCP_SERVERS, MCP_CALL_MS, MCP_HANDSHAKE_MS, MCP_HTTP_BODY_BYTES, MC
 import type { McpServerConfig } from "./config.ts";
 import { createMcpContinuation, mcpErrorResult, normalizeMcpCallResult } from "./results.ts";
 import type { McpCallResult, McpCancellationScope } from "./results.ts";
-import { normalizeInputSchema, normalizeMcpDiscovery, selectMcpTools } from "./tools.ts";
+import { normalizeMcpDiscovery, selectMcpTools } from "./tools.ts";
 import type { McpClientTool } from "./tools.ts";
+
+export class McpTransportError extends Error {
+  readonly why: "timeout" | "interrupted";
+  constructor(why: "timeout" | "interrupted", message: string) {
+    super(message);
+    this.name = "McpTransportError";
+    this.why = why;
+  }
+}
 
 
 export type McpSession = {
@@ -125,7 +134,7 @@ class McpProcess {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        const error = new Error(`mcp ${this.name} timed out`);
+        const error = new McpTransportError("timeout", `mcp ${this.name} timed out`);
         reject(error);
         // Per-request cancellation is not available on stdio MCP, so make
         // the same timeout reason visible to sibling pending requests.
@@ -297,7 +306,7 @@ class McpHttp implements McpConn {
     this.inflight.add(ac);
     const timer = setTimeout(() => {
       ac.abort();
-      this.kill(new Error(`mcp ${this.name} timed out`));
+      this.kill(new McpTransportError("timeout", `mcp ${this.name} timed out`));
     }, timeoutMs);
     try {
       const res = await policyRequest({
@@ -325,7 +334,9 @@ class McpHttp implements McpConn {
       return msg.result;
     } catch (err) {
       if (this.lastErr) throw this.lastErr;
-      if ((err as { name?: string }).name === "AbortError") throw new Error(`mcp ${this.name} timed out`);
+      if ((err as { name?: string }).name === "AbortError") {
+        throw new McpTransportError("timeout", `mcp ${this.name} timed out`);
+      }
       throw err instanceof Error ? err : new Error(String(err));
     } finally {
       clearTimeout(timer);
@@ -440,11 +451,10 @@ async function handshake(proc: McpConn): Promise<McpClientTool[]> {
       if (!item || typeof item !== "object") continue;
       const tool = item as { name?: unknown; description?: unknown; inputSchema?: unknown; input_schema?: unknown };
       if (typeof tool.name !== "string" || !tool.name) continue;
-      const schema = normalizeInputSchema(tool.inputSchema ?? tool.input_schema);
       out.push({
         name: tool.name,
         description: typeof tool.description === "string" ? tool.description.slice(0, 1024) : tool.name,
-        input_schema: schema,
+        input_schema: (tool.inputSchema ?? tool.input_schema) as Record<string, unknown>,
         server: proc.name,
         original: tool.name,
       });
@@ -600,16 +610,16 @@ export async function startMcp(
           const req = active.request("tools/call", { name: hit.original, arguments: args ?? {} }, timeoutMs);
           req.then(resolve, reject);
           poll = setInterval(() => {
-            if (stop?.()) active.kill(new Error("interrupted"));
+            if (stop?.()) active.kill(new McpTransportError("interrupted", "interrupted"));
           }, 50);
-          if (stop?.()) active.kill(new Error("interrupted"));
+          if (stop?.()) active.kill(new McpTransportError("interrupted", "interrupted"));
         });
         return normalizeMcpCallResult(result, continuation);
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
-        const state: CompletionState = why === "interrupted"
-          ? "interrupted"
-          : /timed out/i.test(why) ? "timeout" : "failed";
+        const state: CompletionState = err instanceof McpTransportError
+          ? err.why
+          : "failed";
         const cancellationScope: McpCancellationScope = state === "interrupted" || state === "timeout"
           ? "connection"
           : "none";

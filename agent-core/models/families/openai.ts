@@ -1,6 +1,6 @@
 import type { EffortLevelMap } from "../capabilities.ts";
 import type { ProviderId } from "../../auth.ts";
-import { modelLeaf } from "./identity.ts";
+import { modelLeaf, oSeriesModel } from "./identity.ts";
 
 export function gpt56ReasoningContext(model: string): "all_turns" | undefined {
   const leaf = modelLeaf(model);
@@ -19,7 +19,7 @@ export function gpt5TextVerbosity(model: string): "low" | undefined {
 export function openaiEffortLevelMap(model: string): EffortLevelMap {
   const id = model.toLowerCase();
   const map: EffortLevelMap = {};
-  if (/(?:^|\/)o[0-9]/.test(id)) {
+  if (oSeriesModel(id)) {
     map.off = null;
     map.minimal = null;
     return map;
@@ -80,7 +80,7 @@ export function openaiProviderEffortLevelMap(provider: ProviderId, model: string
   const map = openaiEffortLevelMap(model);
   // Preserve provider restrictions after applying the shared model defaults.
   // O-series rules take precedence even if a catalog id contains another family.
-  if (!/(?:^|\/)o[0-9]/.test(id) && /gpt-(?:5\.[3-6]|[6-9])|codex/.test(id)) {
+  if (!oSeriesModel(id) && /gpt-(?:5\.[3-6]|[6-9])|codex/.test(id)) {
     if (provider === "openai-codex" || provider === "github-copilot") map.minimal = "low";
     if (provider === "github-copilot") map.off = null;
     else if (provider === "openrouter" && id.includes("codex") && !/gpt-[6-9]/.test(id)) delete map.off;

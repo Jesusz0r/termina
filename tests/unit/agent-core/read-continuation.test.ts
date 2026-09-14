@@ -6,7 +6,6 @@ import { join } from "node:path";
 import {
   emitNumberedPage,
   emitPlainPage,
-  readFileResult,
   readProjectFile,
 } from "../../../agent-core/main/file-ops.ts";
 
@@ -178,33 +177,6 @@ describe("numbered read continuation (#156)", () => {
     expect(`${acc}\n`).toBe(source);
   });
 
-  it("reconstructs plain reads with byte-exact offsets", () => {
-    const root = project();
-    const source = `${"line-α-".repeat(9000)}\nsecond half 😀😀\n`;
-    const abs = join(root, "plain.txt");
-    writeFileSync(abs, source);
-    let acc = "";
-    let offset = 0;
-    let pages = 0;
-    for (;;) {
-      pages++;
-      if (pages > 50) throw new Error("continuation chain did not terminate");
-      const got = readFileResult(abs, offset);
-      if (got.isError) throw new Error(got.content);
-      expect(Buffer.byteLength(got.content, "utf8")).toBeLessThanOrEqual(40 * 1024);
-      const lines = got.content.split("\n");
-      const markerIdx = lines.findIndex((l) => l.startsWith("[truncated") || l.startsWith("[invalid UTF-8"));
-      const body = (markerIdx >= 0 ? lines.slice(0, markerIdx) : lines).join("\n");
-      acc += body;
-      const marker = markerIdx >= 0 ? lines[markerIdx]! : null;
-      if (!marker) break;
-      const next = Number(marker.match(/read_file offset (\d+)/)?.[1]);
-      if (!Number.isSafeInteger(next) || next <= offset) throw new Error(`continuation did not advance: ${marker}`);
-      offset = next;
-    }
-    expect(pages).toBeGreaterThan(1);
-    expect(acc).toBe(source);
-  });
 });
 
 describe("page emission units (#156)", () => {

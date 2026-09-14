@@ -8,7 +8,7 @@ import { type ProviderId, type ProviderProtocol } from "./providers/types.ts";
 import { providerDefinition } from "./providers/index.ts";
 import { modelLooksClaude } from "../models/families/anthropic.ts";
 import { modelLooksGemini } from "../models/families/google.ts";
-import { modelLeaf } from "../models/families/identity.ts";
+import { isGpt56OrLaterModel } from "../models/families/identity.ts";
 import { cacheRouteDomain } from "./cache-identity.ts";
 import { providerProtocol } from "./endpoints.ts";
 
@@ -131,17 +131,6 @@ function isDirectDocumentedRoute(provider: ProviderId, route: string): boolean {
   if (provider === "xai") return domain === "api.x.ai";
   if (provider === "google") return domain === "generativelanguage.googleapis.com";
   return false;
-}
-
-
-function isGpt56OrLaterModel(model: string): boolean {
-  if (typeof model !== "string") return false;
-  const leaf = modelLeaf(model);
-  const match = /^gpt-(\d+)(?:\.(\d+))?(?:[.-]|$)/.exec(leaf);
-  if (!match) return false;
-  const major = Number(match[1]);
-  const minor = match[2] === undefined ? 0 : Number(match[2]);
-  return major > 5 || (major === 5 && minor >= 6);
 }
 
 

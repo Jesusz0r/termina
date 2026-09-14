@@ -23,6 +23,7 @@
  */
 import {
   EFFORT_LEVELS,
+  acceptedContextWindow,
   catalogOutputLimit,
   catalogSupportsTools,
   defaultContextWindow,
@@ -174,6 +175,7 @@ import {
   boundedToolResult,
   logicalToolText,
   readBoundedResponseBody,
+  utf8TextPrefix,
   type BoundedText,
   type CompletionState,
   type ToolTextResult,
@@ -242,7 +244,6 @@ import {
   subagentChildTid,
   subagentDepthFromEnv,
   subagentSpawnSidecarRecord,
-  truncateUtf8,
   visibleSubagentTools,
   writeSubagentAckFile,
   writeSubagentApprovalRequest,
@@ -285,6 +286,7 @@ import {
   sessionBundleHasContent,
   sessionBlockBytes,
   sessionBlockHash,
+  isSessionBudgetExceeded,
   type SessionResult,
 } from "./session.ts";
 import {
@@ -310,16 +312,25 @@ const PROVIDER_ENV = process.env.TERMINA_CORE_PROVIDER?.trim() || "";
 const ENV_ROUTE = (() => {
   if (!MODEL_ENV && !PROVIDER_ENV) return null;
   const probe = parseModelRef(MODEL_ENV || DEFAULT_MODELS.anthropic.main, PROVIDER_ENV || undefined);
+  if (!probe) return null;
   return hasStoredCredential(probe.provider) || hasEnvCredential(probe.provider) ? probe : null;
 })();
 const PINNED_ROUTE = ENV_ROUTE !== null;
-let route = ENV_ROUTE ?? parseModelRef(DEFAULT_MODELS.anthropic.main, undefined);
+let route = ENV_ROUTE ?? parseModelRef(DEFAULT_MODELS.anthropic.main, "anthropic");
 /** Routing map, role → model. Mechanical work rides the cheap lane. */
-let summaryRoute = parseModelRef(
-  process.env.TERMINA_CORE_SUMMARY_MODEL ?? DEFAULT_MODELS[route.provider].summary,
-  process.env.TERMINA_CORE_SUMMARY_MODEL ? undefined : route.provider,
-);
+let summaryRoute = (() => {
+  const pinned = process.env.TERMINA_CORE_SUMMARY_MODEL;
+  if (pinned) {
+    const parsed = parseModelRef(pinned);
+    if (parsed) return parsed;
+  }
+  return parseModelRef(DEFAULT_MODELS[route.provider].summary, route.provider);
+})();
 const catalogs = new Map<ProviderId, ModelInfo[]>();
+
+function routeReasoningLevels(provider: ProviderId = route.provider, model: string = route.model): string[] | undefined {
+  return catalogs.get(provider)?.find((entry) => entry.id === model)?.reasoningLevels;
+}
 
 // Resolve model metadata from the existing catalog for every request role,
 // endpoint, serializer, and effort decision. auth.ts remains the mapper.
@@ -359,14 +370,12 @@ export function resolveContextWindow(sources: {
   provider: ProviderId;
   model: string;
 }): number {
-  const env = Number(sources.env ?? "");
-  if (Number.isFinite(env) && env >= 8_000) return env;
-  if (typeof sources.providerContext === "number" && Number.isFinite(sources.providerContext) && sources.providerContext >= 8_000) {
-    return sources.providerContext;
-  }
-  if (typeof sources.catalogContext === "number" && Number.isFinite(sources.catalogContext) && sources.catalogContext >= 8_000) {
-    return sources.catalogContext;
-  }
+  const env = acceptedContextWindow(sources.env ?? "");
+  if (env !== undefined) return env;
+  const provider = acceptedContextWindow(sources.providerContext);
+  if (provider !== undefined) return provider;
+  const catalog = acceptedContextWindow(sources.catalogContext);
+  if (catalog !== undefined) return catalog;
   return defaultContextWindow(sources.provider, sources.model);
 }
 
@@ -385,8 +394,10 @@ function contextWindow(): number {
 }
 
 function usableTokens(): number {
-  const thinking = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)) !== "off";
-  return Math.max(8_000, contextWindow() - outputTokenBudget({ thinking }));
+  const thinking = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()) !== "off";
+  const window = contextWindow();
+  const reserved = Math.min(outputTokenBudget({ thinking }), Math.max(0, window - 1));
+  return Math.max(1, window - reserved);
 }
 
 function protectTokens(): number {
@@ -560,25 +571,28 @@ function recordRejectedCacheCapability(
 function recordRejectedCacheFields(
   provider: ProviderId,
   model: string,
-  body: Record<string, unknown>,
+  present: {
+    promptCacheOptions: boolean;
+    promptCacheBreakpoint: boolean;
+    promptCacheKey: boolean;
+  },
   detail: string,
 ): void {
   const lower = detail.toLowerCase();
-  const serialized = JSON.stringify(body);
   const candidates: Array<{ feature: string; present: boolean; words: string[] }> = [
     {
       feature: CACHE_CAPABILITY_FEATURE.promptCacheOptions,
-      present: body.prompt_cache_options !== undefined,
+      present: present.promptCacheOptions,
       words: ["prompt_cache_options", "cache options"],
     },
     {
       feature: CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint,
-      present: serialized.includes("prompt_cache_breakpoint"),
+      present: present.promptCacheBreakpoint,
       words: ["prompt_cache_breakpoint", "cache breakpoint"],
     },
     {
       feature: CACHE_CAPABILITY_FEATURE.promptCacheKey,
-      present: typeof body.prompt_cache_key === "string",
+      present: present.promptCacheKey,
       words: ["prompt_cache_key", "cache key"],
     },
   ];
@@ -910,8 +924,8 @@ async function writeTraceAttempt(
     taskClass: attempt.task.taskClass,
     requestedEffort: attempt.role === "main" ? effortWanted : "off",
     effectiveEffort: attempt.role === "main"
-      ? effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model))
-      : effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off", providerProtocol(summaryRoute.provider, summaryRoute.model)),
+      ? effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels())
+      : effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off", providerProtocol(summaryRoute.provider, summaryRoute.model), routeReasoningLevels(summaryRoute.provider, summaryRoute.model)),
     status: fields.status,
     retryCount: attempt.retryCount,
     fallbackReason: attempt.fallbackReason,
@@ -2563,7 +2577,7 @@ function replayStateForHistory() {
  *  core of resumeSessionBody without interactive output: the task file pins
  *  the effort for this run, so a saved effort is intentionally not restored.
  *  Marks the stream prepared so runPrompt cannot rotate the bundle away. */
-export function installResumedSubagentHistory(replayed: {
+function installReplayedMessages(replayed: {
   messages: ReadonlyArray<{ role: "user" | "assistant"; content: unknown; sseq: number }>;
   maxSeq: number;
 }): void {
@@ -2581,6 +2595,13 @@ export function installResumedSubagentHistory(replayed: {
     }
   }
   storageSeq = Math.max(storageSeq, replayed.maxSeq);
+}
+
+export function installResumedSubagentHistory(replayed: {
+  messages: ReadonlyArray<{ role: "user" | "assistant"; content: unknown; sseq: number }>;
+  maxSeq: number;
+}): void {
+  installReplayedMessages(replayed);
   openSessionWriter();
   streamPrepared = true;
   resetCacheContinuity();
@@ -3294,8 +3315,8 @@ export function summaryRequestPolicy(providerId: ProviderId, model: string): {
   // Lowest supported effort: "off" where the route disables reasoning, the
   // clamped floor (e.g. Grok low) where it cannot, undefined where the route
   // takes no effort control and the provider default applies.
-  const effort = clampEffortLevel(providerId, model, "off", proto);
-  const reasoning = reasoningEffortFor(providerId, model, "off", proto);
+  const effort = clampEffortLevel(providerId, model, "off", proto, routeReasoningLevels(providerId, model));
+  const reasoning = reasoningEffortFor(providerId, model, "off", proto, routeReasoningLevels(providerId, model));
   const catalogLimit = catalogOutputLimit(catalogs.get(providerId)?.find((m) => m.id === model));
   const thinkingBudget = outputTokenBudget({ thinking: effort !== "off" });
   // Keep the small fixed cap for non-reasoning summaries; give reasoning
@@ -3362,7 +3383,7 @@ async function completeTextBody(
     };
   }
   if (proto === "google-generate") {
-    const effort = reasoningEffortFor(providerId, model, "off", providerProtocol(providerId, model));
+    const effort = reasoningEffortFor(providerId, model, "off", providerProtocol(providerId, model), routeReasoningLevels(providerId, model));
     const requestBody = googleGenerateBody(
       system,
       [{ role: "user", content: prompt }],
@@ -3406,7 +3427,7 @@ async function completeTextBody(
     // Codex and Zen GPT require a streaming list input. String input and stream:false return 400.
     const requestBody = responsesBody(model, system, [{ role: "user", content: prompt }], [], {
       provider: providerId,
-      ...(providerId === "openai-codex" ? {} : { maxTokens: summaryMaxTokens }),
+      maxTokens: summaryMaxTokens,
       ...(sendCacheKey ? { cacheKey } : {}),
       ...(sendSessionId ? { sessionId: sendSessionId } : {}),
       includeEncryptedReasoning: false,
@@ -3570,14 +3591,14 @@ async function callModel(
     content: m.content as string | Array<Record<string, unknown>>,
   }));
   const toolsForProvider = clientTools as ToolDef[];
-  const actualEffort = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
+  const actualEffort = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
   const catalogLimit = catalogOutputLimit(catalogs.get(route.provider)?.find((m) => m.id === route.model));
   const budgeted = outputTokenBudget({ thinking: actualEffort !== "off" });
   // Never request more output than the catalog-reported completion ceiling.
   const maxTokens = catalogLimit === null ? budgeted : Math.max(1_024, Math.min(budgeted, catalogLimit));
   const thinking = thinkingRequestFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
   const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
-  const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
+  const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
   const cacheIdentity = cacheIdentityForRole("main", route.provider, route.model);
   const cacheKey = cacheIdentity?.key;
   const sendCacheKey = Boolean(cacheKey) && cacheCapabilitySupported(route.provider, route.model, CACHE_CAPABILITY_FEATURE.promptCacheKey);
@@ -3612,7 +3633,7 @@ async function callModel(
       : usesResponsesApi(route.provider, route.model)
         ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, {
             provider: route.provider,
-            ...(route.provider === "openai-codex" ? {} : { maxTokens }),
+            maxTokens,
             ...(sendCacheKey ? { cacheKey } : {}),
             ...(sendSessionId ? { sessionId: sendSessionId } : {}),
             ...(sendExplicitCache
@@ -3655,23 +3676,21 @@ async function callModel(
     // attempt so cache attribution can distinguish it from a new prompt.
     cacheDiagnostics = { ...cacheDiagnostics, retryPromptIdentical: true };
   };
-  let optionalCacheFallbackUsed = false;
   let res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true, cacheIdentity, onRetry);
   if (!res.ok || !res.body) {
     const detail = (await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES })).text.slice(0, 300);
-    // Check the cheap preconditions first: the full-body serialization below
-    // only runs when this is actually a 400 about cache fields.
     const fallbackCandidate = res.status === 400 && /prompt_cache_(?:breakpoint|options)/i.test(detail);
-    const optionalFieldsRequested = fallbackCandidate &&
-      (body.prompt_cache_options !== undefined || JSON.stringify(body).includes("prompt_cache_breakpoint"));
+    const optionalFieldsRequested = sendExplicitCache || sendPromptCacheOptions;
     if (
-      !optionalCacheFallbackUsed &&
       fallbackCandidate &&
       optionalFieldsRequested &&
       usesResponsesApi(route.provider, route.model)
     ) {
-      optionalCacheFallbackUsed = true;
-      recordRejectedCacheFields(route.provider, route.model, body, detail);
+      recordRejectedCacheFields(route.provider, route.model, {
+        promptCacheOptions: sendPromptCacheOptions,
+        promptCacheBreakpoint: sendExplicitCache,
+        promptCacheKey: sendCacheKey,
+      }, detail);
       const rejectedCacheDiagnostics = cacheDiagnosticsForRequest(
         body,
         { provider: route.provider, protocol: proto, model: route.model },
@@ -4333,8 +4352,9 @@ async function loadRates(): Promise<boolean> {
       if (contextCatalog) {
         for (const [model, entry] of Object.entries(contextCatalog.models)) {
           const context = Number(entry?.limit?.context);
-          if (Number.isFinite(context) && context >= 8_000) {
-            nextContext.set(contextCatalogKey(providerId, model), Math.floor(context));
+          const window = acceptedContextWindow(context);
+          if (window !== undefined) {
+            nextContext.set(contextCatalogKey(providerId, model), window);
           }
         }
       }
@@ -4602,7 +4622,7 @@ function logSettings(): void {
   sidecar.logEvent({
     t: "agent_settings",
     model: `${route.provider}/${route.model}`,
-    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
+    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
     usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats(), route.provider),
   });
 }
@@ -4704,7 +4724,7 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   const frame = outcome && outcome.status === "success"
     ? {
       ok: true as const,
-      result: truncateUtf8(lastAssistantText(), MAX_SUBAGENT_RESULT_CHARS),
+      result: utf8TextPrefix(lastAssistantText(), MAX_SUBAGENT_RESULT_CHARS),
     }
     : { ok: false as const, error: outcome?.failure ?? "no settlement" };
   process.stdout.write(`${formatSubagentResultFrame(frame)}\n`);
@@ -4932,7 +4952,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     overlayBytes: activeRequestOverlay?.bytes ?? null,
     entryId: String(userMsg.sseq),
     parentEntryId: null,
-    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
+    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
   });
   let storageFailure: string | null = null;
   let taskFailure: string | null = null;
@@ -5372,7 +5392,7 @@ async function resumeSessionBody(overrides?: {
       : { testOnlyMaxBundleBytes: overrides.testOnlyMaxBundleBytes },
   );
   if (!replayed.ok) {
-    if (replayed.error.includes("MAX_SESSION_BUNDLE_BYTES")) {
+    if (isSessionBudgetExceeded(replayed)) {
       // Capacity exhaustion is not corruption (#161): keep the acknowledged
       // bundle in place so nothing is lost, and let /resume retry. Starting
       // a fresh session archives this bundle aside for later inspection.
@@ -5387,25 +5407,13 @@ async function resumeSessionBody(overrides?: {
     streamPrepared = false;
     return { ok: true };
   }
-  history.length = 0;
-  for (const rm of replayed.messages) {
-    const m: Message = { role: rm.role, content: rm.content as Message["content"], tokens: 0, sseq: rm.sseq };
-    m.tokens = estimateReclaimTokens(m.content);
-    history.push(m);
-  }
-  for (let i = history.length - 1; i >= 0; i--) {
-    const c = history[i]!.content;
-    if (typeof c === "string" && c.startsWith("<context-handoff>")) {
-      lastHandoff = c.replace(/<\/?context-handoff>/g, "").trim();
-      break;
-    }
-  }
-  storageSeq = Math.max(storageSeq, replayed.maxSeq);
+  installReplayedMessages(replayed);
   const savedModel = replayed.state.model;
   if (typeof savedModel === "string") {
     const next = parseModelRef(savedModel);
     if (
-      savedModel.startsWith(`${next.provider}/`)
+      next
+      && savedModel.startsWith(`${next.provider}/`)
       && (hasStoredCredential(next.provider) || hasEnvCredential(next.provider))
     ) {
       if (next.provider !== route.provider) {
@@ -5418,7 +5426,7 @@ async function resumeSessionBody(overrides?: {
   }
   const savedEffort = replayed.state.effort;
   if (typeof savedEffort === "string" && (EFFORT_LEVELS as readonly string[]).includes(savedEffort)) {
-    effortWanted = clampEffortLevel(route.provider, route.model, savedEffort as EffortLevel, providerProtocol(route.provider, route.model));
+    effortWanted = clampEffortLevel(route.provider, route.model, savedEffort as EffortLevel, providerProtocol(route.provider, route.model), routeReasoningLevels());
   }
   try {
     open();
@@ -5879,8 +5887,9 @@ async function loadCatalog(
   catalogs.set(provider, got.models);
   syncModelRows();
   if (provider !== route.provider) return { ok: true };
+  const envRef = MODEL_ENV ? parseModelRef(MODEL_ENV, PROVIDER_ENV || undefined) : null;
   const preferred =
-    MODEL_ENV && route.provider === parseModelRef(MODEL_ENV, PROVIDER_ENV || undefined).provider
+    envRef && route.provider === envRef.provider
       ? route.model
       : DEFAULT_MODELS[provider].main;
   const pick = pickDefaultModel(got.models, preferred);
@@ -6124,11 +6133,11 @@ function startAuthCommand(line: string): void {
 }
 
 function syncStatus(): void {
-  effortWanted = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
-  surface?.setEffortLevels(supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model)));
+  effortWanted = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
+  surface?.setEffortLevels(supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model), routeReasoningLevels()));
   surface?.setStatus({
     model: `${route.provider}/${route.model}`,
-    effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
+    effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
   });
   logSettings();
 }
@@ -6299,10 +6308,10 @@ function dispatchLine(line: string): void {
       showPrompt();
       return;
     }
-    const available = supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model));
+    const available = supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model), routeReasoningLevels());
     if ("show" in effortCmd) {
-      const actual = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
-      if (effortControlFor(route.provider, route.model, providerProtocol(route.provider, route.model)) === "provider-default") {
+      const actual = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
+      if (effortControlFor(route.provider, route.model, providerProtocol(route.provider, route.model), routeReasoningLevels()) === "provider-default") {
         out(`(effort provider-default; this route sends no effort control)\n`);
       } else {
         out(`(effort ${actual}; available: ${available.join(", ")})\n`);
@@ -6312,7 +6321,7 @@ function dispatchLine(line: string): void {
     }
     const requested = effortCmd.effort;
     const prev = effortWanted;
-    effortWanted = clampEffortLevel(route.provider, route.model, requested, providerProtocol(route.provider, route.model));
+    effortWanted = clampEffortLevel(route.provider, route.model, requested, providerProtocol(route.provider, route.model), routeReasoningLevels());
     if (effortWanted !== prev) {
       try {
         ensureRouteSettingsWritable();
@@ -6432,11 +6441,11 @@ async function main(): Promise<void> {
         requestProcessShutdown(0, "tui-exit");
       },
     });
-    effortWanted = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
-    surface.setEffortLevels(supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model)));
+    effortWanted = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
+    surface.setEffortLevels(supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model), routeReasoningLevels()));
     surface.setStatus({
       model: `${route.provider}/${route.model}`,
-      effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
+      effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
       permissions: permissionMode,
     });
     surface.setBusy(true);

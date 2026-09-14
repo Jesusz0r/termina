@@ -81,9 +81,19 @@ export const YIELD_EVERY_RECORDS = 64;
 export const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 
-export type SessionResult<T = object> = ({ ok: true } & T) | { ok: false; error: string };
+export type SessionFailureReason = "bundle-budget-exceeded";
 
-export type SessionFailure = { ok: false; error: string };
+export type SessionResult<T = object> = ({ ok: true } & T) | { ok: false; error: string; reason?: SessionFailureReason };
+
+export type SessionFailure = { ok: false; error: string; reason?: SessionFailureReason };
+
+export function sessionBudgetExceeded(error = "session bundle exceeds MAX_SESSION_BUNDLE_BYTES"): SessionFailure {
+  return { ok: false, error, reason: "bundle-budget-exceeded" };
+}
+
+export function isSessionBudgetExceeded(result: { ok: false; error: string; reason?: string }): boolean {
+  return result.reason === "bundle-budget-exceeded";
+}
 
 
 export type SessionOperationOptions = {

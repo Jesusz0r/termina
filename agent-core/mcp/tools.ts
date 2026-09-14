@@ -91,20 +91,31 @@ function canonicalizeJsonValue(raw: unknown, seen: WeakSet<object>, depth: numbe
 }
 
 
-export function normalizeInputSchema(raw: unknown): Record<string, unknown> {
-  const fallback = { type: "object", properties: {} };
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
+export type NormalizedInputSchema =
+  | { ok: true; schema: Record<string, unknown> }
+  | { ok: false; error: string };
+
+export function normalizeInputSchema(raw: unknown): NormalizedInputSchema {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, error: "mcp schema must be a JSON object" };
+  }
   const schema = raw as Record<string, unknown>;
-  if (schema.type !== undefined && schema.type !== "object") return fallback;
+  if (schema.type !== undefined && schema.type !== "object") {
+    return { ok: false, error: `mcp schema type must be object, got ${String(schema.type)}` };
+  }
   try {
     const source = { ...schema, type: "object" };
     const out = canonicalizeJsonValue(source, new WeakSet<object>(), 0);
-    if (!out || typeof out !== "object" || Array.isArray(out)) return fallback;
+    if (!out || typeof out !== "object" || Array.isArray(out)) {
+      return { ok: false, error: "mcp schema must canonicalize to an object" };
+    }
     const encoded = JSON.stringify(out);
-    if (typeof encoded !== "string" || Buffer.byteLength(encoded, "utf8") > SCHEMA_CAP) return fallback;
-    return out as Record<string, unknown>;
-  } catch {
-    return fallback;
+    if (typeof encoded !== "string" || Buffer.byteLength(encoded, "utf8") > SCHEMA_CAP) {
+      return { ok: false, error: "mcp schema exceeds the byte cap" };
+    }
+    return { ok: true, schema: out as Record<string, unknown> };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "mcp schema is invalid" };
   }
 }
 
@@ -140,19 +151,26 @@ function mcpConflictNote(tool: McpClientTool, variants: number): string {
 }
 
 
-function cloneMcpTool(tool: McpClientTool): McpClientTool | null {
+function cloneMcpTool(tool: McpClientTool): { tool: McpClientTool } | { error: string } | null {
   if (!tool || typeof tool !== "object") return null;
   const server = typeof tool.server === "string" ? tool.server : "";
   const original = typeof tool.original === "string"
     ? tool.original
     : typeof tool.name === "string" ? tool.name : "";
   if (!server || !original) return null;
+  const schema = normalizeInputSchema(tool.input_schema);
+  if (!schema.ok) {
+    const label = JSON.stringify(`${server.slice(0, 96)}/${original.slice(0, 128)}`);
+    return { error: `mcp schema invalid for ${label}: ${schema.error}` };
+  }
   return {
-    name: original,
-    description: typeof tool.description === "string" ? tool.description.slice(0, 1024) : original,
-    input_schema: normalizeInputSchema(tool.input_schema),
-    server,
-    original,
+    tool: {
+      name: original,
+      description: typeof tool.description === "string" ? tool.description.slice(0, 1024) : original,
+      input_schema: schema.schema,
+      server,
+      original,
+    },
   };
 }
 
@@ -174,14 +192,19 @@ export function normalizeMcpDiscovery(discovered: readonly McpClientTool[]): {
   conflicts: string[];
 } {
   const candidates: McpClientTool[] = [];
+  const conflicts: string[] = [];
   for (const raw of discovered) {
     const copy = cloneMcpTool(raw);
-    if (copy) candidates.push(copy);
+    if (!copy) continue;
+    if ("error" in copy) {
+      conflicts.push(copy.error);
+      continue;
+    }
+    candidates.push(copy.tool);
   }
   candidates.sort(compareMcpTools);
 
   const tools: McpClientTool[] = [];
-  const conflicts: string[] = [];
   for (let i = 0; i < candidates.length;) {
     const first = candidates[i]!;
     const identity = toolIdentity(first);
@@ -251,10 +274,12 @@ export function selectMcpTools(
     let suffix = 1;
     let name = base;
     while (used.has(name)) name = addMcpNameSuffix(base, ++suffix);
+    const schema = normalizeInputSchema(tool.input_schema);
+    if (!schema.ok) continue;
     const next = {
       name,
       description: tool.description,
-      input_schema: normalizeInputSchema(tool.input_schema),
+      input_schema: schema.schema,
       server: tool.server,
       original: tool.original,
     } satisfies McpClientTool;
