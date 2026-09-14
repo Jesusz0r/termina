@@ -748,9 +748,11 @@ export class EditorManager {
   }
 
   /** Recreate a deleted-on-disk file before saving it. Main's save refuses
-   *  non-regular paths, so without the recreate the restore would fail; when
-   *  the file reappeared meanwhile the create fails harmlessly and the save
-   *  below overwrites it as usual. Errors stay silent here — the save itself
+   *  missing paths, so without the recreate the restore would fail. When the
+   *  file reappeared without a watcher push meanwhile, the create truncates
+   *  it — but the save below overwrites it with the buffer immediately, so
+   *  the empty window is transient (a push would already have cleared the
+   *  marking via updateContent). Errors stay silent here — the save itself
    *  reports the real outcome. */
   private async restoreDeletedBeforeSave(tab: OpenTab): Promise<void> {
     if (!this.deletedOnDisk.has(tab.key) || !tab.owner) return;
