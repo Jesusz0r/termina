@@ -205,8 +205,8 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
       expect(mainSource).toMatch(/clearSidecarQueues\(idsStillClosing\(\)\)/);
       expect(mainSource).not.toMatch(/clearSidecarQueues\(leftoverIds\)/);
       expect(mainSource).toMatch(/closingInstanceOurs\(id, inst\) \|\| !this\.runtime\.has\(id\)/);
-      const worldlinesSource = await readFile("electron/worldlines/manager.ts", "utf8");
-      const launchStart = worldlinesSource.indexOf("private async launchCandidate");
+      const worldlinesSource = await readFile("electron/worldlines/candidate-launch.ts", "utf8");
+      const launchStart = worldlinesSource.indexOf("async launchCandidate");
       const mapping = worldlinesSource.indexOf("this.terminalToComparison.set(terminalId", launchStart);
       const processLookup = worldlinesSource.indexOf("cand.lstart = await readProcessStart(pid)", launchStart);
       expect(launchStart >= 0 && mapping > launchStart && mapping < processLookup).toBe(true);

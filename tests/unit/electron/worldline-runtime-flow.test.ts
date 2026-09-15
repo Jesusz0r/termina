@@ -76,8 +76,10 @@ interface FlowWorldlineManager {
   removeOwnedDir: unknown;
   runEvidence: unknown;
   comparisons: Map<string, FlowComparison>;
-  candidateLaunchAttempts: Map<string, unknown>;
-  launchCandidate: (...args: unknown[]) => Promise<unknown>;
+  launch: {
+    candidateLaunchAttempts: Map<string, unknown>;
+    launchCandidate: (...args: unknown[]) => Promise<unknown>;
+  };
   cancel: (...args: unknown[]) => Promise<{ ok: unknown }>;
   discard: (...args: unknown[]) => Promise<{ ok: unknown }>;
   measureEvidence: (...args: unknown[]) => Promise<{ ok: unknown }>;
@@ -248,10 +250,10 @@ describe("Worldline Runtime Flow Suite", () => {
       const candidate = makeCandidate(root);
       const comparison = makeComparison(root, "fresh-teardown", candidate);
       manager.comparisons.set(comparison.id, comparison);
-      const launch = manager.launchCandidate(comparison, candidate, [], null).catch((error) => error);
+      const launch = manager.launch.launchCandidate(comparison, candidate, [], null).catch((error) => error);
       const created = await spawned;
       await nextTurn();
-      const oldAttempt = [...manager.candidateLaunchAttempts.values()][0];
+      const oldAttempt = [...manager.launch.candidateLaunchAttempts.values()][0];
       const cancel = await manager.cancel(comparison.id);
       const launchResult = await launch;
       assert.equal(cancel.ok, true, "cancel completes while readProcessStart is delayed");
@@ -272,7 +274,7 @@ describe("Worldline Runtime Flow Suite", () => {
     
       // The attempt fence is source-visible and replacement-safe: cleanup uses the
       // captured attempt identity/start time, never a later CandidateState pid.
-      const worldlinesSource = await (await import("node:fs/promises")).readFile("electron/worldlines/manager.ts", "utf8");
+      const worldlinesSource = await (await import("node:fs/promises")).readFile("electron/worldlines/candidate-launch.ts", "utf8");
       assert.match(worldlinesSource, /candidateLaunchAttempts/);
       assert.match(worldlinesSource, /awaitAbortable\(identity, attempt\.controller\.signal\)/);
       assert.match(worldlinesSource, /terminateCandidateGroup\(attempt\.pid, lstart\)/);
