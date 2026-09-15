@@ -24,7 +24,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CacheIdentityInputs, ProviderId, ProviderProtocol } from "../../../agent-core/auth.ts";
+import type { ProviderId, ProviderProtocol } from "../../../agent-core/auth.ts";
+
+type CacheIdentityInputs = Parameters<
+  typeof import("../../../agent-core/auth.ts").cacheIdentityFor
+>[0];
 
 interface LocalProviderOptions {
   provider: string;

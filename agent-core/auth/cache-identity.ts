@@ -19,7 +19,7 @@ type CacheRole = "main" | "summary";
  * sent to a provider. Call `cacheSessionSeed` once at a logical session/run
  * boundary and retain its result for that boundary.
  */
-export interface CacheIdentityInputs {
+interface CacheIdentityInputs {
   sessionSeed: string;
   role: CacheRole;
   provider: ProviderId;

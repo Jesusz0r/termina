@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { LoginInputOpts } from "../../../agent-core/auth/login.ts";
+type LoginIo = Parameters<typeof import("../../../agent-core/auth/login.ts").runLogin>[2];
+type LoginInputOpts = Parameters<NonNullable<LoginIo["waitForCode"]>>[0];
 
 describe("login secret contract (refs #212)", () => {
   let root: string;
