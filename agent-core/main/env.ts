@@ -28,7 +28,7 @@ const ROOT_MANIFESTS = [
   "Gemfile",
 ] as const;
 
-const TOOLCHAIN_BINS = ["python3", "rustc", "go", "pnpm", "npm", "javac", "gcc", "clang"] as const;
+const TOOLCHAIN_BINS = ["python3", "rustc", "go", "gcc", "javac", "clang", "npm", "pnpm"] as const;
 
 function extraBinDirs(): string[] {
   const home = homedir();

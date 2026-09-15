@@ -357,7 +357,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     chmodSync(join(trustedPnpmDir, "pnpm"), 0o755);
     let envTrustedPnpm = "";
     try {
-      process.env.PATH = `${trustedPnpmDir}${delimiter}${prevPathForJail ?? ""}`;
+      process.env.PATH = trustedPnpmDir;
       envTrustedPnpm = formatEnvironment(root, { probes: true });
     } finally {
       process.env.PATH = prevPathForJail;
