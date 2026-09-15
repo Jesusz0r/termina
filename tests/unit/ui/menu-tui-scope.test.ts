@@ -38,7 +38,7 @@ describe("Renderer TUI scope invariants", () => {
     check("keydown yields TUI chords to the pty while a core terminal is focused",
       renderer.includes("if (isTuiOwnedShortcut(target) && isCoreTerminalFocused()) return;"));
     const skipAt = renderer.indexOf("if (isTuiOwnedShortcut(target) && isCoreTerminalFocused()) return;");
-    const resolveAt = renderer.indexOf("const entries = Object.entries(preferences.shortcuts)");
+    const resolveAt = renderer.indexOf("const entries = Object.entries(prefs.current.shortcuts)");
     check("the yield runs before shortcut resolution", skipAt > 0 && resolveAt > 0 && skipAt < resolveAt);
     // The palette documents the split on the quick-open row.
     check("palette rows render through the split-aware detail helper",

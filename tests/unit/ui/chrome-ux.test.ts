@@ -207,8 +207,8 @@ describe("settings chrome", () => {
     expect(html).toContain("btn-settings");
     expect(html.indexOf("btn-settings")).toBeLessThan(html.indexOf("btn-app-update"));
     expect(mainSrc).toContain('getElementById("btn-settings")');
-    expect(mainSrc).toContain("btnSettings.addEventListener(\"click\", () => settingsView.open(committedPreferences))");
-    expect(mainSrc).toContain('commands.register("open-settings", () => settingsView.open(committedPreferences))');
+    expect(mainSrc).toContain("btnSettings.addEventListener(\"click\", () => prefs.openSettings())");
+    expect(mainSrc).toContain('commands.register("open-settings", () => prefs.openSettings())');
   });
 });
 

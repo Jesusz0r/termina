@@ -8,6 +8,7 @@ import {
 } from "../../../src/preferences-boot.ts";
 
 const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+const prefsOwner = readFileSync(new URL("../../../src/main/preferences.ts", import.meta.url), "utf8");
 const settingsSrc = readFileSync(new URL("../../../src/settings.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../../../src/styles.css", import.meta.url), "utf8");
 
@@ -53,10 +54,13 @@ describe("loadPreferencesWithRetry", () => {
 
 describe("prefs boot contract (refs #275)", () => {
   it("does not pin defaults from a failed getPreferences catch", () => {
-    expect(renderer).toContain("loadPreferencesWithRetry");
+    expect(prefsOwner).toContain("loadPreferencesWithRetry");
+    expect(prefsOwner).not.toContain("getPreferences().catch(() => defaultAppPreferences())");
+    expect(prefsOwner).toContain("showPrefsLoadBanner");
+    expect(prefsOwner).toContain("settingsView.open(committedPreferences)");
+    expect(renderer).toContain("createPreferences");
+    expect(renderer).toContain("prefs.openSettings()");
     expect(renderer).not.toContain("getPreferences().catch(() => defaultAppPreferences())");
-    expect(renderer).toContain("showPrefsLoadBanner");
-    expect(renderer).toContain("settingsView.open(committedPreferences)");
     expect(settingsSrc).toContain("open(preferences: AppPreferences | null)");
     expect(settingsSrc).toContain("renderUnavailable");
     expect(settingsSrc).toContain("Could not load settings");

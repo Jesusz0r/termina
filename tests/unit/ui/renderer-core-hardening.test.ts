@@ -12,6 +12,7 @@ const worldlinesSrc = readFileSync(new URL("../../../src/worldlines.ts", import.
 const modalsSrc = readFileSync(new URL("../../../src/components/modals.ts", import.meta.url), "utf8");
 const timelineSrc = readFileSync(new URL("../../../src/timeline.ts", import.meta.url), "utf8");
 const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+const terminalFind = readFileSync(new URL("../../../src/main/terminal-find.ts", import.meta.url), "utf8");
 
 describe("renderer core hardening batch, items 2-10 (refs #217)", () => {
   it("allowlists IPC-shaped class names (item 2)", () => {
@@ -55,9 +56,9 @@ describe("renderer core hardening batch, items 2-10 (refs #217)", () => {
   });
 
   it("repositions the find bar on container resize (item 6)", () => {
-    expect(renderer).toContain("new ResizeObserver(() => {");
-    expect(renderer).toContain("if (findBar && !findBar.hidden) positionTerminalFindBar();");
-    expect(renderer).toContain("}).observe(termContainer);");
+    expect(terminalFind).toContain("new ResizeObserver(() => {");
+    expect(terminalFind).toContain("if (findBar && !findBar.hidden) positionTerminalFindBar();");
+    expect(terminalFind).toContain("resizeObserver.observe(termContainer);");
   });
 
   it("notes the execCommand deprecation with its replacement limits (item 7)", () => {

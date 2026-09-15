@@ -39,18 +39,19 @@ import { PtyView } from "./pty-view";
 import { createTerminalMenu } from "./main/terminal-menu";
 import { createTimelinePane } from "./main/timeline-pane";
 import { createActivityPane } from "./main/activity-pane";
+import { createPreferences, applyEditorPreferences, applyReviewPreferences } from "./main/preferences";
+import { createLayout } from "./main/layout";
+import { createTerminalFind } from "./main/terminal-find";
 import { SessionSearch } from "./session-search";
 import { QuickOpen } from "./quick-open";
 import { ActivityTabs } from "./activity-tabs";
 import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { projectChangedPaths } from "./explorer-file";
-import { showUnsavedConfirm, stickyToast, toast } from "./components/modals";
-import { loadPreferencesWithRetry } from "./preferences-boot";
+import { showUnsavedConfirm, toast } from "./components/modals";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { showContextMenu, type ContextMenuItem } from "./components/context-menu";
-import { SettingsView } from "./settings";
-import { applyEmptyStateShortcutHints, emptyShortcuts, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
+import { applyEmptyStateShortcutHints, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
 import { CommandDispatcher } from "./commands";
 import { PtySequenceLedger } from "./pty-sequence-ledger";
 import {
@@ -70,9 +71,8 @@ import {
   worldlineEventBelongsToProject,
 } from "./worldline-project-state";
 import { asKnownState, KNOWN_ACTIVITY_STATES, KNOWN_VERIFY_BADGE_STATES, presentBlockedLabel } from "./known-state";
-import { CHALLENGE_PROFILES, cssFontFamily, defaultAppPreferences, isTuiOwnedShortcut, pathBasename } from "../shared/types";
-import { normalizeAppPreferences } from "../shared/preferences";
-import type { AgentActivityView, AppPreferences, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
+import { CHALLENGE_PROFILES, isTuiOwnedShortcut, pathBasename } from "../shared/types";
+import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
 type EditorManagerInstance = import("./editor").EditorManager;
 type ReviewViewInstance = import("./review").ReviewView;
@@ -131,7 +131,7 @@ function getBaseEditor(): EditorManagerInstance {
     };
     applySharedEditorHooks(baseEditorInstance, null);
     baseEditorInstance.projectRootProvider = () => projectCwd;
-    applyEditorPreferences(baseEditorInstance, preferences);
+    applyEditorPreferences(baseEditorInstance, prefs.current);
   }
   return baseEditorInstance;
 }
@@ -223,7 +223,7 @@ function ensureProjectEditor(view: ProjectView): EditorManagerInstance {
     const current = projectViews.get(view.id);
     return current?.workspaceId ? { projectId: current.id, workspaceId: current.workspaceId } : null;
   };
-  applyEditorPreferences(editorMgr, preferences);
+  applyEditorPreferences(editorMgr, prefs.current);
   view.editorMgr = editorMgr;
   return editorMgr;
 }
@@ -240,9 +240,9 @@ function applySharedEditorHooks(editor: EditorManagerInstance, projectId: string
   editor.tabBadge = (path) => worldlinesView.labelOfPath(path);
   editor.onFileOpened = () => {
     if (projectId !== null && activeProjectId !== projectId) return;
-    revealEditor();
+    layout.revealEditor();
   };
-  editor.onBecameEmpty = () => collapseEditorIfIdle();
+  editor.onBecameEmpty = () => layout.collapseEditorIfIdle();
 }
 
 /** Remove a closed project's tab, editor view, and panes. */
@@ -315,9 +315,9 @@ function setActiveProject(projectId: string | null): void {
   placeEditorToggle(activeProjectId);
   syncPaneVisibility();
   syncExplorerChanged();
-  syncEditorMinimizedForProject();
+  layout.syncEditorMinimizedForProject();
   drainPendingToolTargets(activeProjectId);
-  fitPanes();
+  layout.fitPanes();
   timelinePane.invalidateJumps();
   updateEditorLock();
 }
@@ -328,7 +328,7 @@ function drainPendingToolTargets(projectId: string | null): void {
   const queued = pendingToolTargets.get(projectId);
   if (!queued || queued.length === 0) return;
   pendingToolTargets.delete(projectId);
-  if (!preferences.autoOpenAgentFiles) return;
+  if (!prefs.current.autoOpenAgentFiles) return;
   const view = projectViews.get(projectId);
   if (!view) return;
   for (const target of queued) {
@@ -400,20 +400,13 @@ function ensureReviewView(): Promise<ReviewViewInstance> {
         pane.accepted.delete(path);
         activityPane.renderModified(pane);
       },
-      onHidden: () => collapseEditorIfIdle(),
-      onShown: () => revealEditor(),
+      onHidden: () => layout.collapseEditorIfIdle(),
+      onShown: () => layout.revealEditor(),
     });
     reviewView = view;
-    applyReviewPreferences(view, preferences);
+    applyReviewPreferences(view, prefs.current);
     return view;
   });
-}
-
-function applyReviewPreferences(view: ReviewViewInstance, prefs: AppPreferences): void {
-  view.setTheme(prefs.theme);
-  view.setFontSize(prefs.editorFontSize);
-  view.setFontFamily(prefs.fontFamily);
-  view.setWordWrap(prefs.wordWrap);
 }
 const explorer = new Explorer(document.getElementById("explorer")!);
 const sessionSearch = new SessionSearch();
@@ -735,13 +728,23 @@ const MAX_PENDING_TOOL_TARGETS = 20;
 const closingPanes = new Map<string, { generation: number }>();
 let activeId: string | null = null;
 let projectCwd: string | null = null;
-const prefsBoot = await loadPreferencesWithRetry(() => window.termina.getPreferences());
-// Visual fallback only. Never treat this as the user's committed prefs.
-let preferences: AppPreferences = prefsBoot.ok ? prefsBoot.preferences : defaultAppPreferences();
-let committedPreferences: AppPreferences | null = prefsBoot.ok ? preferences : null;
-let preferenceGeneration = 0;
-let prefsLoadInFlight = false;
-let prefsLoadBanner: { dismiss: () => void } | null = null;
+const prefs = await createPreferences({
+  getBaseEditor: () => baseEditorInstance,
+  forEachProjectEditor: (fn) => {
+    for (const view of projectViews.values()) {
+      if (view.editorMgr) fn(view.editorMgr);
+    }
+  },
+  getReviewView: () => reviewView,
+  forEachTerminal: (fn) => {
+    for (const pane of panes.values()) fn(pane.view);
+  },
+});
+// The e2e suite opens settings through this hook (the menu owns the
+// visible entry).
+(window as unknown as Record<string, unknown>).__openSettings = () => prefs.openSettings();
+let layout!: ReturnType<typeof createLayout>;
+let terminalFind!: ReturnType<typeof createTerminalFind>;
 
 function applyTerminalGeneration(pane: Pane, generation: number): void {
   if (pane.generation === generation) return;
@@ -756,132 +759,6 @@ function applyTerminalGeneration(pane: Pane, generation: number): void {
 function signalTerminalHydrated(pane: Pane): void {
   if (!pane.error && pane.generation > 0) window.termina.readyTerminal(pane.instanceId, pane.generation);
 }
-
-function userPatch(prev: AppPreferences, next: AppPreferences): import("../shared/types").UserPreferencePatch {
-  const patch: import("../shared/types").UserPreferencePatch = {};
-  if (prev.theme !== next.theme) patch.theme = next.theme;
-  if (prev.editorFontSize !== next.editorFontSize) patch.editorFontSize = next.editorFontSize;
-  if (prev.terminalFontSize !== next.terminalFontSize) patch.terminalFontSize = next.terminalFontSize;
-  if (prev.fontFamily !== next.fontFamily) patch.fontFamily = next.fontFamily;
-  if (prev.wordWrap !== next.wordWrap) patch.wordWrap = next.wordWrap;
-  if (prev.minimap !== next.minimap) patch.minimap = next.minimap;
-  if (JSON.stringify(prev.shortcuts) !== JSON.stringify(next.shortcuts)) patch.shortcuts = next.shortcuts;
-  if (prev.showThinking !== next.showThinking) patch.showThinking = next.showThinking;
-  if (prev.autoOpenAgentFiles !== next.autoOpenAgentFiles) patch.autoOpenAgentFiles = next.autoOpenAgentFiles;
-  return patch;
-}
-
-function paintPreferences(prefs: AppPreferences): void {
-  document.documentElement.dataset.theme = prefs.theme;
-  // The app chrome (explorer, tabs, menus) inherits this token; canvases
-  // set their own families directly below.
-  document.documentElement.style.setProperty("--font-chrome", cssFontFamily(prefs.fontFamily));
-  if (baseEditorInstance) applyEditorPreferences(baseEditorInstance, prefs);
-  for (const view of projectViews.values()) {
-    if (view.editorMgr) applyEditorPreferences(view.editorMgr, prefs);
-  }
-  if (reviewView) {
-    reviewView.setTheme(prefs.theme);
-    reviewView.setFontSize(prefs.editorFontSize);
-    reviewView.setFontFamily(prefs.fontFamily);
-    reviewView.setWordWrap(prefs.wordWrap);
-  }
-  for (const pane of panes.values()) applyTerminalPreferences(pane.view, prefs);
-}
-
-function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean, confirmReset = false): void {
-  if (persist && !committedPreferences) {
-    toast("Could not load settings", "error");
-    return;
-  }
-  const generation = ++preferenceGeneration;
-  const preview = normalizeAppPreferences(next);
-  preferences = preview;
-  paintPreferences(preferences);
-  if (persist) {
-    const baseline = committedPreferences;
-    if (!baseline) return;
-    const patch = userPatch(baseline, preview);
-    // A reset always persists, even with an empty patch: that is the write
-    // that clears an unreadable prefs file back to defaults.
-    if (Object.keys(patch).length > 0 || confirmReset) {
-      void window.termina.updatePreferences({ patch, activateShortcuts, ...(confirmReset ? { confirmReset: true } : {}) }).then((saved) => {
-        const normalized = normalizeAppPreferences(saved);
-        committedPreferences = normalized;
-        if (generation !== preferenceGeneration) return;
-        preferences = normalized;
-        paintPreferences(preferences);
-      }).catch(() => {
-        if (generation !== preferenceGeneration) return;
-        preferences = baseline;
-        paintPreferences(preferences);
-        toast("Could not save settings", "error");
-      });
-    } else if (activateShortcuts) {
-      void window.termina.setKeyboardShortcuts(baseline.shortcuts).catch(() => undefined);
-    }
-  } else {
-    committedPreferences = preview;
-    if (activateShortcuts) {
-      void window.termina.setKeyboardShortcuts(preferences.shortcuts).catch(() => undefined);
-    }
-  }
-}
-
-function applyEditorPreferences(editor: EditorManagerInstance, prefs: AppPreferences): void {
-  editor.setTheme(prefs.theme);
-  editor.setFontSize(prefs.editorFontSize);
-  editor.setFontFamily(prefs.fontFamily);
-  editor.setWordWrap(prefs.wordWrap);
-  editor.setMinimap(prefs.minimap);
-}
-
-function applyTerminalPreferences(view: PtyView, prefs: AppPreferences): void {
-  view.setTheme(prefs.theme);
-  view.setFontSize(prefs.terminalFontSize);
-  view.setFontFamily(prefs.fontFamily);
-}
-
-const settingsView = new SettingsView({
-  onChange: (next) => applyPreferences(next, true, false),
-  onReset: (next) => applyPreferences(next, true, false, true),
-  onOpen: () => void window.termina.setKeyboardShortcuts(emptyShortcuts()).catch(() => undefined),
-  onClose: (next) => applyPreferences(next, true, true),
-  onRetryLoad: () => void retryPreferences(),
-});
-
-function showPrefsLoadBanner(): void {
-  if (prefsLoadBanner) return;
-  prefsLoadBanner = stickyToast("Could not load settings", "warning", {
-    label: "Retry",
-    onClick: () => void retryPreferences(),
-  });
-}
-
-function dismissPrefsLoadBanner(): void {
-  prefsLoadBanner?.dismiss();
-  prefsLoadBanner = null;
-}
-
-async function retryPreferences(): Promise<void> {
-  if (prefsLoadInFlight || committedPreferences) return;
-  prefsLoadInFlight = true;
-  try {
-    const result = await loadPreferencesWithRetry(() => window.termina.getPreferences());
-    if (!result.ok) return;
-    applyPreferences(result.preferences, false, true);
-    dismissPrefsLoadBanner();
-    settingsView.setLoaded(result.preferences);
-  } finally {
-    prefsLoadInFlight = false;
-  }
-}
-
-if (committedPreferences) applyPreferences(preferences, false, true);
-else showPrefsLoadBanner();
-// The e2e suite opens settings through this hook (the menu owns the
-// visible entry).
-(window as unknown as Record<string, unknown>).__openSettings = () => settingsView.open(committedPreferences);
 
 function createPaneShell(instanceId: string): Pane {
   const container = document.createElement("div");
@@ -924,9 +801,9 @@ function createPaneShell(instanceId: string): Pane {
     (message) => toast(message, "error"),
     (files) => window.termina.dropTerminalFiles(instanceId, files),
     {
-      theme: preferences.theme,
-      fontSize: preferences.terminalFontSize,
-      fontFamily: preferences.fontFamily,
+      theme: prefs.current.theme,
+      fontSize: prefs.current.terminalFontSize,
+      fontFamily: prefs.current.fontFamily,
     },
     (filePath, line, column) => {
       const targetProjectId = pane.projectId ?? activeProjectId;
@@ -994,10 +871,10 @@ function createPaneShell(instanceId: string): Pane {
       { label: "Copy", action: () => { view.copySelection(); } },
       { label: "Paste", action: () => { void view.pasteClipboard(); } },
     ];
-    if (pane.engine === "core" && committedPreferences) {
+    if (pane.engine === "core" && prefs.committed) {
       items.push({ separator: true });
       items.push({
-        label: committedPreferences.showThinking ? "Hide Thinking" : "Show Thinking",
+        label: prefs.committed.showThinking ? "Hide Thinking" : "Show Thinking",
         action: () => commands.execute("toggle-thinking"),
       });
     }
@@ -1435,7 +1312,7 @@ async function copyCommitSubject(): Promise<void> {
 async function focusProjectShell(): Promise<void> {
   const pane = activeId ? panes.get(activeId) : undefined;
   const projectId = pane?.projectId ?? activeProjectId;
-  revealTerminal();
+  layout.revealTerminal();
   const existing = [...panes.values()].find((p) => p.projectId === projectId && p.type === "shell" && !p.error);
   if (existing) {
     activatePane(existing.instanceId);
@@ -1541,7 +1418,7 @@ async function openFileSmartInner(
   const abs = cleanPath.startsWith("/") ? cleanPath : normalizePath(`${view.cwd}/${cleanPath}`);
   // Expand the editor only once the target project is known and in front:
   // revealing before routing resizes the terminal twice on cross-project opens.
-  revealEditor();
+  layout.revealEditor();
   try {
     await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });
     // A successful open is the recency signal, whatever path led here.
@@ -1615,151 +1492,8 @@ verifyBadge.addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------- layout ---
-
-type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom" | "terminal-fullscreen";
-type WorkPane = "terminal" | "editor";
-const SPLIT_LAYOUTS = ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom"] as const;
-const DEFAULT_LAYOUT: Layout = "terminal-left";
-const LAYOUT_KEY = "termina.layout";
-const EXPLORER_KEY = "termina.explorer";
-const MODIFIED_KEY = "termina.modified";
-const MODIFIED_HEIGHT_KEY = "termina.modifiedHeight";
-const WORKPANE_KEY = "termina.workpane";
-const PANE_MIN_ICON = "–";
-const PANE_MAX_ICON = "□";
-
-const splitEl = document.getElementById("main-split")!;
-const modifiedPanelEl = document.getElementById("modified-panel")!;
-const explorerDividerEl = document.getElementById("explorer-divider")!;
-const modifiedResizeEl = document.getElementById("modified-resize")!;
-const btnMinExplorer = document.getElementById("btn-min-explorer") as HTMLButtonElement;
-const btnMinTerminal = document.getElementById("btn-min-terminal") as HTMLButtonElement;
-const btnMinEditor = document.getElementById("btn-min-editor") as HTMLButtonElement;
-
-let explorerMinimized = false;
-let minimizedWork: WorkPane | null = null;
-let lastSplitLayout: Layout = DEFAULT_LAYOUT;
-
-function isSplitLayout(value: string | null): value is (typeof SPLIT_LAYOUTS)[number] {
-  return SPLIT_LAYOUTS.includes(value as (typeof SPLIT_LAYOUTS)[number]);
-}
-
-function parseLayout(raw: string | null): Layout {
-  if (raw === "terminal-fullscreen" || isSplitLayout(raw)) return raw;
-  return DEFAULT_LAYOUT;
-}
-
-function isFullscreenLayout(): boolean {
-  return splitEl.classList.contains("layout-terminal-fullscreen");
-}
-
-function exitFullscreen(): void {
-  if (isFullscreenLayout()) applyLayout(lastSplitLayout);
-}
-
-function applyLayout(layout: Layout): void {
-  if (isSplitLayout(layout)) lastSplitLayout = layout;
-  for (const l of ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom", "terminal-fullscreen"] as const) {
-    splitEl.classList.toggle(`layout-${l}`, l === layout);
-  }
-  // Fullscreen hides the editor and explorer so the TUI owns the window.
-  // Minimize bars stay in the persisted state and return when fullscreen ends.
-  if (layout === "terminal-fullscreen") {
-    setExplorerHidden(true);
-    rightPaneEl.style.display = "none";
-  } else {
-    setExplorerHidden(false);
-    rightPaneEl.style.display = "";
-    applyExplorerMinimized();
-    applyWorkMinimized();
-  }
-  clearSplitSizes();
-  stashedSplit = null;
-  localStorage.setItem(LAYOUT_KEY, layout);
-  fitPanes();
-}
-
-function clearSplitSizes(): void {
-  leftPane.style.width = "";
-  leftPane.style.height = "";
-  leftPane.style.flexBasis = "";
-  leftPane.style.flex = "";
-}
-
-/** The user's split-divider ratio, stashed while a work pane is minimized
- *  and re-applied on restore. The minimize takeover needs the inline sizes
- *  cleared (inline flex would beat the full-width CSS rule), but without
- *  the stash every minimize/restore cycle — minimize button, review reveal,
- *  project switch to an empty project — silently reset the ratio. Explicit
- *  layout changes drop the stash: a new geometry starts from 50/50. */
-let stashedSplit: { flex: string; flexBasis: string } | null = null;
-
-function stashSplitSizes(): void {
-  // Only a real divider drag overwrites: swapping which pane is minimized
-  // must keep the earlier stash, not replace it with cleared inline sizes.
-  const flex = leftPane.style.flex;
-  const flexBasis = leftPane.style.flexBasis;
-  if (flex || flexBasis) stashedSplit = { flex, flexBasis };
-}
-
-function restoreSplitSizes(): void {
-  if (!stashedSplit) return;
-  if (stashedSplit.flex) leftPane.style.flex = stashedSplit.flex;
-  if (stashedSplit.flexBasis) leftPane.style.flexBasis = stashedSplit.flexBasis;
-  stashedSplit = null;
-}
-
-function fitPanes(): void {
-  // Flush the new flex sizes before measuring. A delayed fit paints one
-  // frame at the old cell grid, then snaps — that is the occupancy flicker.
-  void splitEl.getBoundingClientRect();
-  if (editorModule) activeEditor().layout();
-  // Only the visible pane: hidden panes measure 0 and skip anyway, but
-  // fitting each of them on every layout change spams pty resizes when
-  // they become visible with stale grids. They fit on activation instead.
-  const active = activeId ? panes.get(activeId) : undefined;
-  if (active && active.projectId === activeProjectId) active.view.fit();
-}
-
-function setExplorerHidden(hidden: boolean): void {
-  explorerEl.style.display = hidden ? "none" : "";
-  explorerDividerEl.style.display = hidden || explorerMinimized ? "none" : "";
-}
-
-function applyExplorerMinimized(): void {
-  explorerEl.classList.toggle("minimized", explorerMinimized);
-  if (!isFullscreenLayout()) {
-    explorerEl.style.display = "";
-    explorerDividerEl.style.display = explorerMinimized ? "none" : "";
-  }
-  syncPaneToggle(btnMinExplorer, explorerMinimized, "explorer");
-}
-
-function setExplorerMinimized(minimized: boolean): void {
-  explorerMinimized = minimized;
-  localStorage.setItem(EXPLORER_KEY, minimized ? "0" : "1");
-  applyExplorerMinimized();
-  fitPanes();
-}
-
-function applyWorkMinimized(): void {
-  leftPane.classList.toggle("minimized", minimizedWork === "terminal");
-  rightPaneEl.classList.toggle("minimized", minimizedWork === "editor");
-  syncPaneToggle(btnMinTerminal, minimizedWork === "terminal", "terminal");
-  syncPaneToggle(btnMinEditor, minimizedWork === "editor", "editor");
-}
-
-function setMinimizedWork(pane: WorkPane | null): void {
-  minimizedWork = pane;
-  if (pane) localStorage.setItem(WORKPANE_KEY, pane);
-  else localStorage.removeItem(WORKPANE_KEY);
-  if (pane) stashSplitSizes();
-  applyWorkMinimized();
-  clearSplitSizes();
-  if (!pane) restoreSplitSizes();
-  fitPanes();
-}
-
+// Occupancy policy stays at the entry: it reads project tabs, review, and
+// the base editor. The layout owner consumes the boolean.
 function editorPaneOccupied(): boolean {
   if (reviewView?.isVisible === true) return true;
   if (activeProjectId) {
@@ -1772,97 +1506,33 @@ function editorPaneOccupied(): boolean {
   return baseEditorInstance?.hasOpenTabs() === true;
 }
 
-/** Project switches share one minimize bar but occupancy is per-project: an
- *  empty project auto-collapses the editor, and returning to a project with
- *  open tabs (or a first-run login hint) restores it. An explicit terminal
- *  minimize is never clobbered. */
-function syncEditorMinimizedForProject(): void {
-  if (editorPaneOccupied()) {
-    if (minimizedWork === "editor") setMinimizedWork(null);
-    return;
-  }
-  if (minimizedWork === null) setMinimizedWork("editor");
-}
-
-function collapseEditorIfIdle(): void {
-  if (editorPaneOccupied()) return;
-  // An explicit terminal minimize owns the split. Closing the last tab
-  // must not steal it by auto-collapsing the empty editor.
-  if (minimizedWork === "terminal") return;
-  if (minimizedWork !== "editor") setMinimizedWork("editor");
-}
-
-function revealEditor(): void {
-  exitFullscreen();
-  if (minimizedWork === "editor") setMinimizedWork(null);
-}
-
-function revealTerminal(): void {
-  exitFullscreen();
-  if (minimizedWork === "terminal") setMinimizedWork(null);
-}
-
-function requestMinimize(pane: WorkPane): void {
-  if (isFullscreenLayout()) {
-    exitFullscreen();
-    // Terminal fullscreen is a maximize. Toggle-editor only leaves that
-    // layout so the editor can come back; toggle-terminal falls through
-    // so the terminal can still collapse while the editor stays up.
-    if (pane === "editor") {
-      if (minimizedWork === "editor") setMinimizedWork(null);
-      return;
-    }
-  }
-  // Restore when this pane is already the thin bar. Manual toggle always
-  // restores, even an empty editor; auto-collapse still hides it on idle.
-  if (minimizedWork === pane) {
-    setMinimizedWork(null);
-    return;
-  }
-  // One work pane always stays expanded. Minimizing the last visible
-  // pane swaps: the other is restored (maximized) automatically.
-  // Occupancy must not block this — an expanded editor, empty or not,
-  // can still collapse the terminal.
-  setMinimizedWork(pane);
-}
-
-function syncPaneToggle(button: HTMLButtonElement, minimized: boolean, label: string): void {
-  button.textContent = minimized ? PANE_MAX_ICON : PANE_MIN_ICON;
-  const action = minimized ? "Restore" : "Minimize";
-  button.title = `${action} ${label}`;
-  button.setAttribute("aria-label", `${action} ${label}`);
-}
-
-function setModifiedVisible(visible: boolean): void {
-  modifiedPanelEl.style.display = visible ? "" : "none";
-  activityTabs.setTabVisible("modified", visible);
-  localStorage.setItem(MODIFIED_KEY, visible ? "1" : "0");
-}
-
-btnMinExplorer.addEventListener("click", (event) => {
-  event.stopPropagation();
-  if (isFullscreenLayout()) {
-    exitFullscreen();
-    return;
-  }
-  setExplorerMinimized(!explorerMinimized);
+layout = createLayout({
+  elements: {
+    splitEl: document.getElementById("main-split")!,
+    leftPane,
+    rightPaneEl,
+    explorerEl,
+    explorerDividerEl: document.getElementById("explorer-divider")!,
+    modifiedPanelEl: document.getElementById("modified-panel")!,
+    modifiedList,
+    modifiedResizeEl: document.getElementById("modified-resize")!,
+    termContainer,
+    divider: document.getElementById("divider")!,
+    btnMinExplorer: document.getElementById("btn-min-explorer") as HTMLButtonElement,
+    btnMinTerminal: document.getElementById("btn-min-terminal") as HTMLButtonElement,
+    btnMinEditor: document.getElementById("btn-min-editor") as HTMLButtonElement,
+    mainEl: document.getElementById("main")!,
+  },
+  editorOccupied: editorPaneOccupied,
+  layoutEditors: () => {
+    if (editorModule) activeEditor().layout();
+  },
+  layoutActiveTerminal: () => {
+    const active = activeId ? panes.get(activeId) : undefined;
+    if (active && active.projectId === activeProjectId) active.view.fit();
+  },
+  setModifiedTabVisible: (visible) => activityTabs.setTabVisible("modified", visible),
 });
-btnMinTerminal.addEventListener("click", (event) => {
-  event.stopPropagation();
-  requestMinimize("terminal");
-});
-btnMinEditor.addEventListener("click", (event) => {
-  event.stopPropagation();
-  requestMinimize("editor");
-});
-
-function isColumnLayout(): boolean {
-  return splitEl.classList.contains("layout-terminal-top") || splitEl.classList.contains("layout-terminal-bottom");
-}
-
-function workPaneCollapsed(): boolean {
-  return minimizedWork !== null;
-}
 
 // File-menu commands + layout/toggle commands
 /**
@@ -1937,150 +1607,28 @@ commands.register("new-terminal", () => {
 commands.register("next-terminal", () => cycleTerminals(1));
 commands.register("previous-terminal", () => cycleTerminals(-1));
 commands.register("toggle-thinking", () => {
-  if (!committedPreferences) {
+  if (!prefs.committed) {
     toast("Could not load settings", "error");
     return;
   }
-  const next = !committedPreferences.showThinking;
+  const next = !prefs.committed.showThinking;
   void window.termina.updatePreferences({ patch: { showThinking: next }, activateShortcuts: false }).then((saved) => {
-    applyPreferences(saved, false, false);
+    prefs.apply(saved, false, false);
   }).catch(() => toast("Could not save settings", "error"));
 });
 commands.register("next-project", () => cycleProjects(1));
 commands.register("previous-project", () => cycleProjects(-1));
 commands.register("terminal-find", () => {
   if (activeEditor().runMenuEdit("find")) return;
-  openTerminalFind();
+  terminalFind.open();
 });
 
 // ---- terminal find ----
-// One global bar searching the active pane's scrollback. Search state
-// (decorations, result index) lives in each pane's SearchAddon; this
-// controller only tracks which pane's decorations are currently live so
-// switching panes never leaves stale highlights behind.
-let findBar: HTMLElement | null = null;
-let findInput: HTMLInputElement | null = null;
-let findCount: HTMLElement | null = null;
-let findPaneId: string | null = null;
-let findResultsSub: { dispose(): void } | null = null;
-
-function findPane(): Pane | undefined {
-  const pane = activeId ? panes.get(activeId) : undefined;
-  return pane && !pane.error ? pane : undefined;
-}
-
-function clearFindDecorations(): void {
-  if (findPaneId) panes.get(findPaneId)?.view.clearFind();
-  findPaneId = null;
-  findResultsSub?.dispose();
-  findResultsSub = null;
-  if (findCount) findCount.textContent = "";
-}
-
-function runTerminalFind(next: boolean): void {
-  const pane = findPane();
-  const term = findInput?.value ?? "";
-  if (!pane || !term) return;
-  if (findPaneId !== pane.instanceId) {
-    clearFindDecorations();
-    findPaneId = pane.instanceId;
-    findResultsSub = pane.view.onFindResults((index, count) => {
-      if (!findCount) return;
-      findCount.textContent = count === 0 ? "no matches" : index < 0 ? `${count}+` : `${index + 1}/${count}`;
-    });
-  }
-  // A throwing search backend shows "error", never a silent no-match.
-  try {
-    if (next) pane.view.findNext(term);
-    else pane.view.findPrevious(term);
-  } catch {
-    if (findCount) findCount.textContent = "error";
-  }
-}
-
-function closeTerminalFind(refocus = true): void {
-  clearFindDecorations();
-  if (findBar) findBar.hidden = true;
-  if (refocus) findPane()?.view.focus();
-}
-
-function positionTerminalFindBar(): void {
-  if (!findBar) return;
-  const rect = termContainer.getBoundingClientRect();
-  findBar.style.top = `${rect.top + 8}px`;
-  findBar.style.left = `${Math.max(8, rect.right - 328)}px`;
-}
-
-// The bar anchors to the terminal container, so it follows window resizes,
-// divider drags, and layout changes — not just the open that positioned it.
-new ResizeObserver(() => {
-  if (findBar && !findBar.hidden) positionTerminalFindBar();
-}).observe(termContainer);
-
-function buildTerminalFindBar(): void {
-  const bar = document.createElement("div");
-  bar.className = "terminal-find";
-  bar.hidden = true;
-  const input = document.createElement("input");
-  input.type = "text";
-  input.placeholder = "Find in terminal";
-  input.setAttribute("aria-label", "Find in terminal");
-  const count = document.createElement("span");
-  count.className = "terminal-find-count";
-  const prev = document.createElement("button");
-  prev.type = "button";
-  prev.textContent = "↑";
-  prev.title = "Previous match (Shift+Enter)";
-  const next = document.createElement("button");
-  next.type = "button";
-  next.textContent = "↓";
-  next.title = "Next match (Enter)";
-  const close = document.createElement("button");
-  close.type = "button";
-  close.textContent = "×";
-  close.title = "Close (Esc)";
-  input.addEventListener("input", () => runTerminalFind(true));
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      runTerminalFind(!e.shiftKey);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      closeTerminalFind();
-    }
-  });
-  prev.addEventListener("click", () => {
-    runTerminalFind(false);
-    input.focus();
-  });
-  next.addEventListener("click", () => {
-    runTerminalFind(true);
-    input.focus();
-  });
-  close.addEventListener("click", () => closeTerminalFind());
-  bar.append(input, count, prev, next, close);
-  document.body.appendChild(bar);
-  findBar = bar;
-  findInput = input;
-  findCount = count;
-}
-
-function openTerminalFind(): void {
-  const pane = findPane();
-  if (!pane) return;
-  if (!findBar) buildTerminalFindBar();
-  if (findPaneId !== pane.instanceId) clearFindDecorations();
-  findBar!.hidden = false;
-  positionTerminalFindBar();
-  if (findInput) {
-    const selection = pane.view.getTerminal().getSelection().trim().split("\n")[0] ?? "";
-    if (selection) findInput.value = selection;
-    findInput.focus();
-    findInput.select();
-  }
-  if (findInput?.value) runTerminalFind(true);
-}
+terminalFind = createTerminalFind({
+  termContainer,
+  getActivePane: () => (activeId ? panes.get(activeId) : undefined),
+  getPaneById: (id) => panes.get(id),
+});
 
 // ---- tab cycling ----
 // Tab order is DOM order: drag reorder moves nodes without touching the
@@ -2177,7 +1725,7 @@ document.addEventListener("focusout", syncTerminalFocusScope);
 window.addEventListener(
   "keydown",
   (e) => {
-    if (settingsView.isOpen) return;
+    if (prefs.settingsView.isOpen) return;
     const computed = shortcutForEvent(e);
     if (!computed) return;
     const target = normalizeShortcut(computed);
@@ -2186,7 +1734,7 @@ window.addEventListener(
     // their bound command. The menu blanks the same chords (see
     // syncTerminalFocusScope), so neither layer steals them on Windows/Linux.
     if (isTuiOwnedShortcut(target) && isCoreTerminalFocused()) return;
-    const entries = Object.entries(preferences.shortcuts) as [CommandId, string][];
+    const entries = Object.entries(prefs.current.shortcuts) as [CommandId, string][];
     const command = entries.find(([, bound]) => bound && normalizeShortcut(bound) === target)?.[0];
     if (!command || !commands.has(command)) return;
     e.preventDefault();
@@ -2224,18 +1772,15 @@ setupWheelCycling(projectTabsEl, cycleProjects);
 setupWheelCycling(termTabsList, cycleTerminals);
 
 // View & Layout commands
-commands.register("fullscreen", () => applyLayout("terminal-fullscreen"));
-commands.register("layout-terminal-left", () => applyLayout("terminal-left"));
-commands.register("layout-terminal-right", () => applyLayout("terminal-right"));
-commands.register("layout-terminal-top", () => applyLayout("terminal-top"));
-commands.register("layout-terminal-bottom", () => applyLayout("terminal-bottom"));
-commands.register("toggle-explorer", () => {
-  if (isFullscreenLayout()) exitFullscreen();
-  else setExplorerMinimized(!explorerMinimized);
-});
-commands.register("toggle-terminal", () => requestMinimize("terminal"));
-commands.register("toggle-editor", () => requestMinimize("editor"));
-commands.register("toggle-modified", () => setModifiedVisible(modifiedPanelEl.style.display === "none"));
+commands.register("fullscreen", () => layout.applyLayout("terminal-fullscreen"));
+commands.register("layout-terminal-left", () => layout.applyLayout("terminal-left"));
+commands.register("layout-terminal-right", () => layout.applyLayout("terminal-right"));
+commands.register("layout-terminal-top", () => layout.applyLayout("terminal-top"));
+commands.register("layout-terminal-bottom", () => layout.applyLayout("terminal-bottom"));
+commands.register("toggle-explorer", () => layout.toggleExplorer());
+commands.register("toggle-terminal", () => layout.requestMinimize("terminal"));
+commands.register("toggle-editor", () => layout.requestMinimize("editor"));
+commands.register("toggle-modified", () => layout.toggleModified());
 commands.register("session-search", () => sessionSearch.open());
 quickOpen.bind({
   // An explicit modal pick is a direct gesture: take editor focus so the
@@ -2248,197 +1793,19 @@ quickOpen.bind({
   onOpenContentHit: (relPath, line, column) => openContentHit(relPath, line, column),
   onContentResults: (pattern, hits, truncated) => explorer.showContentResults(pattern, hits, truncated),
   onExecuteCommand: (command) => commands.execute(command),
-  getShortcut: (command) => preferences.shortcuts[command] ?? "",
+  getShortcut: (command) => prefs.current.shortcuts[command] ?? "",
 });
 commands.register("quick-open", () => quickOpen.open("files"));
 commands.register("content-search", () => quickOpen.open("content"));
 commands.register("command-palette", () => quickOpen.open("actions"));
 
 // Settings
-btnSettings.addEventListener("click", () => settingsView.open(committedPreferences));
-commands.register("open-settings", () => settingsView.open(committedPreferences));
+btnSettings.addEventListener("click", () => prefs.openSettings());
+commands.register("open-settings", () => prefs.openSettings());
 
 window.termina.onMenuCommand((cmd) => {
   commands.execute(cmd.command);
 });
-
-// ------------------------------------------------------------ split pane ----
-
-const divider = document.getElementById("divider")!;
-let dragging = false;
-divider.addEventListener("mousedown", (e) => {
-  if (workPaneCollapsed()) return;
-  e.preventDefault();
-  dragging = true;
-  suppressNativeDrag(true);
-  document.body.style.cursor = isColumnLayout() ? "row-resize" : "col-resize";
-});
-window.addEventListener("mousemove", (e) => {
-  if (!dragging) return;
-  const rect = splitEl.getBoundingClientRect();
-  if (isColumnLayout()) {
-    const pct = ((e.clientY - rect.top) / rect.height) * 100;
-    leftPane.style.flexBasis = `${Math.min(75, Math.max(25, pct))}%`;
-  } else {
-    // flex-basis (not width) drives the split: #left-pane is a flex item
-    // whose flex-basis overrides width. Grow stays on so the right pane
-    // absorbs free space and the left lands exactly on the dragged share.
-    const pct = ((e.clientX - rect.left) / rect.width) * 100;
-    leftPane.style.flex = `0 1 ${Math.min(70, Math.max(30, pct))}%`;
-  }
-});
-window.addEventListener("mouseup", () => {
-  dragging = false;
-  suppressNativeDrag(false);
-  document.body.style.cursor = "";
-});
-
-// explorer ↔ editor divider
-let exploring = false;
-function finishExplorerDrag(): void {
-  exploring = false;
-  suppressNativeDrag(false);
-  document.body.style.cursor = "";
-}
-// File rows are native drag sources (`draggable=true` in explorer.ts): a grab
-// that lands even 1px left of the 4px divider starts a file drag instead of a
-// resize, and its mousemoves never reach the window. Projects with dense trees
-// fill the grab row, so the divider feels broken there and fine in sparse
-// projects. This capture-phase redirect claims near-miss presses before any
-// row sees them.
-const EXPLORER_GRAB_PX = 8;
-window.addEventListener("mousedown", (e) => {
-  if (e.button !== 0 || exploring || explorerMinimized) return;
-  const box = explorerDividerEl.getBoundingClientRect();
-  // Only claim the divider's vertical span, not project tabs above it.
-  if (box.width === 0 || e.clientY < box.top || e.clientY >= box.bottom) return;
-  if (Math.abs(e.clientX - (box.left + box.width / 2)) > EXPLORER_GRAB_PX) return;
-  e.preventDefault();
-  e.stopPropagation();
-  exploring = true;
-  suppressNativeDrag(true);
-  document.body.style.cursor = "col-resize";
-}, true);
-explorerDividerEl.addEventListener("mousedown", (e) => {
-  if (explorerMinimized) return;
-  e.preventDefault();
-  exploring = true;
-  suppressNativeDrag(true);
-  document.body.style.cursor = "col-resize";
-});
-window.addEventListener("mousemove", (e) => {
-  if (!exploring) return;
-  // Released outside the window: no mouseup arrives, so heal here instead of
-  // leaving the flag stuck (same pattern as the modified-list resize).
-  if (e.buttons === 0) {
-    finishExplorerDrag();
-    return;
-  }
-  const rect = document.getElementById("main")!.getBoundingClientRect();
-  const w = Math.min(420, Math.max(140, e.clientX - rect.left));
-  explorerEl.style.width = `${w}px`;
-});
-window.addEventListener("mouseup", () => {
-  finishExplorerDrag();
-});
-
-/** A native file drag started from a near-miss press steals the gesture
- *  (moves arrive as drag events, plus pointercancel) and can leave a pane
- *  drag flag stuck. Suppress dragstart while any divider drag is active. */
-let nativeDragSuppressed = false;
-function suppressNativeDrag(on: boolean): void {
-  if (on === nativeDragSuppressed) return;
-  nativeDragSuppressed = on;
-  if (on) window.addEventListener("dragstart", cancelNativeDrag, true);
-  else window.removeEventListener("dragstart", cancelNativeDrag, true);
-}
-function cancelNativeDrag(e: Event): void {
-  e.preventDefault();
-  e.stopPropagation();
-}
-window.addEventListener("pointercancel", () => {
-  dragging = false;
-  exploring = false;
-  suppressNativeDrag(false);
-  document.body.style.cursor = "";
-});
-
-const MODIFIED_LIST_MIN = 72;
-const MODIFIED_LIST_DEFAULT = 160;
-const TERMINAL_MIN_PX = 128;
-
-function modifiedPanelIsOpen(): boolean {
-  return modifiedPanel.style.display !== "none" && !modifiedPanel.classList.contains("collapsed");
-}
-
-function modifiedListMaxHeight(): number {
-  const paneH = leftPane.clientHeight;
-  if (paneH <= 0) return Number.POSITIVE_INFINITY;
-  const listH = modifiedList.getBoundingClientRect().height;
-  const termH = termContainer.getBoundingClientRect().height;
-  return Math.max(MODIFIED_LIST_MIN, Math.round(listH + termH - TERMINAL_MIN_PX));
-}
-
-function clampModifiedListHeight(px: number, max = modifiedListMaxHeight()): number {
-  const cap = Number.isFinite(max) ? max : Math.max(MODIFIED_LIST_MIN, Math.round(px));
-  return Math.min(cap, Math.max(MODIFIED_LIST_MIN, Math.round(px)));
-}
-
-function applyModifiedListHeight(px: number, max?: number): void {
-  modifiedList.style.height = `${clampModifiedListHeight(px, max)}px`;
-}
-
-function restoreModifiedListHeight(): void {
-  const raw = Number(localStorage.getItem(MODIFIED_HEIGHT_KEY));
-  const h = Number.isFinite(raw) && raw > 0 ? raw : MODIFIED_LIST_DEFAULT;
-  modifiedList.style.height = `${Math.max(MODIFIED_LIST_MIN, Math.round(h))}px`;
-  requestAnimationFrame(() => applyModifiedListHeight(h));
-}
-
-let resizingModified = false;
-let modifiedDragStartY = 0;
-let modifiedDragStartH = 0;
-let modifiedDragMax = MODIFIED_LIST_MIN;
-let modifiedClampRaf = 0;
-
-function finishModifiedResize(): void {
-  if (!resizingModified) return;
-  resizingModified = false;
-  document.body.style.cursor = "";
-  document.body.style.userSelect = "";
-  localStorage.setItem(MODIFIED_HEIGHT_KEY, String(Math.round(modifiedList.getBoundingClientRect().height)));
-  fitPanes();
-}
-modifiedResizeEl.addEventListener("mousedown", (e) => {
-  if (!modifiedPanelIsOpen()) return;
-  e.preventDefault();
-  resizingModified = true;
-  modifiedDragStartY = e.clientY;
-  modifiedDragStartH = modifiedList.getBoundingClientRect().height;
-  modifiedDragMax = modifiedListMaxHeight();
-  document.body.style.cursor = "row-resize";
-  document.body.style.userSelect = "none";
-});
-window.addEventListener("mousemove", (e) => {
-  if (!resizingModified) return;
-  if (e.buttons === 0) {
-    finishModifiedResize();
-    return;
-  }
-  applyModifiedListHeight(modifiedDragStartH + (modifiedDragStartY - e.clientY), modifiedDragMax);
-});
-window.addEventListener("mouseup", () => {
-  if (resizingModified) finishModifiedResize();
-});
-
-new ResizeObserver(() => {
-  if (resizingModified || modifiedClampRaf) return;
-  modifiedClampRaf = requestAnimationFrame(() => {
-    modifiedClampRaf = 0;
-    if (!modifiedPanelIsOpen()) return;
-    applyModifiedListHeight(modifiedList.getBoundingClientRect().height);
-  });
-}).observe(leftPane);
 
 // drag to reorder terminal tabs
 let dragTabEl: HTMLElement | null = null;
@@ -2709,7 +2076,7 @@ window.termina.onVerifyState(({ terminalId, verify }) => {
 window.termina.onToolTarget((p) => {
   const view = projectViews.get(p.projectId);
   if (!view || view.workspaceId !== p.workspaceId) return;
-  if (!preferences.autoOpenAgentFiles) return;
+  if (!prefs.current.autoOpenAgentFiles) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
   // Boot race: before the editor chunk resolves, active-project targets queue
   // exactly like background ones — boot's post-import activation drains them.
@@ -2866,7 +2233,7 @@ window.termina.onLoginHint((e) => {
     view.needsLogin = e.needsLogin === true;
     view.editorMgr?.setProjectOpen(true, e.needsLogin);
   }
-  syncEditorMinimizedForProject();
+  layout.syncEditorMinimizedForProject();
 });
 
 // ---------------------------------------------------------- worldlines ----
@@ -2991,16 +2358,7 @@ function removeSplash(): void {
 setTimeout(removeSplash, 10000);
 
 async function boot(attempt = 0): Promise<void> {
-  // Restore layout + panel visibility preferences (default: terminal-left split).
-  const layout = parseLayout(localStorage.getItem(LAYOUT_KEY));
-  explorerMinimized = localStorage.getItem(EXPLORER_KEY) === "0";
-  const storedWork = localStorage.getItem(WORKPANE_KEY);
-  minimizedWork = storedWork === "terminal" || storedWork === "editor" ? storedWork : null;
-  if (isSplitLayout(layout)) lastSplitLayout = layout;
-  applyLayout(layout);
-  if (minimizedWork !== "editor" && !editorPaneOccupied()) syncEditorMinimizedForProject();
-  if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
-  restoreModifiedListHeight();
+  layout.restore();
 
   try {
     // Build the project tab bar; the active project owns the initial view.
