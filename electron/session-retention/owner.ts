@@ -18,7 +18,7 @@ import { MAX_RETAINED_SESSION_BUNDLES, MAX_RETAINED_SESSION_BUNDLE_BYTES, MAX_RE
 import type { RetainedIdentity, RetainedLedgerEntry, RetainedRootBinding, RetainedUsageLedger } from "./primitives.js";
 
 
-export type SessionRetentionOwnerOptions = {
+type SessionRetentionOwnerOptions = {
   testHooks?: {
     beforeRootBinding?: { stage: string; readyPath: string; releasePath: string };
     beforeClaimRemoval?: RetainedClaimRemovalTestHook;
@@ -27,7 +27,7 @@ export type SessionRetentionOwnerOptions = {
 };
 
 
-export type SessionRetentionTransactionOptions = {
+type SessionRetentionTransactionOptions = {
   /**
    * Exact/conservative full-tree bytes reserved before the worker publishes.
    * Production finalization supplies the source bundle's recursive byte
@@ -37,7 +37,7 @@ export type SessionRetentionTransactionOptions = {
 };
 
 
-export type RetainedSessionTransaction<T> = {
+type RetainedSessionTransaction<T> = {
   destinationSessionFile: string;
   result: T;
 };

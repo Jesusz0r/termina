@@ -23,7 +23,7 @@ export function imageDataUrl(b: Record<string, unknown>): string | null {
 }
 
 
-export function toCompletionsTools(tools: ToolDef[]): Array<Record<string, unknown>> {
+function toCompletionsTools(tools: ToolDef[]): Array<Record<string, unknown>> {
   return tools.map((t) => ({
     type: "function",
     function: {

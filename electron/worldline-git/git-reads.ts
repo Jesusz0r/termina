@@ -8,9 +8,9 @@ import { coreClient } from "./core-process.js";
 import { sep } from "node:path";
 
 
-export type GitFileChange = { relPath: string; status: "created" | "modified" | "deleted" };
+type GitFileChange = { relPath: string; status: "created" | "modified" | "deleted" };
 
-export type GitTreeEntry = { path: string; mode: string; size: number };
+type GitTreeEntry = { path: string; mode: string; size: number };
 
 
 /** Hash the trust-sensitive agent and project resources in the native core. */

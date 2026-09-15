@@ -91,7 +91,7 @@ function canonicalizeJsonValue(raw: unknown, seen: WeakSet<object>, depth: numbe
 }
 
 
-export type NormalizedInputSchema =
+type NormalizedInputSchema =
   | { ok: true; schema: Record<string, unknown> }
   | { ok: false; error: string };
 
