@@ -81,7 +81,7 @@ const PASS_THROUGH: AllowedPassThrough[] = [
   { file: "src/main.ts", method: "pasteTerminal", reason: "pty-view try/catch" },
   { file: "src/main.ts", method: "dropTerminalFiles", reason: "pty-view try/catch" },
   { file: "src/main.ts", method: "detectTest", reason: "worldline-project-state catch" },
-  { file: "src/main.ts", method: "getPreferences", reason: "loadPreferencesWithRetry try/catch" },
+  { file: "src/main/preferences.ts", method: "getPreferences", reason: "loadPreferencesWithRetry try/catch" },
   { file: "src/editor.ts", method: "openFile", reason: "throws to catching callers" },
 ];
 
