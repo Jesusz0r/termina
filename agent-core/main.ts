@@ -2503,7 +2503,7 @@ export function projectMainRequest(
 ): { messages: RequestMessage[]; persistedMessages: RequestMessage[]; overlay: RequestOverlay | null } {
   const projection = projectRequest({
     messages,
-    overlay: buildRequestOverlay({ messages, hostContext }),
+    overlay: buildRequestOverlay({ hostContext }),
   });
   if (!projection.ok) throw new Error(projection.error);
   return {
@@ -4865,7 +4865,9 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   }
   void refreshPendingImageCount();
   const taggedPrompt = prompt.startsWith("/") ? prompt : expandFileTags(canonicalCwd, prompt);
-  const contextResult = eventsDir && terminalId ? readContextFilesResult(eventsDir, terminalId) : null;
+  const contextResult = eventsDir && terminalId
+    ? readContextFilesResult(eventsDir, terminalId, { shouldStop: () => interrupted })
+    : null;
   // Free subagent slots whose host result files landed. Display rides the
   // host mailbox note; this only reconciles registry truth.
   if (eventsDir && terminalId) reconcileSubagentRuns(eventsDir, terminalId, subagentRegistry);
@@ -4909,7 +4911,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   // Build once for this logical prompt. Retries and cache-field fallbacks
   // reuse the same exact bytes instead of observing a changed host snapshot.
   try {
-    activeRequestOverlay = buildRequestOverlay({ messages: history, hostContext: context });
+    activeRequestOverlay = buildRequestOverlay({ hostContext: context });
   } catch (err) {
     cancelPreflight();
     const message = err instanceof Error ? err.message : String(err);

@@ -23,10 +23,6 @@ function message(role: string, content: any, sseq = 0) {
   return { role, content, sseq, tokens: 0 };
 }
 
-function inventoryMessages(paths: string[], start = 1) {
-  return paths.map((path, index) => message("assistant", [toolUse(`call-${start + index}`, "read_file", path)], start + index));
-}
-
 function jsonBytes(value: any) {
   return Buffer.from(JSON.stringify(value), "utf8");
 }
@@ -79,15 +75,15 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     return result.messages;
   };
 
-  const overlayFor = (messages: any[], hostContext = "fresh host state", maxBytes = 64 * 1024) => {
-    return buildRequestOverlay({ messages, hostContext, maxBytes });
+  const overlayFor = (hostContext = "fresh host state", maxBytes = 64 * 1024) => {
+    return buildRequestOverlay({ hostContext, maxBytes });
   };
 
   it("persists submitted prompt but not volatile overlay", () => {
     const persistedContent = userPromptContent("open the file", [], "ignored host argument");
     expect(JSON.stringify(persistedContent)).not.toContain("working-set");
     const persisted = [message("user", persistedContent, 1)];
-    const overlay = overlayFor(persisted);
+    const overlay = overlayFor();
     expect(overlay).toBeTruthy();
     const request = requestMessages(projection({ messages: persisted, overlay }));
     expect(JSON.stringify(persisted)).not.toContain("<working-set>");
@@ -96,7 +92,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
   });
 
   it("produces byte-for-byte stable request projections and exact overlay hash", () => {
-    const overlay = overlayFor(baseHistory);
+    const overlay = overlayFor();
     expect(overlay).toBeTruthy();
     const first = projection({ messages: baseHistory, overlay });
     const second = projection({ messages: baseHistory, overlay });
@@ -110,7 +106,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
   });
 
   it("stamps persisted projection before prepending overlay", () => {
-    const overlay = overlayFor(baseHistory);
+    const overlay = overlayFor();
     expect(overlay).toBeTruthy();
     const persisted = projectPersistedMessages({ messages: baseHistory });
     expect(persisted.ok).toBe(true);
@@ -127,7 +123,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
   });
 
   it("enforces exact metadata on caller-supplied overlays", () => {
-    const overlay = overlayFor([], "caller overlay");
+    const overlay = overlayFor("caller overlay");
     expect(overlay).toBeTruthy();
     const exact = projection({ messages: [], overlay, maxBytes: overlay.bytes });
     expect(exact.ok).toBe(true);
@@ -144,10 +140,9 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
 
   it("does not duplicate file inventories into model requests", () => {
     const paths = ["z.ts", "a&b.ts", "m/<tag>.ts", "unicode/árbol.ts"];
-    const messages = inventoryMessages(paths);
-    expect(overlayFor(messages, "")).toBeNull();
+    expect(overlayFor("")).toBeNull();
 
-    const overlay = overlayFor(messages, "fresh host state");
+    const overlay = overlayFor("fresh host state");
     expect(overlay).toBeTruthy();
     expect(overlay.text).toContain("fresh host state");
     expect(overlay.text).not.toContain("read-files");
@@ -156,12 +151,12 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
   });
 
   it("does not inject empty host context sections", () => {
-    expect(overlayFor([], "")).toBeNull();
-    expect(overlayFor([], " \n\t ")).toBeNull();
+    expect(overlayFor("")).toBeNull();
+    expect(overlayFor(" \n\t ")).toBeNull();
   });
 
   it("places overlay before persisted history so tool sequences stay append-only", () => {
-    const overlay = overlayFor(baseHistory);
+    const overlay = overlayFor();
     expect(overlay).toBeTruthy();
     const request = requestMessages(projection({ messages: baseHistory, overlay }));
     const serialized = JSON.stringify(request);
@@ -218,7 +213,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
       if (!forkReplay.ok) throw new Error("expected fork replay to succeed");
       expect(forkReplay.messages.map((m: any) => m.content)).toEqual(resumed.messages.map((m: any) => m.content));
       expect(existsSync(join(dirname(dest), "resume-img-1.png"))).toBe(true);
-      const overlay = overlayFor(forkReplay.messages, "fresh host state");
+      const overlay = overlayFor("fresh host state");
       expect(overlay).toBeTruthy();
       const request = requestMessages(projection({ messages: forkReplay.messages, overlay }));
       expect(countText(JSON.stringify(request), overlay.text)).toBe(1);
@@ -230,7 +225,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
 
   it("fails closed on incomplete or orphaned tool sequences before overlay injection", () => {
     const incomplete = [message("assistant", [toolUse("open-call", "read_file", "open.ts")], 1)];
-    const overlay = overlayFor(incomplete, "fresh host state");
+    const overlay = overlayFor("fresh host state");
     expect(overlay).toBeTruthy();
     const result = projection({ messages: incomplete, overlay });
     expect(result.ok).toBe(false);
@@ -257,7 +252,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
 
   it("strips C1 controls from host context without altering framing", () => {
     const host = "before\u0085after\u009f\nnext";
-    const hostOverlay = overlayFor([], host);
+    const hostOverlay = overlayFor(host);
     expect(hostOverlay).toBeTruthy();
     expect(hostOverlay.text).not.toContain("\u0085");
     expect(hostOverlay.text).not.toContain("\u009f");
@@ -266,7 +261,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
 
   it("keeps overlay bytes/hash single-pass consistent on multi-byte truncation", () => {
     const host = "😀".repeat(1024);
-    const overlay = overlayFor([], host, 1024);
+    const overlay = overlayFor(host, 1024);
     expect(overlay).toBeTruthy();
     expect(overlay.bytes).toBe(Buffer.byteLength(overlay.text, "utf8"));
     expect(overlay.bytes).toBeLessThanOrEqual(1024);
@@ -275,9 +270,9 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
   });
 
   it("hashes whitespace-only host variants identically", () => {
-    const a = overlayFor([], "fresh host state");
-    const b = overlayFor([], "  fresh host state  \n");
-    const c = overlayFor([], "\n\tfresh host state\n");
+    const a = overlayFor("fresh host state");
+    const b = overlayFor("  fresh host state  \n");
+    const c = overlayFor("\n\tfresh host state\n");
     expect(a).toBeTruthy();
     expect(b?.hash).toBe(a?.hash);
     expect(c?.hash).toBe(a?.hash);

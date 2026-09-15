@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import { done, toolOutcomeTraceFields, toolResult } from "../../../agent-core/main/tools.ts";
+import {
+  done,
+  formatToolAnnounce,
+  toolOutcomeTraceFields,
+  toolResult,
+  toolTranscriptDetail,
+} from "../../../agent-core/main/tools.ts";
 import {
   MCP_RESULT_BYTES,
   createMcpContinuation,
@@ -76,5 +82,25 @@ describe("done() tool outcomes (#373)", () => {
     expect(branch).toContain("return done(use, got);");
     expect(branch).not.toContain("toolResult(");
     expect(branch).not.toContain("cancellationScope:");
+  });
+});
+
+describe("formatToolAnnounce (#377)", () => {
+  it("wraps toolTranscriptDetail for path/pattern/url tools", () => {
+    const edit = { id: "1", name: "edit", input: { path: "a.ts" } };
+    expect(formatToolAnnounce(edit)).toBe(`◆ Tool · edit\n  ${toolTranscriptDetail(edit)}`);
+    const grep = { id: "2", name: "grep", input: { pattern: "foo" } };
+    expect(formatToolAnnounce(grep)).toBe(`◆ Tool · grep\n  ${toolTranscriptDetail(grep)}`);
+    const fetch = { id: "3", name: "fetch", input: { url: "https://ex.test" } };
+    expect(formatToolAnnounce(fetch)).toBe(`◆ Tool · fetch\n  ${toolTranscriptDetail(fetch)}`);
+  });
+
+  it("prefixes bash detail with $ and keeps spawn announce-only extras", () => {
+    const bash = { id: "1", name: "bash", input: { command: "ls" } };
+    expect(toolTranscriptDetail(bash)).toBe("ls");
+    expect(formatToolAnnounce(bash)).toBe("◆ Tool · bash\n  $ ls");
+    const spawn = { id: "2", name: "spawn_subagent", input: { task: "do things", user_requested: true } };
+    expect(toolTranscriptDetail(spawn)).toBe("");
+    expect(formatToolAnnounce(spawn)).toContain("user-requested");
   });
 });

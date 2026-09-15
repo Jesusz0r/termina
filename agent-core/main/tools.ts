@@ -169,25 +169,29 @@ export function sidecarStartFor(use: {
   return { t: "tool", toolName: use.name, toolCallId: use.id };
 }
 
-export function formatToolAnnounce(use: ToolUse): string {
-  let detail = "";
-  if (use.name === "edit" || use.name === "write_file") detail = use.input.path ?? "";
-  else if (use.name === "read_file") {
-    detail = Array.isArray(use.input.paths)
-      ? `${(use.input.paths as unknown[]).length} paths`
-      : use.input.path ?? "";
+export function toolTranscriptDetail(use: ToolUse): string {
+  if (use.name === "edit" || use.name === "write_file") return use.input.path ?? "";
+  if (use.name === "read_file") {
+    if (Array.isArray(use.input.paths)) return `${(use.input.paths as unknown[]).length} paths`;
+    return use.input.path ?? "";
   }
-  else if (use.name === "bash") detail = `$ ${use.input.command ?? ""}`;
-  else if (use.name === "grep") detail = use.input.pattern ?? "";
-  else if (use.name === "glob") detail = use.input.pattern ?? "";
-  else if (use.name === "fetch") detail = String(use.input.url ?? "");
+  if (use.name === "bash") return use.input.command ?? "";
+  if (use.name === "grep" || use.name === "glob") return use.input.pattern ?? "";
+  if (use.name === "fetch") return String(use.input.url ?? "");
+  return "";
+}
+
+export function formatToolAnnounce(use: ToolUse): string {
+  let detail = toolTranscriptDetail(use);
+  if (use.name === "bash") detail = `$ ${detail}`;
   else if (use.name === "spawn_subagent") {
     detail = String(use.input.task ?? "").slice(0, 80);
     // Manual-bypass runs are privileged: mark them so a self-granted
     // user_requested flag is visible in the transcript, not silent.
     if (use.input.user_requested === true) detail += " · user-requested";
+  } else if (use.name === "message_subagent") {
+    detail = String(use.input.run_id ?? "");
   }
-  else if (use.name === "message_subagent") detail = String(use.input.run_id ?? "");
   return `◆ Tool · ${use.name}${detail ? `\n  ${detail}` : ""}`;
 }
 
@@ -218,18 +222,6 @@ export function formatToolFollowup(use: ToolUse, outcome: { result: Record<strin
     return `◇ ${use.name} · done · ${n} ${use.name === "grep" ? "hits" : "files"}\n`;
   }
   return `◇ ${use.name} · done\n`;
-}
-
-export function toolTranscriptDetail(use: ToolUse): string {
-  if (use.name === "edit" || use.name === "write_file") return use.input.path ?? "";
-  if (use.name === "read_file") {
-    if (Array.isArray(use.input.paths)) return `${(use.input.paths as unknown[]).length} paths`;
-    return use.input.path ?? "";
-  }
-  if (use.name === "bash") return use.input.command ?? "";
-  if (use.name === "grep" || use.name === "glob") return use.input.pattern ?? "";
-  if (use.name === "fetch") return String(use.input.url ?? "");
-  return "";
 }
 
 export function displayToolOutput(content: string): string {
