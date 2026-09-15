@@ -16,6 +16,7 @@ import {
   type ProviderId,
 } from "./auth.ts";
 import { testLoopbackOverride } from "./auth/endpoints.ts";
+import { BoundedUtf8Error, readBoundedUtf8 } from "./auth/http.ts";
 import { providerDefinition } from "./auth/providers/index.ts";
 import { acceptedContextWindow, acceptedOutputLimit } from "./models/capabilities.ts";
 import { subsequenceSpread } from "./tui-text.ts";
@@ -324,39 +325,13 @@ async function fetchCatalog(
 }
 
 async function readCatalogBody(res: Response): Promise<string> {
-  const declared = res.headers.get("content-length")?.trim();
-  if (declared && /^\d+$/.test(declared) && BigInt(declared) > BigInt(CATALOG_BODY_LIMIT)) {
-    await cancelResponse(res);
-    throw new Error("models response too large");
-  }
-  if (!res.body) return "";
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    length += value.byteLength;
-    if (length > CATALOG_BODY_LIMIT) {
-      try {
-        await reader.cancel();
-      } catch {
-        /* The transport can close while cancellation is being delivered. */
-      }
-      throw new Error("models response too large");
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new Error("models response is not valid UTF-8");
+    return await readBoundedUtf8(res, CATALOG_BODY_LIMIT);
+  } catch (error) {
+    if (error instanceof BoundedUtf8Error) {
+      throw new Error(error.kind === "too-large" ? "models response too large" : "models response is not valid UTF-8");
+    }
+    throw error;
   }
 }
 

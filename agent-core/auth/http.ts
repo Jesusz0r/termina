@@ -30,6 +30,66 @@ class AuthHttpError extends Error {
 }
 
 
+export class BoundedUtf8Error extends Error {
+  readonly kind: "too-large" | "invalid-utf8";
+  constructor(kind: "too-large" | "invalid-utf8") {
+    super(kind === "too-large" ? "response too large" : "response is not valid UTF-8");
+    this.name = "BoundedUtf8Error";
+    this.kind = kind;
+  }
+}
+
+
+/** Byte-capped Response body as fatal UTF-8. Redirect policy stays at the call site. */
+export async function readBoundedUtf8(res: Response, maxBytes: number): Promise<string> {
+  const declaredRaw = res.headers.get("content-length")?.trim() ?? "";
+  if (/^\d+$/.test(declaredRaw) && BigInt(declaredRaw) > BigInt(maxBytes)) {
+    try {
+      await res.body?.cancel("too-large");
+    } catch {
+      /* The request may already have closed while cancellation was delivered. */
+    }
+    throw new BoundedUtf8Error("too-large");
+  }
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (res.body) {
+    const reader = res.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          try {
+            await reader.cancel("too-large");
+          } catch {
+            /* The stream may already have closed while cancellation was delivered. */
+          }
+          throw new BoundedUtf8Error("too-large");
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new BoundedUtf8Error("invalid-utf8");
+  }
+}
+
+
 export function authHttpError(error: unknown): string | null {
   return error instanceof AuthHttpError ? error.message : null;
 }
@@ -94,61 +154,17 @@ function authRequestSignal(callerSignal?: AbortSignal): AuthRequestSignal {
 }
 
 
-async function cancelAuthBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
-  if (!body) return;
-  try {
-    await body.cancel(AUTH_RESPONSE_TOO_LARGE);
-  } catch {
-    /* The request may already have closed while cancellation was delivered. */
-  }
-}
-
-
 async function readAuthResponse(
   response: Response,
 ): Promise<{ ok: boolean; status: number; payload: unknown; raw: string }> {
-  const declaredRaw = response.headers.get("content-length")?.trim() ?? "";
-  const declared = /^\d+$/.test(declaredRaw) ? Number(declaredRaw) : Number.NaN;
-  if (Number.isSafeInteger(declared) && declared > AUTH_HTTP_MAX_RESPONSE_BYTES) {
-    await cancelAuthBody(response.body);
-    throw new AuthHttpError(AUTH_RESPONSE_TOO_LARGE);
-  }
-
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  if (response.body) {
-    const reader = response.body.getReader();
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.byteLength;
-        if (total > AUTH_HTTP_MAX_RESPONSE_BYTES) {
-          try {
-            await reader.cancel(AUTH_RESPONSE_TOO_LARGE);
-          } catch {
-            /* The stream may already have closed while cancellation was delivered. */
-          }
-          throw new AuthHttpError(AUTH_RESPONSE_TOO_LARGE);
-        }
-        chunks.push(value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  }
-
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
   let raw: string;
   try {
-    raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new AuthHttpError(AUTH_RESPONSE_INVALID_UTF8);
+    raw = await readBoundedUtf8(response, AUTH_HTTP_MAX_RESPONSE_BYTES);
+  } catch (error) {
+    if (error instanceof BoundedUtf8Error) {
+      throw new AuthHttpError(error.kind === "too-large" ? AUTH_RESPONSE_TOO_LARGE : AUTH_RESPONSE_INVALID_UTF8);
+    }
+    throw error;
   }
   let payload: unknown;
   try {
