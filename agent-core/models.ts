@@ -75,6 +75,34 @@ export function modelsUrl(provider: ProviderId, baseUrl: string): string {
   return `${base}/models`;
 }
 
+/**
+ * models.dev provider whose **pricing** applies to a route.
+ *
+ * Copilot and Codex are billed at OpenAI's rates, so their costs come from the
+ * `openai` catalog. This mapping is about billing only — see
+ * `contextCatalogProviderId` for the separate window lookup.
+ */
+export function catalogProviderId(provider: ProviderId): string {
+  return provider === "openai-codex" || provider === "github-copilot" ? "openai" : provider;
+}
+
+/**
+ * models.dev provider whose **context windows** apply to a route.
+ *
+ * Deliberately not `catalogProviderId`: Copilot is *billed* like OpenAI but
+ * *serves* its own model list, including models OpenAI does not have (claude,
+ * grok, gemini, kimi) and ids whose window differs (`gpt-5-mini` is 264k on
+ * Copilot, 400k on OpenAI). Reusing the pricing mapping would leave those 18
+ * models with no entry and give `gpt-5-mini` the wrong window.
+ *
+ * Both OpenCode relays serve one shared model list, which models.dev publishes
+ * as `opencode`; neither relay endpoint reports a window itself.
+ */
+export function contextCatalogProviderId(provider: ProviderId): string {
+  if (provider === "opencode-go" || provider === "opencode-zen") return "opencode";
+  return provider;
+}
+
 export function isChatModel(id: string, provider: ProviderId): boolean {
   const n = id.toLowerCase();
   if (!n || n.length > 200) return false;

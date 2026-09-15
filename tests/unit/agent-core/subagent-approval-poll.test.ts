@@ -12,7 +12,7 @@ import {
   SUBAGENT_APPROVAL_TIMEOUT_MS,
   writeSubagentApprovalRequest,
 } from "../../../agent-core/subagents.ts";
-import { isApprovalAnswer } from "../../../agent-core/main.ts";
+import { isApprovalAnswer } from "../../../agent-core/subagents.ts";
 
 function fakeTui(onSubmit: (line: string) => void): AgentTui {
   return new AgentTui({

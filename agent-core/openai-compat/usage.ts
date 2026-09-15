@@ -4,7 +4,7 @@
  * Owns token/usage merging and reported-cost extraction. Split from
  * agent-core/openai-compat.ts (issue #38).
  */
-import type { CallResultLike } from "./types.ts";
+import type { CallResultLike, ProviderUsage } from "./types.ts";
 
 
 export function tokenCount(value: unknown): number | null {
@@ -85,6 +85,37 @@ function reportedCostUsd(u: Record<string, unknown>): number | null {
   return null;
 }
 
+
+/** Normalize provider counters without turning an absent field into zero. */
+export function normalizeProviderUsage(u: Record<string, unknown> | undefined): ProviderUsage | null {
+  if (!u) return null;
+  return {
+    input: tokenCount(u.input_tokens ?? u.prompt_tokens),
+    cacheRead: tokenCount(u.cache_read_input_tokens ?? u.cached_tokens),
+    cacheWrite: tokenCount(u.cache_creation_input_tokens ?? u.cache_write_tokens),
+    output: tokenCount(u.output_tokens ?? u.completion_tokens),
+    reasoning: tokenCount(u.reasoning_tokens),
+  };
+}
+
+export function mergeProviderUsage(previous: ProviderUsage | null, next: ProviderUsage | null): ProviderUsage | null {
+  if (!previous) return next;
+  if (!next) return previous;
+  return {
+    input: next.input ?? previous.input,
+    cacheRead: next.cacheRead ?? previous.cacheRead,
+    cacheWrite: next.cacheWrite ?? previous.cacheWrite,
+    output: next.output ?? previous.output,
+    reasoning: next.reasoning ?? previous.reasoning,
+    reportedUsd: next.reportedUsd ?? previous.reportedUsd,
+  };
+}
+
+/** Exact billed total when the provider reported one; otherwise null. */
+export function providerReportedUsd(usage: Pick<ProviderUsage, "reportedUsd"> | null): number | null {
+  const value = usage?.reportedUsd;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
 
 export function usageFromOpenAI(u: Record<string, unknown> | undefined): CallResultLike["usage"] {
   if (!u) return null;

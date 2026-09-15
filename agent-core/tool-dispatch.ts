@@ -49,6 +49,28 @@ function inputError(value: unknown, schema: Schema, path: string): string | null
   return null;
 }
 
+/** Final provider-to-kernel admission invariant. Provider decoders should
+ * reject first; this backstop prevents malformed executable calls from being
+ * made durable if a decoder regresses. */
+export function providerToolAdmissionError(blocks: readonly Record<string, unknown>[]): string | null {
+  const ids = new Set<string>();
+  for (const block of blocks) {
+    if (block.type !== "tool_use") continue;
+    if (
+      typeof block.id !== "string" || !block.id.trim() ||
+      typeof block.name !== "string" || !block.name.trim()
+    ) {
+      return "provider protocol error: tool call identity is missing";
+    }
+    if (ids.has(block.id)) return "provider protocol error: duplicate tool call identity";
+    ids.add(block.id);
+    if (!block.input || typeof block.input !== "object" || Array.isArray(block.input)) {
+      return "provider protocol error: tool call arguments must be an object";
+    }
+  }
+  return null;
+}
+
 export function toolInputError(call: ToolCall, definitions: readonly Record<string, unknown>[]): string | null {
   const definition = definitions.find((tool) => tool.name === call.name);
   if (!definition || !record(definition.input_schema)) return null;

@@ -19,24 +19,29 @@ describe("Agent Core Main Final Review Contracts", () => {
     const grep = await import("../../../agent-core/main/grep.ts");
     const fileOps = await import("../../../agent-core/main/file-ops.ts");
     const output = await import("../../../agent-core/tool-output.ts");
+    const {
+      isTerminalTraceAttemptStatus,
+      storageSeqRange,
+      traceWriteDisposition,
+    } = await import("../../../agent-core/trace.ts");
     
     assert.deepEqual(
-      main.traceWriteDisposition({ ok: false, persisted: false, retryable: true } as TraceWriteFailure),
+      traceWriteDisposition({ ok: false, persisted: false, retryable: true } as TraceWriteFailure),
       { persisted: false, retry: true, terminal: false },
     );
     assert.deepEqual(
-      main.traceWriteDisposition({ ok: false, persisted: true, retryable: true } as TraceWriteFailure),
+      traceWriteDisposition({ ok: false, persisted: true, retryable: true } as TraceWriteFailure),
       { persisted: true, retry: false, terminal: true },
     );
-    assert.equal(main.isTerminalTraceAttemptStatus("error"), true);
-    assert.equal(main.isTerminalTraceAttemptStatus("interrupted"), true);
-    assert.equal(main.isTerminalTraceAttemptStatus("storage-error"), true);
-    assert.equal(main.isTerminalTraceAttemptStatus("retrying"), false);
-    assert.equal(main.isTerminalTraceAttemptStatus("fallback"), false);
-    assert.equal(main.isTerminalTraceAttemptStatus("overflow"), false);
-    assert.deepEqual(main.storageSeqRange(8, 8), null);
-    assert.deepEqual(main.storageSeqRange(8, 9), [9, 9]);
-    assert.deepEqual(main.storageSeqRange(8, 7), null);
+    assert.equal(isTerminalTraceAttemptStatus("error"), true);
+    assert.equal(isTerminalTraceAttemptStatus("interrupted"), true);
+    assert.equal(isTerminalTraceAttemptStatus("storage-error"), true);
+    assert.equal(isTerminalTraceAttemptStatus("retrying"), false);
+    assert.equal(isTerminalTraceAttemptStatus("fallback"), false);
+    assert.equal(isTerminalTraceAttemptStatus("overflow"), false);
+    assert.deepEqual(storageSeqRange(8, 8), null);
+    assert.deepEqual(storageSeqRange(8, 9), [9, 9]);
+    assert.deepEqual(storageSeqRange(8, 7), null);
     assert.equal(typeof main.shutdownAgentCore, "function");
     const firstShutdown = main.shutdownAgentCore({ reason: "final-review", timeoutMs: 1 });
     assert.equal(firstShutdown, main.shutdownAgentCore({ reason: "final-review-repeat", timeoutMs: 1 }));

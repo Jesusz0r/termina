@@ -683,6 +683,28 @@ export function emptyCacheFlipTally(): CacheFlipTally {
   return { evaluations: 0, prefixFlips: 0, workingSetChanges: 0 };
 }
 
+/**
+ * Whether a null cache-write count is exact for one provider route. xAI
+ * and the OpenCode relays report cached reads only (255 Go+Zen turns on
+ * 2026-09-07 carried reads up to 451k tokens without a single write
+ * count, and the usage parser probes `cache_write_tokens` in two places
+ * without ever finding it there), so null means no write component. The
+ * same holds for OpenAI (writes are free and unreported before GPT-5.6;
+ * 5.6+ reports `cache_write_tokens`, which takes the non-null branch) and
+ * Google (implicit caching has no write-token concept). A reported count
+ * means support trivially; other providers stay strict.
+ *
+ * https://docs.x.ai/developers/advanced-api-usage/prompt-caching
+ * https://ai.google.dev/gemini-api/docs/caching
+ */
+export function cacheWriteSupportedFor(provider: ProviderId, cacheWrite: number | null): boolean | null {
+  if (cacheWrite !== null) return true;
+  return provider === "xai" || provider === "openai" || provider === "google" ||
+      provider === "opencode-go" || provider === "opencode-zen"
+    ? false
+    : null;
+}
+
 /** Fold one classified attempt into the tally. Pure; the caller owns reset. */
 export function tallyCacheFlip(
   tally: CacheFlipTally,

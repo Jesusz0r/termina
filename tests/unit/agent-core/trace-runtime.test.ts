@@ -922,12 +922,12 @@ describe("Agent Core Trace Runtime Invariants", () => {
 
   it("retries bare provider terminations exactly once", async () => {
     process.env.TERMINA_CORE_TEST = "1";
-    const core = await import("../../../agent-core/main.ts");
-    assert.equal(core.isRetriableProviderTermination("terminated"), true);
-    assert.equal(core.isRetriableProviderTermination("  Terminated  "), true);
-    assert.equal(core.isRetriableProviderTermination("terminated (extra)"), false);
-    assert.equal(core.isRetriableProviderTermination("API 500: terminated"), false);
-    assert.equal(core.isRetriableProviderTermination("aborted"), false);
-    assert.equal(core.isRetriableProviderTermination(""), false);
+    const { isRetriableProviderTermination } = await import("../../../agent-core/trace.ts");
+    assert.equal(isRetriableProviderTermination("terminated"), true);
+    assert.equal(isRetriableProviderTermination("  Terminated  "), true);
+    assert.equal(isRetriableProviderTermination("terminated (extra)"), false);
+    assert.equal(isRetriableProviderTermination("API 500: terminated"), false);
+    assert.equal(isRetriableProviderTermination("aborted"), false);
+    assert.equal(isRetriableProviderTermination(""), false);
   });
 });

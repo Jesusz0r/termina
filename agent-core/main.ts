@@ -64,11 +64,6 @@ import {
   providerProtocol as configuredProviderProtocol,
   usesResponsesApi as configuredUsesResponsesApi,
   CACHE_CAPABILITY_FEATURE,
-  documentedCacheCapability,
-  documentedCacheRoute,
-  cacheRouteDomain,
-  type CacheCapabilityScope,
-  cacheIdentityFor,
   cacheSessionSeed,
   cacheSessionHeaders,
   protocolEndpoint,
@@ -77,10 +72,10 @@ import {
   resolveAuth,
   runLogin,
   runLogout,
+  type CacheIdentity,
   type ProviderId,
   type ProviderProtocol,
 } from "./auth.ts";
-import { providerDefinition } from "./auth/providers/index.ts";
 import {
   completionsBody,
   completionLiveDelta,
@@ -92,6 +87,9 @@ import {
   readSseJson,
   responsesBody,
   responsesLiveDelta,
+  mergeProviderUsage,
+  normalizeProviderUsage,
+  providerReportedUsd,
   responsesResultFromEvents,
   stripResponsesBreakpoints,
   textFromCompletionPayload,
@@ -114,27 +112,23 @@ import {
   userPromptContent as projectedUserPromptContent,
 } from "./request-projection.ts";
 import {
-  cacheRequestDiagnostics,
+  cacheWriteSupportedFor,
   classifyCacheMiss,
-  createCapabilityCache,
   emptyCacheFlipTally,
-  queryCapability,
-  recordCapability,
   tallyCacheFlip,
   type CacheFlipTally,
-  type CapabilityCacheRecord,
   type CacheAttemptSnapshot,
   type CachePolicyDiagnostics,
-  type CacheRequestDiagnostics,
 } from "./cache.ts";
 import {
   emptyToolLoopTracker,
   trackToolLoopTurn,
 } from "./stall.ts";
-import { toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
+import { providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
 import {
   HIGH_WATER,
   LOW_WATER,
+  isContextOverflowMessage,
   planSummary,
   serializeForSummary,
   shouldCompactForCacheCost,
@@ -146,6 +140,8 @@ import {
   filterCatalogModels,
   formatCatalogLines,
   formatModelBanner,
+  catalogProviderId,
+  contextCatalogProviderId,
   loadProviderModels,
   parseModelSwitch,
   pickDefaultModel,
@@ -164,7 +160,6 @@ import {
   readContextFilesResult,
   readProtectedPaths,
   structuredStartup,
-  type ContextFilesResult,
   visibleAssistantText,
   waitForAck,
   writePromptPayload,
@@ -175,7 +170,6 @@ import {
   logicalToolText,
   readBoundedResponseBody,
   utf8TextPrefix,
-  type BoundedText,
   type CompletionState,
   type ToolTextResult,
 } from "./tool-output.ts";
@@ -226,18 +220,30 @@ import {
 import { createFrontMatter } from "./main/front-matter.ts";
 import { renderHistoryTranscript, type ContentBlock } from "./main/history-view.ts";
 import { shouldAutoOpenLogin } from "./main/login-hint.ts";
+import { buildCachedPrefix, stampHistoryCache } from "./main/anthropic-cache.ts";
+import { cacheRouteForProvider, createCacheCapabilityGate } from "./main/cache-capabilities.ts";
+import {
+  buildCacheRequestDiagnostics,
+  cacheMarkerDetails,
+  type HostContextTrace,
+  type TraceCacheDiagnostics,
+} from "./main/cache-diagnostics.ts";
+import { retryAfter } from "./main/retry-after.ts";
 import {
   SubagentRegistry,
   appendSubagentInboxMessage,
   clearSubagentApprovalFiles,
   formatSubagentBrief,
   formatSubagentResultFrame,
+  isApprovalAnswer,
+  isLiveSubagentRun,
   isWorldlineCandidateEnv,
   parseSubagentApprovalName,
   parseSubagentTaskFile,
   readSubagentApprovalRequest,
   readSubagentInbox,
   reconcileSubagentRuns,
+  resolveSubagentPermissionMode,
   SUBAGENT_APPROVAL_POLL_MS,
   subagentApprovalTimeoutMs,
   subagentChildTid,
@@ -249,7 +255,6 @@ import {
   writeSubagentTaskFile,
   MAX_SUBAGENT_FILE_BYTES,
   MAX_SUBAGENT_RESULT_CHARS,
-  type SubagentPermissionMode,
   type SubagentTaskFile,
 } from "./subagents.ts";
 import {
@@ -263,7 +268,11 @@ import {
 import {
   createTraceRuntime,
   DEFAULT_TRACE_RETENTION_CAP,
+  isRetriableProviderTermination,
+  isTerminalTraceAttemptStatus,
   sanitizeProviderError,
+  storageSeqRange,
+  traceWriteDisposition,
   type TraceAttemptInput,
   type TraceCacheInput,
   type TraceCostInput as TraceRecordCostInput,
@@ -278,6 +287,7 @@ import {
   clearSessionBundle,
   createReplayState,
   isSessionModel,
+  mayPrepareSessionForSettings,
   prepareFreshSession,
   quarantineSessionBundle,
   replaySessionBundle,
@@ -432,10 +442,6 @@ let effortWanted: EffortLevel = ((value) => {
   const wanted = value.trim().toLowerCase();
   return (EFFORT_LEVELS as readonly string[]).includes(wanted) ? (wanted as EffortLevel) : "medium";
 })(process.env.TERMINA_CORE_EFFORT ?? "");
-type HostContextTrace = Pick<
-  BoundedText,
-  "state" | "direction" | "limitBytes" | "inputBytes" | "retainedBytes" | "omittedBytes" | "outputBytes" | "truncated"
-> & Pick<ContextFilesResult, "files">;
 let currentHostContext: HostContextTrace | null = null;
 let activeRequestOverlay: RequestOverlay | null = null;
 
@@ -460,6 +466,13 @@ const terminalId = isValidTerminalId(rawTerminalId) ? rawTerminalId : "";
 const sessionId = sessionEnvironment.TERMINA_CORE_SESSION_ID?.trim() || terminalId;
 /** Stable for one logical session boundary; rotated by /clear/quarantine. */
 let cacheSeed = cacheSessionSeed(sessionId);
+const cacheGate = createCacheCapabilityGate({
+  protocolFor: providerProtocol,
+  sessionSeed: () => cacheSeed,
+});
+const cacheCapabilitySupported = cacheGate.supported;
+const recordRejectedCacheFields = cacheGate.recordRejectedFields;
+const cacheIdentityForRole = cacheGate.identityForRole;
 const bridgeId = `core-${randomUUID()}`;
 const traceRunId = `run-${randomUUID()}`;
 const sidecar = createSidecarWriter({ eventsDir, terminalId, bridgeId });
@@ -487,200 +500,11 @@ if (tracesDir) {
   }
 }
 
-type MainCacheIdentity = NonNullable<ReturnType<typeof cacheIdentityFor>>;
-
-/** Route origin used for documented capability gates. Custom relay origins
- * remain unknown because a model name alone cannot establish their fields. */
-function cacheRouteForProvider(provider: ProviderId): string {
-  const definition = providerDefinition(provider);
-  if (definition.baseEnv) {
-    const configured = process.env[definition.baseEnv]?.trim();
-    if (configured) return configured;
-  }
-  return documentedCacheRoute(provider);
-}
-
-/** One bounded, route/model/feature-scoped cache capability cache for this
- * process.  Documentation-backed observations are seeded lazily; relay and
- * compatibility routes stay explicitly unknown and therefore disabled. */
-const cacheCapabilities = createCapabilityCache();
-
-function cacheCapabilityScope(
-  provider: ProviderId,
-  model: string,
-  feature: string,
-): CacheCapabilityScope {
-  return {
-    provider,
-    protocol: providerProtocol(provider, model),
-    route: cacheRouteDomain(cacheRouteForProvider(provider)),
-    model,
-    feature,
-  };
-}
-
-function observeCacheCapability(
-  provider: ProviderId,
-  model: string,
-  feature: string,
-): CapabilityCacheRecord {
-  const scope = cacheCapabilityScope(provider, model, feature);
-  const now = Date.now();
-  const cached = queryCapability(cacheCapabilities, scope, now);
-  if (cached.reason !== "not-observed" && cached.reason !== "expired") return cached;
-  const documented = documentedCacheCapability(scope);
-  const recorded = recordCapability(cacheCapabilities, {
-    scope,
-    supported: documented.supported,
-    status: documented.status,
-    source: documented.source,
-    reason: documented.reason,
-    provenance: documented.provenance,
-    observedAtMs: now,
-    // No provider-independent expiry is assumed.  A live rejection can be
-    // invalidated by a process restart or a future route-specific probe.
-    expiresAtMs: null,
-  });
-  return recorded ?? cached;
-}
-
-function cacheCapabilitySupported(provider: ProviderId, model: string, feature: string): boolean {
-  return observeCacheCapability(provider, model, feature).supported === true;
-}
-
-function recordRejectedCacheCapability(
-  provider: ProviderId,
-  model: string,
-  feature: string,
-  reason: string,
-): void {
-  const scope = cacheCapabilityScope(provider, model, feature);
-  recordCapability(cacheCapabilities, {
-    scope,
-    supported: false,
-    status: "rejected",
-    source: "probe",
-    reason: reason.slice(0, 512),
-    provenance: null,
-    observedAtMs: Date.now(),
-    // Retention/expiry is route-specific and unknown; do not invent a TTL.
-    expiresAtMs: null,
-  });
-}
-
-function recordRejectedCacheFields(
-  provider: ProviderId,
-  model: string,
-  present: {
-    promptCacheOptions: boolean;
-    promptCacheBreakpoint: boolean;
-    promptCacheKey: boolean;
-  },
-  detail: string,
-): void {
-  const lower = detail.toLowerCase();
-  const candidates: Array<{ feature: string; present: boolean; words: string[] }> = [
-    {
-      feature: CACHE_CAPABILITY_FEATURE.promptCacheOptions,
-      present: present.promptCacheOptions,
-      words: ["prompt_cache_options", "cache options"],
-    },
-    {
-      feature: CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint,
-      present: present.promptCacheBreakpoint,
-      words: ["prompt_cache_breakpoint", "cache breakpoint"],
-    },
-    {
-      feature: CACHE_CAPABILITY_FEATURE.promptCacheKey,
-      present: present.promptCacheKey,
-      words: ["prompt_cache_key", "cache key"],
-    },
-  ];
-  for (const candidate of candidates) {
-    if (candidate.present && candidate.words.some((word) => lower.includes(word))) {
-      recordRejectedCacheCapability(provider, model, candidate.feature, detail);
-    }
-  }
-}
-
-function cacheIdentityForRole(role: "main" | "summary", provider: ProviderId, model: string): MainCacheIdentity | null {
-  const protocol = providerProtocol(provider, model);
-  const identity = cacheIdentityFor({
-    sessionSeed: cacheSeed,
-    role,
-    provider,
-    protocol,
-    route: cacheRouteForProvider(provider),
-  });
-  if (!identity) return null;
-  // xAI documents different identities for Responses and Chat. A relay must
-  // not receive the Chat header (or a diagnostic hash) merely because the
-  // selected model happens to be a Grok model.
-  if (
-    provider === "xai" &&
-    !cacheCapabilitySupported(provider, model, CACHE_CAPABILITY_FEATURE.promptCacheKey)
-  ) {
-    return null;
-  }
-  return identity;
-}
+type MainCacheIdentity = CacheIdentity;
 
 function rotateCacheSession(): void {
   cacheSeed = cacheSessionSeed(undefined);
   resetCacheContinuity();
-}
-
-export interface TraceCacheDiagnostics extends CacheRequestDiagnostics {
-  /** Hash and exact byte count of the volatile overlay, if one was sent. */
-  overlayHash: string | null;
-  overlayBytes: number | null;
-  /** Bounded host-reader metadata retained without exposing host content. */
-  hostContext: HostContextTrace | null;
-  retryPromptIdentical: boolean | null;
-  codexTurnStateUsed: boolean;
-  /** Exact UTF-8 serialization metadata for the provider tool schema. */
-  serializedToolsHash: string | null;
-  serializedToolsBytes: number | null;
-  /** Full local miss evidence; null fields mean the provider did not expose enough data. */
-  missAttribution: NonNullable<TraceCacheInput["missAttribution"]>;
-}
-
-/** Decide whether a trace write actually persisted and whether a retry is
- * meaningful.  A failed write must not be mistaken for a durable attempt. */
-export function traceWriteDisposition(
-  outcome: TraceWriteOutcome,
-): { persisted: boolean; retry: boolean; terminal: boolean } {
-  const persisted = outcome.ok || outcome.persisted;
-  const retryable = outcome.ok ? false : outcome.retryable;
-  return {
-    persisted,
-    retry: !persisted && retryable,
-    terminal: persisted || !retryable,
-  };
-}
-
-/** Return a storage range only when this operation actually appended records. */
-export function storageSeqRange(
-  seqBefore: number,
-  seqAfter: number,
-): readonly [number, number] | null {
-  if (!Number.isSafeInteger(seqBefore) || !Number.isSafeInteger(seqAfter)) return null;
-  if (seqAfter < seqBefore + 1) return null;
-  return [seqBefore + 1, seqAfter];
-}
-
-/** Intermediate provider records must not become the task's final attempt. */
-export function isTerminalTraceAttemptStatus(status: string): boolean {
-  return status !== "retrying" && status !== "fallback" && status !== "overflow";
-}
-
-/**
- * Bare provider stream terminations (observed as `response.failed` with the
- * message `terminated`, e.g. on the Codex relay) carry no actionable detail
- * and are worth exactly one immediate retry with identical bytes.
- */
-export function isRetriableProviderTermination(message: string): boolean {
-  return /^terminated$/i.test(message.trim());
 }
 
 type TraceTaskState = {
@@ -1021,119 +845,6 @@ export function hashSystem(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
 
-type CacheMarkerDetails = { count: number; positions: number[]; ttlMs: number | null };
-
-function cacheMarkerDetails(value: unknown): CacheMarkerDetails {
-  const details: CacheMarkerDetails = { count: 0, positions: [], ttlMs: null };
-  const walk = (item: unknown): void => {
-    if (Array.isArray(item)) {
-      for (const child of item) walk(child);
-      return;
-    }
-    if (!item || typeof item !== "object") return;
-    for (const [key, child] of Object.entries(item as Record<string, unknown>)) {
-      if (key === "cache_control" || key === "prompt_cache_breakpoint") {
-        details.count++;
-        if (details.positions.length < 64) details.positions.push(details.count - 1);
-        if (
-          child &&
-          typeof child === "object" &&
-          !Array.isArray(child) &&
-          (child as Record<string, unknown>).ttl === "1h"
-        ) {
-          details.ttlMs = 60 * 60 * 1000;
-        }
-      }
-      walk(child);
-    }
-  };
-  walk(value);
-  return details;
-}
-
-function cachePolicyFromBody(
-  body: Record<string, unknown>,
-  identity: { provider: ProviderId; protocol: string; model: string },
-  prior: CachePolicyDiagnostics | null,
-  fallbackReason: string | null,
-): { policy: CachePolicyDiagnostics; markers: CacheMarkerDetails } {
-  const markers = cacheMarkerDetails(body);
-  const options = body.prompt_cache_options;
-  const hasExplicitOptions = Boolean(options && typeof options === "object" && !Array.isArray(options));
-  const hasCacheKey = typeof body.prompt_cache_key === "string" && body.prompt_cache_key.length > 0;
-  const hasSessionId = typeof body.session_id === "string" && body.session_id.length > 0;
-  const requestedMode = hasExplicitOptions
-    ? "explicit"
-    : hasCacheKey || hasSessionId
-      ? "implicit"
-        : markers.count > 0
-          ? identity.protocol === "anthropic-messages"
-            ? "markers"
-            : "explicit"
-          : "none";
-  // A rejected explicit field may be removed while a supported implicit key
-  // remains in the same body. Derive the effective policy from that actual
-  // body instead of collapsing every fallback to "none".
-  const effectiveMode = requestedMode;
-  let requestedTtlMs: number | null = null;
-  if (hasExplicitOptions && (options as Record<string, unknown>).ttl === "30m") requestedTtlMs = 30 * 60 * 1000;
-  else if (identity.provider === "anthropic" && markers.count > 0) requestedTtlMs = markers.ttlMs ?? 5 * 60 * 1000;
-  else if (markers.ttlMs !== null) requestedTtlMs = markers.ttlMs;
-  const effectiveTtlMs = fallbackReason ? null : requestedTtlMs;
-  const retentionKnown =
-    identity.provider === "anthropic" && markers.count > 0
-      ? true
-      : identity.provider === "openai" && hasExplicitOptions
-        ? true
-        : requestedMode === "none"
-          ? true
-          : null;
-  return {
-    markers,
-    policy: {
-      provider: identity.provider,
-      protocol: identity.protocol,
-      model: identity.model,
-      requestedMode: prior?.requestedMode ?? requestedMode,
-      effectiveMode,
-      requestedTtlMs: prior?.requestedTtlMs ?? requestedTtlMs,
-      effectiveTtlMs,
-      retentionKnown,
-      fallbackReason,
-    },
-  };
-}
-
-/** Exact tools serialization memoized by array identity. One turn diagnoses
- * the same `body.tools` array up to three times (initial attempt, rejected
- * cache-field trace, fallback retry); serialize it once. Entries are
- * identity-keyed so they drop with the array — no size cap needed. */
-const serializedToolsMemo = new WeakMap<object, { text: string; hash: string; bytes: number } | null>();
-
-function memoizedSerializedTools(tools: unknown): { text: string; hash: string; bytes: number } | null {
-  try {
-    const serialized = JSON.stringify(tools);
-    if (typeof serialized !== "string") return null;
-    const encoded = Buffer.from(serialized, "utf8");
-    return {
-      text: serialized,
-      hash: createHash("sha256").update(encoded).digest("hex"),
-      bytes: encoded.length,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function memoizedSerializedToolsFor(tools: unknown): { text: string; hash: string; bytes: number } | null {
-  if (typeof tools !== "object" || tools === null) return memoizedSerializedTools(tools);
-  const hit = serializedToolsMemo.get(tools);
-  if (hit !== undefined) return hit;
-  const result = memoizedSerializedTools(tools);
-  serializedToolsMemo.set(tools, result);
-  return result;
-}
-
 function cacheDiagnosticsForRequest(
   body: Record<string, unknown>,
   identity: { provider: ProviderId; protocol: string; model: string },
@@ -1144,82 +855,20 @@ function cacheDiagnosticsForRequest(
   priorPolicy: CachePolicyDiagnostics | null = null,
   retryPromptIdentical: boolean | null = null,
 ): TraceCacheDiagnostics {
-  const settings = { ...body };
-  const tools = settings.tools ?? [];
-  const memoizedTools = memoizedSerializedToolsFor(tools);
-  const serializedToolsHash = memoizedTools ? memoizedTools.hash.slice(0, 16) : null;
-  const serializedToolsBytes = memoizedTools ? memoizedTools.bytes : null;
-  delete settings.tools;
-  let stableSystem = settings.instructions ?? settings.system ?? settings.systemInstruction ?? null;
-  delete settings.instructions;
-  delete settings.system;
-  delete settings.systemInstruction;
-  let messages = settings.input ?? settings.messages ?? settings.contents ?? [];
-  delete settings.input;
-  delete settings.messages;
-  delete settings.contents;
-  if (stableSystem === null && Array.isArray(messages) && messages[0]?.role === "system") {
-    stableSystem = messages[0];
-    messages = messages.slice(1);
-  }
-  delete settings.prompt_cache_key;
-  delete settings.session_id;
-  const modelSettings = { ...identity, request: settings };
-  const policyDetails = cachePolicyFromBody(body, identity, priorPolicy, fallbackReason);
-  // `toGoogleContents` coalesces adjacent user turns into one contents item,
-  // so its first array element is not a reliable overlay boundary. Leave that
-  // reusable-prefix hash unknown rather than claiming a prefix we cannot
-  // reconstruct byte-for-byte after serialization.
-  const persistedMessages = identity.protocol === "google-generate" && overlay
-    ? undefined
-    : Array.isArray(messages) && overlay ? messages.slice(1) : messages;
-  // A session seed is useful for deriving provider headers, but it is not a
-  // provider-facing cache key on every route (for example direct Anthropic or
-  // Gemini). Only report the identity hash when this request actually emits
-  // a supported body/header identity.
-  const diagnosticIdentity = cacheIdentity && (
-    identity.provider === "openrouter" ||
-    identity.provider === "xai" ||
-    cacheCapabilitySupported(identity.provider, identity.model, CACHE_CAPABILITY_FEATURE.promptCacheKey)
-  ) ? cacheIdentity : null;
-  const base = cacheRequestDiagnostics({
-    identity: diagnosticIdentity,
-    policy: policyDetails.policy,
-    modelSettings,
-    tools,
-    serializedToolsText: memoizedTools?.text ?? null,
-    stablePrefix: { system: stableSystem, tools, settings: modelSettings },
-    reusablePrefix: persistedMessages,
-    previous: cacheIdentity?.role === "main" ? previousCacheAttempt?.diagnostics : null,
-    // Prefix evidence takes one bounded pass and checkpoints the previous
-    // request's boundary. Do not compute a second whole-history diagnostic.
-    // An absent overlay is complete evidence (no working set was sent), so
-    // report it as an explicit null that hashes to a stable sentinel. Only
-    // an undefined value stays unknown, as for routes where the prefix
-    // cannot be reconstructed after serialization.
-    workingSet: overlay ? overlay.text : null,
-    markerCount: policyDetails.markers.count,
-    markerPositions: policyDetails.markers.positions,
-  });
-  return {
-    ...base,
-    overlayHash: overlay?.hash ?? null,
-    overlayBytes: overlay?.bytes ?? null,
-    hostContext: hostContext ? { ...hostContext } : null,
+  return buildCacheRequestDiagnostics({
+    body,
+    identity,
+    cacheIdentity,
+    overlay,
+    hostContext,
+    fallbackReason,
+    priorPolicy,
     retryPromptIdentical,
+    previousDiagnostics: cacheIdentity?.role === "main" ? previousCacheAttempt?.diagnostics : null,
+    cacheKeySupported: cacheCapabilitySupported(identity.provider, identity.model, CACHE_CAPABILITY_FEATURE.promptCacheKey),
     codexTurnStateUsed: identity.provider === "openai-codex" && Boolean(codexTurnState),
-    serializedToolsHash,
-    serializedToolsBytes,
-    missAttribution: {
-      attributed: null,
-      primary: null,
-      contributing: [],
-      missedTokens: null,
-      gapMs: null,
-      missingFields: ["previous-attempt"],
-      noiseFloorTokens: NOISE_FLOOR_TOKENS,
-    },
-  };
+    noiseFloorTokens: NOISE_FLOOR_TOKENS,
+  });
 }
 
 // ---- trace runtime integration ----
@@ -1390,19 +1039,6 @@ function ensureRouteSettingsWritable(): void {
   if (mayPrepareSessionForSettings(sessionFile, sessionWriter !== null, hasContent)) {
     ensureFreshSession();
   }
-}
-
-/**
- * Whether a settings pin may prepare the session itself: a bundle path
- * exists, no writer is open yet, and nothing is stored. Exported for unit
- * tests; ensureRouteSettingsWritable keeps the only callers.
- */
-export function mayPrepareSessionForSettings(
-  file: string | null,
-  writerOpen: boolean,
-  hasContent: boolean,
-): boolean {
-  return !!file && !writerOpen && !hasContent;
 }
 
 /**
@@ -1726,11 +1362,6 @@ let approvalResolve: ((line: string) => void) | null = null;
 let approvalQueue = Promise.resolve();
 const protectedTaskApprovals = new Set<string>();
 
-/** True when a submitted line answers the approval picker (deny/once/always/protected). */
-export function isApprovalAnswer(line: string): boolean {
-  return line === "/approve" || line.startsWith("/approve ");
-}
-
 /** Resolve an in-flight permission prompt before tearing down its surface. */
 export function cancelPendingApproval(line = "/approve deny"): boolean {
   const resolve = approvalResolve;
@@ -1849,11 +1480,6 @@ function stopSubagentApprovalTimer(): void {
  * parents (no picker surface) resolve to a fast deny ack instead of
  * making the child hang the full timeout.
  */
-/** A picker prompt is only valid for a live run; settled runs must not be asked about. */
-export function isLiveSubagentRun(run: { state: string } | undefined): boolean {
-  return run?.state === "active";
-}
-
 function pollSubagentApprovals(): void {
   if (!eventsDir || !terminalId || subagentRegistry.activeRuns().length === 0) return;
   let names: string[];
@@ -2282,116 +1908,6 @@ export const WEB_SEARCH_TOOL = {
   max_uses: 5,
 } as const;
 
-export type AnthropicCacheMark = { type: "ephemeral" };
-
-/** Anthropic's default five-minute TTL is sliding and avoids the 1-hour write premium. */
-export function anthropicCacheMark(): AnthropicCacheMark {
-  return { type: "ephemeral" };
-}
-
-export function buildCachedPrefix(
-  system: string,
-  tools: Array<Record<string, unknown>>,
-): {
-  system: Array<{ type: "text"; text: string; cache_control: AnthropicCacheMark }>;
-  tools: Array<Record<string, unknown> & { cache_control?: AnthropicCacheMark }>;
-} {
-  const mark = anthropicCacheMark();
-  // Anthropic permits at most four explicit breakpoints. The system marker
-  // consumes one, leaving three for tools. Preserve existing markers in
-  // discovery order and only add the final-tool marker when budget remains.
-  let toolMarkers = 0;
-  const copied = tools.map((tool, index) => {
-    const existing = Object.prototype.hasOwnProperty.call(tool, "cache_control");
-    if (existing && toolMarkers < 3) {
-      toolMarkers++;
-      return { ...tool };
-    }
-    if (existing) {
-      const { cache_control: _cacheControl, ...withoutMarker } = tool;
-      return { ...withoutMarker };
-    }
-    if (index === tools.length - 1 && toolMarkers < 3) {
-      toolMarkers++;
-      return { ...tool, cache_control: mark };
-    }
-    return { ...tool };
-  });
-  return {
-    system: [{ type: "text", text: system, cache_control: mark }],
-    tools: copied,
-  };
-}
-
-const HISTORY_CACHE_BLOCKS = new Set(["text", "tool_result", "image"]);
-
-/** Stamp cache_control on the last stable history block. Skip thinking and
- *  tool_use. Only the provider's documented 20-block lookback is eligible. */
-export function stampHistoryCache(
-  messages: Array<{ role: string; content: unknown }>,
-): Array<{ role: string; content: unknown }> {
-  const mark = anthropicCacheMark();
-  let lookback = 20;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (typeof m.content === "string") {
-      if (lookback <= 0) break;
-      lookback--;
-      if (!m.content) continue;
-      const next = messages.slice();
-      next[i] = {
-        ...m,
-        content: [{ type: "text", text: m.content, cache_control: mark }],
-      };
-      return next;
-    }
-    if (!Array.isArray(m.content)) continue;
-    const blocks = m.content as Array<Record<string, unknown>>;
-    for (let j = blocks.length - 1; j >= 0; j--) {
-      const b = blocks[j]!;
-      const bType = typeof b.type === "string" ? b.type : "";
-      // Anthropic merges a run of consecutive tool_use blocks (and likewise
-      // tool_result) into one lookback position, so only the run's far edge
-      // consumes the budget. See "20-block lookback window" in the prompt
-      // caching docs: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
-      const prev = j > 0 ? blocks[j - 1] : null;
-      const prevType = prev && typeof prev.type === "string" ? prev.type : "";
-      const continuesRun = (bType === "tool_use" || bType === "tool_result") && prevType === bType;
-      if (!continuesRun) {
-        if (lookback <= 0) return messages;
-        lookback--;
-      }
-      if (typeof b.type !== "string" || !HISTORY_CACHE_BLOCKS.has(b.type)) continue;
-      if (Object.prototype.hasOwnProperty.call(b, "cache_control")) return messages;
-      const next = messages.slice();
-      const copied = blocks.slice();
-      copied[j] = { ...b, cache_control: mark };
-      next[i] = { ...m, content: copied };
-      return next;
-    }
-  }
-  return messages;
-}
-
-const RETRY_STATUSES = new Set([429, 529, 500, 502, 503]);
-const RETRY_AFTER_CAP_S = 10;
-
-/** Milliseconds to wait, or null when this status/attempt must not retry. */
-export function retryAfter(
-  status: number,
-  headers: { get(name: string): string | null },
-  attempt: number,
-): number | null {
-  if (attempt >= 2) return null;
-  if (!RETRY_STATUSES.has(status)) return null;
-  const raw = headers.get("retry-after");
-  if (raw !== null && raw !== "") {
-    const secs = Number(raw);
-    if (Number.isInteger(secs) && secs >= 0 && secs <= RETRY_AFTER_CAP_S) return secs * 1000;
-  }
-  return attempt === 0 ? 1_000 : 2_000;
-}
-
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -2816,14 +2332,6 @@ function effectiveTotalTokens(): number {
   return Math.max(totalTokens(), lastBilledTokens ?? 0);
 }
 
-/** Provider window-overflow shapes across Anthropic/OpenAI/Gemini/xAI. Tested
- * only against provider-thrown request errors, never user text. Generic nouns
- * stay verb-guarded so benign messages (e.g. "context window info") cannot
- * trigger a destructive summarize/truncate. */
-export function isContextOverflowMessage(message: string): boolean {
-  return /prompt is too long|maximum context|maximum prompt|context_length|request_too_large|request too large|too many tokens|tokens?\s+(exceed|exceeds|exceeded)|exceed.*tokens?|tokens?.*exceed|request contains .*tokens|input.*too long|prompt.*too (long|large|big)|context.*too (long|large|big)|context.*exceed|exceed.*context|token limit|context limit/i.test(message);
-}
-
 /** Collapse old turns into one handoff message. Runs on the cheap lane,
  *  falling back to the current main model when the cheap lane fails.
  *  Returns false when there is nothing safely evictable or every call fails;
@@ -2930,28 +2438,6 @@ type Block =
   | { type: "tool_use"; id: string; name: string; input: ToolUse["input"] }
   | { type: "server_tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "web_search_tool_result"; tool_use_id: string; content: unknown };
-
-/** Final provider-to-kernel admission invariant. Provider decoders should
- * reject first; this backstop prevents malformed executable calls from being
- * made durable if a decoder regresses. */
-export function providerToolAdmissionError(blocks: readonly Record<string, unknown>[]): string | null {
-  const ids = new Set<string>();
-  for (const block of blocks) {
-    if (block.type !== "tool_use") continue;
-    if (
-      typeof block.id !== "string" || !block.id.trim() ||
-      typeof block.name !== "string" || !block.name.trim()
-    ) {
-      return "provider protocol error: tool call identity is missing";
-    }
-    if (ids.has(block.id)) return "provider protocol error: duplicate tool call identity";
-    ids.add(block.id);
-    if (!block.input || typeof block.input !== "object" || Array.isArray(block.input)) {
-      return "provider protocol error: tool call arguments must be an object";
-    }
-  }
-  return null;
-}
 
 /** Keep client results paired even when a server tool is still outstanding.
  * Claude forbids sibling user text in that case; attach harness guidance as a
@@ -3163,41 +2649,6 @@ async function rotateProviderRetryAttempt(
     provider: attempt.provider,
     model: attempt.model,
   });
-}
-
-function providerToken(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-/** Normalize provider counters without turning an absent field into zero. */
-export function normalizeProviderUsage(u: Record<string, unknown> | undefined): Usage | null {
-  if (!u) return null;
-  return {
-    input: providerToken(u.input_tokens ?? u.prompt_tokens),
-    cacheRead: providerToken(u.cache_read_input_tokens ?? u.cached_tokens),
-    cacheWrite: providerToken(u.cache_creation_input_tokens ?? u.cache_write_tokens),
-    output: providerToken(u.output_tokens ?? u.completion_tokens),
-    reasoning: providerToken(u.reasoning_tokens),
-  };
-}
-
-function mergeProviderUsage(previous: Usage | null, next: Usage | null): Usage | null {
-  if (!previous) return next;
-  if (!next) return previous;
-  return {
-    input: next.input ?? previous.input,
-    cacheRead: next.cacheRead ?? previous.cacheRead,
-    cacheWrite: next.cacheWrite ?? previous.cacheWrite,
-    output: next.output ?? previous.output,
-    reasoning: next.reasoning ?? previous.reasoning,
-    reportedUsd: next.reportedUsd ?? previous.reportedUsd,
-  };
-}
-
-/** Exact billed total when the provider reported one; otherwise null. */
-export function providerReportedUsd(usage: Pick<Usage, "reportedUsd"> | null): number | null {
-  const value = usage?.reportedUsd;
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 const PROVIDER_BODY_CAP_BYTES = 256 * 1024;
@@ -4219,34 +3670,6 @@ function catalogKey(provider: string, model: string, role: "main" | "summary"): 
   return `${provider}\0${model}\0${role}`;
 }
 
-/**
- * models.dev provider whose **pricing** applies to a route.
- *
- * Copilot and Codex are billed at OpenAI's rates, so their costs come from the
- * `openai` catalog. This mapping is about billing only — see
- * `contextCatalogProviderId` for the separate window lookup.
- */
-export function catalogProviderId(provider: ProviderId): string {
-  return provider === "openai-codex" || provider === "github-copilot" ? "openai" : provider;
-}
-
-/**
- * models.dev provider whose **context windows** apply to a route.
- *
- * Deliberately not `catalogProviderId`: Copilot is *billed* like OpenAI but
- * *serves* its own model list, including models OpenAI does not have (claude,
- * grok, gemini, kimi) and ids whose window differs (`gpt-5-mini` is 264k on
- * Copilot, 400k on OpenAI). Reusing the pricing mapping would leave those 18
- * models with no entry and give `gpt-5-mini` the wrong window.
- *
- * Both OpenCode relays serve one shared model list, which models.dev publishes
- * as `opencode`; neither relay endpoint reports a window itself.
- */
-export function contextCatalogProviderId(provider: ProviderId): string {
-  if (provider === "opencode-go" || provider === "opencode-zen") return "opencode";
-  return provider;
-}
-
 /** The context entry for a route's provider, or null when it has no models.
  *  Narrows `models` to a present record so callers need no second check. */
 function contextCatalogEntry(
@@ -4504,25 +3927,6 @@ function traceCostForUsage(
   };
 }
 
-/**
- * Whether a null cache-write count is exact for one provider route. xAI
- * and the OpenCode relays report cached reads only (255 Go+Zen turns on
- * 2026-09-07 carried reads up to 451k tokens without a single write
- * count, and the usage parser probes `cache_write_tokens` in two places
- * without ever finding it there), so null means no write component. The
- * same holds for OpenAI (writes are free and unreported before GPT-5.6;
- * 5.6+ reports `cache_write_tokens`, which takes the non-null branch) and
- * Google (implicit caching has no write-token concept). A reported count
- * means support trivially; other providers stay strict.
- */
-export function cacheWriteSupportedFor(provider: ProviderId, cacheWrite: number | null): boolean | null {
-  if (cacheWrite !== null) return true;
-  return provider === "xai" || provider === "openai" || provider === "google" ||
-      provider === "opencode-go" || provider === "opencode-zen"
-    ? false
-    : null;
-}
-
 function reportUsage(
   usage: Usage,
   ttftMs: number | null,
@@ -4631,19 +4035,6 @@ function lastAssistantText(): string {
  * line on stdout, and exit. Stdout keeps the full `-p`-style transcript;
  * the host takes the LAST framed line, so model text cannot collide with it.
  */
-
-/**
- * Child permission mode (#206): the validated task file carries ask/dangerous
- * faithfully; `always` additionally requires the host bridge
- * (TERMINA_CORE_APPROVE=all), so a forged task file alone cannot grant it.
- */
-export function resolveSubagentPermissionMode(
-  taskMode: SubagentPermissionMode,
-  approveEnv: string | undefined,
-): PermissionMode {
-  if (taskMode === "always") return approveEnv === "all" ? "always" : "ask";
-  return taskMode;
-}
 
 async function runSubagentTask(taskPath: string): Promise<never> {
   const fail = async (message: string): Promise<never> => {

@@ -13,3 +13,9 @@ export { DEFAULT_TRACE_MAX_RECORD_BYTES, DEFAULT_TRACE_RETENTION_CAP, TRACE_SCHE
 export type { ExistingTraceRole, FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptIndexEntry, TraceAttemptInput, TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceLinkIndex, TraceManifest, TraceManifestLinkIndex, TraceManifestOutcome, TraceManifestReset, TraceManifestStartup, TraceReclaimEvidence, TraceReclaimTarget, TraceRecord, TraceRevisions, TraceRevisionsInput, TraceRole, TraceRuntimeOptions, TraceSettlementIndexEntry, TraceStartupResult, TraceTaskOutcome, TraceTaskSettled, TraceTaskSettledInput, TraceToolOutcome, TraceUsage, TraceUsageInput, TraceWriteFailure, TraceWriteFailureKind, TraceWriteOutcome, TraceWriteSuccess } from "./trace/schema.ts";
 export { createAttemptRecord, createTaskSettledRecord, sanitizeProviderError, validTraceLinkIndex } from "./trace/records.ts";
 export { TraceRuntime, createTraceRuntime } from "./trace/runtime.ts";
+export {
+  isRetriableProviderTermination,
+  isTerminalTraceAttemptStatus,
+  storageSeqRange,
+  traceWriteDisposition,
+} from "./trace/disposition.ts";

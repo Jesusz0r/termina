@@ -50,6 +50,8 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
   it("passes provider cache tests", async () => {
     const auth = await import("../../../agent-core/auth.ts");
     const compat = await import("../../../agent-core/openai-compat.ts");
+    const cache = await import("../../../agent-core/cache.ts");
+    const anthropicCache = await import("../../../agent-core/main/anthropic-cache.ts");
     const coreLoad = await import("../../../agent-core/main.ts")
       .then((module) => ({ module, error: null }))
       .catch((error) => ({ module: null, error }));
@@ -424,17 +426,16 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
     });
 
     await test("writeless relay routes treat a null cache write as exact", () => {
-      const core = requireCore();
-      assert.equal(typeof core.cacheWriteSupportedFor, "function");
+      assert.equal(typeof cache.cacheWriteSupportedFor, "function");
       for (const provider of ["xai", "openai", "google", "opencode-go", "opencode-zen"] as const) {
-        assert.equal(core.cacheWriteSupportedFor(provider, null), false);
+        assert.equal(cache.cacheWriteSupportedFor(provider, null), false);
       }
       for (const provider of ["openai-codex", "anthropic", "openrouter"] as const) {
-        assert.equal(core.cacheWriteSupportedFor(provider, null), null);
+        assert.equal(cache.cacheWriteSupportedFor(provider, null), null);
       }
       for (const provider of ["xai", "opencode-go", "opencode-zen", "openai-codex"] as const) {
-        assert.equal(core.cacheWriteSupportedFor(provider, 0), true);
-        assert.equal(core.cacheWriteSupportedFor(provider, 12), true);
+        assert.equal(cache.cacheWriteSupportedFor(provider, 0), true);
+        assert.equal(cache.cacheWriteSupportedFor(provider, 12), true);
       }
     });
 
@@ -788,7 +789,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       for (let i = 0; i < 20; i++) {
         history.push({ role: "assistant", content: [{ type: "thinking", thinking: `thought-${i}` }] });
       }
-      const stamped = requireCore().stampHistoryCache(history);
+      const stamped = anthropicCache.stampHistoryCache(history);
       assert.equal(allCacheMarkers(stamped).length, 0);
     });
 
@@ -798,7 +799,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         { role: "user", content: [{ type: "text", text: "old reusable text" }] },
         { role: "assistant", content: parallelUse },
       ];
-      const stamped = requireCore().stampHistoryCache(history);
+      const stamped = anthropicCache.stampHistoryCache(history);
       // The 25-call run counts as one position, so the text stays reachable.
       assert.equal(allCacheMarkers(stamped).length, 1);
       const control: Array<{ role: string; content: unknown }> = [
@@ -809,7 +810,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         control.push({ role: "assistant", content: [{ type: "thinking", thinking: `thought-${i}` }] });
       }
       // Twenty alternating positions with no runs still exhaust the budget.
-      assert.equal(allCacheMarkers(requireCore().stampHistoryCache(control)).length, 0);
+      assert.equal(allCacheMarkers(anthropicCache.stampHistoryCache(control)).length, 0);
     });
     
     await test("Anthropic direct prefix never exceeds four explicit breakpoints", () => {
@@ -819,7 +820,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         input_schema: { type: "object" },
         ...(i < 4 ? { cache_control: { type: "ephemeral" } } : {}),
       }));
-      const prefix = requireCore().buildCachedPrefix("system", premarkedTools);
+      const prefix = anthropicCache.buildCachedPrefix("system", premarkedTools);
       const markers = allCacheMarkers(prefix);
       assert.ok(markers.length <= 4);
       assert.ok(markers.every((entry) => (entry.cache_control as { ttl?: unknown } | undefined)?.ttl === undefined));

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { RUN_IMAGE_CAP, droppedRunImageCount, isLiveSubagentRun } from "../../../agent-core/main.ts";
+import { RUN_IMAGE_CAP, droppedRunImageCount } from "../../../agent-core/main.ts";
+import { isLiveSubagentRun } from "../../../agent-core/subagents.ts";
 
 describe("run guardrails (#222)", () => {
   it("counts images dropped by the run cap", () => {

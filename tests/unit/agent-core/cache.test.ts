@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import * as auth from "../../../agent-core/auth.ts";
 import * as cache from "../../../agent-core/cache.ts";
+import { cacheRouteForProvider, createCacheCapabilityGate } from "../../../agent-core/main/cache-capabilities.ts";
+import { cacheMarkerDetails, cachePolicyFromBody } from "../../../agent-core/main/cache-diagnostics.ts";
 
 const {
   CACHE_KEY_MAX_LENGTH,
@@ -483,6 +485,47 @@ describe("Agent Core Cache", () => {
       expect(strict.primary).toBe("unknown");
       expect(strict.missingFields).toContain("previous.cacheWriteTokens");
       expect(strict.missingFields).toContain("current.cacheWriteTokens");
+    });
+  });
+
+  describe("Extracted cache owners (#324)", () => {
+    it("treats a null write as exact only on writeless routes", () => {
+      expect(cache.cacheWriteSupportedFor("xai", null)).toBe(false);
+      expect(cache.cacheWriteSupportedFor("openai", null)).toBe(false);
+      expect(cache.cacheWriteSupportedFor("google", null)).toBe(false);
+      expect(cache.cacheWriteSupportedFor("opencode-go", null)).toBe(false);
+      expect(cache.cacheWriteSupportedFor("opencode-zen", null)).toBe(false);
+      expect(cache.cacheWriteSupportedFor("anthropic", null)).toBeNull();
+      expect(cache.cacheWriteSupportedFor("openai-codex", 0)).toBe(true);
+    });
+
+    it("forwards capability observations without inventing a second mapper", () => {
+      const gate = createCacheCapabilityGate({
+        protocolFor: (provider, model) => auth.providerProtocol(provider, model),
+        sessionSeed: () => auth.cacheSessionSeed("term-324"),
+      });
+      expect(cacheRouteForProvider("anthropic")).toBe(auth.documentedCacheRoute("anthropic"));
+      expect(gate.supported("anthropic", "claude-sonnet-5", auth.CACHE_CAPABILITY_FEATURE.anthropicCacheControl)).toBe(true);
+      expect(gate.supported("opencode-zen", "claude-sonnet-5", auth.CACHE_CAPABILITY_FEATURE.anthropicCacheControl)).toBe(false);
+      expect(gate.identityForRole("main", "xai", "grok-4.6")?.key).toBeTypeOf("string");
+      gate.recordRejected("openai", "gpt-5.6", auth.CACHE_CAPABILITY_FEATURE.promptCacheOptions, "prompt_cache_options unsupported");
+      expect(gate.observe("openai", "gpt-5.6", auth.CACHE_CAPABILITY_FEATURE.promptCacheOptions).status).toBe("rejected");
+    });
+
+    it("derives request policy from body markers without serializing a request", () => {
+      const markers = cacheMarkerDetails({
+        system: [{ type: "text", text: "sys", cache_control: { type: "ephemeral" } }],
+        tools: [{ name: "bash", cache_control: { type: "ephemeral" } }],
+      });
+      expect(markers.count).toBe(2);
+      const { policy } = cachePolicyFromBody(
+        { model: "claude-sonnet-5", system: [{ cache_control: { type: "ephemeral" } }] },
+        { provider: "anthropic", protocol: "anthropic-messages", model: "claude-sonnet-5" },
+        null,
+        null,
+      );
+      expect(policy.requestedMode).toBe("markers");
+      expect(policy.retentionKnown).toBe(true);
     });
   });
 });
