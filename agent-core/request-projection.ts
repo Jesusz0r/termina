@@ -18,9 +18,9 @@ const TOOL_RESULT_TYPES = new Set(["tool_result", "web_search_tool_result"]);
 
 type PromptImage = { name: string; mediaType: string };
 
-export type ProjectionBlock = Record<string, unknown> & { type: string };
+type ProjectionBlock = Record<string, unknown> & { type: string };
 
-export type ProjectionMessage = {
+type ProjectionMessage = {
   role: "user" | "assistant";
   content: string | readonly ProjectionBlock[];
   sseq?: number;
@@ -38,7 +38,7 @@ export type RequestOverlay = {
   hash: string;
 };
 
-export type BuildRequestOverlayOptions = {
+type BuildRequestOverlayOptions = {
   hostContext?: string;
   maxBytes?: number;
 };

@@ -150,7 +150,7 @@ interface PtyEgressSource {
   resume(): void;
 }
 
-export interface PtyEgressTransport {
+interface PtyEgressTransport {
   /**
    * Deliver one already-bounded chunk to the current renderer document.
    * Returning false means that the renderer did not accept the IPC message;
@@ -186,7 +186,7 @@ export interface PtyEgressSchedulerOptions {
   flushIntervalMs?: number;
 }
 
-export interface PtyEgressQueueStats {
+interface PtyEgressQueueStats {
   /** Bytes/chunks waiting for IPC admission. */
   queuedBytes: number;
   queuedChunks: number;
