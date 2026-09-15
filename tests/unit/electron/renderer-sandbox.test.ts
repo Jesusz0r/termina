@@ -13,8 +13,10 @@ describe("Renderer Chromium sandbox invariants", () => {
  * tests/e2e/renderer-sandbox.spec.ts.
  */
 const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+const windowChrome = readFileSync(new URL("../../../electron/window-chrome.ts", import.meta.url), "utf8");
 const preload = readFileSync(new URL("../../../electron/preload.ts", import.meta.url), "utf8");
 const html = readFileSync(new URL("../../../src/index.html", import.meta.url), "utf8");
+const windowSource = `${main}\n${windowChrome}`;
 
 const checks: string[] = [];
 function check(name: string, value: unknown) {
@@ -23,25 +25,26 @@ function check(name: string, value: unknown) {
 }
 
 // Sandboxed renderer with no Node: the preload runs inside the sandbox.
-check("renderer sandbox is on", main.includes("sandbox: true") && !main.includes("sandbox: false"));
+check("renderer sandbox is on", windowSource.includes("sandbox: true") && !windowSource.includes("sandbox: false"));
 check(
   "context isolation stays on with node integration off",
-  main.includes("contextIsolation: true") && main.includes("nodeIntegration: false"),
+  windowSource.includes("contextIsolation: true") && windowSource.includes("nodeIntegration: false"),
 );
 
 // No web permission surface except the DOM clipboard Monaco and the copy
 // buttons need: every other request is denied, every other check fails.
 check(
   "permission requests deny by default except the dom clipboard",
-  main.includes("setPermissionRequestHandler")
-    && main.includes('permission === "clipboard-read"')
-    && main.includes('permission === "clipboard-sanitized-write"'),
+  windowSource.includes("setPermissionRequestHandler")
+    && windowSource.includes('permission === "clipboard-read"')
+    && windowSource.includes('permission === "clipboard-sanitized-write"')
+    && main.includes("attachAppWindowSecurity(win)"),
 );
 check(
   "permission checks fail closed except the dom clipboard",
-  main.includes("setPermissionCheckHandler")
-    && main.includes('permission === "clipboard-read"')
-    && main.includes('permission === "clipboard-sanitized-write"'),
+  windowSource.includes("setPermissionCheckHandler")
+    && windowSource.includes('permission === "clipboard-read"')
+    && windowSource.includes('permission === "clipboard-sanitized-write"'),
 );
 
 // The sandboxed preload may only use the sandbox-compatible Electron

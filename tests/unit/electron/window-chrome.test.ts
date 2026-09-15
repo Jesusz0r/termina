@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
+  APP_WINDOW_BACKGROUNDS,
+  appWindowOptions,
+  attachAppWindowSecurity,
   attachMacTitlebarReclaim,
+  denyRendererWindowOpen,
+  isRendererClipboardPermission,
   MAC_TRAFFIC_LIGHTS,
   macWindowChrome,
   type MacTitlebarWindow,
@@ -60,10 +65,66 @@ describe("mac window chrome", () => {
     expect(win.sizes).toEqual([601, 600]);
   });
 
-  it("wires the chrome helper from the BrowserWindow constructor", () => {
+  it("builds BrowserWindow options with chrome, sandbox, and e2e hide", () => {
+    const shown = appWindowOptions({ theme: "dark", hidden: false, preload: "/p.js", platform: "darwin" });
+    expect(shown).toMatchObject({
+      title: "Termina",
+      backgroundColor: APP_WINDOW_BACKGROUNDS.dark,
+      titleBarStyle: "hidden",
+      trafficLightPosition: { ...MAC_TRAFFIC_LIGHTS },
+      webPreferences: {
+        preload: "/p.js",
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    expect(shown.show).toBeUndefined();
+    expect(shown.webPreferences.backgroundThrottling).toBeUndefined();
+
+    const hidden = appWindowOptions({ theme: "light", hidden: true, preload: "/p.js", platform: "linux" });
+    expect(hidden.show).toBe(false);
+    expect(hidden.webPreferences.backgroundThrottling).toBe(false);
+    expect(hidden.titleBarStyle).toBeUndefined();
+    expect(hidden.backgroundColor).toBe(APP_WINDOW_BACKGROUNDS.light);
+  });
+
+  it("denies every web permission except the DOM clipboard and every window.open", () => {
+    expect(isRendererClipboardPermission("clipboard-read")).toBe(true);
+    expect(isRendererClipboardPermission("clipboard-sanitized-write")).toBe(true);
+    expect(isRendererClipboardPermission("notifications")).toBe(false);
+    expect(denyRendererWindowOpen()).toEqual({ action: "deny" });
+
+    const requests: boolean[] = [];
+    const checks: boolean[] = [];
+    let openAction: { action: "deny" } | undefined;
+    attachAppWindowSecurity({
+      webContents: {
+        setWindowOpenHandler(handler) {
+          openAction = handler();
+        },
+        session: {
+          setPermissionRequestHandler(handler) {
+            handler({}, "clipboard-read", (allow) => requests.push(allow));
+            handler({}, "media", (allow) => requests.push(allow));
+          },
+          setPermissionCheckHandler(handler) {
+            checks.push(handler({}, "clipboard-sanitized-write"));
+            checks.push(handler({}, "geolocation"));
+          },
+        },
+      },
+    });
+    expect(openAction).toEqual({ action: "deny" });
+    expect(requests).toEqual([true, false]);
+    expect(checks).toEqual([true, false]);
+  });
+
+  it("wires the window owner from createWindow", () => {
     const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
-    expect(main.includes("...macWindowChrome(process.platform)")).toBe(true);
+    expect(main.includes("appWindowOptions(")).toBe(true);
     expect(main.includes("attachMacTitlebarReclaim(win, process.platform)")).toBe(true);
+    expect(main.includes("attachAppWindowSecurity(win)")).toBe(true);
     expect(main.includes("titleBarStyle: \"hiddenInset\"")).toBe(false);
   });
 });

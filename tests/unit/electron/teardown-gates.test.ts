@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
+import { parseTerminalCreateOptions } from "../../../electron/main/ipc-validate.ts";
 
 /**
  * Mid-teardown creation gates (refs #214).
@@ -81,8 +82,9 @@ type DispatchRun = (ownerId: string, taskText?: string) => Promise<{ ok: boolean
 type TerminalsCreate = (event: unknown, opts?: unknown) => Promise<{ ok: boolean; id?: string; error?: string }>;
 
 const dispatchRun = loadMethod("dispatchRun", "private async dispatchRun(", [], []) as DispatchRun;
-const terminalsCreate = loadHandler("terminals:create", "_e, opts", ["detectShells"], [
+const terminalsCreate = loadHandler("terminals:create", "_e, opts", ["detectShells", "parseTerminalCreateOptions"], [
   async () => [{ path: "/bin/zsh", name: "zsh" }],
+  parseTerminalCreateOptions,
 ]) as TerminalsCreate;
 
 interface FakeProject {

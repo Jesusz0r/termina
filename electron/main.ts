@@ -103,7 +103,23 @@ import {
   type AgentActivityInput,
 } from "./agent-activity.js";
 import { PathLookup } from "./path-lookup.js";
-import { attachMacTitlebarReclaim, macWindowChrome } from "./window-chrome.js";
+import { attachAppWindowSecurity, attachMacTitlebarReclaim, appWindowOptions } from "./window-chrome.js";
+import {
+  isChallengeProfile,
+  isFlushResult,
+  isUnsavedConfirmResult,
+  isWorldlineLabel,
+  parsePtyAckPayload,
+  parseRendererCapability,
+  parseTerminalCreateOptions,
+} from "./main/ipc-validate.js";
+import {
+  newWorkspaceState,
+  nextProjectId,
+  pathInside,
+  primaryWorkspaceOf,
+  sanitizeSessionDir,
+} from "./main/project-workspace.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
@@ -114,8 +130,6 @@ import {
   defaultAppPreferences,
   isTuiOwnedShortcut,
   type AppPreferences,
-  CHALLENGE_PROFILES,
-  type ChallengeProfile,
   type CommandId,
   type ContentHit,
   type ExplorerEntry,
@@ -126,7 +140,6 @@ import {
   type ShortcutCommand,
   type ShortcutMap,
   type TerminalPasteResult,
-  type ThemeId,
   type TimelineEvent,
   type TimelinePrefix,
   type TimelineProgress,
@@ -141,9 +154,6 @@ const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
 /** Bound for ~/.termina/agent/auth.json when checking whether a provider exists. */
 const MAX_AUTH_JSON_BYTES = 128 * 1024;
 
-function isChallengeProfile(value: unknown): value is ChallengeProfile {
-  return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
-}
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
 /** Absurd terminal dimensions are clamped before they reach the pty ioctl. */
 const MAX_TERMINAL_DIMENSION = 1024;
@@ -174,9 +184,6 @@ const CHECKPOINT_IDLE_WAIT_MS = 1000;
 /** Overall deadline for one checkpoint capture: a wedged core must stall
  *  one terminal's sidecar queue for seconds, not forever. */
 const CHECKPOINT_CAPTURE_TIMEOUT_MS = 30_000;
-
-let workspaceSeq = 0;
-let projectSeq = 0;
 
 /** One source tree the app controls (WORLDLINES §6.2). */
 interface WorkspaceState {
@@ -318,21 +325,6 @@ interface UserEdit {
 function capUtf8(text: string, maxBytes: number): string {
   const bytes = Buffer.from(text, "utf8");
   return bytes.length <= maxBytes ? text : bytes.subarray(0, maxBytes).toString("utf8");
-}
-
-function isFlushResult(value: unknown): value is { ok: boolean; failed: string[] } {
-  if (typeof value !== "object" || value === null) return false;
-  const rec = value as { ok?: unknown; failed?: unknown };
-  return typeof rec.ok === "boolean" && Array.isArray(rec.failed) && rec.failed.every((item) => typeof item === "string");
-}
-
-function isUnsavedConfirmResult(value: unknown): value is { ok: boolean; cancelled?: boolean; error?: string } {
-  if (typeof value !== "object" || value === null) return false;
-  const rec = value as { ok?: unknown; cancelled?: unknown; error?: unknown };
-  if (typeof rec.ok !== "boolean") return false;
-  if (rec.cancelled !== undefined && typeof rec.cancelled !== "boolean") return false;
-  if (rec.error !== undefined && typeof rec.error !== "string") return false;
-  return true;
 }
 
 let shellsPromise: Promise<{ name: string; path: string }[]> | null = null;
@@ -795,33 +787,6 @@ class TerminaApp {
     return ++this.projectActivationGeneration;
   }
 
-  /** Validate the shape of a renderer capability before comparing it. */
-  private parseRendererCapability(value: unknown): RendererIpcCapability | null {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-    const rec = value as Record<string, unknown>;
-    const integer = (key: string): number | null => {
-      const n = rec[key];
-      return typeof n === "number" && Number.isSafeInteger(n) && n >= 1 ? n : null;
-    };
-    const windowGeneration = integer("windowGeneration");
-    const rendererGeneration = integer("rendererGeneration");
-    const loadGeneration = integer("loadGeneration");
-    const processId = integer("processId");
-    const frameRoutingId = integer("frameRoutingId");
-    const nonce = rec.nonce;
-    if (
-      windowGeneration === null
-      || rendererGeneration === null
-      || loadGeneration === null
-      || processId === null
-      || frameRoutingId === null
-      || typeof nonce !== "string"
-      || nonce.length < 16
-      || nonce.length > 128
-    ) return null;
-    return { windowGeneration, rendererGeneration, loadGeneration, nonce, processId, frameRoutingId };
-  }
-
   /** Configure the one URL/protocol that is allowed to host the app bridge. */
   private configureTrustedRendererTarget(devUrl: string | undefined): void {
     this.trustedRendererProtocol = null;
@@ -897,7 +862,7 @@ class TerminaApp {
     // getters. The process/routing pair is the stable frame identity and
     // rejects subframes even when they share a renderer process.
     if (!this.isTrustedRendererFrame(frame, mainFrame)) return false;
-    const capability = this.parseRendererCapability(value);
+    const capability = parseRendererCapability(value);
     const current = this.currentPtyLifecycle();
     const identity = this.readIpcFrameIdentity(event);
     if (!capability || !current || !identity || this.rendererAwaitingNewFrame) return false;
@@ -1200,31 +1165,12 @@ class TerminaApp {
       }
     }
     nativeTheme.themeSource = this.preferences.theme === "light" ? "light" : "dark";
-    const windowBackground: Record<ThemeId, string> = {
-      dark: "#1e1e1e",
-      light: "#f6f8fa",
-      "high-contrast": "#000000",
-      atom: "#282c34",
-    };
-    const backgroundColor = windowBackground[this.preferences.theme];
-    const win = new BrowserWindow({
-      width: 1440,
-      height: 900,
-      minWidth: 960,
-      minHeight: 600,
-      title: "Termina",
-      backgroundColor,
-      ...macWindowChrome(process.platform),
-      ...(E2E_HIDDEN_WINDOW ? { show: false } : {}),
-      webPreferences: {
-        preload: join(__dirname, "preload.cjs"),
-        contextIsolation: true,
-        nodeIntegration: false,
-        // Sandboxed: the preload may only use contextBridge/ipcRenderer/webUtils.
-        sandbox: true,
-        ...(E2E_HIDDEN_WINDOW ? { backgroundThrottling: false } : {}),
-      },
-    });
+    const win = new BrowserWindow(appWindowOptions({
+      theme: this.preferences.theme,
+      hidden: E2E_HIDDEN_WINDOW,
+      preload: join(__dirname, "preload.cjs"),
+      platform: process.platform,
+    }));
     const windowGeneration = ++rendererWindowGenerationSeq;
     const rendererGeneration = ++rendererGenerationSeq;
     const devUrl = process.env.VITE_DEV_SERVER_URL;
@@ -1247,7 +1193,9 @@ class TerminaApp {
     this.runtime.detachViewer(windowGeneration, rendererGeneration);
     win.removeMenu();
     attachMacTitlebarReclaim(win, process.platform);
+    attachAppWindowSecurity(win);
 
+    // Keep: close/nav/crash fencing mutates TerminaApp PTY document generations.
     // Attach lifecycle listeners before loading.  PTY output can arrive while
     // the first document or a reload is still being parsed; it stays in the
     // bounded egress queues until the new renderer has finished loading.
@@ -1296,17 +1244,6 @@ class TerminaApp {
       }
       if (!this.rendererAwaitingNewFrame) this.beginPtyDocumentReload(win, windowGeneration);
     });
-    win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    // The renderer needs no web permissions except the DOM clipboard that
-    // Monaco copy/cut/paste and the copy buttons use. Deny everything else
-    // so a future XSS cannot reach media, geolocation, notifications, or
-    // devices. The already-privileged bridge owns terminal clipboard flows.
-    win.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) =>
-      callback(permission === "clipboard-read" || permission === "clipboard-sanitized-write"),
-    );
-    win.webContents.session.setPermissionCheckHandler((_webContents, permission) =>
-      permission === "clipboard-read" || permission === "clipboard-sanitized-write",
-    );
     win.webContents.on("did-start-navigation", (details, _url, _isInPlace, _isMainFrame, frameProcessId, frameRoutingId) => {
       if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
       if (!details.isMainFrame || details.isSameDocument) return;
@@ -1746,8 +1683,7 @@ class TerminaApp {
   private primaryWorkspace(project?: ProjectState): WorkspaceState | null {
     const owner = project ?? this.project();
     if (!owner) return null;
-    for (const ws of owner.workspaces.values()) if (ws.primary) return ws;
-    return null;
+    return primaryWorkspaceOf(owner.workspaces.values());
   }
 
   /** The workspace a terminal works in. Missing ownership fails closed. */
@@ -1782,24 +1718,7 @@ class TerminaApp {
   /** Create a workspace in a project and start its watcher. The primary
    *  workspace sets the project cwd used by the renderer-facing APIs. */
   private createWorkspace(project: ProjectState, root: string, primary: boolean): WorkspaceState {
-    const ws: WorkspaceState = {
-      id: `ws-${++workspaceSeq}`,
-      root,
-      primary,
-      generation: 0,
-      writerId: null,
-      watcher: null,
-      terminalIds: new Set(),
-      lastStateCommit: null,
-      momentCapturePromise: null,
-      momentUnsettledRetries: 0,
-      lastReseedMs: 0,
-      retainedBlobBytes: 0,
-      indexReady: null,
-      indexDone: false,
-      recordError: null,
-      changeLines: new Map(),
-    };
+    const ws: WorkspaceState = newWorkspaceState(root, primary);
     project.workspaces.set(ws.id, ws);
     this.workspaceOwners.set(ws.id, project.id);
     if (primary) project.cwd = root;
@@ -2681,7 +2600,7 @@ class TerminaApp {
   }
 
   private async coreProjectSessionDir(cwd: string): Promise<string> {
-    return join(this.coreSessionRoot(), this.sanitizeSessionDir(await this.canonicalPath(cwd)));
+    return join(this.coreSessionRoot(), sanitizeSessionDir(await this.canonicalPath(cwd)));
   }
 
   private async coreSessionFile(sessionId: string, cwd: string): Promise<string> {
@@ -2696,16 +2615,10 @@ class TerminaApp {
       live.push(inst);
     }
     this.runtime.saveRoster(
-      rosterFilePath(this.userDataDir, this.sanitizeSessionDir(project.canonicalRoot)),
+      rosterFilePath(this.userDataDir, sanitizeSessionDir(project.canonicalRoot)),
       live,
       project.unrestoredTerminals,
     );
-  }
-
-  /** True when `target` resolves inside `parent`. Neither path needs to exist. */
-  private pathInside(parent: string, target: string): boolean {
-    const rel = relative(resolve(parent), resolve(target));
-    return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
   }
 
   private sessionFileInUse(path: string | null | undefined): boolean {
@@ -2720,7 +2633,7 @@ class TerminaApp {
    *  Session Search can read it after the tab closes. */
   private async discardCoreSession(inst: AgentTerminalInstance): Promise<void> {
     if (!inst.sessionFile) return;
-    if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
+    if (!pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
     // Empty core bundles are reclaimed by the worker's native descriptor/
     // provenance-bound owner.
     await this.sessionFork.discardEmptyCoreSession(inst.sessionFile);
@@ -2736,7 +2649,7 @@ class TerminaApp {
   }
 
   private async restoreProjectTerminals(project: ProjectState): Promise<void> {
-    const loaded = await this.runtime.loadRoster(rosterFilePath(this.userDataDir, this.sanitizeSessionDir(project.canonicalRoot)));
+    const loaded = await this.runtime.loadRoster(rosterFilePath(this.userDataDir, sanitizeSessionDir(project.canonicalRoot)));
     if (loaded.entries.length === 0) {
       // Only a genuinely new project gets a default terminal. An existing
       // empty roster is the durable result of closing the project's last tab.
@@ -2928,6 +2841,7 @@ class TerminaApp {
     return { model: `${first.provider}/${first.model}`, thinkingLevel: null };
   }
 
+  // Keep: terminal spawn/exit stay on TerminaApp; TerminalRuntime owns the instance map.
   private async createTerminal(
     cwd?: string,
     opts?: {
@@ -3660,14 +3574,6 @@ class TerminaApp {
 
   // ------------------------------------------------------ session search ----
 
-  /** The sessions directory name for a project path: "--" + the canonical
-   *  path with separators replaced by dashes + "--". One sanitizer serves
-   *  the session picker and the promotion install. */
-  private sanitizeSessionDir(absPath: string): string {
-    const p = absPath.replace(/^[/\\]+/, "").replace(/[/\\]+$/, "").replace(/[/\\:]/g, "-");
-    return "--" + p + "--";
-  }
-
   private searchSessionsSeq = 0;
   /** Aborts the in-flight worker search when a newer query arrives. */
   private searchAbort: AbortController | null = null;
@@ -3686,7 +3592,7 @@ class TerminaApp {
     const query = rawQuery.trim().slice(0, MAX_SESSION_SEARCH_QUERY);
     if (!project || !cwd || query.length < 2) return { hits: [] };
     const projectCwd = await this.canonicalPath(cwd);
-    const key = this.sanitizeSessionDir(projectCwd);
+    const key = sanitizeSessionDir(projectCwd);
     const coreDir = join(this.coreSessionRoot(), key);
     const seq = ++this.searchSessionsSeq;
     const stale = (): boolean => seq !== this.searchSessionsSeq || this.disposed;
@@ -4336,7 +4242,7 @@ class TerminaApp {
   /** The persisted marks file for one project. */
   private async mineFilePath(project: ProjectState): Promise<string> {
     const cwd = await this.canonicalPath(project.cwd);
-    return join(this.eventsDir, `mine-${this.sanitizeSessionDir(cwd)}.json`);
+    return join(this.eventsDir, `mine-${sanitizeSessionDir(cwd)}.json`);
   }
 
   /** Load the marks saved for one project (restart persistence). */
@@ -4624,6 +4530,7 @@ class TerminaApp {
   }
 
   // -------------------------------------------------------------- sidecar ---
+  // Keep: sidecar drain stays on TerminaApp; TerminalRuntime owns the queues.
 
   private trackRecordingTask<T>(task: Promise<T>): void {
     this.recordingTasks.add(task);
@@ -6715,7 +6622,7 @@ class TerminaApp {
     expected?: PtyRendererSendTarget | null,
   ): Promise<ProjectState | null> {
     const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
-    const id = `proj-${++projectSeq}`;
+    const id = nextProjectId();
     this.switchingProjects.add(id);
     try {
       const canonicalRoot = await this.canonicalPath(cwd);
@@ -6919,6 +6826,7 @@ class TerminaApp {
     return promise;
   }
 
+  // Keep: project close owns lease/snapshot teardown and stays on TerminaApp.
   /** Tear down one project: manager, terminals, watchers, and store. */
   private async closeProjectOnce(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }> {
     const project = this.projects.get(projectId);
@@ -7822,6 +7730,7 @@ class TerminaApp {
   }
 
   private registerIpc(): void {
+    // Keep: ipcMain.handle registration is the only IPC registrar.
     // Keep the existing registration surface, but make every invoke handler
     // pass through the one capability gate. `on` remains available only for
     // the PTY handshake messages, which apply the same gate explicitly below.
@@ -7902,42 +7811,12 @@ class TerminaApp {
     ipcMain.handle("update:install", () => this.installAppUpdate());
 
     ipcMain.handle("terminals:create", async (_e, opts?: unknown) => {
-      let type: "agent" | "shell" | undefined;
-      let shell: string | undefined;
-      let engine: "core" | undefined;
-      let fromTerminalId: string | undefined;
-      let projectId: string | undefined;
-      if (opts !== undefined) {
-        if (typeof opts !== "object" || opts === null) return { ok: false, error: "invalid terminal options" };
-        const rec = opts as { type?: unknown; shell?: unknown; engine?: unknown; fromTerminalId?: unknown; projectId?: unknown };
-        if (rec.type !== undefined && rec.type !== "agent" && rec.type !== "shell") {
-          return { ok: false, error: "invalid terminal type" };
-        }
-        if (rec.engine !== undefined && rec.engine !== "core") {
-          return { ok: false, error: "invalid agent engine" };
-        }
-        if (rec.shell !== undefined && typeof rec.shell !== "string") return { ok: false, error: "invalid shell" };
-        if (rec.fromTerminalId != null) {
-          if (typeof rec.fromTerminalId !== "string" || rec.fromTerminalId.length > 64) {
-            return { ok: false, error: "invalid source terminal" };
-          }
-          const id = rec.fromTerminalId.trim();
-          if (id) fromTerminalId = id;
-        }
-        if (rec.projectId != null) {
-          if (typeof rec.projectId !== "string" || rec.projectId.length > 64) {
-            return { ok: false, error: "invalid project" };
-          }
-          const pid = rec.projectId.trim();
-          if (pid) projectId = pid;
-        }
-        type = rec.type;
-        shell = rec.shell;
-        engine = rec.engine;
-        if (shell) {
-          const shells = await detectShells();
-          if (!shells.some((item) => item.path === shell)) return { ok: false, error: "unknown shell" };
-        }
+      const parsed = parseTerminalCreateOptions(opts);
+      if (!parsed.ok) return parsed;
+      const { type, shell, engine, fromTerminalId, projectId } = parsed.value;
+      if (shell) {
+        const shells = await detectShells();
+        if (!shells.some((item) => item.path === shell)) return { ok: false, error: "unknown shell" };
       }
       try {
         // An explicit but unresolvable project id fails closed: silently
@@ -7965,7 +7844,7 @@ class TerminaApp {
     ipcMain.on("pty:ready", (event, id: unknown, generation: unknown, capability: unknown) => {
       if (!this.isTrustedRenderer(event, capability)) return;
       if (typeof id !== "string" || typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) return;
-      const rendererCapability = this.parseRendererCapability(capability);
+      const rendererCapability = parseRendererCapability(capability);
       const frameIdentity = this.readIpcFrameIdentity(event);
       const current = this.currentPtyLifecycle();
       // A ready message is a capability proof for one concrete document and
@@ -8014,23 +7893,8 @@ class TerminaApp {
     });
     ipcMain.on("pty:ack", (event, payload: unknown, capability: unknown) => {
       if (!this.isTrustedRenderer(event, capability)) return;
-      if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
-      const p = payload as Record<string, unknown>;
-      if (
-        typeof p.id !== "string"
-        || typeof p.generation !== "number"
-        || !Number.isSafeInteger(p.generation)
-        || p.generation < 1
-        || typeof p.windowGeneration !== "number"
-        || !Number.isSafeInteger(p.windowGeneration)
-        || p.windowGeneration < 1
-        || typeof p.rendererGeneration !== "number"
-        || !Number.isSafeInteger(p.rendererGeneration)
-        || p.rendererGeneration < 1
-        || typeof p.sequence !== "number"
-        || !Number.isSafeInteger(p.sequence)
-        || p.sequence < 1
-      ) return;
+      const p = parsePtyAckPayload(payload);
+      if (!p) return;
       this.runtime.acknowledge(
         p.id,
         p.generation,
@@ -8082,6 +7946,7 @@ class TerminaApp {
       return this.instanceList();
     });
 
+    // Keep: worldline IPC stays on the one registrar; WorldlineManager owns comparisons.
     // ---- Worldlines: run records (WORLDLINES §6.5) ----
     ipcMain.handle("worldline:runs", (_e, terminalId?: string) => {
       if (terminalId) {
@@ -8096,14 +7961,14 @@ class TerminaApp {
       return this.projects.get(projectId)?.worldlines?.listWithEvidence() ?? [];
     });
     ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B", force?: boolean) => {
-      if (label !== "A" && label !== "B") return { ok: false, error: "invalid candidate" };
+      if (!isWorldlineLabel(label)) return { ok: false, error: "invalid candidate" };
       if (force !== undefined && force !== true && force !== false) return { ok: false, error: "invalid force" };
       const manager = this.projectOfComparison(comparisonId)?.worldlines;
       if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
       return manager.promote(comparisonId, label, force === true);
     });
     ipcMain.handle("worldline:export", (_e, comparisonId: string, label: "A" | "B") => {
-      if (label !== "A" && label !== "B") return { ok: false, error: "invalid candidate" };
+      if (!isWorldlineLabel(label)) return { ok: false, error: "invalid candidate" };
       const manager = this.projectOfComparison(comparisonId)?.worldlines;
       if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
       return manager.exportCandidate(comparisonId, label);
@@ -8129,18 +7994,17 @@ class TerminaApp {
       return owner.worldlines!.forkPoint(terminalId, ev);
     });
     const wlOf = (comparisonId: string) => this.projectOfComparison(comparisonId)?.worldlines ?? null;
-    const validLabel = (label: unknown): label is "A" | "B" => label === "A" || label === "B";
     ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => {
-      if (!validLabel(label)) return { ok: false, error: "invalid candidate" };
+      if (!isWorldlineLabel(label)) return { ok: false, error: "invalid candidate" };
       return wlOf(comparisonId)?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" };
     });
     ipcMain.handle("worldline:challenge-candidate", (_e, comparisonId: string, label: "A" | "B", profile: unknown) => {
-      if (!validLabel(label)) return { ok: false, error: "invalid candidate" };
+      if (!isWorldlineLabel(label)) return { ok: false, error: "invalid candidate" };
       if (!isChallengeProfile(profile)) return { ok: false, error: "invalid challenge profile" };
       return wlOf(comparisonId)?.challengeFromCandidate(comparisonId, label, profile) ?? { ok: false, error: "worldlines unavailable" };
     });
     ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => {
-      if (!validLabel(label)) return { ok: false, error: "invalid candidate" };
+      if (!isWorldlineLabel(label)) return { ok: false, error: "invalid candidate" };
       return wlOf(comparisonId)?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" };
     });
     ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => wlOf(comparisonId)?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
@@ -8152,7 +8016,7 @@ class TerminaApp {
     ipcMain.handle("worldline:cancel", (_e, comparisonId: string) => wlOf(comparisonId)?.cancel(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:discard", (_e, comparisonId: string) => wlOf(comparisonId)?.discard(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:open-terminal", async (_e, comparisonId: string, label: "A" | "B") => {
-      if (!validLabel(label)) return { ok: false, error: "invalid candidate" };
+      if (!isWorldlineLabel(label)) return { ok: false, error: "invalid candidate" };
       const manager = wlOf(comparisonId);
       if (!manager) return { ok: false, error: "worldlines unavailable" };
       const result = await manager.openTerminal(comparisonId, label);

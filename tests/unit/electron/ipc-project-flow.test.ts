@@ -39,6 +39,7 @@ describe("IPC Capability & Project Flow Security Invariants", () => {
  */
 
 const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+const windowChrome = readFileSync(new URL("../../../electron/window-chrome.ts", import.meta.url), "utf8");
 const rosterStore = readFileSync(new URL("../../../electron/roster-store.ts", import.meta.url), "utf8");
 const preload = readFileSync(new URL("../../../electron/preload.ts", import.meta.url), "utf8");
 const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
@@ -65,7 +66,8 @@ check("capability issuance is bound to the trusted app origin", main.includes("t
   && main.includes('win.webContents.on("will-frame-navigate"')
   && main.includes('win.webContents.on("will-navigate"')
   && main.includes('win.webContents.on("will-redirect"')
-  && main.includes("setWindowOpenHandler")
+  && main.includes("attachAppWindowSecurity(win)")
+  && windowChrome.includes("setWindowOpenHandler")
   && main.includes("event.preventDefault()"));
 check("stale, replaced, and crashed documents fail closed", main.includes("win.webContents.isCrashed()")
   && main.includes("this.rendererAwaitingNewFrame")
