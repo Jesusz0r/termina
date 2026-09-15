@@ -15,10 +15,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { delimiter, isAbsolute, join, relative, sep } from "node:path";
 import { realpathSync, statSync } from "node:fs";
-import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
+import { IGNORED_SEGMENTS, matchGitignore, type GitignoreRules } from "../shared/gitignore.ts";
 import type { ContentHit } from "../shared/types.ts";
 import { isRecord } from "../shared/guards.ts";
-import { listProjectPaths, readGitignoreFile } from "./quick-open.js";
+import { ensureGitignoreChain, listProjectPaths } from "./quick-open.js";
 
 export type { ContentHit };
 
@@ -265,26 +265,6 @@ function ripgrepContentSearch(
       done({ ok: true, hits, truncated });
     });
   });
-}
-
-async function ensureGitignoreChain(
-  rules: GitignoreRules,
-  loaded: Set<string>,
-  root: string,
-  posixDir: string,
-): Promise<void> {
-  let dir = posixDir;
-  for (;;) {
-    if (!loaded.has(dir)) {
-      loaded.add(dir);
-      const abs = dir === "" ? join(root, ".gitignore") : join(root, ...dir.split("/"), ".gitignore");
-      const source = await readGitignoreFile(abs);
-      if (source !== null) rules.set(dir, parseGitignore(source));
-    }
-    if (dir === "") return;
-    const slash = dir.lastIndexOf("/");
-    dir = slash === -1 ? "" : dir.slice(0, slash);
-  }
 }
 
 async function scanContentSearch(
