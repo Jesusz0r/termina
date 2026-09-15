@@ -211,3 +211,20 @@ describe("settings chrome", () => {
     expect(mainSrc).toContain('commands.register("open-settings", () => settingsView.open(committedPreferences))');
   });
 });
+
+describe("status activity copy (issue #348)", () => {
+  it("presents blocked activity through one mapper and never interpolates protocol reasons", () => {
+    const presentStart = mainSrc.indexOf("function presentActivity(");
+    const presentEnd = mainSrc.indexOf("function renderStatus(");
+    expect(presentStart).toBeGreaterThan(-1);
+    expect(presentEnd).toBeGreaterThan(presentStart);
+    const presentSrc = mainSrc.slice(presentStart, presentEnd);
+    expect(presentSrc).toContain("blockedLabel: presentBlockedLabel(pane.activity?.reason)");
+    expect(presentSrc).not.toContain("`blocked: ${reason}`");
+    expect(presentSrc).not.toContain("lease-wait");
+    expect(presentSrc).not.toContain("sidecar-paused");
+    expect(presentSrc).not.toContain("writerId");
+    expect(mainSrc).toContain('statusState.textContent = presented.blocked');
+    expect(mainSrc).toContain("pane.statusEl.title = presented.blocked ? presented.blockedLabel");
+  });
+});
