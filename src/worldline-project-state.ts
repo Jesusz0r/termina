@@ -12,22 +12,33 @@ export interface WorldlineLabeledPane extends WorldlineProjectPane {
   worldlineLabel: WorldlineLabel | null;
 }
 
+export interface WorldlineCandidateTestPane extends WorldlineLabeledPane {
+  testCommand: string | null;
+  candidateTestEpoch: number;
+}
+
+function isCandidateTestPane(pane: WorldlineLabeledPane): pane is WorldlineCandidateTestPane {
+  return "candidateTestEpoch" in pane && "testCommand" in pane;
+}
+
 /** Refresh an active pane from the active project's index. Hidden projects
- * retain their own last reconciled label until their authoritative hydration. */
+ * retain their own last reconciled label until their authoritative hydration.
+ * Losing a candidate label drops that pane's candidate test command so verify
+ * cannot keep using the isolated tree after the badge is gone. */
 export function refreshWorldlinePaneLabel<TPane extends WorldlineLabeledPane>(
   activeProjectId: string | null,
   pane: TPane,
   labelOfTerminal: (instanceId: string) => WorldlineLabel | null,
 ): WorldlineLabel | null {
+  const previous = pane.worldlineLabel;
   if (activeProjectId === null || pane.projectId === activeProjectId) {
     pane.worldlineLabel = labelOfTerminal(pane.instanceId);
   }
+  if (previous !== null && pane.worldlineLabel === null && isCandidateTestPane(pane)) {
+    pane.candidateTestEpoch++;
+    pane.testCommand = null;
+  }
   return pane.worldlineLabel;
-}
-
-export interface WorldlineCandidateTestPane extends WorldlineLabeledPane {
-  testCommand: string | null;
-  candidateTestEpoch: number;
 }
 
 /** Candidate label wins; otherwise the project-tree detect. */
@@ -97,17 +108,23 @@ export function refreshWorldlineCandidateTest<TPane extends WorldlineCandidateTe
   pane: TPane,
   bindings: WorldlineCandidateTestBindings<TPane>,
 ): void {
-  const requestEpoch = ++pane.candidateTestEpoch;
   const projectId = bindings.activeProjectId();
   const hydrationEpoch = bindings.hydrationEpoch();
   const label = pane.worldlineLabel;
-  if (projectId === null || pane.projectId !== projectId || label === null) {
+  // Unlabeled panes are the project-tree cache. Wiping them here used to be
+  // safe because renderVerify fell back to a module global; that global is
+  // gone, so a reconcile must not empty the only remaining value. Demotion
+  // (A/B → none) is handled in refreshWorldlinePaneLabel.
+  if (projectId === null || pane.projectId !== projectId) {
+    pane.candidateTestEpoch++;
     if (pane.testCommand !== null) {
       pane.testCommand = null;
       bindings.onChanged(pane);
     }
     return;
   }
+  if (label === null) return;
+  const requestEpoch = ++pane.candidateTestEpoch;
 
   // Reconciliation visits every pane so a removed/changed candidate cannot
   // retain stale state, but only the visible pane needs a fresh IPC detect.
