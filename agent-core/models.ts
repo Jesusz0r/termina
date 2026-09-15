@@ -371,26 +371,14 @@ function catalogAbortError(caller: AbortSignal | undefined, combined: AbortSigna
   return null;
 }
 
+const CATALOG_POST_ONLY_HEADERS = new Set(["content-type", "openai-beta"]);
+
 /** Catalog GET is not a Responses call. Drop POST-only Codex headers. */
 export function catalogHeaders(authHeaders: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = { accept: "application/json" };
-  for (const key of [
-    "authorization",
-    "chatgpt-account-id",
-    "originator",
-    "user-agent",
-    "x-api-key",
-    "anthropic-version",
-    "anthropic-beta",
-    "x-app",
-    "http-referer",
-    "x-title",
-    "editor-version",
-    "editor-plugin-version",
-    "copilot-integration-id",
-  ]) {
-    const value = authHeaders[key];
-    if (value) headers[key] = value;
+  for (const [key, value] of Object.entries(authHeaders)) {
+    if (!value || CATALOG_POST_ONLY_HEADERS.has(key)) continue;
+    headers[key] = value;
   }
   return headers;
 }
