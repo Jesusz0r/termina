@@ -23,7 +23,7 @@ export const GIT_NOT_A_REPO_REASON = "the opened folder is not inside a Git repo
 /** Core/protocol failure or a present `.git` that could not be opened. */
 export const GIT_UNREADABLE_REASON = "the Git repository could not be opened";
 
-export type OpenedGitRoot =
+type OpenedGitRoot =
   | { ok: true; top: string }
   | { ok: false; reason: typeof GIT_NOT_A_REPO_REASON | typeof GIT_UNREADABLE_REASON };
 

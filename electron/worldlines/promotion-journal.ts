@@ -94,7 +94,7 @@ export async function measurePromotionTreeBytes(path: string, limit: bigint): Pr
  * Once the byte ceiling is crossed, the scan saturates because the caller
  * already has to fail closed.
  */
-export async function measurePromotionRetention(worldsRoot: string): Promise<PromotionRetentionUsage> {
+async function measurePromotionRetention(worldsRoot: string): Promise<PromotionRetentionUsage> {
   const root = resolve(worldsRoot, "promotion-journal");
   let rootInfo;
   try {
@@ -300,7 +300,7 @@ export function releasePromotionJournalAdmissionOwner(owner: PromotionJournalAdm
   }
 }
 
-export function promotionRetentionBytes(bytes: bigint): string {
+function promotionRetentionBytes(bytes: bigint): string {
   return `${Number(bytes / 1_048_576n).toLocaleString()} MiB`;
 }
 

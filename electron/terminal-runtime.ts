@@ -28,7 +28,7 @@ import { AgentTerminalInstance } from "./terminal-instance.js";
 /** Exit teardown waits this long for the renderer to acknowledge the PTY
  *  tail before cancelling it: crash/reload cycles finish well inside, while
  *  a wedged renderer cannot stall teardown (and subagent cleanup) forever. */
-export const PTY_EXIT_DRAIN_TIMEOUT_MS = 10_000;
+const PTY_EXIT_DRAIN_TIMEOUT_MS = 10_000;
 
 /** Tailer surface the runtime watches and stops. SidecarTailer is assignable. */
 export interface RuntimeSidecarTailer {
@@ -91,7 +91,7 @@ export interface TerminalRuntimeOptions extends PtyEgressSchedulerOptions {
 }
 
 /** Renderer pane. Detach drops this viewer; it does not pause the PTY. */
-export const RENDERER_VIEWER_ID = "renderer";
+const RENDERER_VIEWER_ID = "renderer";
 
 export function worldlineViewerId(comparisonId: string, label: string): string {
   return `worldline:${comparisonId}:${label}`;

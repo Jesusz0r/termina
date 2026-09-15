@@ -15,7 +15,7 @@ import type { DirView } from "./explorer-rows";
 const TYPE_AHEAD_RESET_MS = 700;
 
 /** Narrow Explorer surface the keyboard collaborator drives. */
-export interface ExplorerKeyboardHost {
+interface ExplorerKeyboardHost {
   treeEl: HTMLElement;
   rowEntry: WeakMap<HTMLElement, ExplorerEntry>;
   dirViews: Map<string, DirView>;

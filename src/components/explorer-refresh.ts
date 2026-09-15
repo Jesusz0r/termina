@@ -14,7 +14,7 @@ import type { ExplorerEntry } from "../../shared/types";
 import type { DirState, DirView } from "./explorer-rows";
 
 /** Narrow Explorer surface the refresh collaborator drives. */
-export interface ExplorerRefreshHost {
+interface ExplorerRefreshHost {
   treeEl: HTMLElement;
   projectCwd(): string | null;
   dirs: Map<string, DirState>;

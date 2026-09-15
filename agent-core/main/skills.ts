@@ -8,7 +8,7 @@ import { basename, dirname, join } from "node:path";
 import type { SkillIndexSkill } from "../skill-index.ts";
 import { GREP_VISIT_CAP, classifyWalkPath, fileHasNul, readBoundedRegularFile, sortUtf8 } from "./files.ts";
 
-export type Skill = SkillIndexSkill;
+type Skill = SkillIndexSkill;
 
 const USER_AGENTS_CAP = 8_192;
 const PROJECT_AGENTS_CAP = 24_576;

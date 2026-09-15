@@ -13,7 +13,7 @@
  */
 import type { ThemeId } from "../shared/types.js";
 
-export type MacWindowChrome = {
+type MacWindowChrome = {
   titleBarStyle: "hidden";
   trafficLightPosition: { x: number; y: number };
 };
@@ -70,14 +70,14 @@ export const APP_WINDOW_BACKGROUNDS: Record<ThemeId, string> = {
   atom: "#282c34",
 };
 
-export type AppWindowOptionsInput = {
+type AppWindowOptionsInput = {
   theme: ThemeId;
   hidden: boolean;
   preload: string;
   platform?: NodeJS.Platform;
 };
 
-export type AppWindowOptions = {
+type AppWindowOptions = {
   width: number;
   height: number;
   minWidth: number;
@@ -126,7 +126,7 @@ export function denyRendererWindowOpen(): { action: "deny" } {
   return { action: "deny" };
 }
 
-export type AppWindowSecurityTarget = {
+type AppWindowSecurityTarget = {
   webContents: {
     setWindowOpenHandler(handler: () => { action: "deny" }): void;
     session: {

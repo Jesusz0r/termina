@@ -16,7 +16,7 @@ const CHECK_TOOL = "bash";
 
 export { NO_QUIET_WINS_CLASS };
 
-export interface QuietWinsSettle {
+interface QuietWinsSettle {
   readonly status: string;
   readonly criticalClass: string | null;
 }
@@ -26,7 +26,7 @@ function toolName(entry: Record<string, unknown>): string | null {
 }
 
 /** Same success mapping as the laziness-metrics outcome classifier. */
-export function isSuccessClaim(status: string): boolean {
+function isSuccessClaim(status: string): boolean {
   return status.toLowerCase() === "success";
 }
 
@@ -66,7 +66,7 @@ export function applyNoQuietWins(status: string, outcomes: readonly unknown[] | 
   return { status: "failure", criticalClass: NO_QUIET_WINS_CLASS };
 }
 
-export interface CollectedTaskOutcomes {
+interface CollectedTaskOutcomes {
   readonly readable: boolean;
   readonly outcomes: readonly unknown[];
 }

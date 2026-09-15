@@ -5,7 +5,7 @@
  */
 import type { CommandId } from "../shared/types";
 
-export type CommandHandler = () => void | Promise<void>;
+type CommandHandler = () => void | Promise<void>;
 
 export class CommandDispatcher {
   private readonly handlers = new Map<CommandId, CommandHandler>();

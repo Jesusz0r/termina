@@ -13,9 +13,7 @@ export type { AgentActivityReason, AgentActivityState, AgentActivityView };
 /** Consecutive same-target `tool_end.isError` before `blocked: tool-error-loop`. */
 export const TOOL_ERROR_LOOP_STREAK = STALL_FAILURE_TURNS;
 
-export const IDLE_ACTIVITY: AgentActivityView = { state: "idle", reason: null };
-
-export type ActivityBoundary = "none" | "agent_start" | "agent_settled";
+type ActivityBoundary = "none" | "agent_start" | "agent_settled";
 
 export type ActivitySignal =
   | { t: "preflight_request"; seq: number; at: number }
@@ -46,7 +44,7 @@ export interface AgentActivityInput {
   lastAt: number;
 }
 
-export interface AgentActivity {
+interface AgentActivity {
   state: AgentActivityState;
   reason: AgentActivityReason | null;
   sinceSeq: number;
@@ -81,7 +79,7 @@ export function activityKey(view: AgentActivityView): string {
 }
 
 /** True when settle-time stall-tracker stop is on `agent_settled.error`. */
-export function isStalledSettleError(error: string | null | undefined): boolean {
+function isStalledSettleError(error: string | null | undefined): boolean {
   return typeof error === "string" && /\bstalled\b/i.test(error);
 }
 

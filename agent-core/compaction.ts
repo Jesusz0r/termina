@@ -8,7 +8,7 @@
  */
 
 /** Minimal message shape planners need; the loop's Message is assignable. */
-export interface CompactionBlock {
+interface CompactionBlock {
   type: string;
   text?: unknown;
   name?: unknown;
@@ -32,7 +32,7 @@ export const PROTECT_TURNS = 2;
 
 /** Compact an expensive miss before the request reaches the context limit. */
 export const CACHE_MISS_COMPACT_TOKENS = 100_000;
-export const CACHE_MISS_COMPACT_SHARE = 0.5;
+const CACHE_MISS_COMPACT_SHARE = 0.5;
 /** Default window the floor constants were tuned against (2 × the floor). */
 export const COMPACT_COST_REFERENCE_WINDOW = 2 * CACHE_MISS_COMPACT_TOKENS;
 

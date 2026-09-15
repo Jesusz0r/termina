@@ -16,7 +16,7 @@ export type SkillIndexSkill = {
   abs: string;
 };
 
-export type SkillIndexOptions = {
+type SkillIndexOptions = {
   /** Root directories used during discovery, in any order. */
   roots?: readonly string[];
   /** Maximum UTF-8 bytes for the complete rendered index. */
@@ -29,7 +29,7 @@ export type SkillIndexOptions = {
 
 export const DEFAULT_SKILL_INDEX_BYTES = 8 * 1024;
 /** Enough of the trigger to distinguish a skill while keeping all entries. */
-export const DEFAULT_SKILL_TRIGGER_CHARS = 24;
+const DEFAULT_SKILL_TRIGGER_CHARS = 24;
 
 const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 const SLASH_RE = /\\/g;

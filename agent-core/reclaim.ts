@@ -23,16 +23,16 @@ import { isRecord } from "../shared/guards.ts";
 const PRUNE_MIN_CHARS = 2_048;
 const MAX_RECEIPT_TARGETS = 256;
 
-export type PruneAction = "stub" | "drop";
+type PruneAction = "stub" | "drop";
 
-export type ReclaimMessage = {
+type ReclaimMessage = {
   role: string;
   content: unknown;
   sseq: number;
   tokens?: number;
 };
 
-export type ReclaimPlanOptions = {
+type ReclaimPlanOptions = {
   systemTokens: number;
   toolSchemaTokens?: number;
   usable: number;
@@ -53,12 +53,12 @@ export type PrunePick = {
   fallback: SessionReclaimRecovery;
 };
 
-export type PruneRevision = SessionReclaimReceipt & {
+type PruneRevision = SessionReclaimReceipt & {
   type: "revision";
   kind: "prune";
 };
 
-export type RecoveryPlan = {
+type RecoveryPlan = {
   source: "session-record";
   revisionId: string;
   sseq: number;

@@ -197,7 +197,7 @@ export async function exportCandidateRun(
 }
 
 /** Keep only the newest export bundles. Best-effort; never fails export. */
-export async function pruneExportBundles(exportsRoot: string, keepDir: string): Promise<void> {
+async function pruneExportBundles(exportsRoot: string, keepDir: string): Promise<void> {
   try {
     const names = await readdir(exportsRoot);
     if (names.length <= MAX_EXPORT_BUNDLES) return;

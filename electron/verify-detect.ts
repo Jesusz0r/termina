@@ -7,7 +7,7 @@ import { readFile, realpath as fsRealpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import type { SnapshotStore } from "./worldline-git.js";
 
-export type DetectedTestCommand = { command: string; args: string[]; label: string };
+type DetectedTestCommand = { command: string; args: string[]; label: string };
 
 /**
  * Detect the project's test command: package.json scripts (prefer `test`,
@@ -22,7 +22,7 @@ export async function detectTestCommand(cwd: string): Promise<DetectedTestComman
   return detectTestFromFiles(cwd);
 }
 
-export async function safeWorkspaceRead(root: string, relPath: string): Promise<string | null> {
+async function safeWorkspaceRead(root: string, relPath: string): Promise<string | null> {
   try {
     const [canonicalRoot, canonicalPath] = await Promise.all([fsRealpath(root), fsRealpath(join(root, relPath))]);
     const rel = relative(canonicalRoot, canonicalPath);

@@ -26,7 +26,7 @@ export { IGNORED_SEGMENTS, matchGitignore, parseGitignore };
 export type { GitignoreRule, GitignoreRules } from "../shared/gitignore.js";
 
 /** The precomputed Git blob oids of one cached content string. */
-export interface CachedOids {
+interface CachedOids {
   sha1: string;
   sha256: string;
 }
@@ -66,13 +66,13 @@ const WATCHER_EVENT_QUEUE_HIGH_WATER_ITEMS = 2000;
 const WATCHER_EVENT_QUEUE_HIGH_WATER_BYTES = 4 * 1024 * 1024;
 const WATCHER_EVENT_IN_FLIGHT_HIGH_WATER = 8;
 
-export interface ProjectWatcherAdmissionLimits {
+interface ProjectWatcherAdmissionLimits {
   maxPendingItems?: number;
   maxPendingBytes?: number;
   maxInFlight?: number;
 }
 
-export interface ProjectWatcherQueueStats {
+interface ProjectWatcherQueueStats {
   pendingItems: number;
   pendingBytes: number;
   inFlight: number;

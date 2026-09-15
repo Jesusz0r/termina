@@ -18,12 +18,12 @@ export interface PromptPayload {
   context: string;
 }
 
-export const PROMPT_TEXT_CAP = 64_000;
-export const PROMPT_CONTEXT_CAP = 16_000;
+const PROMPT_TEXT_CAP = 64_000;
+const PROMPT_CONTEXT_CAP = 16_000;
 
-export type PromptPayloadFailureReason = "missing" | "not-a-file" | "oversize" | "malformed" | "unreadable";
+type PromptPayloadFailureReason = "missing" | "not-a-file" | "oversize" | "malformed" | "unreadable";
 
-export type PromptPayloadRead =
+type PromptPayloadRead =
   | { ok: true; payload: PromptPayload }
   | { ok: false; reason: PromptPayloadFailureReason };
 

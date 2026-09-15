@@ -9,13 +9,13 @@
  * Main has no ticket store; do not grow one here. Callers cite through
  * this map. The in-memory table is process-local.
  */
-export type VerifyCiteOk = {
+type VerifyCiteOk = {
   readonly ok: true;
   readonly verifyRunId: string;
   readonly ticketId: string;
 };
 
-export type VerifyCiteConflict = {
+type VerifyCiteConflict = {
   readonly ok: false;
   readonly error: string;
   readonly verifyRunId: string;
@@ -23,9 +23,9 @@ export type VerifyCiteConflict = {
   readonly existingTicketId: string;
 };
 
-export type VerifyCiteResult = VerifyCiteOk | VerifyCiteConflict;
+type VerifyCiteResult = VerifyCiteOk | VerifyCiteConflict;
 
-export interface VerifyMap {
+interface VerifyMap {
   cite(verifyRunId: string, ticketId: string): VerifyCiteResult;
   ticketFor(verifyRunId: string): string | null;
 }

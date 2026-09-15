@@ -14,7 +14,7 @@ import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { createValidatedLookup, type CallbackDnsLookup } from "./url.ts";
 
 /** Case-insensitive response-header view over an IncomingMessage. */
-export class PolicyHeaders {
+class PolicyHeaders {
   private readonly raw: Record<string, string | string[] | undefined>;
 
   constructor(headers: Record<string, string | string[] | undefined>) {
@@ -28,7 +28,7 @@ export class PolicyHeaders {
   }
 }
 
-export interface PolicyRequestInput {
+interface PolicyRequestInput {
   url: string;
   method: string;
   headers: Record<string, string>;
@@ -64,7 +64,7 @@ const DECODERS: Record<string, () => Transform> = {
  * through untouched, matching fetch; stacked encodings decode innermost
  * last, as sent.
  */
-export function decodeHttpBody(res: IncomingMessage, headers: PolicyHeaders): Readable {
+function decodeHttpBody(res: IncomingMessage, headers: PolicyHeaders): Readable {
   const tokens = (headers.get("content-encoding") ?? "")
     .split(",")
     .map((token) => token.trim().toLowerCase())

@@ -260,7 +260,7 @@ const MAX_FAIL_NAME_CHARS = 80;
 /** CSI and 2-byte escape sequences from colored test reporters. */
 const ANSI_ESCAPE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 
-export interface FailingTests {
+interface FailingTests {
   /** Unique failing names in the output, including names past the display cap. */
   count: number;
   /** The first names, capped for the badge and the context file. */
@@ -791,7 +791,7 @@ export class EvidenceEngine {
 }
 
 /** Counts from one candidate sidecar. Last file-tool outcome matches Plan Board. */
-export interface TrajectorySignals {
+interface TrajectorySignals {
   fileToolStarts: number;
   fileToolErrors: number;
   lastErrorCount: number;
