@@ -20,12 +20,13 @@ mod store;
 mod store_tx;
 mod promote_fs;
 mod test_hooks;
+use test_hooks::pause_at_hook;
 mod capture;
 use capture::{
     FlatEntry, GitTreeBudget, TreeLookupKind, exact_ref_target,
     git_blob_bytes_bounded, git_blob_size_bounded, git_tree_entry_path, git_tree_object_bounded,
     materialize_state_bound, nested_from_flat, op_apply_state, op_capture, op_capture_incremental,
-    op_template, open_store, pause_at_hook,
+    op_template, open_store,
     publish_transaction_ref, resolve_tree, state_entries, sync_exact_transaction_ref,
     tree_lookup, validate_transaction_ref, write_nested_tree_for_ref,
 };
@@ -116,20 +117,12 @@ const PROMOTION_QUARANTINE_MAX_CONTAINERS: usize = 128;
 pub(crate) const PROMOTION_QUARANTINE_MAX_ENTRIES: usize = 250_000;
 pub(crate) const PROMOTION_QUARANTINE_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const PROMOTION_QUARANTINE_PREFIX: &str = ".termina-promotion-quarantine-";
-/// Unref prunes loose objects only past this many files. Small stores skip
 /// Cached tree maps kept across requests. Captures chain parent to child,
 /// so the parent map of the next request is usually the one just built.
 pub(crate) const TREE_MAP_CACHE_SIZE: usize = 8;
 /// Loose-object compression level. The format matches Git at every level;
 /// the fast level cuts capture CPU on the hot path.
 pub(crate) const BLOB_COMPRESSION: flate2::Compression = flate2::Compression::fast();
-/// A burst of unrefs shares one prune: the walk does not rerun inside this
-/// Durable per-session identity for the app-owned snapshot store.  The
-/// sibling mutation lock survives store deletion, so the marker must live in
-/// the store itself and change on every store-create.
-/// Publish large captures in bounded groups while keeping common captures to
-/// one blob/tree group plus the final commit. Directory durability work is
-/// per group, never per object.
 pub(crate) static PROMOTION_CLEANUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static STORE_DESTROY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 

@@ -30,13 +30,14 @@ use crate::{
     recover_store_transaction,
     write_blob,
 };
+use crate::test_hooks::pause_at_hook;
 
 use super::binding::{AnchoredPath, BoundSourceRepository, CaptureRoot, open_store, preload_cached_blobs};
-use super::hash::{after_cache_hooks, apply_rewrite_hooks, before_read_hooks, hash_path};
+use super::hash::{apply_rewrite_hooks, hash_path, rewrite_hooks};
 use super::trees::{FlatEntry, nested_from_flat, write_nested_tree, write_tree_delta};
 use super::walk::{TreeLookupKind, collect_tree_map, resolve_tree, tree_lookup};
 use super::tree_cache::{cache_tree_map, collect_tree_map_cached};
-use super::refs::{commit_tree, fail_before_state_ref, pause_at_hook, update_state_ref};
+use super::refs::{commit_tree, fail_before_state_ref, update_state_ref};
 
 /// Enumerate the capture domain: tracked files plus untracked non-ignored
 /// files. Matches `git ls-files -z` plus `ls-files --others
@@ -204,8 +205,8 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
         .transpose()?
         .into_iter()
         .collect();
-    let hooks = before_read_hooks(req);
-    let cache_hooks = after_cache_hooks(req);
+    let hooks = rewrite_hooks(req, "/hooks/beforeRead");
+    let cache_hooks = rewrite_hooks(req, "/hooks/afterCache");
 
     source.verify(&capture_fs)?;
     let paths_and_index = enumerate_domain(&source.repo, source.capture_prefix.as_deref())?;
@@ -441,7 +442,7 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     recover_store_transaction(&store_dir, &store)?;
     let mut object_transaction = StoreObjectTransaction::new(&store_dir, req);
     let capture_fs = CaptureRoot::open(&capture_root)?;
-    let hooks = before_read_hooks(req);
+    let hooks = rewrite_hooks(req, "/hooks/beforeRead");
     let parent_oid = oid_ext(&store, &parent_commit)?;
     let parent_commit_obj = store.find_commit(parent_oid).map_err(|e| e.to_string())?;
     let parent_tree = resolve_tree(&store, parent_oid)?;

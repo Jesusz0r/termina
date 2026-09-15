@@ -76,10 +76,6 @@ pub(crate) fn loose_path(repo: &Repository, oid: Oid) -> Option<PathBuf> {
     Some(repo.path().join("objects").join(&hex[0..2]).join(&hex[2..]))
 }
 
-/// Serialize the complete store lifecycle across core processes. The lock is
-/// a stable sibling of the deletable store, so destroy/recreate cannot replace
-/// its inode while an older request still holds it.
-
 /// Decode a Git path that must be valid UTF-8. Non-UTF8 paths fail the
 /// operation instead of being dropped or forged as empty.
 pub(crate) fn require_utf8_git_path<E>(

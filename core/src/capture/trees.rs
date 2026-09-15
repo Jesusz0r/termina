@@ -51,7 +51,6 @@ fn insert_node(
     Ok(())
 }
 
-/// Write the nested tree into the repository. Returns the tree oid.
 /// One prepared entry of a tree being written.
 pub(crate) struct TreeEntry {
     mode: u32,
@@ -59,6 +58,7 @@ pub(crate) struct TreeEntry {
     oid: Oid,
 }
 
+/// Write the nested tree into the repository. Returns the tree oid.
 pub(crate) fn write_nested_tree(
     transaction: &mut StoreObjectTransaction,
     repo: &Repository,

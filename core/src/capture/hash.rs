@@ -21,30 +21,10 @@ fn hook_matches(rel_path: &str, hook_path: &str) -> bool {
             && rel_path.as_bytes()[rel_path.len() - hook_path.len() - 1] == b'/')
 }
 
-/// The before-read test seams of a capture request.
-pub(crate) fn before_read_hooks(req: &Value) -> Vec<(String, String, bool)> {
-    req.pointer("/hooks/beforeRead")
-        .and_then(Value::as_array)
-        .map(|hooks| {
-            hooks
-                .iter()
-                .filter_map(|hook| {
-                    let path = hook.get("path").and_then(Value::as_str)?;
-                    let content = hook.get("content").and_then(Value::as_str)?;
-                    let restore_mtime = hook
-                        .get("restoreMtime")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    Some((path.to_string(), content.to_string(), restore_mtime))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The after-cache test seams of a full capture request.
-pub(crate) fn after_cache_hooks(req: &Value) -> Vec<(String, String, bool)> {
-    req.pointer("/hooks/afterCache")
+/// Rewrite-hook entries at one capture JSON pointer (`/hooks/beforeRead`
+/// or `/hooks/afterCache`).
+pub(crate) fn rewrite_hooks(req: &Value, pointer: &str) -> Vec<(String, String, bool)> {
+    req.pointer(pointer)
         .and_then(Value::as_array)
         .map(|hooks| {
             hooks
