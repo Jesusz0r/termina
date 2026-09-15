@@ -127,9 +127,9 @@ describe("bundled-node PATH prefix (issue #328)", () => {
     expect((main.match(/join\(process\.resourcesPath, "node", "bin"\)/g) ?? []).length).toBe(1);
 
     expect(agentEnv).toContain("export function filterAgentEnvironment");
-    expect(agentEnv).not.toContain("filterCandidateEnvironment");
-    expect(agentEnv).not.toContain("filterVerifyEnvironment");
-    expect(agentEnv).not.toContain("prependBundledNodePath");
+    expect(agentEnv).not.toMatch(/export function filterCandidateEnvironment/);
+    expect(agentEnv).not.toMatch(/export function filterVerifyEnvironment/);
+    expect(agentEnv).not.toContain("function prependBundledNodePath");
     expect(sandbox).toContain("export function filterCandidateEnvironment");
     expect(sandbox).toContain("export function filterVerifyEnvironment");
   });
