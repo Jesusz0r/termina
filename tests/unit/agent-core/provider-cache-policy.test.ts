@@ -604,8 +604,8 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       );
     });
     
-    await test("Google completions never emit an undocumented prompt cache key", () => {
-      const body = compat.completionsBody(
+    await test("serializers emit caller-supplied cache fields without gemini/zen re-gates", () => {
+      const completions = compat.completionsBody(
         "gemini-3.7-flash",
         "sys",
         [{ role: "user", content: "hello" }],
@@ -613,12 +613,11 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         "max_tokens",
         { cacheKey: "derived-private-key", sessionId: "openrouter-session", provider: "google" },
       );
-      assert.equal(body.prompt_cache_key, undefined);
-      assert.equal(body.session_id, undefined);
-    });
-    
-    await test("Gemini route does not emit OpenAI cache controls", () => {
-      const body = compat.responsesBody(
+      assert.equal(completions.prompt_cache_key, "derived-private-key");
+      assert.equal(completions.session_id, "openrouter-session");
+      assert.equal(completions.cachedContent, undefined);
+
+      const responses = compat.responsesBody(
         "google/gemini-3.7-flash",
         "sys",
         [{ role: "user", content: "hello" }],
@@ -633,15 +632,15 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
           cacheControl: true,
         },
       );
-      assert.equal(body.prompt_cache_key, undefined);
-      assert.equal(body.session_id, undefined);
-      assert.equal(body.prompt_cache_options, undefined);
-      const geminiInput = responsesInputItems(body);
-      assert.equal(geminiInput[0]?.content?.[0]?.prompt_cache_breakpoint, undefined);
+      assert.equal(responses.prompt_cache_key, "derived-private-key");
+      assert.equal(responses.session_id, "openrouter-session");
+      assert.deepEqual(responses.prompt_cache_options, { mode: "explicit" });
+      const geminiInput = responsesInputItems(responses);
+      assert.equal(geminiInput[0]?.content?.[0]?.prompt_cache_breakpoint?.mode, "explicit");
       assert.equal(geminiInput[0]?.content?.[0]?.cache_control, undefined);
     });
-    
-    await test("optional cache controls follow documented route inputs", () => {
+
+    await test("optional cache controls follow caller-supplied fields", () => {
       const opts = {
         cacheKey: "derived-private-key",
         sessionId: "openrouter-session",
@@ -658,12 +657,12 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         { ...opts, provider: "openai" },
       );
       assert.equal(openai.prompt_cache_key, opts.cacheKey);
-      assert.equal((openai.prompt_cache_options as { mode?: string } | undefined)?.mode, "explicit");
+      assert.equal(openai.session_id, opts.sessionId);
+      assert.deepEqual(openai.prompt_cache_options, { mode: "explicit" });
       assert.deepEqual(
         responsesInputItems(openai).map((item) => item.content?.[0]?.prompt_cache_breakpoint?.mode ?? null),
         [null, "explicit", "explicit", "explicit", "explicit"],
       );
-      assert.equal(openai.session_id, undefined);
 
       const stableHistory = compat.responsesBody(
         "gpt-5.6-sol",
@@ -685,11 +684,43 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         { ...opts, provider: "xai" },
       );
       assert.equal(xai.prompt_cache_key, opts.cacheKey);
-      assert.equal(xai.prompt_cache_options, undefined);
+      assert.equal(xai.session_id, opts.sessionId);
+      assert.deepEqual(xai.prompt_cache_options, { mode: "explicit" });
       const xaiInput = responsesInputItems(xai);
-      assert.equal(xaiInput[0]?.content?.[0]?.prompt_cache_breakpoint, undefined);
+      assert.equal(xaiInput[0]?.content?.[0]?.prompt_cache_breakpoint?.mode, "explicit");
+      assert.equal(xaiInput[1]?.content?.[0]?.prompt_cache_breakpoint, undefined);
       assert.equal(xaiInput[0]?.content?.[0]?.cache_control, undefined);
-      assert.equal(xai.session_id, undefined);
+
+      const xaiKeyOnly = compat.responsesBody(
+        "grok-4.6",
+        "sys",
+        [{ role: "user", content: "stable" }, { role: "user", content: "tail" }],
+        [],
+        { provider: "xai", cacheKey: opts.cacheKey },
+      );
+      assert.equal(xaiKeyOnly.prompt_cache_key, opts.cacheKey);
+      assert.equal(xaiKeyOnly.prompt_cache_options, undefined);
+      assert.equal(xaiKeyOnly.session_id, undefined);
+      assert.equal(responsesInputItems(xaiKeyOnly)[0]?.content?.[0]?.prompt_cache_breakpoint, undefined);
+
+      const codex = compat.responsesBody(
+        "gpt-5.6-sol",
+        "sys",
+        [{ role: "user", content: "stable" }],
+        [],
+        { provider: "openai-codex", maxTokens: 2048, cacheKey: opts.cacheKey, promptCacheMode: "explicit" },
+      );
+      assert.equal(codex.max_output_tokens, undefined);
+      assert.equal(codex.prompt_cache_key, opts.cacheKey);
+      assert.deepEqual(codex.prompt_cache_options, { mode: "explicit" });
+      const openaiLimited = compat.responsesBody(
+        "gpt-5.6-sol",
+        "sys",
+        [{ role: "user", content: "stable" }],
+        [],
+        { provider: "openai", maxTokens: 2048 },
+      );
+      assert.equal(openaiLimited.max_output_tokens, 2048);
     });
 
     await test("OpenRouter Responses uses documented breakpoint translation and marks tool results", () => {
@@ -848,7 +879,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(result.requests.length, 1);
       const body = result.requests[0].body;
       assert.equal(body.prompt_cache_options?.mode, "explicit");
-      assert.equal(body.prompt_cache_options?.ttl, "30m");
+      assert.equal(body.prompt_cache_options?.ttl, undefined);
     });
     
     await test("custom relay route does not receive undocumented explicit cache controls", async () => {

@@ -3096,7 +3096,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check(
       "gpt-5.6 explicit mode disables implicit overlay writes",
       explicitCacheMode === "explicit" &&
-        explicitCacheTtl === "30m" &&
+        explicitCacheTtl === undefined &&
         inputBreakpoint(bodyGpt56Explicit.input, -1) === undefined,
     );
     const bodyGpt56NoOverlay = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user", content: "stable history" }], [], {

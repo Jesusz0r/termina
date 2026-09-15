@@ -5,7 +5,7 @@
  * Split from agent-core/openai-compat.ts (issue #38).
  */
 import type { CompletionMessage, CompletionsOpts, KernelMessage, ToolDef } from "./types.ts";
-import { gemini25Model, modelLooksGemini } from "../models/families/google.ts";
+import { gemini25Model } from "../models/families/google.ts";
 
 
 /** Fail closed: never invent a tool result for an unmatched call. */
@@ -127,19 +127,10 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
 }
 
 
-export function applyCacheOpts(body: Record<string, unknown>, opts?: CompletionsOpts, model = ""): void {
-  // Gemini's OpenAI-compatible endpoint does not document prompt_cache_key.
-  // Callers may still use this generic serializer for another route, so use
-  // both the explicit provider and the model route hint supplied by the
-  // caller rather than guessing from arbitrary provider metadata.
-  const geminiRoute = opts?.provider === "google" || modelLooksGemini(model);
-  const zenRoute = opts?.provider === "opencode-zen";
-  if (opts?.cacheKey && !geminiRoute && !zenRoute) body.prompt_cache_key = opts.cacheKey;
-  // OpenRouter documents session_id for sticky routing. Do not leak that
-  // OpenRouter-specific field to Google/Gemini or undocumented relay routes.
-  if (opts?.sessionId && !geminiRoute && (opts.provider === undefined || opts.provider === "openrouter")) {
-    body.session_id = opts.sessionId;
-  }
+/** Stamp caller-selected cache fields. Route policy is decided by documentedCacheCapability before these opts are set. */
+export function applyCacheOpts(body: Record<string, unknown>, opts?: CompletionsOpts): void {
+  if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
+  if (opts?.sessionId) body.session_id = opts.sessionId;
 }
 
 
@@ -160,7 +151,7 @@ export function completionsBody(
     messages: toCompletionsMessages(system, messages),
     tools: toCompletionsTools(tools),
   };
-  applyCacheOpts(body, opts, model);
+  applyCacheOpts(body, opts);
   if (opts?.googleThinking && opts.reasoningEffort && opts.reasoningEffort !== "none") {
     if (gemini25Model(model)) {
       // Gemini 2.5 has no thinking_level: the OpenAI-compatible endpoint maps

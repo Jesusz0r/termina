@@ -58,7 +58,7 @@ describe("bounded OpenAI cache parity experiment", () => {
     expect(implicit.provider).toBe("openai");
     expect(explicit.provider).toBe("openai");
     expect(implicit.body.prompt_cache_options).toBeUndefined();
-    expect(explicit.body.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+    expect(explicit.body.prompt_cache_options).toEqual({ mode: "explicit" });
     const input = explicit.body.input as Array<{ content: Json[] }>;
     expect(input[0]!.content[0]!.prompt_cache_breakpoint).toEqual({ mode: "explicit" });
     expect(input.at(-1)!.content[0]!.prompt_cache_breakpoint).toBeUndefined();
