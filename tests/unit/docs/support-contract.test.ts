@@ -47,7 +47,9 @@ describe("support/security contract docs (#128)", () => {
     }
     // The WORLDLINES test plan describes asserted behavior; the retired
     // allowlist bullet must stay gone from it.
-    const plan = worldlines().slice(worldlines().indexOf("### `scripts/worldline-isolation-test.mjs`"));
+    const isolationAt = worldlines().indexOf("### Isolation");
+    expect(isolationAt, "WORLDLINES test plan must keep an Isolation heading").toBeGreaterThan(-1);
+    const plan = worldlines().slice(isolationAt);
     expect(plan).not.toContain("Deny candidate network except the active model provider");
     // The retired promise must be gone from the whole design doc, including
     // the FAQ and the section 6 candidate policy — not just the test plan.

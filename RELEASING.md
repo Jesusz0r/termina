@@ -100,7 +100,7 @@ them the builds stay unsigned.
    Developer ID certificate"). electron-builder signs the app, but
    `resources/` files are copied in as-is — if the error ever returns
    for `resources/node` or `resources/termina-core`, ad-hoc sign them
-   (`codesign -s -`) in `scripts/prepare-resources.mjs`.
+   (`codesign -s -`) in `scripts/prepare-resources.ts`.
 4. **The Apple Distribution cert trap.** The notary rejects it for real
    binaries while a shell-script-only test app passes — do not trust a
    minimal test that contains no compiled binary.
@@ -110,5 +110,6 @@ them the builds stay unsigned.
 - **End users:** the `.dmg` (macOS) and `.AppImage` (Linux) on the
   GitHub release. No other installation is needed; users run `/login`
   in the terminal to configure their model provider.
-- **From source:** `scripts/install.sh` downloads the prebuilt core and
-  runs `pnpm install`; no cargo and no git required.
+- **From source:** `scripts/install.sh` needs a git checkout, Node ≥ 22.19,
+  pnpm, and cargo. It installs locked dependencies and builds the core
+  from the checked-out source.
