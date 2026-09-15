@@ -12,7 +12,7 @@ import { filterKeeps, filterVisibleSet } from "../explorer-file";
 const FILTER_DEBOUNCE_MS = 150;
 
 /** Narrow Explorer surface the filter collaborator drives. */
-export interface ExplorerFilterHost {
+interface ExplorerFilterHost {
   treeEl: HTMLElement;
   filterInput: HTMLInputElement | null;
   projectCwd(): string | null;

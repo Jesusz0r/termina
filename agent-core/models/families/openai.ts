@@ -39,7 +39,7 @@ export function gpt5TextVerbosity(model: string): "low" | undefined {
   return "low";
 }
 
-export function openaiEffortLevelMap(model: string): EffortLevelMap {
+function openaiEffortLevelMap(model: string): EffortLevelMap {
   const id = model.toLowerCase();
   const map: EffortLevelMap = {};
   if (oSeriesModel(id)) {

@@ -16,7 +16,7 @@ const KNOWN_FILENAMES = new Set([
   "cargo.toml", "cargo.lock", "package.json", "pnpm-lock.yaml", "tsconfig.json",
 ]);
 
-export interface ParsedTerminalFileLink {
+interface ParsedTerminalFileLink {
   /** The exact raw string in the terminal line that was matched. */
   text: string;
   /** Cleaned file path suitable for opening (file:// stripped, diff prefixes stripped). */

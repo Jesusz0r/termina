@@ -24,7 +24,7 @@ export function opus45ComposesEffort(model: string): boolean {
   return claudeThinkingApi(model) === "budget" && /opus-4[.-]5(?![0-9])/.test(model.toLowerCase());
 }
 
-export function thinkingLockedOn(model: string): boolean {
+function thinkingLockedOn(model: string): boolean {
   const id = model.toLowerCase();
   return id.includes("fable") || id.includes("mythos");
 }

@@ -12,7 +12,7 @@ import { constants as fsConstants } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
 
-export interface QuickOpenEntry {
+interface QuickOpenEntry {
   relPath: string;
   /** Matched character indices into relPath, for result highlighting. */
   matches?: number[];
@@ -499,7 +499,7 @@ export class ProjectPathIndex {
 }
 
 /** Snapshot entries for one agent turn: most projects fit, huge ones truncate. */
-export const MAX_PROJECT_SNAPSHOT_ENTRIES = 400;
+const MAX_PROJECT_SNAPSHOT_ENTRIES = 400;
 /** Directory visits per snapshot: empty-dir trees cannot force a full walk. */
 const MAX_PROJECT_SNAPSHOT_DIRS = 2000;
 

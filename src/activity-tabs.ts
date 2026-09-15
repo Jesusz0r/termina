@@ -14,7 +14,7 @@
  * arrows/Home/End along the visible tabs.
  */
 
-export type ActivityTab = "timeline" | "plan" | "worldlines" | "modified";
+type ActivityTab = "timeline" | "plan" | "worldlines" | "modified";
 
 export const ACTIVITY_TABS: readonly ActivityTab[] = ["timeline", "plan", "worldlines", "modified"];
 
@@ -25,7 +25,7 @@ export const ACTIVITY_TAB_LABELS: Record<ActivityTab, string> = {
   modified: "Modified",
 };
 
-export const ACTIVITY_TAB_KEY = "termina.activityTab";
+const ACTIVITY_TAB_KEY = "termina.activityTab";
 
 /** Panel chrome repeats the tab name only when the tab bar is gone. */
 export function activityPanelTitleVisible(tabBarVisible: boolean): boolean {
@@ -43,7 +43,7 @@ interface ActivityTabState {
   held: ActivityTab | null;
 }
 
-export type ActivityTabEvent =
+type ActivityTabEvent =
   | { type: "select"; tab: ActivityTab }
   | { type: "content"; tab: ActivityTab; has: boolean }
   | { type: "sync"; tab: ActivityTab; has: boolean }
@@ -115,7 +115,7 @@ export function reduceActivityTab(state: ActivityTabState, event: ActivityTabEve
   }
 }
 
-export interface ActivityTabsDeps {
+interface ActivityTabsDeps {
   bar: HTMLElement;
   panels: Record<ActivityTab, HTMLElement>;
   counts: Record<ActivityTab, HTMLElement | null>;

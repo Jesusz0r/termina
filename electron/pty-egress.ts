@@ -34,7 +34,7 @@ export interface PtyLifecycleIdentity extends PtyDocumentIdentity {
 }
 
 /** Minimal WebContents surface used by the generic renderer send guard. */
-export interface PtyRendererWebContents {
+interface PtyRendererWebContents {
   isDestroyed(): boolean;
   isCrashed(): boolean;
   send(channel: string, payload: unknown): void;
@@ -143,7 +143,7 @@ export function isPtyDocumentNonce(expected: string, provided: unknown): provide
   return expected.length > 0 && typeof provided === "string" && provided.length === expected.length && provided === expected;
 }
 
-export interface PtyEgressSource {
+interface PtyEgressSource {
   /** Stop reading from the PTY until the queue crosses low-water. */
   pause(): void;
   /** Resume reading after the queue crosses low-water. */

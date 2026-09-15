@@ -32,7 +32,7 @@ export function isGrepNoMatches(content: unknown): boolean {
 }
 
 /** Consecutive identical tool-turn evidence for stall detection. */
-export interface StallTracker {
+interface StallTracker {
   fingerprint: string | null;
   repeats: number;
 }
@@ -90,7 +90,7 @@ export function trackStallTurn(prev: StallTracker, fingerprint: string | null): 
 }
 
 /** Consecutive same-target failure evidence (complements exact-match stall detection). */
-export interface FailureLoopTracker {
+interface FailureLoopTracker {
   key: string | null;
   repeats: number;
 }
@@ -174,7 +174,7 @@ export function trackFailureLoopTurn(prev: FailureLoopTracker, keys: readonly st
 const MAX_CYCLE_TURNS = 8;
 const RECENT_TURN_LIMIT = MAX_CYCLE_TURNS * STALL_TURNS;
 
-export interface ToolLoopTracker {
+interface ToolLoopTracker {
   exact: StallTracker;
   failure: FailureLoopTracker;
   recoveryOffered: boolean;

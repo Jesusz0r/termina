@@ -9,7 +9,7 @@ import type { ContentHit } from "../../shared/types";
 import { makeNote } from "./explorer-rows";
 
 /** Narrow Explorer surface the content collaborator drives. */
-export interface ExplorerContentHost {
+interface ExplorerContentHost {
   onContentHit(relPath: string, line: number, column: number): void;
 }
 

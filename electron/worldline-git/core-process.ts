@@ -68,7 +68,7 @@ type QueuedRequest = {
   reject: (error: Error) => void;
 };
 
-export interface CoreRequestQueueStats {
+interface CoreRequestQueueStats {
   /** All retained requests, including the one sent to core. */
   items: number;
   bytes: number;

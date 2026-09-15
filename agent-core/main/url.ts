@@ -209,9 +209,6 @@ export function createValidatedLookup(dnsImpl: CallbackDnsLookup = callbackLooku
   };
 }
 
-/** Shared dial-path lookup; per-test fakes go through createValidatedLookup. */
-export const validatedLookup: CallbackDnsLookup = createValidatedLookup();
-
 /** AbortError-shaped rejection so callers map DNS aborts like fetch aborts. */
 export function dnsAbortError(): Error {
   return Object.assign(new Error("DNS lookup aborted"), { name: "AbortError" });

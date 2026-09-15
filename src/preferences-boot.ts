@@ -3,13 +3,13 @@ import type { AppPreferences } from "../shared/types";
 
 /** One initial read plus two retries. Short enough not to stall splash. */
 export const PREFS_BOOT_ATTEMPTS = 3;
-export const PREFS_BOOT_RETRY_DELAY_MS = 150;
+const PREFS_BOOT_RETRY_DELAY_MS = 150;
 
-export type PrefsBootResult =
+type PrefsBootResult =
   | { ok: true; preferences: AppPreferences }
   | { ok: false; error: string };
 
-export interface LoadPreferencesOptions {
+interface LoadPreferencesOptions {
   attempts?: number;
   delayMs?: number;
   sleep?: (ms: number) => Promise<void>;

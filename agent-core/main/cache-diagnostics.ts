@@ -142,7 +142,7 @@ function memoizedSerializedTools(tools: unknown): { text: string; hash: string; 
   }
 }
 
-export function memoizedSerializedToolsFor(tools: unknown): { text: string; hash: string; bytes: number } | null {
+function memoizedSerializedToolsFor(tools: unknown): { text: string; hash: string; bytes: number } | null {
   if (typeof tools !== "object" || tools === null) return memoizedSerializedTools(tools);
   const hit = serializedToolsMemo.get(tools);
   if (hit !== undefined) return hit;

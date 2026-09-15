@@ -5,7 +5,7 @@
 import { COMMAND_DEFINITIONS, QUICK_OPEN_TERMINAL_NOTE, type CommandId } from "../shared/commands";
 import type { ContentHit } from "../shared/types";
 
-export type QuickOpenMode = "files" | "actions" | "content";
+type QuickOpenMode = "files" | "actions" | "content";
 
 /**
  * Render text with the matched characters wrapped in <mark>, one element per

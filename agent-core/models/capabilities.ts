@@ -27,14 +27,14 @@ function thinkingWireProtocol(protocol: ProviderProtocol): boolean {
 }
 
 /** Relay chat/completions models with a known reasoning contract. */
-export function usesRelayCompletionsEffort(provider: ProviderId, model: string, protocol: ProviderProtocol): boolean {
+function usesRelayCompletionsEffort(provider: ProviderId, model: string, protocol: ProviderProtocol): boolean {
   if (provider !== "opencode-zen" && provider !== "opencode-go") return false;
   if (protocol !== "openai-completions") return false;
   return relayCompletionsFamily(modelLeaf(model));
 }
 
 /** Anthropic thinking fields belong on Messages + a Claude model, not on the login id. */
-export function usesAnthropicThinking(_provider: ProviderId, model: string, protocol: ProviderProtocol): boolean {
+function usesAnthropicThinking(_provider: ProviderId, model: string, protocol: ProviderProtocol): boolean {
   return protocol === "anthropic-messages" && claudeThinkingApi(model) !== "none";
 }
 
@@ -141,7 +141,7 @@ const EFFORT_MAP_RULES: readonly EffortMapRule[] = [
  *
  * Unknown catalog strings are ignored rather than invented as UI levels.
  */
-export function effortMapFromReasoningLevels(levels: readonly string[]): EffortLevelMap {
+function effortMapFromReasoningLevels(levels: readonly string[]): EffortLevelMap {
   const allowed = new Set(levels.map((level) => level.trim().toLowerCase()).filter(Boolean));
   const map: EffortLevelMap = {};
   for (const level of EFFORT_LEVELS) {

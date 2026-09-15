@@ -291,7 +291,7 @@ function maxSameWidth(value: number): number {
   return Number("9".repeat(String(Math.max(0, Math.floor(value))).length));
 }
 
-export interface NumberedPageEmission {
+interface NumberedPageEmission {
   body: string;
   /** Source bytes covered by the emitted body. */
   emittedBytes: number;
@@ -337,7 +337,7 @@ export function emitNumberedPage(text: string, startLine: number, bodyLimit: num
   return { body, emittedBytes: keep, emittedLines: 0, partial: true };
 }
 
-export interface PlainPageEmission {
+interface PlainPageEmission {
   body: string;
   emittedBytes: number;
 }
@@ -715,7 +715,7 @@ export function writeProjectFile(cwd: string, path: string | undefined, content:
   }
 }
 
-export type EditResult = {
+type EditResult = {
   content: string;
   isError: boolean;
   edits?: Array<{ oldText: string; newText: string }>;

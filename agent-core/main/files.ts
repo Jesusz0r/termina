@@ -62,7 +62,7 @@ export function yieldEventLoop(): Promise<void> {
 /** Largest `.gitignore` honored; larger metadata files are omitted, not truncated. */
 export const IGNORE_FILE_CAP_BYTES = 256 * 1024;
 
-export type RegularFileOpen = { fd: number; size: number; mode: number } | { error: string };
+type RegularFileOpen = { fd: number; size: number; mode: number } | { error: string };
 
 function openSyncNonblocking(abs: string): number {
   try {
@@ -136,7 +136,7 @@ export function readIgnoreFile(abs: string): string | null {
   return got.text;
 }
 
-export type ConfineResult = { ok: true; abs: string } | { ok: false; error: string };
+type ConfineResult = { ok: true; abs: string } | { ok: false; error: string };
 
 export function confinePath(
   cwd: string,
@@ -430,7 +430,7 @@ export async function collectFiles(
   return { files, state: unreadable ? "unreadable" : "complete", hitCap: false, timedOut: false };
 }
 
-export type RelativeFilesScanOptions = {
+type RelativeFilesScanOptions = {
   shouldStop?: () => boolean;
   budgetMs?: number;
 };
@@ -440,7 +440,7 @@ export type RelativeFilesScanOptions = {
  * string-array consumer while every scan carries its completion state. The
  * `files` copy is the explicit canonical payload for metadata-aware callers.
  */
-export type RelativeFilesResult = string[] & {
+type RelativeFilesResult = string[] & {
   readonly files: string[];
   readonly state: CompletionState;
   readonly hitCap: boolean;
@@ -661,7 +661,7 @@ export async function globFiles(
   return Object.freeze({ ...result, truncated: result.truncated || needsContinuation });
 }
 
-export function escapeXml(s: string): string {
+function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 

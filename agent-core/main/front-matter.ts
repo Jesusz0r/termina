@@ -114,7 +114,7 @@ export function buildFrozenSystem(opts: {
   return { system: parts.join("\n\n"), allow };
 }
 
-export interface FrontMatter {
+interface FrontMatter {
   systemPrompt: () => string;
   readonly allowPaths: Set<string>;
 }

@@ -81,7 +81,7 @@ export const YIELD_EVERY_RECORDS = 64;
 export const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 
-export type SessionFailureReason = "bundle-budget-exceeded";
+type SessionFailureReason = "bundle-budget-exceeded";
 
 export type SessionResult<T = object> = ({ ok: true } & T) | { ok: false; error: string; reason?: SessionFailureReason };
 

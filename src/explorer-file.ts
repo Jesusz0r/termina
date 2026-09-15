@@ -10,7 +10,7 @@
 
 import { languageForPath } from "./editor-language";
 
-export type FileIconKind = "code" | "config" | "doc" | "image" | "archive" | "file";
+type FileIconKind = "code" | "config" | "doc" | "image" | "archive" | "file";
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif", "tiff"]);
 const ARCHIVE_EXTS = new Set(["zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "dmg"]);
@@ -109,7 +109,7 @@ export function isMarkedChanged(
 }
 
 /** The pane fields the explorer's change marks are derived from. */
-export interface ChangedPaneSource {
+interface ChangedPaneSource {
   projectId: string | null;
   workspaceId: string;
   modified: ReadonlyArray<{ relPath: string }>;

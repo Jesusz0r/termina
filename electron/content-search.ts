@@ -22,12 +22,12 @@ import { ensureGitignoreChain, listProjectPaths } from "./quick-open.js";
 
 export type { ContentHit };
 
-export interface ContentSearchResult {
+interface ContentSearchResult {
   hits: ContentHit[];
   truncated: boolean;
 }
 
-export interface ContentSearchOptions {
+interface ContentSearchOptions {
   shouldStop?: () => boolean;
   candidates?: { paths: readonly string[]; truncated: boolean };
   /** Resolved ripgrep path; null forces the JS scan; omitted resolves from PATH. */

@@ -168,7 +168,7 @@ export type PromotionJournalUsageLedger = {
   reservation: { token: string; pid: number; journalCount: number; bytes: string } | null;
 };
 
-export type PromotionJournalAdmissionLease = {
+type PromotionJournalAdmissionLease = {
   release(): Promise<void>;
 };
 

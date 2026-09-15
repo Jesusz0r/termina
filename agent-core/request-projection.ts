@@ -16,7 +16,7 @@ const VIEW_KEYS = new Set(["chars", "tool", "repro", "stubbed"]);
 const TOOL_USE_TYPES = new Set(["tool_use", "server_tool_use"]);
 const TOOL_RESULT_TYPES = new Set(["tool_result", "web_search_tool_result"]);
 
-export type PromptImage = { name: string; mediaType: string };
+type PromptImage = { name: string; mediaType: string };
 
 export type ProjectionBlock = Record<string, unknown> & { type: string };
 
@@ -43,14 +43,14 @@ export type BuildRequestOverlayOptions = {
   maxBytes?: number;
 };
 
-export type ProjectRequestOptions = {
+type ProjectRequestOptions = {
   messages: readonly ProjectionMessage[];
   overlay?: RequestOverlay | null;
   imageRoots?: readonly string[];
   maxBytes?: number;
 };
 
-export type ProjectRequestResult =
+type ProjectRequestResult =
   | {
       ok: true;
       /** Complete request, including the volatile overlay when present. */
@@ -63,7 +63,7 @@ export type ProjectRequestResult =
     }
   | { ok: false; error: string };
 
-export type ProjectPersistedResult =
+type ProjectPersistedResult =
   | { ok: true; messages: RequestMessage[] }
   | { ok: false; error: string };
 
@@ -306,4 +306,3 @@ export function userPromptContent(prompt: string, images: readonly PromptImage[]
   ];
 }
 
-export const REQUEST_OVERLAY_BYTES = DEFAULT_OVERLAY_BYTES;

@@ -187,7 +187,7 @@ export interface TraceHostContext extends TraceBoundedToolOutput {
 }
 
 
-export interface TraceHostContextFileInput {
+interface TraceHostContextFileInput {
   readonly kind?: unknown;
   readonly present?: unknown;
   readonly size?: unknown;
@@ -197,7 +197,7 @@ export interface TraceHostContextFileInput {
 }
 
 
-export interface TraceHostContextInput {
+interface TraceHostContextInput {
   readonly state?: unknown;
   readonly direction?: unknown;
   readonly limitBytes?: unknown;
