@@ -7,7 +7,7 @@
 import { errorCode, isRecord } from "../../shared/guards.ts";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { cache, cost, criticVerdict, freezeDeep, id, nullableInteger, nullableNumber, optionalText, pair, reclaimEvidence, revisions, stringArray, toolOutcomes, usage } from "./normalize.ts";
+import { cache, cost, criticVerdict, criticalClass, freezeDeep, id, nullableInteger, nullableNumber, optionalText, pair, reclaimEvidence, revisions, stringArray, toolOutcomes, usage } from "./normalize.ts";
 import { MAX_ARRAY_ITEMS, MAX_ID_CHARS, MAX_TRACE_INDEX_ENTRIES, TRACE_FILE_PATTERN, TRACE_SCHEMA_VERSION } from "./schema.ts";
 import type { FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptInput, TraceLinkIndex, TraceManifest, TraceManifestLinkIndex, TraceRole, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailureKind } from "./schema.ts";
 
@@ -117,6 +117,7 @@ export function createTaskSettledRecord(input: TraceTaskSettledInput): FrozenTra
       criteriaHash: optionalText(input.outcome?.criteriaHash, "outcome criteria hash"),
     }),
     critic: criticVerdict(input.critic),
+    criticalClass: criticalClass(input.criticalClass),
   };
   return freezeDeep(record);
 }
