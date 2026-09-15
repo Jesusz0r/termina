@@ -1,8 +1,6 @@
 import type { EffortLevelMap } from "../capabilities.ts";
-import { modelLeaf } from "./identity.ts";
 export function modelLooksClaude(model: string): boolean {
-  const n = model.toLowerCase();
-  return modelLeaf(model).includes("claude") || n.includes("claude");
+  return model.toLowerCase().includes("claude");
 }
 
 /** Prefer adaptive thinking on newer Claude models; 4.6 still accepts deprecated budgets. */

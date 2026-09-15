@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, catalogHeaders, filterCatalogModels, formatCatalogLines, parseModelsPayload, type CatalogModel } from "../../../agent-core/models.ts";
+import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, catalogHeaders, filterCatalogModels, formatCatalogLines, isChatModel, parseModelsPayload, type CatalogModel } from "../../../agent-core/models.ts";
 import { catalogOutputLimit, catalogSupportsTools } from "../../../agent-core/models/capabilities.ts";
 
 describe("catalogHeaders denylist", () => {
@@ -21,6 +21,26 @@ describe("catalogHeaders denylist", () => {
 });
 
 describe("catalog provider policy composition", () => {
+  it("keeps the official OpenAI catalog on OpenAI ids", () => {
+    expect(parseModelsPayload({ data: [
+      { id: "gpt-5.6-sol" },
+      { id: "o3-mini" },
+      { id: "chatgpt-4o-latest" },
+      { id: "claude-sonnet-5" },
+      { id: "grok-4.6" },
+      { id: "gemini-3.7-flash" },
+      { id: "gemma-3-27b-it" },
+      { id: "deepseek-v4-pro" },
+    ] }, "openai").map((model) => model.id)).toEqual([
+      "gpt-5.6-sol",
+      "o3-mini",
+      "chatgpt-4o-latest",
+    ]);
+    expect(isChatModel("gpt-4o", "openai")).toBe(true);
+    expect(isChatModel("claude-sonnet-5", "openai")).toBe(false);
+    expect(isChatModel("grok-4.6", "openai")).toBe(false);
+  });
+
   it("keeps Copilot metadata scoped to Copilot and preserves top-level context precedence", () => {
     const row = {
       id: "claude-opus-4-6", context_length: 96000,
