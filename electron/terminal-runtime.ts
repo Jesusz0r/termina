@@ -497,9 +497,19 @@ export class TerminalRuntime {
     source.watch(id);
   }
 
-  /** Destroy-path only. Viewer detach must never call this. */
-  stopSidecar(id: string): void {
-    this.stopSidecarWatch(id);
+  /**
+   * Destroy-path only. Viewer detach must never call this.
+   * Pass `generation` after a recycle-prone await so a stale close cannot
+   * cancel a later watch on the same term-N. Omit it only for intentional
+   * destroy of the current watch (clear, replace, unique child ids).
+   */
+  stopSidecar(id: string, generation?: number): void {
+    this.stopSidecarWatch(id, generation);
+  }
+
+  /** Current sidecar watch generation, or undefined when this id is not watched. */
+  sidecarWatchGeneration(id: string): number | undefined {
+    return this.sidecarSources.get(id)?.generation;
   }
 
   private installSidecarSource(id: string, tailer: RuntimeSidecarTailer): number {

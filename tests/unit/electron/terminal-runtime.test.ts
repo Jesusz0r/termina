@@ -355,6 +355,36 @@ describe("TerminalRuntime", () => {
     runtime.disposeEgress();
   });
 
+  it("stale stopSidecar generation cannot cancel a recycled term-N watch", async () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), {
+      eventsDir: "/tmp/termina-stale-stop-sidecar",
+      flushIntervalMs: 0,
+    });
+    const first = fakeTailer();
+    const second = fakeTailer();
+    runtime.ownCandidateSidecar("term-1", first);
+    const staleGeneration = runtime.sidecarWatchGeneration("term-1");
+    assert.equal(typeof staleGeneration, "number");
+    const { inst: instA } = fakeTerminal("term-1", 1);
+    runtime.adopt(instA, { tailer: first, skipSidecarWatch: true, rendererTarget: null });
+    await Promise.resolve(instA.pty.onExit(0));
+
+    runtime.ownCandidateSidecar("term-1", second);
+    assert.equal(await runtime.watchCandidateReady("term-1"), true);
+    const liveGeneration = runtime.sidecarWatchGeneration("term-1");
+    assert.notEqual(liveGeneration, staleGeneration);
+    const { inst: instB } = fakeTerminal("term-1", 2);
+    runtime.adopt(instB, { tailer: second, skipSidecarWatch: true, rendererTarget: null });
+    runtime.stopSidecar("term-1", staleGeneration);
+    assert.deepEqual(second.stopped, []);
+    assert.equal(runtime.hasCandidateSidecar("term-1"), true);
+    assert.equal(runtime.get("term-1"), instB);
+    runtime.stopSidecar("term-1");
+    assert.deepEqual(second.stopped, ["term-1"]);
+    assert.equal(second.fullyStopped, 1);
+    runtime.disposeEgress();
+  });
+
   it("keeps candidate events dirs off the primary tailer", () => {
     const runtime = new TerminalRuntime(hostWithSends([]), {
       eventsDir: "/tmp/termina-primary-events-dir",
