@@ -16,6 +16,11 @@ keys, no timestamps or paths. `scripts/laziness-metrics.ts` is
 measurement-only; it changes no runtime behavior. The `No Quiet Wins`
 critical class (#237) is a settle gate, not a signal in this report.
 
+Issue #125 remains measurement-only. Confidence, evidence, and
+change-condition rules live in `docs/reference/CALIBRATION.md`. This
+baseline and `scripts/laziness-metrics.ts` do not settle a run and do
+not copy that policy.
+
 ## Corpus
 
 `tests/fixtures/traces/laziness-baseline/` — 19 turn files, 9 tasks across
