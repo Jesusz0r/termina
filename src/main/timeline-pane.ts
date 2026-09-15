@@ -17,12 +17,12 @@ interface TimelinePaneState {
   recorderDetail: string | null;
 }
 
-export interface TimelinePaneProject {
+interface TimelinePaneProject {
   id: string | null;
   generation: number;
 }
 
-export interface TimelinePaneEditor {
+interface TimelinePaneEditor {
   openSnapshot(terminalId: string, eventKey: string, relPath: string, content: string, label: string, replay?: boolean): void;
 }
 

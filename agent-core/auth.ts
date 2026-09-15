@@ -19,7 +19,7 @@ export { AUTH_PROVIDER_ORDER, authPath, defaultLoginMode, googleNativeHeaders, i
 export { CACHE_CAPABILITY_FEATURE, CACHE_POLICY_PROVENANCE, documentedCacheCapability, documentedCacheRoute, usesAnthropicCacheMarkers, usesOpenAIExplicitCache, usesPromptCacheKey, usesPromptCacheOptions } from "./auth/cache-policy.ts";
 export type { CacheCapabilityFeature, CacheCapabilityObservation, CacheCapabilityProvenance, CacheCapabilityScope, CacheCapabilitySource, CacheCapabilityStatus } from "./auth/cache-policy.ts";
 export { CACHE_KEY_MAX_LENGTH, cacheIdentityFor, cacheRouteDomain, cacheSessionHeaders, cacheSessionSeed, deriveCacheIdentityKey } from "./auth/cache-identity.ts";
-export type { CacheIdentity, CacheIdentityInputs, CacheRole } from "./auth/cache-identity.ts";
+export type { CacheIdentity, CacheIdentityInputs } from "./auth/cache-identity.ts";
 export { modifyProvider, readAuth, resetAuthCache } from "./auth/store.ts";
 export { exchangeGithubCopilotToken, parseOauthToken, pollGithubDeviceToken, pollXaiDeviceToken, refreshOauth, requestGithubDeviceCode, requestXaiDeviceCode } from "./auth/oauth.ts";
 export { DEFAULT_MODELS, authBanner, firstAuthenticatedProvider, hasEnvCredential, hasStoredCredential, parseModelRef, resolveAuth } from "./auth/resolve.ts";

@@ -5,23 +5,23 @@
  * editor/terminal fit, and the modified-tab visibility hook.
  */
 
-export type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom" | "terminal-fullscreen";
-export type WorkPane = "terminal" | "editor";
-export const SPLIT_LAYOUTS = ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom"] as const;
+type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom" | "terminal-fullscreen";
+type WorkPane = "terminal" | "editor";
+const SPLIT_LAYOUTS = ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom"] as const;
 export const DEFAULT_LAYOUT: Layout = "terminal-left";
-export const LAYOUT_KEY = "termina.layout";
-export const EXPLORER_KEY = "termina.explorer";
-export const MODIFIED_KEY = "termina.modified";
-export const MODIFIED_HEIGHT_KEY = "termina.modifiedHeight";
-export const WORKPANE_KEY = "termina.workpane";
-export const PANE_MIN_ICON = "–";
-export const PANE_MAX_ICON = "□";
-export const EXPLORER_GRAB_PX = 8;
+const LAYOUT_KEY = "termina.layout";
+const EXPLORER_KEY = "termina.explorer";
+const MODIFIED_KEY = "termina.modified";
+const MODIFIED_HEIGHT_KEY = "termina.modifiedHeight";
+const WORKPANE_KEY = "termina.workpane";
+const PANE_MIN_ICON = "–";
+const PANE_MAX_ICON = "□";
+const EXPLORER_GRAB_PX = 8;
 export const MODIFIED_LIST_MIN = 72;
-export const MODIFIED_LIST_DEFAULT = 160;
-export const TERMINAL_MIN_PX = 128;
+const MODIFIED_LIST_DEFAULT = 160;
+const TERMINAL_MIN_PX = 128;
 
-export function isSplitLayout(value: string | null): value is (typeof SPLIT_LAYOUTS)[number] {
+function isSplitLayout(value: string | null): value is (typeof SPLIT_LAYOUTS)[number] {
   return SPLIT_LAYOUTS.includes(value as (typeof SPLIT_LAYOUTS)[number]);
 }
 

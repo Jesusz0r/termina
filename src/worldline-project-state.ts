@@ -1,18 +1,18 @@
 import { worldlineEventBelongsToProject, type AgentActivityView, type InstanceSummary, type RecorderState, type VerifyInfo, type WorldlineSummary } from "../shared/types";
 export { worldlineEventBelongsToProject } from "../shared/types";
 
-export interface WorldlineProjectPane {
+interface WorldlineProjectPane {
   projectId: string | null;
 }
 
 export type WorldlineLabel = "A" | "B";
 
-export interface WorldlineLabeledPane extends WorldlineProjectPane {
+interface WorldlineLabeledPane extends WorldlineProjectPane {
   instanceId: string;
   worldlineLabel: WorldlineLabel | null;
 }
 
-export interface WorldlineCandidateTestPane extends WorldlineLabeledPane {
+interface WorldlineCandidateTestPane extends WorldlineLabeledPane {
   testCommand: string | null;
   candidateTestEpoch: number;
 }
@@ -162,7 +162,7 @@ export function refreshWorldlineCandidateTest<TPane extends WorldlineCandidateTe
   });
 }
 
-export interface WorldlineProjectEffects<TPane extends WorldlineProjectPane> {
+interface WorldlineProjectEffects<TPane extends WorldlineProjectPane> {
   resetView(): void;
   clearTombstones(): void;
   addTombstone(comparisonId: string): void;
@@ -174,7 +174,7 @@ export interface WorldlineProjectEffects<TPane extends WorldlineProjectPane> {
   updateEditorLock(): void;
 }
 
-export interface WorldlineTabBadge {
+interface WorldlineTabBadge {
   textContent: string | null;
   style: { display: string };
   title: string;
@@ -199,7 +199,7 @@ export function updateWorldlinePaneTab<TPane extends WorldlineLabeledPane>(
   return label;
 }
 
-export interface WorldlineBusyPane {
+interface WorldlineBusyPane {
   instanceId: string;
   busy: boolean;
 }

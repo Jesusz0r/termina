@@ -28,13 +28,13 @@ export function formatToolSummary(name: string, detail: string | undefined, stat
   return detail ? `◆ ${label}  ${detail}  ${status}` : `◆ ${label}  ${status}`;
 }
 
-export const PERMISSION_COMMANDS: SlashCommand[] = [
+const PERMISSION_COMMANDS: SlashCommand[] = [
   { name: "Always ask", hint: "ask before every bash command", submit: "/permissions ask" },
   { name: "Ask on dangerous requests", hint: "ask before recognized destructive commands", submit: "/permissions dangerous" },
   { name: "Always approve", hint: "run bash without asking", submit: "/permissions always" },
 ];
 
-export const EFFORT_HINTS: Record<string, string> = {
+const EFFORT_HINTS: Record<string, string> = {
   off: "disable reasoning",
   minimal: "use minimal reasoning effort",
   low: "use low reasoning effort",
@@ -52,7 +52,7 @@ export function effortCommandRows(levels: readonly string[] = Object.keys(EFFORT
   }));
 }
 
-export function authCommandRows(cmd: "/login" | "/logout"): SlashCommand[] {
+function authCommandRows(cmd: "/login" | "/logout"): SlashCommand[] {
   return loginPickerItems(cmd).map((m) => ({
     name: m.label,
     hint: m.hint,
@@ -60,7 +60,7 @@ export function authCommandRows(cmd: "/login" | "/logout"): SlashCommand[] {
   }));
 }
 
-export function authRowMatches(line: string, rowName: string): boolean {
+function authRowMatches(line: string, rowName: string): boolean {
   if (rowName.startsWith(line)) return true;
   const space = line.indexOf(" ");
   if (space < 0) return false;
@@ -80,7 +80,7 @@ export function authRowMatches(line: string, rowName: string): boolean {
   return !group || (rowGroup ?? "").startsWith(group);
 }
 
-export function pickerRowMatches(line: string, row: SlashCommand): boolean {
+function pickerRowMatches(line: string, row: SlashCommand): boolean {
   const command = row.submit ?? row.name;
   if (authRowMatches(line, command)) return true;
   const space = line.indexOf(" ");
@@ -178,9 +178,9 @@ export function completeSlashLine(
   return prefix.length > line.length ? prefix : line;
 }
 
-export const FILE_MENTION_PATH = /^[^\s@]+$/;
+const FILE_MENTION_PATH = /^[^\s@]+$/;
 
-export function mentionTokenEnd(text: string, from: number): number {
+function mentionTokenEnd(text: string, from: number): number {
   let i = from;
   while (i < text.length && !/\s/.test(text[i]!) && text[i] !== "@") i++;
   return i;
@@ -343,7 +343,7 @@ export const TUI_SHORTCUTS: SlashCommand[] = [
   { name: "Esc", hint: "session · close picker" },
 ];
 
-export const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
+const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
 
 export function forEachGrapheme(text: string, visit: (grapheme: string) => boolean | void): void {
   // Intl.Segmenter is disproportionately expensive on the several-thousand
@@ -368,7 +368,7 @@ export function splitGraphemes(text: string): string[] {
   return out;
 }
 
-export function isCombiningCode(cp: number): boolean {
+function isCombiningCode(cp: number): boolean {
   return (
     (cp >= 0x0300 && cp <= 0x036f) ||
     (cp >= 0x1ab0 && cp <= 0x1aff) ||

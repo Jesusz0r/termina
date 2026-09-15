@@ -30,35 +30,35 @@ export interface CoreSessionForkOpts {
   retentionLease?: SessionRetentionLock;
 }
 
-export interface CoreSessionDiscardOpts {
+interface CoreSessionDiscardOpts {
   sessionFile: string;
 }
 
-export interface SessionSearchOpts {
+interface SessionSearchOpts {
   query: string;
   /** Project-scoped core session directory; the worker lists it off the main thread. */
   coreDir: string;
   projectCwd: string;
 }
 
-export type SessionSearchResult =
+type SessionSearchResult =
   | { ok: true; hits: SessionHit[]; error?: string }
   | { ok: false; error: string };
 
-export interface ExportPatchOpts {
+interface ExportPatchOpts {
   files: ExportPatchFile[];
 }
 
-export type ExportPatchResult =
+type ExportPatchResult =
   | { ok: true; patch: string }
   | { ok: false; error: string };
 
-export interface LineDiffOpts {
+interface LineDiffOpts {
   before: string;
   after: string;
 }
 
-export type LineDiffResult =
+type LineDiffResult =
   | { ok: true; lines: number[] }
   | { ok: false; error: string };
 
@@ -85,7 +85,7 @@ export type CoreSessionForkResult =
   | { ok: true; sessionFile: string; kept: number }
   | { ok: false; sessionFile: string; commit: "uncertain"; error: string };
 
-export type CoreSessionDiscardResult =
+type CoreSessionDiscardResult =
   | { ok: true; removed: boolean }
   | { ok: false; error: string };
 
@@ -119,18 +119,18 @@ export interface ReadPromptRequest extends ReadPromptOpts {
   requestId: string;
 }
 
-export interface SessionForkCancelRequest {
+interface SessionForkCancelRequest {
   op: "cancel";
   requestId: string;
 }
 
-export interface SessionWorkerShutdownRequest {
+interface SessionWorkerShutdownRequest {
   op: "shutdown";
 }
 
 export type SessionWorkerRequest = CoreSessionForkRequest | CoreSessionDiscardRequest | SessionSearchRequest | ExportPatchRequest | LineDiffRequest | ReadPromptRequest | SessionForkCancelRequest | SessionWorkerShutdownRequest;
 
-export type SessionForkFailure = {
+type SessionForkFailure = {
   requestId: string;
   ok: false;
   error: { code: "failed" | "cancelled" | "uncertain"; message: string };

@@ -13,7 +13,7 @@ export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 export type EffortLevelMap = Partial<Record<EffortLevel, string | null>>;
 type ReasoningEffort = "none" | Exclude<EffortLevel, "off">;
 const FIXED_THINK_BUDGET = 16_384;
-export type ThinkingRequest =
+type ThinkingRequest =
   | { type: "disabled" }
   | { type: "adaptive"; display: "summarized" }
   | { type: "enabled"; budget_tokens: number };

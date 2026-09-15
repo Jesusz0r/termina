@@ -9,7 +9,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { isSupportedProvider } from "./endpoints.ts";
 
 
-export type CacheRole = "main" | "summary";
+type CacheRole = "main" | "summary";
 
 
 /**
