@@ -9,13 +9,12 @@
  */
 import { randomUUID } from "node:crypto";
 import { boundPromotionRemoveTree } from "../worldline-git.js";
-import { promotionIdentityOf } from "./bindings.js";
+import { promotionIdentityOf, refreshBoundPromotionDirectory } from "./bindings.js";
 import { CANDIDATE_CLEANUP_TIMEOUT_MS, READY_TIMEOUT_MS } from "./limits.js";
 import {
   awaitAbortable,
   processStartMatches,
   readProcessStart,
-  refreshBoundPromotionDirectory,
   waitBounded,
 } from "./promotion-recovery.js";
 import type {
