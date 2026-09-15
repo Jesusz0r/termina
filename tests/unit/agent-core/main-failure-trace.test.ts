@@ -15,31 +15,46 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDirectRunFrom } from "../../../agent-core/main/env.ts";
 
 describe("Agent Core Failed Provider Trace Contract", () => {
+  it("treats identical entry paths as a direct run when realpath cannot resolve them", () => {
+    const missing = join(tmpdir(), "termina-direct-run-missing", "entry.mjs");
+    assert.equal(isDirectRunFrom(pathToFileURL(missing).href, missing), true);
+    assert.equal(isDirectRunFrom(pathToFileURL(missing).href, join(tmpdir(), "other-missing.mjs")), false);
+  });
+
   it("passes failed-provider trace contract", async () => {
     function readJsonLines(path: string) {
       if (!existsSync(path)) return [];
       return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
     }
-    
+
     const root = mkdtempSync(join(tmpdir(), "agent-core-main-failure-trace-"));
     const events = join(root, "events");
     const terminalId = "term-main-failure";
     mkdirSync(events, { recursive: true, mode: 0o700 });
     const providerBase = "https://api.openai.com/v1";
     const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
+    const mainPath = fileURLToPath(mainUrl);
     const childScript = `
+      const providerBase = ${JSON.stringify(providerBase)};
       globalThis.fetch = async (input) => {
-        if (String(input) === "https://models.dev/api.json") {
-          return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
+        const url = String(input);
+        if (!url.startsWith(providerBase)) {
+          return new Response(JSON.stringify({
+            openai: { models: { "gpt-5.6-sol": { cost: {
+              input: 1, output: 2, cache_read: 0.1, cache_write: 1.25, reasoning: 2
+            }, limit: { context: 400000 } } } }
+          }), { status: 200, headers: { "content-type": "application/json" } });
         }
         return new Response(JSON.stringify({ error: { message: "provider failed" } }), {
           status: 500,
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "retry-after": "0" },
         });
       };
-      process.argv = [process.execPath, new URL(${JSON.stringify(mainUrl)}).pathname, "-p", "provider failure trace probe"];
+      process.argv = [process.execPath, ${JSON.stringify(mainPath)}, "-p", "provider failure trace probe"];
       await import(${JSON.stringify(mainUrl)});
     `;
     const child = spawn(
@@ -78,7 +93,7 @@ describe("Agent Core Failed Provider Trace Contract", () => {
         /* Wait for startup. */
       }
     }, 10);
-    
+
     try {
       const result = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
         const timer = setTimeout(() => {
@@ -91,13 +106,22 @@ describe("Agent Core Failed Provider Trace Contract", () => {
         });
       });
       assert.equal(result.code, 0, stderr);
+      const sidecar = readJsonLines(join(events, `${terminalId}.jsonl`));
+      const sidecarTypes = sidecar.map((record) => record.t).join(",");
+      assert.ok(
+        sidecar.some((record) => record.t === "agent_start"),
+        `agent-core never started a run; events=${sidecarTypes || "(none)"}; stderr=${stderr}`,
+      );
       const traceDir = join(events, `${terminalId}.traces`);
       const traces = readdirSync(traceDir)
         .filter((name) => /^turn-\d+\.json$/.test(name))
         .sort((a, b) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]))
         .map((name) => JSON.parse(readFileSync(join(traceDir, name), "utf8")));
       const attempts = traces.filter((record) => record.recordType === "attempt" && record.role === "main");
-      assert.ok(attempts.length >= 2, "provider retries and terminal failure must be persisted");
+      assert.ok(
+        attempts.length >= 2,
+        `provider retries and terminal failure must be persisted (attempts=${attempts.length} statuses=${attempts.map((record) => record.status).join(",")})`,
+      );
       assert.ok(attempts.some((record) => record.status === "retrying"));
       const terminal = [...attempts].reverse().find((record) => record.status === "error");
       assert.ok(terminal, "terminal provider failure must be persisted");

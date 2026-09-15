@@ -1879,6 +1879,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(fakeEntry, "");
     check("isDirectRunFrom same entry is direct", isDirectRunFrom(pathToFileURL(fakeEntry).href, fakeEntry) === true);
     check("isDirectRunFrom different entry is not", isDirectRunFrom(pathToFileURL(fakeEntry).href, join(root, "other.mjs")) === false);
+    const missingEntry = join(root, "missing-entry.mjs");
+    check(
+      "isDirectRunFrom same missing entry is still direct",
+      isDirectRunFrom(pathToFileURL(missingEntry).href, missingEntry) === true,
+    );
+    check(
+      "isDirectRunFrom different missing entry is not",
+      isDirectRunFrom(pathToFileURL(missingEntry).href, join(root, "other-missing.mjs")) === false,
+    );
     
     const bundled = join(here, "..", "..", "..", "dist-electron", "agent-core.mjs");
     if (existsSync(bundled)) {

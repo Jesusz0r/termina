@@ -6,7 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IGNORED_SEGMENTS, parseGitignore, type GitignoreRules } from "../../shared/gitignore.ts";
 import { freezeCwd, gitignoreSkips, readIgnoreFile, sortUtf8, underRoot } from "./files.ts";
@@ -123,11 +123,21 @@ export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): str
   return `<environment>\n${lines.join("\n")}\n</environment>`;
 }
 
+function canonicalEntryPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    // realpath throws on a missing file and on transient EMFILE. Treating
+    // that as "imported as a library" skips main() and still exits 0.
+    return resolve(path);
+  }
+}
+
 export function isDirectRunFrom(selfUrl: string, argv1: string | undefined): boolean {
   if (!argv1) return false;
   try {
     const self = selfUrl.startsWith("file:") ? fileURLToPath(selfUrl) : selfUrl;
-    return realpathSync(self) === realpathSync(argv1);
+    return canonicalEntryPath(self) === canonicalEntryPath(argv1);
   } catch {
     return false;
   }
