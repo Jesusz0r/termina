@@ -5,7 +5,7 @@
  * Split from promotion-recovery.ts (issue #38).
  */
 import { parseSessionBundlePath } from "../../../agent-core/session.js";
-import { boundPromotionCopyFile, boundPromotionCreateSymlink, boundPromotionInstallDirectory, boundPromotionListDirectories, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionTransition, boundPromotionWriteFile, disposeWorldlineGitCore, readBoundPromotionJournal, type BoundPromotionExpectedLeaf, type PromotionFsIdentity } from "../../worldline-git.js";
+import { boundPromotionCopyFile, boundPromotionCreateSymlink, boundPromotionInstallDirectory, boundPromotionListDirectories, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionTransition, boundPromotionWriteFile, readBoundPromotionJournal, type BoundPromotionExpectedLeaf, type PromotionFsIdentity } from "../../worldline-git.js";
 import { promotionIdentityOf } from "../bindings.js";
 import { isInside } from "../guards.js";
 import { errorCode } from "../../../shared/guards.js";
@@ -563,12 +563,6 @@ export async function ensurePromotionRoots(worldsRoot: string, primaryRoot: stri
     const worldsRootBinding = await ensureBoundDirectory(worldsRoot, "worlds root");
     await ensureBoundDirectory(primaryRoot, "primary root", worldsRootBinding);
   });
-}
-
-
-/** Stop the shared native helper when a focused Worldline harness exits. */
-export function disposeWorldlineCoreClient(): void {
-  disposeWorldlineGitCore();
 }
 
 

@@ -153,13 +153,8 @@ export type UncertainComparisonAdmissionLease = {
   bind?(comparisonId: string): void;
 };
 
-export type UncertainComparisonAdmissionOwnerLease = {
-  release(): void;
-  bind?(comparisonId: string): void;
-};
-
 export type UncertainComparisonAdmissionOwnerResult =
-  | { ok: true; lease: UncertainComparisonAdmissionOwnerLease }
+  | { ok: true; lease: UncertainComparisonAdmissionLease }
   | { ok: false; error: string };
 
 export type UncertainComparisonParticipant = () => ReadonlySet<string>;

@@ -16,8 +16,8 @@ export type {
   RunRecord,
 } from "./types.js";
 export { UNCERTAIN_COMPARISON_USAGE_LEDGER } from "./limits.js";
+export { disposeWorldlineGitCore } from "../worldline-git.js";
 export {
-  disposeWorldlineCoreClient,
   ensurePromotionRoots,
   ensureBoundRetainedRoot,
   recoverPromotionJournals,

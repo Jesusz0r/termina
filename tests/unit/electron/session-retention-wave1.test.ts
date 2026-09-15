@@ -52,7 +52,7 @@ async function loadRetentionBundle(work: string) {
       list(): Promise<Array<{ runId: string; bytes: number | null }>>;
     };
     RETAINED_SESSION_USAGE_LEDGER: string;
-    disposeSessionRetentionCoreClient: () => void;
+    disposeWorldlineGitCore: () => void;
   }>;
 }
 
@@ -60,7 +60,7 @@ describe("Session Retention Wave 1 regressions", () => {
   it("rebuilds a ledger with corrupt nested destinations (refs #150)", async () => {
     const work = mkdtempSync(join(tmpdir(), "termina-retention-wave1-150-"));
     try {
-      const { SessionRetentionOwner, RETAINED_SESSION_USAGE_LEDGER, disposeSessionRetentionCoreClient } = await loadRetentionBundle(work);
+      const { SessionRetentionOwner, RETAINED_SESSION_USAGE_LEDGER, disposeWorldlineGitCore } = await loadRetentionBundle(work);
       try {
         const root = join(work, "retained");
         const owner = new SessionRetentionOwner(root);
@@ -105,7 +105,7 @@ describe("Session Retention Wave 1 regressions", () => {
         assert.equal(recoveredClaim?.destination?.name, "claim-run", "recovered ledger destination was not remeasured");
         assert.ok(recoveredClaim.destination.usage.bytes > 0, "recovered destination usage was not remeasured");
       } finally {
-        disposeSessionRetentionCoreClient();
+        disposeWorldlineGitCore();
       }
     } finally {
       rmSync(work, { recursive: true, force: true });
@@ -115,7 +115,7 @@ describe("Session Retention Wave 1 regressions", () => {
   it("retries root binding after repair on the same owner (refs #151)", async () => {
     const work = mkdtempSync(join(tmpdir(), "termina-retention-wave1-151-"));
     try {
-      const { SessionRetentionOwner, disposeSessionRetentionCoreClient } = await loadRetentionBundle(work);
+      const { SessionRetentionOwner, disposeWorldlineGitCore } = await loadRetentionBundle(work);
       try {
         const rootPath = join(work, "poison-root");
         // A regular file where the root directory belongs: native binding
@@ -144,7 +144,7 @@ describe("Session Retention Wave 1 regressions", () => {
         renameSync(substitute, rootPath);
         await assert.rejects(owner.list(), "substituted root did not fail closed");
       } finally {
-        disposeSessionRetentionCoreClient();
+        disposeWorldlineGitCore();
       }
     } finally {
       rmSync(work, { recursive: true, force: true });

@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from "vitest";
 import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { WorldlineManager, disposeWorldlineCoreClient, type RunRecord } from "../../../electron/worldlines/index.ts";
+import { WorldlineManager, disposeWorldlineGitCore, type RunRecord } from "../../../electron/worldlines/index.ts";
 import { decodeTrustHashes } from "../../../electron/worldline-git/core-process.ts";
 
 const BASELINE: Record<string, string> = {
@@ -108,7 +108,7 @@ async function makeManager(trustHashes: () => Promise<Record<string, string>>) {
 
 describe("fork trust gate (issue #47)", () => {
   afterAll(() => {
-    disposeWorldlineCoreClient();
+    disposeWorldlineGitCore();
   });
 
   it("refuses when a new trust-sensitive path appears after the run", async () => {

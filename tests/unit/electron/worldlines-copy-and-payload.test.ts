@@ -39,7 +39,7 @@ vi.mock("../../../electron/worldline-git.ts", async (importOriginal) => {
 
 import {
   WorldlineManager,
-  disposeWorldlineCoreClient,
+  disposeWorldlineGitCore,
   type RunRecord,
 } from "../../../electron/worldlines/index.ts";
 import type { BoundPromotionDirectory, CandidateState, ComparisonState } from "../../../electron/worldlines/types.ts";
@@ -259,7 +259,7 @@ describe("candidate resource copy (issue #247)", () => {
 
 describe("prompt payload gates (issue #248)", () => {
   afterAll(() => {
-    disposeWorldlineCoreClient();
+    disposeWorldlineGitCore();
   });
 
   it("treats a missing payload file as absent, not unreadable", async () => {

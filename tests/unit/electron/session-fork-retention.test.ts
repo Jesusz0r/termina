@@ -360,7 +360,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
             return realKill(pid, signal);
           };
         }
-        const { disposeSessionRetentionCoreClient, SessionRetentionOwner } = await import(process.env.TERMINA_RETENTION_BUNDLE);
+        const { disposeWorldlineGitCore, SessionRetentionOwner } = await import(process.env.TERMINA_RETENTION_BUNDLE);
         const owner = new SessionRetentionOwner(root);
         try {
           const tx = await owner.transact(process.env.TERMINA_RETENTION_RUN, async (destination) => {
@@ -378,7 +378,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
         } catch (error) {
           console.log(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
         } finally {
-          disposeSessionRetentionCoreClient();
+          disposeWorldlineGitCore();
         }
       `;
     }
@@ -466,10 +466,10 @@ describe("Session Fork Teardown and Retention Probes", () => {
           logLevel: "silent",
         }),
       ]);
-      const { UNCERTAIN_COMPARISON_USAGE_LEDGER, WorldlineManager, disposeWorldlineCoreClient: disposeWorldlineCore } = await import(pathToFileURL(bundle).href);
+      const { UNCERTAIN_COMPARISON_USAGE_LEDGER, WorldlineManager, disposeWorldlineGitCore: disposeWorldlineCore } = await import(pathToFileURL(bundle).href);
       disposeWorldlineCoreClient = disposeWorldlineCore;
       const {
-        disposeSessionRetentionCoreClient,
+        disposeWorldlineGitCore: disposeSessionRetentionCoreClient,
         MAX_RETAINED_SESSION_BUNDLE_BYTES,
         MAX_RETAINED_SESSION_BYTES,
         MAX_RETAINED_SESSION_BUNDLES,
