@@ -20,8 +20,6 @@ import type { ContentHit } from "../shared/types.ts";
 import { isRecord } from "../shared/guards.ts";
 import { ensureGitignoreChain, listProjectPaths } from "./quick-open.js";
 
-export type { ContentHit };
-
 interface ContentSearchResult {
   hits: ContentHit[];
   truncated: boolean;

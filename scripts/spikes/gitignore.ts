@@ -11,7 +11,8 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import { matchGitignore, parseGitignore, ProjectWatcher, type GitignoreRules } from "../../electron/watcher.js";
+import { matchGitignore, parseGitignore, type GitignoreRules } from "../../shared/gitignore.js";
+import { ProjectWatcher } from "../../electron/watcher.js";
 import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 function sleep(ms: number): Promise<void> {

@@ -8,8 +8,6 @@
 import { STALL_FAILURE_TURNS } from "../agent-core/stall.ts";
 import type { AgentActivityReason, AgentActivityState, AgentActivityView } from "../shared/types.ts";
 
-export type { AgentActivityReason, AgentActivityState, AgentActivityView };
-
 /** Consecutive same-target `tool_end.isError` before `blocked: tool-error-loop`. */
 export const TOOL_ERROR_LOOP_STREAK = STALL_FAILURE_TURNS;
 
