@@ -30,7 +30,7 @@ describe("recording bootstrap", () => {
     );
     check(
       "non-private event leaves are replaced through the bound parent",
-      worldlineGit.includes("promotion read file is not a bounded private regular file")
+      worldlineGit.includes("promotion read file is not a bounded private app-owned file")
         && worldlineGit.includes("expectedDestinationForBoundWrite")
         && worldlineGit.includes("await removeBoundOwnedEntry({ binding })"),
     );
