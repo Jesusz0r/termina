@@ -89,6 +89,7 @@ pub(crate) fn op_promotion_bound_copy_file(req: &Value) -> Result<Value, String>
         "copy destination parent",
     )?;
     promotion_test_pause(req, "promotion-copy-roots-open")?;
+    // Invariant: promotion_components_for rejects empty arrays.
     let (_, source_name) = source_components
         .last()
         .expect("non-empty source components");

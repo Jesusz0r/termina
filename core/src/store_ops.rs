@@ -193,6 +193,7 @@ pub(crate) fn op_store_destroy(req: &Value) -> Result<Value, String> {
     let mut quarantine_name = None;
     for _ in 0..64 {
         let sequence = STORE_DESTROY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        // Invariant: `name` already passed CString::new; pid and sequence are ASCII.
         let candidate = CString::new(format!(
             ".{name}.termina-destroy-{}-{sequence}",
             std::process::id()

@@ -59,6 +59,7 @@ pub(crate) fn promotion_remove_tree_contents(
         PROMOTION_DIRECTORY_MAX_NAME_BYTES,
         "stale promotion tree",
     )?;
+    // Invariant: last/pop see a frame while the stack is non-empty.
     while !stack.is_empty() {
         let next = stack
             .last_mut()

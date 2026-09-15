@@ -76,6 +76,7 @@ pub(crate) fn op_promotion_bound_create_directory(req: &Value) -> Result<Value, 
     let parent_path = promotion_path_with_components(&root_path, parent_components);
     promotion_bound_path_matches(&root_path, root_identity, "directory root")?;
     promotion_bound_path_matches(&parent_path, parent_identity, "directory parent")?;
+    // Invariant: promotion_components_for rejects empty arrays.
     let (leaf_name, leaf) = components.last().expect("non-empty components");
     let require_missing = req
         .get("requireMissing")
@@ -193,6 +194,7 @@ pub(crate) fn op_promotion_bound_write_file(req: &Value) -> Result<Value, String
     let parent_path = promotion_path_with_components(&root_path, &components[..components.len() - 1]);
     promotion_bound_path_matches(&root_path, root_identity, "write root")?;
     promotion_bound_path_matches(&parent_path, parent_identity, "write parent")?;
+    // Invariant: promotion_components_for rejects empty arrays.
     let (_, leaf) = components.last().expect("non-empty components");
     let expected = parse_promotion_expected_missing_or_leaf(
         req.get("expectedDestination")
@@ -304,6 +306,7 @@ pub(crate) fn op_promotion_bound_create_symlink(req: &Value) -> Result<Value, St
     )?;
     promotion_directory_identity_matches(&parent, parent_identity, "symlink parent")?;
     promotion_test_pause(req, "promotion-symlink-parent-open")?;
+    // Invariant: promotion_components_for rejects empty arrays.
     let (_, leaf) = components.last().expect("non-empty components");
     if stat_at(parent.as_raw_fd(), leaf).is_ok() {
         return Err("promotion symlink destination is occupied".to_string());
@@ -403,6 +406,7 @@ pub(crate) fn op_promotion_bound_install_directory(req: &Value) -> Result<Value,
         "install directory destination parent",
     )?;
     promotion_test_pause(req, "promotion-install-directory-parents-open")?;
+    // Invariant: promotion_components_for rejects empty arrays.
     let (_, source_name) = source_components
         .last()
         .expect("non-empty source components");

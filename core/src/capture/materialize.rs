@@ -186,6 +186,7 @@ fn promotion_remove_stale_paths(
         PROMOTION_DIRECTORY_MAX_NAME_BYTES,
         "promotion stale-path scan",
     )?;
+    // Invariant: last/pop see a frame while the stack is non-empty.
     while !stack.is_empty() {
         let next = stack
             .last_mut()

@@ -53,6 +53,7 @@ pub(crate) fn op_promotion_bound_read_journal(req: &Value) -> Result<Value, Stri
     )?;
     promotion_test_pause(req, "journal-operation-open")?;
 
+    // Invariant: "journal.json" is a compile-time literal (no NUL).
     let journal_name = CString::new("journal.json").expect("constant has no NUL");
     let journal_file = open_at(
         operation_dir.as_raw_fd(),
@@ -111,6 +112,7 @@ pub(crate) fn op_promotion_bound_read_file(req: &Value) -> Result<Value, String>
         "parentIdentity",
     )?;
     promotion_directory_identity_matches(&parent, parent_identity, "read parent")?;
+    // Invariant: promotion_components_for rejects empty arrays.
     let (_, leaf) = components.last().expect("non-empty components");
     let expected = req
         .get("expectedIdentity")

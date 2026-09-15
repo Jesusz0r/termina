@@ -105,6 +105,7 @@ pub(crate) fn promotion_copy_tree_contents(
         parent_name: None,
         identity: None,
     });
+    // Invariant: last/pop see a frame while the stack is non-empty.
     while !stack.is_empty() {
         let next = stack
             .last_mut()

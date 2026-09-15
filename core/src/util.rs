@@ -63,6 +63,7 @@ pub(crate) fn object_oid(repo: &Repository, kind: &str, content: &[u8]) -> Oid {
             hasher.finalize().to_vec()
         }
     };
+    // Invariant: Sha1/Sha256 finalize length matches this repo's object format.
     Oid::from_bytes(&digest).expect("digest length matches the object format")
 }
 

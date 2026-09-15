@@ -120,6 +120,7 @@ pub(crate) fn promotion_validate_retained_directory(
         root_level,
     });
     let mut root_entry_count = 0usize;
+    // Invariant: last/pop see a frame while the stack is non-empty.
     while !stack.is_empty() {
         let next = stack
             .last_mut()
