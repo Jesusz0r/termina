@@ -337,6 +337,26 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(join(root, "bin", "python3"), "#!/bin/sh\necho HACKED\n", { mode: 0o755 });
     const envProbe = formatEnvironment(root, { probes: true });
     check("project-local python3 is not executed", !envProbe.includes("HACKED"));
+
+    const jailRoot = mkdtempSync(join(tmpdir(), "agent-core-env-jail-"));
+    leftovers.push(jailRoot);
+    mkdirSync(join(jailRoot, "bin"), { recursive: true });
+    for (const bin of ["pnpm", "npm", "gcc", "clang", "javac"]) {
+      writeFileSync(join(jailRoot, "bin", bin), `#!/bin/sh\necho HACKED-${bin}\n`, { mode: 0o755 });
+      writeFileSync(join(jailRoot, bin), `#!/bin/sh\necho HACKED-${bin}\n`, { mode: 0o755 });
+    }
+    const prevPathJail = process.env.PATH;
+    let envJail = "";
+    try {
+      process.env.PATH = `${jailRoot}${delimiter}${join(jailRoot, "bin")}${delimiter}${prevPathJail ?? ""}`;
+      envJail = formatEnvironment(jailRoot, { probes: true });
+    } finally {
+      process.env.PATH = prevPathJail;
+    }
+    check(
+      "project-local pnpm/npm/gcc are not executed",
+      !envJail.includes("HACKED") && envJail.includes("toolchain:"),
+    );
     
     writeFileSync(join(root, "hit.ts"), "alpha unique-token beta\n");
     const g = await grepFiles(root, { pattern: "unique-token" });
@@ -1828,6 +1848,47 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(join(jsonRoot, 'quot"ed'), "x");
     const listingJson = formatEnvironment(jsonRoot, { probes: false });
     check("listing JSON-encodes special names", listingJson.includes(JSON.stringify('quot"ed')));
+    check("manifests omitted when none exist", !listingJson.includes("manifests:"));
+
+    const manRoot = mkdtempSync(join(tmpdir(), "agent-core-manifest-"));
+    leftovers.push(manRoot);
+    writeFileSync(join(manRoot, ".gitignore"), "package.json\n");
+    writeFileSync(join(manRoot, "package.json"), '{"name":"secret-body"}\n');
+    writeFileSync(join(manRoot, "Gemfile"), "source secret-body\n");
+    writeFileSync(join(manRoot, "requirements.txt"), "secret-body==1\n");
+    writeFileSync(join(manRoot, "visible.txt"), "ok\n");
+    mkdirSync(join(manRoot, "nested"), { recursive: true });
+    writeFileSync(join(manRoot, "nested", "Cargo.toml"), "[package]\nname = \"nope\"\n");
+    mkdirSync(join(manRoot, "pnpm-lock.yaml"));
+    const man1 = formatEnvironment(manRoot, { probes: false });
+    const man2 = formatEnvironment(manRoot, { probes: false });
+    const manListing = man1.split("\n").find((l) => l.startsWith("listing:")) ?? "";
+    const manFacts = man1.split("\n").find((l) => l.startsWith("manifests:")) ?? "";
+    check("environment two calls equal with manifests", man1 === man2);
+    check(
+      "manifests lists existing root files in stable order",
+      manFacts === 'manifests: "package.json", "requirements.txt", "Gemfile"',
+    );
+    check(
+      "manifests omits missing and non-file names",
+      !manFacts.includes("pnpm-lock.yaml") && !manFacts.includes("Cargo.toml") && !manFacts.includes("yarn.lock"),
+    );
+    check(
+      "listing omits gitignored package.json",
+      !manListing.includes("package.json") && manListing.includes("visible.txt"),
+    );
+    check("manifests names only not bodies", !man1.includes("secret-body"));
+    const manProbe1 = formatEnvironment(manRoot, { probes: true });
+    const manProbe2 = formatEnvironment(manRoot, { probes: true });
+    check("environment two probe calls equal", manProbe1 === manProbe2);
+    const toolLine = (manProbe1.split("\n").find((l) => l.startsWith("toolchain:")) ?? "").slice("toolchain: ".length);
+    const toolBins = toolLine.split("; ").map((part) => part.split(" ")[0]);
+    const toolOrder = ["node", "python3", "rustc", "go", "pnpm", "npm", "javac", "gcc", "clang"];
+    const toolIdx = toolBins.map((b) => toolOrder.indexOf(b));
+    check(
+      "toolchain bins stay in stable order",
+      toolBins[0] === "node" && toolIdx.every((p, i) => i === 0 || (p >= 0 && p >= toolIdx[i - 1])),
+    );
     
     const prevPath = process.env.PATH;
     let envMissing = "";
