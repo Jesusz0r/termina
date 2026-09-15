@@ -67,6 +67,16 @@ describe("verify-detect package scripts (refs #152)", () => {
     expect(run.stdout).toBe("one|two words|three|");
   });
 
+  it.runIf(process.platform !== "win32")("executes custom test command string with shell arguments", () => {
+    const custom = 'printf "%s|" "custom command" works';
+    const tc = { command: "sh", args: ["-c", custom], label: custom };
+    const quoteShellArg = (arg: string): string => `'${arg.replace(/'/g, `'\\''`)}'`;
+    const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
+    const run = spawnSync("sh", ["-c", cmdline], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe("custom command|works|");
+  });
+
   it("reads the immutable snapshot body, not the live tree", async () => {
     const store = {
       readBlob: async (_stateId: string, path: string) =>
