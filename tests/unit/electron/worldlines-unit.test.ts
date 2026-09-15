@@ -475,6 +475,8 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
         model: "model-x",
         thinkingLevel: "high",
         teardownPromise: null,
+        manifestWriteFailed: false,
+        uncertainSessionArtifacts: [],
         candidates: new Map([
           ["A", {
             label: "A",
