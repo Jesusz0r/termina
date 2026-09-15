@@ -1,5 +1,12 @@
 //! Snapshot-store transactions: mutation lock, staging journal, durable
 //! object writes, blob budgets, and crash recovery.
+//!
+//! Keep this file together. Staging, flush, commit, and crash recovery are
+//! one transaction state machine: callers construct `StoreObjectTransaction`,
+//! write through it, and commit or drop. `recover_store_transaction` is the
+//! same rollback path from `Drop` and from store ops before the next
+//! mutation. Callers do not treat staging versus commit as separate
+//! lifecycles, so this file is not split.
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};

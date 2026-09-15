@@ -97,6 +97,8 @@ pub(crate) fn promotion_remove_tree_contents(
         if entries > PROMOTION_QUARANTINE_MAX_ENTRIES {
             return Err("stale promotion tree exceeds its entry bound; evidence retained".to_string());
         }
+        // Bounded relative path (PROMOTION_PATH_MAX_BYTES). Clone keeps this
+        // frame's walk identity while later last()/push() reborrow the stack.
         let current_relative = stack.last().expect("stale removal frame exists").relative.clone();
         let path_work = promotion_path_work_bytes(&current_relative, &name)?;
         promotion_add_work(
