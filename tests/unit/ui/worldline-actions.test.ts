@@ -18,7 +18,7 @@ describe("worldline action placement", () => {
   });
 
   it("explains that A is the result and B is a retry", () => {
-    expect(view).toContain('export const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry"');
+    expect(view).toContain('const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry"');
     expect(view).toContain("rolesEl.textContent = WORLDLINE_PAIR_ROLES_LINE");
   });
 });

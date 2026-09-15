@@ -585,7 +585,7 @@ export async function replaySessionBundle(
 }
 
 
-export type SessionRecoveryTarget = {
+type SessionRecoveryTarget = {
   revisionId: string;
   sseq: number;
   blockIndex: number;

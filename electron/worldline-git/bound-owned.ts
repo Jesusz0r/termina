@@ -155,7 +155,7 @@ export interface BoundOwnedDirectory {
 
 
 /** Provenance for one app-owned leaf below a retained directory. */
-export interface BoundOwnedEntry {
+interface BoundOwnedEntry {
   path: string;
   parentPath: string;
   identity: PromotionFsIdentity;

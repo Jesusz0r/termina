@@ -17,7 +17,7 @@ export interface PromotionFsIdentity {
 }
 
 
-export interface BoundPromotionJournalRead {
+interface BoundPromotionJournalRead {
   journalRoot: string;
   journalRootIdentity: PromotionFsIdentity;
   operationName: string;
@@ -26,7 +26,7 @@ export interface BoundPromotionJournalRead {
 }
 
 
-export type BoundPromotionExpectedState =
+type BoundPromotionExpectedState =
   | { type: "file"; mode: number; size: string; sha256: string }
   | { type: "symlink"; target: string };
 
@@ -42,18 +42,7 @@ export interface BoundPromotionExpectedMissing {
 }
 
 
-export interface BoundPromotionDirectoryResult {
-  path: string;
-  identity: PromotionFsIdentity;
-}
-
-
-export interface BoundPromotionLeafResult {
-  leaf: BoundPromotionExpectedLeaf;
-}
-
-
-export type BoundPromotionTransitionRequest = {
+type BoundPromotionTransitionRequest = {
   primaryRoot: string;
   primaryRootIdentity: PromotionFsIdentity;
   destinationComponents: string[];
@@ -87,7 +76,7 @@ export type BoundPromotionTransitionRequest = {
 };
 
 
-export interface BoundPromotionTransitionResult {
+interface BoundPromotionTransitionResult {
   outcome: "applied" | "conflict-after-mutation";
   transition: "exchange" | "retire" | "install";
   durable: boolean;

@@ -12,7 +12,7 @@ import { asKnownState, KNOWN_CANDIDATE_STATES, KNOWN_EVIDENCE_STATUSES, KNOWN_FI
 import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf, worldlineHeaderSummary } from "./worldline-evidence";
 
 /** Orientation caption on every A/B pair header: A kept the run, B is the retry. */
-export const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry";
+const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry";
 
 /** Rendered cap for the inline changed-files list. The title and stats keep the
  *  true total; the overflow note says the listing is truncated. */

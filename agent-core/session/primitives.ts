@@ -247,7 +247,7 @@ export type SessionBundlePaths = {
  * Paths are retained only as names; the native owner reopens the root and
  * verifies these identities before it mutates anything.
  */
-export type EmptySessionBundleProof = {
+type EmptySessionBundleProof = {
   sessionFile: string;
   bundleDir: string;
   projectDir: string;

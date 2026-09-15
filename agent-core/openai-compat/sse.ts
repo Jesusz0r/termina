@@ -11,7 +11,7 @@ import { responsesLiveDelta } from "./responses-stream.ts";
 export const MAX_SSE_BUFFER_BYTES = 8 * 1024 * 1024;
 
 /** Protect the caller's event array from an endless stream of tiny events. */
-export const MAX_SSE_EVENT_COUNT = 32_768;
+const MAX_SSE_EVENT_COUNT = 32_768;
 
 /** Bound parsed JSON retained by a single provider stream. */
 export const MAX_SSE_PAYLOAD_BYTES = 32 * 1024 * 1024;

@@ -26,7 +26,7 @@ export const HOST_CONTEXT_BYTES = 64 * 1024;
 const HOST_CONTEXT_READ_CHUNK_BYTES = 16 * 1024;
 
 
-export type ReadContextFilesOptions = {
+type ReadContextFilesOptions = {
   shouldStop?: () => boolean;
 };
 
@@ -40,7 +40,7 @@ export type ReadContextFilesOptions = {
  * reads' digests pinpoints which of the five context files moved when the
  * working-set hash changes.
  */
-export type ContextFileDigest = Readonly<{
+type ContextFileDigest = Readonly<{
   kind: string;
   present: boolean;
   size: number | null;

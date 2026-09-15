@@ -52,7 +52,7 @@ export function loadImageFromRoots(ref: ImageRef, roots: string[]): LoadedImage 
 }
 
 
-export function persistSessionImage(
+function persistSessionImage(
   sessionFile: string | null,
   img: LoadedImage,
   index: number,

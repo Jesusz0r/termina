@@ -62,7 +62,7 @@ export type PendingImageResult =
   | { ok: true; count: number; names: string[] }
   | { ok: false; error: string };
 
-export type PendingImageClaim = { claimId: string; images: LoadedImage[] };
+type PendingImageClaim = { claimId: string; images: LoadedImage[] };
 
 export type PendingImageStateResult =
   | { ok: true; count: number; hasImages: boolean }

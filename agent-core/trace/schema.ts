@@ -313,7 +313,7 @@ export interface TraceAttempt {
 }
 
 
-export interface TraceTaskOutcome {
+interface TraceTaskOutcome {
   readonly status: string | null;
   readonly criteriaHash: string | null;
 }
@@ -334,8 +334,6 @@ export interface TraceTaskSettled {
   readonly criticalClass: string | null;
 }
 
-
-export type TraceRecord = TraceAttempt | TraceTaskSettled;
 
 export type FrozenTraceAttempt = Readonly<TraceAttempt>;
 
@@ -481,7 +479,7 @@ export interface TraceManifestReset {
 }
 
 
-export interface TraceManifestStartup {
+interface TraceManifestStartup {
   readonly namespace: string;
   readonly startedAt: string;
   readonly reset: TraceManifestReset;
@@ -577,7 +575,7 @@ export interface TraceStartupResult {
 export type TraceWriteFailureKind = "write-failure" | "manifest-write-failure" | "retention-failure" | "index-write-failure" | "index-full" | "record-too-large" | "invalid-record" | "queue-full" | "closed" | "duplicate-attempt" | "duplicate-settlement" | "invalid-link";
 
 
-export interface TraceWriteSuccess {
+interface TraceWriteSuccess {
   readonly ok: true;
   readonly kind: "record-written";
   readonly persisted: true;
