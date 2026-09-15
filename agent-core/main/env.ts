@@ -14,6 +14,22 @@ import { freezeCwd, gitignoreSkips, readIgnoreFile, sortUtf8, underRoot } from "
 const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
 
+/** Well-known root markers. Names only, fixed order, omit missing. */
+const ROOT_MANIFESTS = [
+  "package.json",
+  "pnpm-lock.yaml",
+  "package-lock.json",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+  "Cargo.toml",
+  "go.mod",
+  "pyproject.toml",
+  "Gemfile",
+] as const;
+
+const TOOLCHAIN_BINS = ["python3", "rustc", "go", "pnpm", "npm", "javac", "gcc", "clang"] as const;
+
 function extraBinDirs(): string[] {
   const home = homedir();
   return [
@@ -83,6 +99,18 @@ function probeAbs(absBin: string, remainingMs: number): string | null {
   }
 }
 
+function listRootManifests(root: string): string[] {
+  const found: string[] = [];
+  for (const name of ROOT_MANIFESTS) {
+    try {
+      if (statSync(join(root, name)).isFile()) found.push(name);
+    } catch {
+      /* missing or unreadable */
+    }
+  }
+  return found;
+}
+
 export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): string {
   const root = freezeCwd(cwd);
   const lines = [
@@ -109,10 +137,14 @@ export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): str
   } catch {
     /* unreadable cwd */
   }
+  const manifests = listRootManifests(root);
+  if (manifests.length > 0) {
+    lines.push(`manifests: ${manifests.map((n) => JSON.stringify(n)).join(", ")}`);
+  }
   if (opts?.probes !== false) {
     const tools: string[] = [`node ${process.version}`];
     const deadline = Date.now() + PROBE_TIMEOUT_MS;
-    for (const bin of ["python3", "rustc", "go"]) {
+    for (const bin of TOOLCHAIN_BINS) {
       const abs = resolveTrustedBin(bin, root);
       if (!abs) continue;
       const ver = probeAbs(abs, deadline - Date.now());
