@@ -78,6 +78,15 @@ describe("Subagent Wiring Invariants", () => {
     assert.match(main, /isWorldlineTerminal: \(terminalId\)/);
   });
 
+  it("viewers subscribe to the runtime session (#293)", () => {
+    assert.match(host, /attachSession\(run\.parentTerminalId, subagentViewerId\(run\.runId\)\)/);
+    assert.match(host, /detachSession\(run\.parentTerminalId, subagentViewerId\(run\.runId\)\)/);
+    assert.match(main, /attachSession: \(terminalId, viewerId\) => \{\s*this\.runtime\.subscribe\(terminalId, viewerId\);/);
+    assert.match(main, /detachSession: \(terminalId, viewerId\) => \{\s*this\.runtime\.unsubscribe\(terminalId, viewerId\);/);
+    assert.match(main, /this\.runtime\.subscribe\(worker\.id, dispatchViewerId\(ownerId\)\)/);
+    assert.match(main, /this\.runtime\.subscribe\(result\.terminalId, worldlineViewerId\(comparisonId, label\)\)/);
+  });
+
   it("host re-validates handoff identity, cwd, and permission mode (issue #39)", () => {
     assert.match(host, /subagentTaskFileName\(sourceTerminalId, runId\)/);
     assert.match(host, /task\.runId !== runId/);

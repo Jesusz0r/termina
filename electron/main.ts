@@ -91,7 +91,7 @@ import {
 } from "./terminal-roster.js";
 import { rosterFilePath, type RosterTerminal } from "./roster-store.js";
 import { AgentTerminalInstance } from "./terminal-instance.js";
-import { TerminalRuntime } from "./terminal-runtime.js";
+import { TerminalRuntime, dispatchViewerId, worldlineViewerId } from "./terminal-runtime.js";
 import {
   activityFor,
   activityKey,
@@ -615,6 +615,12 @@ class TerminaApp {
     releaseStream: (terminalId) => {
       this.tailer.stopWatching(terminalId);
       this.runtime.deleteSidecarQueue(terminalId);
+    },
+    attachSession: (terminalId, viewerId) => {
+      this.runtime.subscribe(terminalId, viewerId);
+    },
+    detachSession: (terminalId, viewerId) => {
+      this.runtime.unsubscribe(terminalId, viewerId);
     },
     dispatchKeysFor: async (ownerId) => {
       const owner = this.runtime.get(ownerId);
@@ -1956,6 +1962,7 @@ class TerminaApp {
         await this.releaseStateIfUnused(stateId, undefined, undefined, project);
       },
       terminalBusy: (terminalId) => this.runtime.get(terminalId)?.busy === true,
+      terminalLive: (terminalId) => this.runtime.has(terminalId),
       terminalVerifying: (terminalId) => this.verifyRuns.has(terminalId),
       workspaceAt: async (root) => {
         const ws = await this.workspaceContaining(root);
@@ -3935,6 +3942,7 @@ class TerminaApp {
         });
         this.dispatchWorkers.set(worker.id, job.task.text);
         this.dispatchRuns.set(worker.id, { ownerId, taskText: job.task.text });
+        this.runtime.subscribe(worker.id, dispatchViewerId(ownerId));
         job.task.workerId = worker.id;
         job.task.claimed = [...job.task.paths];
         job.task.state = "active";
@@ -8125,9 +8133,15 @@ class TerminaApp {
     });
     ipcMain.handle("worldline:cancel", (_e, comparisonId: string) => wlOf(comparisonId)?.cancel(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:discard", (_e, comparisonId: string) => wlOf(comparisonId)?.discard(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
-    ipcMain.handle("worldline:open-terminal", (_e, comparisonId: string, label: "A" | "B") => {
+    ipcMain.handle("worldline:open-terminal", async (_e, comparisonId: string, label: "A" | "B") => {
       if (!validLabel(label)) return { ok: false, error: "invalid candidate" };
-      return wlOf(comparisonId)?.openTerminal(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" };
+      const manager = wlOf(comparisonId);
+      if (!manager) return { ok: false, error: "worldlines unavailable" };
+      const result = await manager.openTerminal(comparisonId, label);
+      if (result.ok && result.terminalId) {
+        this.runtime.subscribe(result.terminalId, worldlineViewerId(comparisonId, label));
+      }
+      return result;
     });
     // ---- Editor flush (run-start preflight) ----
     ipcMain.handle("editor:flush-report", (_e, requestId: unknown, result: unknown) => {

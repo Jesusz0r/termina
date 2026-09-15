@@ -235,6 +235,8 @@ export interface WorldlineDeps {
   /** Release a temporary state reference after a comparison operation. */
   releaseState(stateId: string): Promise<void>;
   terminalBusy(terminalId: string): boolean;
+  /** True when the candidate PTY is still in the runtime map, including a closing one. */
+  terminalLive(terminalId: string): boolean;
   terminalVerifying(terminalId: string): boolean;
   workspaceAt(root: string): Promise<{ id: string; generation: number; lastStateCommit: string | null } | null>;
   acquireWriteLease(workspaceId: string, requester: string, timeoutMs: number): Promise<{ ok: boolean; error?: string; generation?: number }>;
@@ -3216,15 +3218,17 @@ export class WorldlineManager {
     return { ok: true };
   }
 
-  /** Open a new terminal for an existing candidate (reopen). */
+  /** Attach a live candidate terminal, or reopen one whose PTY is gone. */
   async openTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
     if (!cand.sessionFile) return { ok: false, error: "the candidate has no session" };
     if (cand.state === "creating") return { ok: false, error: "candidate startup is already in progress" };
-    if (cand.terminalId && (cand.state === "ready" || cand.state === "running")) {
-      return { ok: false, error: "candidate terminal is already open" };
+    // A mapped PTY is the session. State (promoting, settled-during-drain,
+    // error) must not spawn a second candidate on the same tree.
+    if (cand.terminalId && this.deps.terminalLive(cand.terminalId)) {
+      return { ok: true, terminalId: cand.terminalId };
     }
 
     const previousTerminalId = cand.terminalId;

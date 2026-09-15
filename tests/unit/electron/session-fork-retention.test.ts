@@ -168,6 +168,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
         capturePrimary: async () => null,
         releaseState: async () => undefined,
         terminalBusy: () => false,
+        terminalLive: () => true,
         terminalVerifying: () => false,
         workspaceAt: async () => null,
         acquireWriteLease: async () => ({ ok: true }),

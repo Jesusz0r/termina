@@ -169,10 +169,12 @@ describe("TerminalRuntime", () => {
     }, { flushIntervalMs: 0 });
     const { inst } = fakeTerminal("term-1", 1);
     runtime.adopt(inst, { tailer, rendererTarget: null });
+    assert.equal(runtime.subscribe("term-1", "renderer"), true);
     await assert.rejects(Promise.resolve(inst.pty.onExit(0)), /before-release failed/);
     assert.equal(runtime.has("term-1"), false);
     assert.deepEqual(tailer.stopped, ["term-1"]);
     assert.deepEqual(after, ["term-1"]);
+    assert.deepEqual(runtime.viewersOf("term-1"), []);
     runtime.disposeEgress();
   });
 
@@ -205,14 +207,63 @@ describe("TerminalRuntime", () => {
     runtime.adopt(inst, { tailer, rendererTarget: null });
     assert.equal(runtime.attachViewer(1, 1), true);
     assert.equal(runtime.attach("term-1", 1, 1, 1), true);
+    assert.deepEqual(runtime.viewersOf("term-1"), ["renderer"]);
     assert.deepEqual(tailer.watched, ["term-1"]);
     assert.equal(runtime.detachViewer(1, 1), true);
+    assert.deepEqual(runtime.viewersOf("term-1"), []);
     assert.equal((inst.pty as unknown as { paused: boolean }).paused, false);
     assert.deepEqual(tailer.stopped, []);
     assert.equal(runtime.acceptOutput("term-1", 1, "while-gone"), true);
     assert.equal(runtime.attachViewer(1, 2), true);
     assert.equal(runtime.attach("term-1", 1, 1, 2), true);
     assert.deepEqual(tailer.watched, ["term-1"]);
+    runtime.disposeEgress();
+  });
+
+  it("refuses subscribe on unknown or closed terminals", () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    runtime.adopt(inst, { tailer: fakeTailer(), rendererTarget: null });
+    assert.equal(runtime.subscribe("term-missing", "renderer"), false);
+    assert.equal(runtime.subscribe("term-1", ""), false);
+    runtime.markClosed("term-1");
+    assert.equal(runtime.subscribe("term-1", "renderer"), false);
+    runtime.disposeEgress();
+  });
+
+  it("keeps sidecar seq and timeline after every viewer detaches", async () => {
+    const received: SidecarEvent[] = [];
+    const runtime = new TerminalRuntime({
+      ...hostWithSends([]),
+      onSidecarEvent(_id, event) { received.push(event); },
+    }, { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    Object.assign(inst, {
+      timeline: [],
+      plan: [{ text: "one", paths: [], state: "pending" }],
+      sessionFile: "/tmp/core-session.json",
+    });
+    const tailer = fakeTailer();
+    runtime.adopt(inst, { tailer, rendererTarget: null });
+    assert.equal(runtime.subscribe("term-1", "renderer"), true);
+    assert.equal(runtime.subscribe("term-1", "worldline:c:A"), true);
+    assert.equal(runtime.subscribe("term-1", "subagent:bg-1"), true);
+    assert.equal(runtime.viewerCount("term-1"), 3);
+    assert.equal(runtime.enqueueSidecar("term-1", { t: "session_ready", bridgeId: "b", seq: 1 }).accepted, true);
+    inst.timeline.push({ seq: 1, t: "agent_start", ts: 1 });
+    runtime.detachAllViewers("term-1");
+    assert.deepEqual(runtime.viewersOf("term-1"), []);
+    assert.equal(runtime.enqueueSidecar("term-1", { t: "agent_settled", bridgeId: "b", seq: 2 }).accepted, true);
+    inst.timeline.push({ seq: 2, t: "agent_settled", ts: 2 });
+    await runtime.drainSidecarQueues(["term-1"]);
+    assert.equal(received.length, 2);
+    assert.equal(received[1]?.seq, 2);
+    assert.deepEqual(tailer.stopped, []);
+    assert.equal(runtime.subscribe("term-1", "renderer"), true);
+    assert.equal(runtime.get("term-1")?.timeline.length, 2);
+    assert.equal(runtime.get("term-1")?.timeline[1]?.t, "agent_settled");
+    assert.equal(runtime.get("term-1")?.sessionFile, "/tmp/core-session.json");
+    assert.equal(runtime.get("term-1")?.plan.length, 1);
     runtime.disposeEgress();
   });
 

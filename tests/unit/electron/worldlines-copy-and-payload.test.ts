@@ -110,6 +110,7 @@ async function makeManager(): Promise<{ manager: WorldlineManager; root: string;
     capturePrimary: async () => null,
     releaseState: async () => {},
     terminalBusy: () => false,
+    terminalLive: () => true,
     terminalVerifying: () => false,
     workspaceAt: async () => null,
     acquireWriteLease: async () => ({ ok: false, error: "unused" }),

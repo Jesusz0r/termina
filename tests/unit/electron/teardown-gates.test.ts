@@ -103,7 +103,7 @@ function makeHarness(opts: { switching: Set<string>; activeId: string | null }) 
     disposed: false,
     projects,
     terminals,
-    runtime: { get: (id: string) => terminals.get(id) },
+    runtime: { get: (id: string) => terminals.get(id), subscribe() { return true; } },
     project: () => (opts.activeId ? (projects.get(opts.activeId) ?? null) : null),
     projectOfTerminal: (id: string) => {
       const pid = terminalProjects.get(id);

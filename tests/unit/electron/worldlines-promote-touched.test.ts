@@ -113,6 +113,7 @@ async function makeFixture(opts: {
     capturePrimary: async () => null,
     releaseState: async () => {},
     terminalBusy: () => false,
+    terminalLive: () => true,
     terminalVerifying: () => false,
     workspaceAt: opts.workspaceAt ?? (async (wsRoot: string) => {
       if (wsRoot === primaryRoot) return { id: "ws-primary", generation: 7, lastStateCommit: "p0" };

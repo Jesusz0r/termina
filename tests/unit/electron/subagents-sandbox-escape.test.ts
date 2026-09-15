@@ -72,6 +72,8 @@ function setup(opts: {
       appendMailboxNote: (_t, note) => { notes.push(note); },
       watchStream: () => {},
       releaseStream: () => {},
+      attachSession: () => {},
+      detachSession: () => {},
       dispatchKeysFor: async () => ({ keys: new Set<string>(), root: "" }),
       canonicalPath: async (p) => {
         try {

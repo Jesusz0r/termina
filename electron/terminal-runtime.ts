@@ -3,7 +3,8 @@
  *
  * Owns the live instance map, PTY spawn/exit, the egress ledger, the primary
  * events dir + tailer, the roster file store, sidecar watch/queue, generation
- * fencing, and viewer attach/detach. Main is a client: it validates IPC,
+ * fencing, and the viewer registry. Viewers subscribe; none own the session
+ * triple (PTY + sidecar + core bundle). Main is a client: it validates IPC,
  * folds activity, and owns projects/leases/snapshots. Renderer attach stays
  * `readyTerminal` / `acknowledgePtyData` — this module does not add IPC.
  */
@@ -79,6 +80,21 @@ export interface TerminalRuntimeOptions extends PtyEgressSchedulerOptions {
   rosterHost?: TerminalRosterHost;
 }
 
+/** Renderer pane. Detach drops this viewer; it does not pause the PTY. */
+export const RENDERER_VIEWER_ID = "renderer";
+
+export function worldlineViewerId(comparisonId: string, label: string): string {
+  return `worldline:${comparisonId}:${label}`;
+}
+
+export function dispatchViewerId(ownerId: string): string {
+  return `dispatch:${ownerId}`;
+}
+
+export function subagentViewerId(runId: string): string {
+  return `subagent:${runId}`;
+}
+
 export interface TerminalRuntimeSpawnOptions {
   id: string;
   cwd: string;
@@ -108,6 +124,8 @@ export class TerminalRuntime {
   private readonly terminals = new Map<string, AgentTerminalInstance>();
   private readonly sidecarQueues = new Map<string, SidecarEventQueue>();
   private readonly sidecarSources = new Map<string, RuntimeSidecarTailer>();
+  /** Live viewers per terminal. Empty does not pause PTY, sidecar, or session. */
+  private readonly viewers = new Map<string, Set<string>>();
   private readonly egress: PtyEgressScheduler;
   readonly eventsDir: string;
   readonly tailer: SidecarTailer | null;
@@ -153,6 +171,7 @@ export class TerminalRuntime {
     for (const [id, tailer] of this.sidecarSources) tailer.stopWatching(id);
     this.sidecarSources.clear();
     this.terminals.clear();
+    this.viewers.clear();
   }
 
   allocateId(): string {
@@ -265,9 +284,11 @@ export class TerminalRuntime {
   /**
    * Drop the renderer document. The PTY keeps writing the ledger, the
    * sidecar stays on its durable cursor, and the session bundle keeps
-   * appending. Next attach replays from those cursors.
+   * appending. Next attach replays from those cursors. Never calls
+   * stopWatching — that is destroy-only.
    */
   detachViewer(windowGeneration: number, rendererGeneration: number): boolean {
+    this.unsubscribeViewer(RENDERER_VIEWER_ID);
     return this.egress.setRendererReady(windowGeneration, rendererGeneration, false);
   }
 
@@ -284,7 +305,53 @@ export class TerminalRuntime {
   ): boolean {
     const inst = this.terminals.get(terminalId);
     if (!inst || inst.closed || inst.generation !== terminalGeneration) return false;
-    return this.egress.hydrateTerminal(terminalId, terminalGeneration, windowGeneration, rendererGeneration);
+    const hydrated = this.egress.hydrateTerminal(terminalId, terminalGeneration, windowGeneration, rendererGeneration);
+    if (hydrated) this.subscribe(terminalId, RENDERER_VIEWER_ID);
+    return hydrated;
+  }
+
+  /** Register a viewer. Missing terminals refuse; an empty set never pauses the session. */
+  subscribe(terminalId: string, viewerId: string): boolean {
+    const inst = this.terminals.get(terminalId);
+    if (!viewerId || !inst || inst.closed) return false;
+    let set = this.viewers.get(terminalId);
+    if (!set) {
+      set = new Set();
+      this.viewers.set(terminalId, set);
+    }
+    set.add(viewerId);
+    return true;
+  }
+
+  unsubscribe(terminalId: string, viewerId: string): boolean {
+    const set = this.viewers.get(terminalId);
+    if (!set || !set.delete(viewerId)) return false;
+    if (set.size === 0) this.viewers.delete(terminalId);
+    return true;
+  }
+
+  unsubscribeViewer(viewerId: string): void {
+    for (const [terminalId, set] of this.viewers) {
+      set.delete(viewerId);
+      if (set.size === 0) this.viewers.delete(terminalId);
+    }
+  }
+
+  /** Drop viewer bookkeeping only. Does not stop the sidecar or PTY. */
+  detachAllViewers(terminalId?: string): void {
+    if (terminalId === undefined) {
+      this.viewers.clear();
+      return;
+    }
+    this.viewers.delete(terminalId);
+  }
+
+  viewersOf(terminalId: string): string[] {
+    return [...(this.viewers.get(terminalId) ?? [])];
+  }
+
+  viewerCount(terminalId: string): number {
+    return this.viewers.get(terminalId)?.size ?? 0;
   }
 
   saveRoster(path: string, terminals: RosterTerminal[], unrestored: TerminalRosterEntry[]): void {
@@ -359,12 +426,14 @@ export class TerminalRuntime {
     this.sidecarQueues.delete(id);
   }
 
+  /** Destroy-path only. Viewer detach must never call this. */
   stopSidecar(id: string): void {
     this.sidecarSources.get(id)?.stopWatching(id);
   }
 
   private release(inst: AgentTerminalInstance): void {
     this.terminals.delete(inst.id);
+    this.viewers.delete(inst.id);
     this.sidecarSources.get(inst.id)?.stopWatching(inst.id);
     this.sidecarSources.delete(inst.id);
     this.sidecarQueues.delete(inst.id);

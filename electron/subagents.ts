@@ -17,6 +17,7 @@ import { rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { coreSessionFile, parseSessionBundlePath, sessionBundleExists } from "../agent-core/session.js";
+import { subagentViewerId } from "./terminal-runtime.js";
 import {
   MAX_SUBAGENT_ERROR_CHARS,
   MAX_SUBAGENT_RESULT_CHARS,
@@ -69,6 +70,10 @@ export interface SubagentHostSinks {
   watchStream(terminalId: string): void;
   /** Release a child sidecar stream (stop tailing, drop its queue). */
   releaseStream(terminalId: string): void;
+  /** Subscribe the parent session as a viewer for this run's lifetime. */
+  attachSession(terminalId: string, viewerId: string): void;
+  /** Drop the parent session viewer when the run settles. */
+  detachSession(terminalId: string, viewerId: string): void;
   /** Canonical in-flight dispatch path keys plus their root (spawn-time veto). */
   dispatchKeysFor(ownerId: string): Promise<{ keys: Set<string>; root: string }>;
   /** Canonical absolute path (total: resolves existing prefixes, never throws). */
@@ -335,6 +340,22 @@ export class SubagentHost {
     return `${parentTerminalId}/${runId}`;
   }
 
+  private attachParentSession(run: HostRun): void {
+    try {
+      this.sinks.attachSession(run.parentTerminalId, subagentViewerId(run.runId));
+    } catch {
+      /* Viewer bookkeeping must not fail the child. */
+    }
+  }
+
+  private detachParentSession(run: HostRun): void {
+    try {
+      this.sinks.detachSession(run.parentTerminalId, subagentViewerId(run.runId));
+    } catch {
+      /* Viewer bookkeeping must not fail settle. */
+    }
+  }
+
   private async spawnInner(sourceTerminalId: string, runId: unknown, taskFile: unknown): Promise<void> {
     if (typeof runId !== "string" || !/^bg-\d{1,10}$/.test(runId)) return;
     if (typeof taskFile !== "string" || !taskFile || taskFile.includes("/") || taskFile.includes("\\") || taskFile.includes("..")) {
@@ -542,8 +563,10 @@ export class SubagentHost {
     const dir = this.sinks.eventsDirFor(run.parentTerminalId);
     if (!dir) {
       this.runs.delete(run.key);
+      this.detachParentSession(run);
       return;
     }
+    this.attachParentSession(run);
     run.attempts += 1;
     run.stdout = "";
     run.stdoutTruncated = false;
@@ -782,6 +805,7 @@ export class SubagentHost {
     }
     this.runs.delete(run.key);
     this.streams.delete(run.childTid);
+    this.detachParentSession(run);
     try {
       this.sinks.releaseStream(run.childTid);
     } catch {

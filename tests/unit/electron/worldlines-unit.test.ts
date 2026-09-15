@@ -39,6 +39,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       capturePrimary: async () => null,
       releaseState: async () => {},
       terminalBusy: () => false,
+      terminalLive: () => true,
       terminalVerifying: () => false,
       workspaceAt: async () => null,
       acquireWriteLease: async () => ({ ok: false, error: "unused" }),
@@ -85,6 +86,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
     const created: any[] = [];
     let mappingObservedBeforeReady = false;
     let staleKeptPending = false;
+    let attachable = false;
 
     const deps = {
       worldsRoot: join(root, "worlds"),
@@ -148,6 +150,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       capturePrimary: async () => null,
       releaseState: async () => {},
       terminalBusy: () => false,
+      terminalLive: () => attachable,
       terminalVerifying: () => false,
       workspaceAt: async () => null,
       acquireWriteLease: async () => ({ ok: false, error: "unused" }),
@@ -226,10 +229,30 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       mode = "immediate";
       let result = await manager.openTerminal(comparison.id, "A");
       expect(result.ok).toBe(true);
+      expect(result.terminalId).toBe("candidate-1");
       expect(candidate.state).toBe("ready");
       expect(created[0].beforeSpawn).toBe(true);
       expect(mappingObservedBeforeReady).toBe(true);
 
+      attachable = true;
+      result = await manager.openTerminal(comparison.id, "A");
+      expect(result.ok).toBe(true);
+      expect(result.terminalId).toBe("candidate-1");
+      expect(created.length).toBe(1);
+
+      candidate.state = "promoting";
+      result = await manager.openTerminal(comparison.id, "A");
+      expect(result.ok).toBe(true);
+      expect(result.terminalId).toBe("candidate-1");
+      expect(created.length).toBe(1);
+
+      candidate.state = "settled";
+      result = await manager.openTerminal(comparison.id, "A");
+      expect(result.ok).toBe(true);
+      expect(result.terminalId).toBe("candidate-1");
+      expect(created.length).toBe(1);
+
+      attachable = false;
       candidate.state = "settled";
       candidate.error = null;
       mode = "stale-delayed";

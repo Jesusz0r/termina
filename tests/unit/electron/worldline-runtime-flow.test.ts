@@ -200,6 +200,7 @@ describe("Worldline Runtime Flow Suite", () => {
       capturePrimary: async () => null,
       releaseState: async () => {},
       terminalBusy: () => false,
+      terminalLive: () => true,
       terminalVerifying: () => false,
       workspaceAt: async () => null,
       acquireWriteLease: async () => ({ ok: false, error: "unused" }),

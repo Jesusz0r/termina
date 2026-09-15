@@ -90,6 +90,7 @@ function setup(opts: {
   const notes: Array<{ terminalId: string; note: string }> = [];
   const watched: string[] = [];
   const unwatched: string[] = [];
+  const sessions: Array<{ op: "attach" | "detach"; terminalId: string; viewerId: string }> = [];
   const procs: FakeProc[] = [];
   const launches: Array<{ cmd: string; args: string[]; env: Record<string, string | undefined> }> = [];
   let launchAttempts = 0;
@@ -109,6 +110,8 @@ function setup(opts: {
       appendMailboxNote: (terminalId, note) => { notes.push({ terminalId, note }); },
       watchStream: (id) => { watched.push(id); },
       releaseStream: (id) => { unwatched.push(id); },
+      attachSession: (terminalId, viewerId) => { sessions.push({ op: "attach", terminalId, viewerId }); },
+      detachSession: (terminalId, viewerId) => { sessions.push({ op: "detach", terminalId, viewerId }); },
       dispatchKeysFor: async () => dispatch ?? { keys: new Set<string>(), root: "" },
       canonicalPath: async (p) => {
         try {
@@ -129,7 +132,7 @@ function setup(opts: {
   };
   const resultFile = join(dir, "subagent-term-7-bg-1.result.json");
   const readResult = () => JSON.parse(readFileSync(resultFile, "utf8"));
-  return { dir, host, notes, watched, unwatched, procs, launches, writeTask, resultFile, readResult, get launchAttempts() { return launchAttempts; } };
+  return { dir, host, notes, watched, unwatched, sessions, procs, launches, writeTask, resultFile, readResult, get launchAttempts() { return launchAttempts; } };
 }
 
 describe("SubagentHost", () => {
@@ -316,6 +319,8 @@ describe("SubagentHost", () => {
         appendMailboxNote: (_t, note) => { notes.push(note); },
         watchStream: () => {},
         releaseStream: () => {},
+        attachSession: () => {},
+        detachSession: () => {},
         dispatchKeysFor: async () => ({ keys: new Set<string>(), root: dir }),
         canonicalPath: async (p) => p,
         isWorldlineTerminal: () => false,
@@ -486,6 +491,10 @@ describe("SubagentHost", () => {
     await until(() => existsSync(s.resultFile));
     expect(s.host.hasStream("sub-term-7-bg-1")).toBe(false);
     expect(s.unwatched).toEqual(["sub-term-7-bg-1"]);
+    expect(s.sessions).toEqual([
+      { op: "attach", terminalId: "term-7", viewerId: "subagent:bg-1" },
+      { op: "detach", terminalId: "term-7", viewerId: "subagent:bg-1" },
+    ]);
   });
 
   it("kills one owner's runs and keeps the other's", async () => {
