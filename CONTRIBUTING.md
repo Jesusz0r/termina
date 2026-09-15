@@ -91,7 +91,7 @@ under `electron/worldline-git/`. When you add an op:
 
 ## Submitting changes
 
-1. Branch off `master`, keep changes focused.
+1. Branch off `main`, keep changes focused.
 2. Run `pnpm exec tsc --noEmit`, `pnpm run build`, the spike suites, and the
    e2e suites that touch your change.
 3. Commit with the repo identity: `termina <dev@termina.local>`.
