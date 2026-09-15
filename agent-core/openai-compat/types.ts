@@ -68,9 +68,7 @@ export type CompletionsOpts = {
   reasoningContext?: "all_turns" | "current_turn";
   textVerbosity?: "low" | "medium" | "high";
   googleThinking?: boolean;
-  /** Native Google cachedContent only; OpenAI-compatible serializers ignore it. */
-  cachedContent?: string | null;
   includeEncryptedReasoning?: boolean;
-  promptCacheMode?: "implicit" | "explicit";
+  promptCacheMode?: "explicit";
   explicitCacheSkipTail?: boolean;
 };

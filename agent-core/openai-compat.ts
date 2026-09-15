@@ -15,4 +15,4 @@ export { usageFromOpenAI } from "./openai-compat/usage.ts";
 export { completionLiveDelta, completionResultFromEvents, textFromCompletionPayload } from "./openai-compat/completions-stream.ts";
 export { responsesLiveDelta, responsesResultFromEvents } from "./openai-compat/responses-stream.ts";
 export { MAX_SSE_BUFFER_BYTES, MAX_SSE_EVENT_COUNT, MAX_SSE_PAYLOAD_BYTES, readSseJson } from "./openai-compat/sse.ts";
-export { googleGenerateBody, googleLiveDelta, googleResultFromEvents, isGoogleCachedContentName } from "./openai-compat/google.ts";
+export { googleGenerateBody, googleLiveDelta, googleResultFromEvents } from "./openai-compat/google.ts";

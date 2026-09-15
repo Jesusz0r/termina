@@ -10,7 +10,7 @@ const {
   createMcpContinuation,
   mcpToolDefs,
   normalizeMcpCallResult,
-  normalizeMcpTools,
+  normalizeMcpDiscovery,
   selectMcpTools,
 } = mcp;
 
@@ -87,8 +87,8 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
       });
       const schemaInputSnapshot = structuredClone(schemaForward);
 
-      const forward = normalizeMcpTools([schemaForward]);
-      const reverse = normalizeMcpTools([schemaReverse]);
+      const forward = normalizeMcpDiscovery([schemaForward]).tools;
+      const reverse = normalizeMcpDiscovery([schemaReverse]).tools;
       expect(forward).toEqual(reverse);
       expect(JSON.stringify(forward)).toBe(JSON.stringify(reverse));
       expect(schemaForward).toEqual(schemaInputSnapshot);
@@ -112,8 +112,8 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
         tool({ server: "dedupe-server", original: `unique-${String(index).padStart(2, "0")}` }),
       );
 
-      const first = normalizeMcpTools([duplicateA, duplicateB, ...uniqueTools]);
-      const second = normalizeMcpTools([...uniqueTools].reverse().concat([duplicateB, duplicateA]));
+      const first = normalizeMcpDiscovery([duplicateA, duplicateB, ...uniqueTools]).tools;
+      const second = normalizeMcpDiscovery([...uniqueTools].reverse().concat([duplicateB, duplicateA])).tools;
       expect(first.filter((row: any) => row.server === "dedupe-server" && row.original === "same-tool").length).toBe(1);
       expect(serializedSignature(first)).toBe(serializedSignature(second));
 
@@ -156,7 +156,7 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
         tool({ server: "a-server", original: "a-tool" }),
         tool({ server: "m-server", original: "m-tool" }),
       ];
-      const normalized = normalizeMcpTools(sortTools);
+      const normalized = normalizeMcpDiscovery(sortTools).tools;
       expect(normalized.map((row: any) => `${row.server}/${row.original}`)).toEqual([
         "a-server/a-tool",
         "a-server/z-tool",

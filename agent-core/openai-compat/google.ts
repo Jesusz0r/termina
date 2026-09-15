@@ -103,33 +103,6 @@ function toGoogleContents(messages: KernelMessage[]): Array<Record<string, unkno
 }
 
 
-/**
- * Native Gemini context caching is deliberately separate from the OpenAI
- * compatibility serializers. The caller must select the direct Google route
- * before passing `provider: "google"` to these builders.
- */
-
-/** Resource-name validation for the native `cachedContent` request field. */
-const GOOGLE_CACHE_NAME_RE = /^cachedContents\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-const GOOGLE_RESOURCE_MAX_CHARS = 512;
-
-
-export function isGoogleCachedContentName(value: unknown): value is string {
-  return typeof value === "string" &&
-    value.length <= GOOGLE_RESOURCE_MAX_CHARS &&
-    GOOGLE_CACHE_NAME_RE.test(value);
-}
-
-
-function requireGoogleCachedContentName(value: unknown): string {
-  if (!isGoogleCachedContentName(value)) {
-    throw new TypeError("invalid Google cached content name");
-  }
-  return value;
-}
-
-
 /** Native Gemini generateContent. Model id lives in the URL, not the body. */
 export function googleGenerateBody(
   system: string,
@@ -149,12 +122,6 @@ export function googleGenerateBody(
         })),
       },
     ];
-  }
-  // `cachedContent` is a native Google field. Require the direct provider
-  // marker so the same generateContent serializer cannot accidentally enable
-  // undocumented caching for OpenCode Zen's Gemini relay.
-  if (opts?.provider === "google" && opts.cachedContent !== undefined && opts.cachedContent !== null) {
-    body.cachedContent = requireGoogleCachedContentName(opts.cachedContent);
   }
   const gen: Record<string, unknown> = {};
   if (opts?.maxTokens !== undefined) gen.maxOutputTokens = Math.min(opts.maxTokens, 65_536);

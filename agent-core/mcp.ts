@@ -9,7 +9,7 @@
 // Split into ./mcp/ modules (issue #38). This entry re-exports the public surface.
 export { MAX_MCP_JSON_BYTES, MAX_MCP_SERVERS, MAX_MCP_TOOLS, MAX_MCP_TOOL_BYTES, MCP_CALL_MS, MCP_HANDSHAKE_MS, MCP_PROTOCOL, MCP_RESULT_BYTES, jailMcpCwd, loadMcpConfigs, mcpHttpUrlError, parseMcpConfig, userMcpPath } from "./mcp/config.ts";
 export type { McpServerConfig } from "./mcp/config.ts";
-export { KERNEL_TOOL_NAMES, mcpToolDefs, mcpToolName, mergeClientTools, normalizeInputSchema, normalizeMcpDiscovery, normalizeMcpTools, sanitizeMcpIdent, selectMcpTools } from "./mcp/tools.ts";
+export { KERNEL_TOOL_NAMES, mcpToolDefs, mcpToolName, mergeClientTools, normalizeInputSchema, normalizeMcpDiscovery, sanitizeMcpIdent, selectMcpTools } from "./mcp/tools.ts";
 export type { McpClientTool, NormalizedInputSchema } from "./mcp/tools.ts";
 export { createMcpContinuation, normalizeMcpCallResult } from "./mcp/results.ts";
 export type { McpCallResult, McpCancellationScope, McpContinuation } from "./mcp/results.ts";

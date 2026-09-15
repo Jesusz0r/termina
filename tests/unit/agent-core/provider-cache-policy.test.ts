@@ -569,41 +569,6 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(cancelled, true);
     });
     
-    await test("cachedContent is emitted only by the native Google generateContent serializer", () => {
-      const native = compat.googleGenerateBody(
-        "sys",
-        [{ role: "user", content: "follow-up" }],
-        [],
-        { provider: "google", cachedContent: "cachedContents/cache-1" },
-      );
-      assert.equal(native.cachedContent, "cachedContents/cache-1");
-    
-      const zen = compat.googleGenerateBody(
-        "sys",
-        [{ role: "user", content: "follow-up" }],
-        [],
-        { provider: "opencode-zen", cachedContent: "cachedContents/cache-1" },
-      );
-      assert.equal(zen.cachedContent, undefined);
-    
-      const compatible = compat.completionsBody(
-        "gemini-3.7-flash",
-        "sys",
-        [{ role: "user", content: "follow-up" }],
-        [],
-        "max_tokens",
-        { provider: "google", cachedContent: "cachedContents/cache-1" },
-      );
-      assert.equal(compatible.cachedContent, undefined);
-    });
-    
-    await test("native Google generateContent cache reference validates the resource name", () => {
-      assert.throws(
-        () => compat.googleGenerateBody("", [{ role: "user", content: "follow-up" }], [], { provider: "google", cachedContent: "cache-1" }),
-        /cached content name/i,
-      );
-    });
-    
     await test("serializers emit caller-supplied cache fields without gemini/zen re-gates", () => {
       const completions = compat.completionsBody(
         "gemini-3.7-flash",

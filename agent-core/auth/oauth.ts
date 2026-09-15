@@ -43,14 +43,6 @@ export function parseOauthToken(
 }
 
 
-export function parseTokenResponse(
-  payload: unknown,
-  now = Date.now(),
-): { ok: true; access: string; refresh: string; expires: number } | { ok: false; error: string } {
-  return parseOauthToken(payload, now, { requireRefresh: true });
-}
-
-
 function sleepAsync(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -138,14 +130,14 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
         refresh_token: entry.refresh,
         client_id: ANTHROPIC_CLIENT_ID,
       });
-      parsed = parseTokenResponse(res.payload);
+      parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     } else if (providerId === "openai-codex") {
       const res = await postForm(tokenUrl(providerId), {
         grant_type: "refresh_token",
         refresh_token: entry.refresh,
         client_id: OPENAI_CODEX_CLIENT_ID,
       });
-      parsed = parseTokenResponse(res.payload);
+      parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     } else if (providerId === "xai") {
       const res = await postForm(tokenUrl(providerId), {
         grant_type: "refresh_token",
@@ -241,7 +233,7 @@ export async function exchangeAnthropic(
       },
       signal,
     );
-    const parsed = parseTokenResponse(res.payload);
+    const parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
     return persistOauth("anthropic", parsed, {}, opts);
@@ -270,7 +262,7 @@ export async function exchangeCodex(
       },
       signal,
     );
-    const parsed = parseTokenResponse(res.payload);
+    const parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
     const rec = isRecord(res.payload) ? res.payload : {};
@@ -306,20 +298,67 @@ export async function exchangeOpenRouter(
 }
 
 
-function validateVerificationUri(raw: string): string {
+function hostAllowed(hostname: string, hosts: readonly string[]): boolean {
+  return hosts.some((host) => hostname === host || hostname.endsWith(`.${host}`));
+}
+
+
+function validateHttpsVerificationUri(raw: string, opts: { hosts: readonly string[]; label: string }): string {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new Error("Untrusted verification URI in xAI OAuth response");
+    throw new Error(`Untrusted verification URI in ${opts.label} OAuth response`);
   }
-  if (url.protocol !== "https:" && !testLoopbackOverride("TERMINA_TEST_DEVICE_URL")) {
-    throw new Error("Untrusted verification URI in xAI OAuth response");
-  }
-  if (!testLoopbackOverride("TERMINA_TEST_DEVICE_URL") && url.hostname !== "auth.x.ai" && !url.hostname.endsWith(".auth.x.ai")) {
-    throw new Error("Untrusted verification URI in xAI OAuth response");
+  const loopback = Boolean(testLoopbackOverride("TERMINA_TEST_DEVICE_URL"));
+  if ((url.protocol !== "https:" || !hostAllowed(url.hostname, opts.hosts)) && !loopback) {
+    throw new Error(`Untrusted verification URI in ${opts.label} OAuth response`);
   }
   return url.href;
+}
+
+
+type DevicePollParse<T> = (res: { ok: boolean; status: number; payload: unknown }) =>
+  | ({ ok: true } & T)
+  | { ok: false; error: string }
+  | "pending"
+  | "slow_down";
+
+
+async function pollDeviceGrant<T extends object>(
+  device: { intervalMs: number; expiresMs: number },
+  opts: {
+    tokenUrl: string;
+    grant: Record<string, string>;
+    request: (
+      url: string,
+      grant: Record<string, string>,
+      signal?: AbortSignal,
+    ) => Promise<{ ok: boolean; status: number; payload: unknown }>;
+    parse: DevicePollParse<T>;
+    waitFirst: boolean;
+    pollMarginMs: number;
+    slowDownMs: number;
+    timeoutError: string;
+  },
+  signal?: AbortSignal,
+): Promise<({ ok: true } & T) | { ok: false; error: string }> {
+  const deadline = Date.now() + device.expiresMs;
+  let interval = device.intervalMs;
+  while (Date.now() < deadline) {
+    if (opts.waitFirst) {
+      const wait = Math.min(interval + opts.pollMarginMs, Math.max(0, deadline - Date.now()));
+      if (wait > 0) await sleepAsync(wait, signal);
+    }
+    const parsed = opts.parse(await opts.request(opts.tokenUrl, opts.grant, signal));
+    if (parsed !== "pending" && parsed !== "slow_down") return parsed;
+    if (parsed === "slow_down") interval += opts.slowDownMs;
+    if (!opts.waitFirst) {
+      const wait = Math.min(interval, Math.max(0, deadline - Date.now()));
+      if (wait > 0) await sleepAsync(wait, signal);
+    }
+  }
+  return { ok: false, error: opts.timeoutError };
 }
 
 
@@ -365,7 +404,7 @@ export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<{
   return {
     deviceCode,
     userCode,
-    verificationUri: validateVerificationUri(verification),
+    verificationUri: validateHttpsVerificationUri(verification, { hosts: ["auth.x.ai"], label: "xAI" }),
     intervalMs: intervalMs(
       res.payload.interval,
       XAI_DEFAULT_INTERVAL_MS,
@@ -380,36 +419,34 @@ export async function pollXaiDeviceToken(
   device: { deviceCode: string; intervalMs: number; expiresMs: number },
   signal?: AbortSignal,
 ): Promise<{ ok: true; access: string; refresh: string; expires: number } | { ok: false; error: string }> {
-  const deadline = Date.now() + device.expiresMs;
-  let intervalMs = device.intervalMs;
-  while (Date.now() < deadline) {
-    const wait = Math.min(intervalMs + (testLoopbackOverride("TERMINA_TEST_DEVICE_URL") ? 0 : XAI_POLL_MARGIN_MS), Math.max(0, deadline - Date.now()));
-    if (wait > 0) await sleepAsync(wait, signal);
-    const res = await postForm(
-      tokenUrl("xai"),
-      {
-        grant_type: XAI_DEVICE_GRANT,
-        client_id: XAI_CLIENT_ID,
-        device_code: device.deviceCode,
-      },
-      signal,
-    );
-    if (res.ok) {
-      const parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true, defaultExpiresIn: 3600 });
-      if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
-      return parsed;
-    }
-    const err = isRecord(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
-    if (err === "authorization_pending") continue;
-    if (err === "slow_down") {
-      intervalMs += XAI_SLOW_DOWN_MS;
-      continue;
-    }
-    if (err === "access_denied" || err === "authorization_denied") return { ok: false, error: "xAI device authorization was denied" };
-    if (err === "expired_token") return { ok: false, error: "xAI device code expired" };
-    return { ok: false, error: `xAI device token exchange failed (HTTP ${res.status})` };
-  }
-  return { ok: false, error: "xAI device authorization timed out" };
+  return pollDeviceGrant(device, {
+    tokenUrl: tokenUrl("xai"),
+    grant: {
+      grant_type: XAI_DEVICE_GRANT,
+      client_id: XAI_CLIENT_ID,
+      device_code: device.deviceCode,
+    },
+    request: postForm,
+    parse: (res) => {
+      if (res.ok) {
+        const parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true, defaultExpiresIn: 3600 });
+        if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
+        return parsed;
+      }
+      const err = isRecord(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
+      if (err === "authorization_pending") return "pending";
+      if (err === "slow_down") return "slow_down";
+      if (err === "access_denied" || err === "authorization_denied") {
+        return { ok: false, error: "xAI device authorization was denied" };
+      }
+      if (err === "expired_token") return { ok: false, error: "xAI device code expired" };
+      return { ok: false, error: `xAI device token exchange failed (HTTP ${res.status})` };
+    },
+    waitFirst: true,
+    pollMarginMs: testLoopbackOverride("TERMINA_TEST_DEVICE_URL") ? 0 : XAI_POLL_MARGIN_MS,
+    slowDownMs: XAI_SLOW_DOWN_MS,
+    timeoutError: "xAI device authorization timed out",
+  }, signal);
 }
 
 
@@ -425,23 +462,6 @@ function githubAccessUrl(): string {
 
 function copilotSessionUrl(): string {
   return testLoopbackOverride("TERMINA_TEST_COPILOT_TOKEN_URL") || GITHUB_COPILOT_TOKEN_URL;
-}
-
-
-function validateGithubVerificationUri(raw: string): string {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error("Untrusted verification URI in GitHub OAuth response");
-  }
-  if (url.protocol !== "https:" && !testLoopbackOverride("TERMINA_TEST_DEVICE_URL")) {
-    throw new Error("Untrusted verification URI in GitHub OAuth response");
-  }
-  if (!testLoopbackOverride("TERMINA_TEST_DEVICE_URL") && url.hostname !== "github.com" && !url.hostname.endsWith(".github.com")) {
-    throw new Error("Untrusted verification URI in GitHub OAuth response");
-  }
-  return url.href;
 }
 
 
@@ -470,7 +490,7 @@ export async function requestGithubDeviceCode(signal?: AbortSignal): Promise<{
   return {
     deviceCode,
     userCode,
-    verificationUri: validateGithubVerificationUri(verification),
+    verificationUri: validateHttpsVerificationUri(verification, { hosts: ["github.com"], label: "GitHub" }),
     intervalMs: intervalMs(res.payload.interval, 5_000, testLoopbackOverride("TERMINA_TEST_DEVICE_URL") ? 0 : 1_000),
     expiresMs: positiveMs(res.payload.expires_in, 15 * 60 * 1000),
   };
@@ -481,35 +501,38 @@ export async function pollGithubDeviceToken(
   device: { deviceCode: string; intervalMs: number; expiresMs: number },
   signal?: AbortSignal,
 ): Promise<{ ok: true; githubToken: string } | { ok: false; error: string }> {
-  const deadline = Date.now() + device.expiresMs;
-  let waitMs = device.intervalMs;
-  while (Date.now() < deadline) {
-    const res = await postJson(
-      githubAccessUrl(),
-      {
-        client_id: GITHUB_COPILOT_CLIENT_ID,
-        device_code: device.deviceCode,
-        grant_type: GITHUB_DEVICE_GRANT,
-      },
-      signal,
-      { accept: "application/json", "user-agent": COPILOT_HEADERS["user-agent"] },
-    );
-    if (isRecord(res.payload) && typeof res.payload.access_token === "string" && res.payload.access_token) {
-      return { ok: true, githubToken: res.payload.access_token };
-    }
-    const err = isRecord(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
-    if (err === "access_denied") return { ok: false, error: "GitHub device authorization was denied" };
-    if (err === "expired_token") return { ok: false, error: "GitHub device code expired" };
-    if (err === "slow_down") waitMs += 5_000;
-    else if (err && err !== "authorization_pending") {
-      return { ok: false, error: `GitHub device token exchange failed (HTTP ${res.status})` };
-    } else if (!res.ok && err !== "authorization_pending") {
-      return { ok: false, error: `GitHub device token exchange failed (HTTP ${res.status})` };
-    }
-    const wait = Math.min(waitMs, Math.max(0, deadline - Date.now()));
-    if (wait > 0) await sleepAsync(wait, signal);
-  }
-  return { ok: false, error: "GitHub device authorization timed out" };
+  return pollDeviceGrant(device, {
+    tokenUrl: githubAccessUrl(),
+    grant: {
+      client_id: GITHUB_COPILOT_CLIENT_ID,
+      device_code: device.deviceCode,
+      grant_type: GITHUB_DEVICE_GRANT,
+    },
+    request: (url, grant, requestSignal) => postJson(url, grant, requestSignal, {
+      accept: "application/json",
+      "user-agent": COPILOT_HEADERS["user-agent"],
+    }),
+    parse: (res) => {
+      if (isRecord(res.payload) && typeof res.payload.access_token === "string" && res.payload.access_token) {
+        return { ok: true, githubToken: res.payload.access_token };
+      }
+      const err = isRecord(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
+      if (err === "access_denied") return { ok: false, error: "GitHub device authorization was denied" };
+      if (err === "expired_token") return { ok: false, error: "GitHub device code expired" };
+      if (err === "slow_down") return "slow_down";
+      if (err && err !== "authorization_pending") {
+        return { ok: false, error: `GitHub device token exchange failed (HTTP ${res.status})` };
+      }
+      if (!res.ok && err !== "authorization_pending") {
+        return { ok: false, error: `GitHub device token exchange failed (HTTP ${res.status})` };
+      }
+      return "pending";
+    },
+    waitFirst: false,
+    pollMarginMs: 0,
+    slowDownMs: 5_000,
+    timeoutError: "GitHub device authorization timed out",
+  }, signal);
 }
 
 

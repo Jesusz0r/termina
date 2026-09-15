@@ -45,7 +45,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const core = await import("../../../agent-core/main.ts");
     const files = await import("../../../agent-core/main/files.ts");
     const env = await import("../../../agent-core/main/env.ts");
-    const { defaultContextWindow, supportedEffortLevels, clampEffortLevel, thinkingEnabledFor, thinkingRequestFor, adaptiveEffortFor, effectiveEffortFor, reasoningEffortFor, includeEncryptedReasoning } = await import("../../../agent-core/models/capabilities.ts");
+    const { defaultContextWindow, supportedEffortLevels, clampEffortLevel, thinkingEnabledFor, thinkingRequestFor, adaptiveEffortFor, reasoningEffortFor, includeEncryptedReasoning } = await import("../../../agent-core/models/capabilities.ts");
     const { gpt56ReasoningContext, gpt5TextVerbosity } = await import("../../../agent-core/models/families/openai.ts");
     const host = await import("../../../agent-core/host.ts");
     const auth = await import("../../../agent-core/auth.ts");
@@ -1977,7 +1977,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const {
       pickHeaders,
       needsRefresh,
-      parseTokenResponse,
       parseOauthToken,
       parseModelRef,
       DEFAULT_MODELS,
@@ -2050,11 +2049,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("needsRefresh past is true", needsRefresh(Date.now() - 1000) === true);
     check("needsRefresh future is false", needsRefresh(Date.now() + 60_000) === false);
     
-    check("parseTokenResponse missing access fails", parseTokenResponse({ refresh_token: "r", expires_in: 10 }).ok === false);
-    check("parseTokenResponse missing refresh fails", parseTokenResponse({ access_token: "a", expires_in: 10 }).ok === false);
-    const parsedTok = parseTokenResponse({ access_token: "a", refresh_token: "r", expires_in: 3600 }, 1_000_000);
+    check("parseOauthToken missing access fails", parseOauthToken({ refresh_token: "r", expires_in: 10 }, Date.now(), { requireRefresh: true }).ok === false);
+    check("parseOauthToken missing refresh fails", parseOauthToken({ access_token: "a", expires_in: 10 }, Date.now(), { requireRefresh: true }).ok === false);
+    const parsedTok = parseOauthToken({ access_token: "a", refresh_token: "r", expires_in: 3600 }, 1_000_000, { requireRefresh: true });
     check(
-      "parseTokenResponse back-dates expires",
+      "parseOauthToken back-dates expires",
       parsedTok.ok === true && parsedTok.expires === 1_000_000 + 3600 * 1000 - 300_000,
     );
     check("maskSecret hides the raw token", !maskSecret("sk-ant-oat-abcdefgh").includes("sk-ant-oat-abcd") && maskSecret("sk-ant-oat-abcdefgh").endsWith("efgh"));
@@ -4296,7 +4295,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         supportedEffortLevels("opencode-go", "glm-5.3", auth.providerProtocol("opencode-go", "glm-5.3")).join(" ") === "high max" &&
         supportedEffortLevels("openrouter", "z-ai/glm-5.3", auth.providerProtocol("openrouter", "z-ai/glm-5.3")).join(" ") === "high xhigh",
     );
-    check("fable off clamps to minimal", effectiveEffortFor("anthropic", "claude-fable-5", "off", auth.providerProtocol("anthropic", "claude-fable-5")) === "minimal");
+    check("fable off clamps to minimal", clampEffortLevel("anthropic", "claude-fable-5", "off", auth.providerProtocol("anthropic", "claude-fable-5")) === "minimal");
     check(
       "thinkingRequestFor fable off stays adaptive",
       JSON.stringify(thinkingRequestFor("anthropic", "claude-fable-5", "off", auth.providerProtocol("anthropic", "claude-fable-5"))) ===

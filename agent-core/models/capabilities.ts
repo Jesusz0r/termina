@@ -269,16 +269,6 @@ export function adaptiveEffortFor(
   return (typeof mapped === "string" ? mapped : actual) as ReasoningEffort;
 }
 
-export function effectiveEffortFor(
-  provider: ProviderId,
-  model: string,
-  effort: EffortLevel,
-  protocol: ProviderProtocol,
-  reasoningLevels?: readonly string[],
-): EffortLevel {
-  return clampEffortLevel(provider, model, effort, protocol, reasoningLevels);
-}
-
 /** Grok rejects OpenAI encrypted-reasoning include, including on Zen and OpenRouter. */
 export function includeEncryptedReasoning(provider: ProviderId, model: string): boolean {
   if (provider === "xai") return false;
