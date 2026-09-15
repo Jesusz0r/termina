@@ -35,13 +35,20 @@ function fakeTailer() {
   const watched: string[] = [];
   const stopped: string[] = [];
   const producers: Array<{ id: string; pid: number }> = [];
+  let started = 0;
+  let fullyStopped = 0;
   return {
     watched,
     stopped,
     producers,
+    get started() { return started; },
+    get fullyStopped() { return fullyStopped; },
     watch(id: string) { watched.push(id); },
     stopWatching(id: string) { stopped.push(id); },
     setExpectedProducer(id: string, pid: number) { producers.push({ id, pid }); },
+    start() { started += 1; },
+    stop() { fullyStopped += 1; },
+    async watchReady(id: string) { this.watch(id); return true; },
   };
 }
 
@@ -264,6 +271,113 @@ describe("TerminalRuntime", () => {
     assert.equal(runtime.get("term-1")?.timeline[1]?.t, "agent_settled");
     assert.equal(runtime.get("term-1")?.sessionFile, "/tmp/core-session.json");
     assert.equal(runtime.get("term-1")?.plan.length, 1);
+    runtime.disposeEgress();
+  });
+
+  it("stopSidecar then release does not stopWatching twice", async () => {
+    const tailer = fakeTailer();
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    runtime.adopt(inst, { tailer, rendererTarget: null });
+    runtime.stopSidecar("term-1");
+    await Promise.resolve(inst.pty.onExit(0));
+    assert.deepEqual(tailer.stopped, ["term-1"]);
+    assert.equal(runtime.has("term-1"), false);
+    runtime.disposeEgress();
+  });
+
+  it("owns candidate start/stop and does not stopWatching the primary", async () => {
+    const primaryStopped: string[] = [];
+    const runtime = new TerminalRuntime(hostWithSends([]), {
+      eventsDir: "/tmp/termina-candidate-sidecar-owner",
+      flushIntervalMs: 0,
+    });
+    const primary = runtime.tailer;
+    assert.ok(primary);
+    const orig = primary.stopWatching.bind(primary);
+    primary.stopWatching = (id: string) => {
+      primaryStopped.push(id);
+      orig(id);
+    };
+    const candidate = fakeTailer();
+    runtime.ownCandidateSidecar("term-1", candidate);
+    assert.equal(candidate.started, 1);
+    assert.equal(runtime.hasCandidateSidecar("term-1"), true);
+    assert.equal(await runtime.watchCandidateReady("term-1"), true);
+    assert.deepEqual(candidate.watched, ["term-1"]);
+    const { inst } = fakeTerminal("term-1", 1);
+    runtime.adopt(inst, { tailer: candidate, skipSidecarWatch: true, rendererTarget: null });
+    assert.deepEqual(candidate.watched, ["term-1"]);
+    await Promise.resolve(inst.pty.onExit(0));
+    assert.deepEqual(candidate.stopped, ["term-1"]);
+    assert.equal(candidate.fullyStopped, 1);
+    assert.equal(runtime.hasCandidateSidecar("term-1"), false);
+    assert.deepEqual(primaryStopped, []);
+    runtime.disposeEgress();
+  });
+
+  it("recycled term-N cannot cancel another worldline candidate watch", async () => {
+    const primaryStopped: string[] = [];
+    const runtime = new TerminalRuntime(hostWithSends([]), {
+      eventsDir: "/tmp/termina-recycled-term-sidecar",
+      flushIntervalMs: 0,
+    });
+    const primary = runtime.tailer;
+    assert.ok(primary);
+    const orig = primary.stopWatching.bind(primary);
+    primary.stopWatching = (id: string) => {
+      primaryStopped.push(id);
+      orig(id);
+    };
+    const first = fakeTailer();
+    const second = fakeTailer();
+    runtime.ownCandidateSidecar("term-1", first);
+    const { inst: instA } = fakeTerminal("term-1", 1);
+    runtime.adopt(instA, { tailer: first, skipSidecarWatch: true, rendererTarget: null });
+    await Promise.resolve(instA.pty.onExit(0));
+    assert.deepEqual(first.stopped, ["term-1"]);
+    assert.equal(first.fullyStopped, 1);
+
+    runtime.ownCandidateSidecar("term-1", second);
+    assert.equal(await runtime.watchCandidateReady("term-1"), true);
+    const { inst: instB } = fakeTerminal("term-1", 2);
+    runtime.adopt(instB, { tailer: second, skipSidecarWatch: true, rendererTarget: null });
+    instA.exitHandled = false;
+    await Promise.resolve(instA.pty.onExit(0));
+    assert.equal(runtime.get("term-1"), instB);
+    assert.deepEqual(second.stopped, []);
+    assert.equal(second.fullyStopped, 0);
+    assert.equal(runtime.hasCandidateSidecar("term-1"), true);
+    assert.deepEqual(primaryStopped, []);
+    await Promise.resolve(instB.pty.onExit(0));
+    assert.deepEqual(second.stopped, ["term-1"]);
+    assert.equal(second.fullyStopped, 1);
+    runtime.disposeEgress();
+  });
+
+  it("keeps candidate events dirs off the primary tailer", () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), {
+      eventsDir: "/tmp/termina-primary-events-dir",
+      flushIntervalMs: 0,
+    });
+    const candidate = runtime.startCandidateSidecar("term-9", "/tmp/termina-candidate-events-dir");
+    assert.ok(candidate);
+    assert.notEqual(candidate, runtime.tailer);
+    assert.equal(runtime.hasCandidateSidecar("term-9"), true);
+    runtime.stopSidecar("term-9");
+    assert.equal(runtime.hasCandidateSidecar("term-9"), false);
+    runtime.disposeEgress();
+  });
+
+  it("owns child stream watch and release without a second stopWatching", () => {
+    const stream = fakeTailer();
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    runtime.watchSidecar("sub-term-1-bg-1", stream);
+    assert.deepEqual(stream.watched, ["sub-term-1-bg-1"]);
+    runtime.stopSidecar("sub-term-1-bg-1");
+    runtime.stopSidecar("sub-term-1-bg-1");
+    assert.deepEqual(stream.stopped, ["sub-term-1-bg-1"]);
+    assert.equal(stream.fullyStopped, 0);
     runtime.disposeEgress();
   });
 

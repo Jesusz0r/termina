@@ -611,9 +611,9 @@ class TerminaApp {
     coreBinary: () => coreEngineBinary(),
     sessionRootFor: (cwd) => this.coreProjectSessionDir(cwd),
     appendMailboxNote: (terminalId, note) => this.appendMailboxNote(terminalId, note),
-    watchStream: (terminalId) => this.tailer.watch(terminalId),
+    watchStream: (terminalId) => this.runtime.watchSidecar(terminalId),
     releaseStream: (terminalId) => {
-      this.tailer.stopWatching(terminalId);
+      this.runtime.stopSidecar(terminalId);
       this.runtime.deleteSidecarQueue(terminalId);
     },
     attachSession: (terminalId, viewerId) => {
@@ -631,7 +631,7 @@ class TerminaApp {
     },
     canonicalPath: (p) => this.canonicalPath(p),
     isWorldlineTerminal: (terminalId) =>
-      this.worldlineTailers.has(terminalId) || this.isWorldlineTerminal(terminalId),
+      this.runtime.hasCandidateSidecar(terminalId) || this.isWorldlineTerminal(terminalId),
     workspaceRootFor: (terminalId) => {
       const inst = this.runtime.get(terminalId);
       if (!inst) return null;
@@ -642,7 +642,7 @@ class TerminaApp {
     // launch); only an explicit host-level opt-in lets a child auto-approve.
     // Worldline candidates never qualify: the host refuses their spawns.
     autoApproveAllowedFor: (terminalId) =>
-      !this.worldlineTailers.has(terminalId)
+      !this.runtime.hasCandidateSidecar(terminalId)
       && !this.isWorldlineTerminal(terminalId)
       && cleanEnv().TERMINA_CORE_APPROVE === "all",
   });
@@ -725,8 +725,6 @@ class TerminaApp {
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /clear (/new alias) slash-command detection (terminals:write is per keystroke). */
   private newCommandBuffers = new Map<string, string>();
-  /** Tailers for candidate events directories. */
-  private worldlineTailers = new Map<string, SidecarTailer>();
   /** Live fold for `electron/agent-activity.ts`. Never persisted. */
   private activityInputs = new Map<string, AgentActivityInput>();
   private lastActivityKey = new Map<string, string>();
@@ -2172,15 +2170,13 @@ class TerminaApp {
     // readiness transition.
     const terminalId = this.allocateTerminalId();
     if (!eventsDir) throw new Error("candidate events directory is missing");
-    const tailer = new SidecarTailer(eventsDir);
+    const tailer = this.runtime.startCandidateSidecar(terminalId, eventsDir);
     tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.bindSidecarHold(tailer);
-    tailer.start();
-    this.worldlineTailers.set(terminalId, tailer);
     try {
-      // The durable `await tailer.watchReady(terminalId)` boundary is
-      // cancellation-raced so teardown cannot leave a waiter behind.
-      if (!(await awaitCandidateAbortable(tailer.watchReady(terminalId), opts.signal))) {
+      // The durable `await this.runtime.watchCandidateReady(terminalId)`
+      // boundary is cancellation-raced so teardown cannot leave a waiter behind.
+      if (!(await awaitCandidateAbortable(this.runtime.watchCandidateReady(terminalId), opts.signal))) {
         throw new Error("candidate sidecar tailer could not establish a durable startup cursor");
       }
       if (opts.signal?.aborted) throw new Error("candidate startup was cancelled");
@@ -2204,11 +2200,7 @@ class TerminaApp {
       }
       return { terminalId: inst.id, pid: inst.pty.pid };
     } catch (error) {
-      if (tailer) {
-        this.worldlineTailers.delete(terminalId);
-        tailer.stopWatching(terminalId);
-        tailer.stop();
-      }
+      this.runtime.stopSidecar(terminalId);
       throw error;
     }
   }
@@ -2920,7 +2912,7 @@ class TerminaApp {
    *  instead of the core default. Worldline candidates run explicit specs;
    *  their levels never become the user default. */
   private rememberEffort(inst: AgentTerminalInstance, level: string): void {
-    if (this.worldlineTailers.has(inst.id)) return;
+    if (this.runtime.hasCandidateSidecar(inst.id)) return;
     if ((this.preferences.defaultEffort ?? null) === level) return;
     this.commitPreferencePatch({ defaultEffort: level }, false).then(
       () => undefined,
@@ -3190,9 +3182,6 @@ class TerminaApp {
     exitOwner?.terminalIds.delete(inst.id);
     if (persistOwner) this.saveTerminalRoster(persistOwner);
     exitOwner?.worldlines?.terminalExited(inst.id);
-    this.worldlineTailers.get(inst.id)?.stop();
-    this.worldlineTailers.delete(inst.id);
-    this.tailer.stopWatching(inst.id);
     // A closed owner takes its background runs with it: no API burns for
     // a dead terminal, and no orphan results land nowhere.
     this.subagents.killOwner(inst.id, "terminal closed");
@@ -6988,9 +6977,6 @@ class TerminaApp {
       // Drain only this project's terminals. Other open projects keep running.
       for (const id of closingIds) {
         this.runtime.stopSidecar(id);
-        this.tailer.stopWatching(id);
-        this.worldlineTailers.get(id)?.stop();
-        this.worldlineTailers.delete(id);
         this.closeTerminal(id);
       }
       await this.drainTerminals(closingIds);
@@ -8911,8 +8897,6 @@ class TerminaApp {
     this.unsavedWaiters.clear();
     this.projects.clear();
     this.runtime.clear();
-    for (const tailer of this.worldlineTailers.values()) tailer.stop();
-    this.worldlineTailers.clear();
     this.stopPaintWatchdog();
   }
 

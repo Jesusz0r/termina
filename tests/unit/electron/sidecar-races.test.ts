@@ -188,10 +188,16 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
     try {
       const mainSource = await readFile("electron/main.ts", "utf8");
       const candidateStart = mainSource.indexOf("private async createCandidate");
-      const candidateTailerReady = mainSource.indexOf("await tailer.watchReady(terminalId)", candidateStart);
+      const candidateTailerReady = mainSource.indexOf("await this.runtime.watchCandidateReady(terminalId)", candidateStart);
       const candidateSpawn = mainSource.indexOf("await this.createTerminal(opts.root", candidateStart);
       expect(candidateStart >= 0 && candidateTailerReady > candidateStart && candidateTailerReady < candidateSpawn).toBe(true);
+      expect(mainSource.slice(candidateStart, candidateTailerReady)).toMatch(/this\.runtime\.startCandidateSidecar\(terminalId, eventsDir\)/);
       expect(mainSource.slice(candidateSpawn, candidateSpawn + 500)).toMatch(/skipSidecarWatch: true/);
+      expect(mainSource).not.toMatch(/\bworldlineTailers\b/);
+      expect(mainSource).not.toMatch(/this\.tailer\.stopWatching/);
+      expect(mainSource).not.toMatch(/this\.tailer\.watch\(/);
+      expect(mainSource).toMatch(/watchStream: \(terminalId\) => this\.runtime\.watchSidecar\(terminalId\)/);
+      expect(mainSource).toMatch(/this\.runtime\.stopSidecar\(terminalId\)/);
       const worldlinesSource = await readFile("electron/worldlines/manager.ts", "utf8");
       const launchStart = worldlinesSource.indexOf("private async launchCandidate");
       const mapping = worldlinesSource.indexOf("this.terminalToComparison.set(terminalId", launchStart);

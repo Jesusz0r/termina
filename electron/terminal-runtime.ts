@@ -2,11 +2,12 @@
  * In-process terminal lifecycle.
  *
  * Owns the live instance map, PTY spawn/exit, the egress ledger, the primary
- * events dir + tailer, the roster file store, sidecar watch/queue, generation
- * fencing, and the viewer registry. Viewers subscribe; none own the session
- * triple (PTY + sidecar + core bundle). Main is a client: it validates IPC,
- * folds activity, and owns projects/leases/snapshots. Renderer attach stays
- * `readyTerminal` / `acknowledgePtyData` — this module does not add IPC.
+ * events dir + tailer, candidate sidecar tailers (distinct events dirs), the
+ * roster file store, sidecar watch/queue, generation fencing, and the viewer
+ * registry. Viewers subscribe; none own the session triple (PTY + sidecar +
+ * core bundle). Main is a client: it validates IPC, folds activity, and owns
+ * projects/leases/snapshots. Renderer attach stays `readyTerminal` /
+ * `acknowledgePtyData` — this module does not add IPC.
  */
 import { PtyEgressScheduler, type PtyEgressSchedulerOptions, type PtyRendererSendTarget } from "./pty-egress.js";
 import {
@@ -34,6 +35,15 @@ export interface RuntimeSidecarTailer {
   watch(id: string): void;
   stopWatching(id: string): void;
   setExpectedProducer(id: string, pid: number): void;
+  /** Dedicated candidate tailers shut down their watcher/timer here. */
+  stop?(): void;
+  start?(): void;
+  watchReady?(id: string): Promise<boolean>;
+}
+
+interface SidecarWatch {
+  tailer: RuntimeSidecarTailer;
+  generation: number;
 }
 
 export interface TerminalRuntimeHost {
@@ -123,7 +133,13 @@ export class TerminalRuntime {
   private terminalSeq = 0;
   private readonly terminals = new Map<string, AgentTerminalInstance>();
   private readonly sidecarQueues = new Map<string, SidecarEventQueue>();
-  private readonly sidecarSources = new Map<string, RuntimeSidecarTailer>();
+  private readonly sidecarSources = new Map<string, SidecarWatch>();
+  /** Distinct candidate tailers (own events dirs). Never the primary tailer. */
+  private readonly candidateSidecars = new Map<string, RuntimeSidecarTailer>();
+  /** Watch generation bound to a live instance so a recycled term-N cannot
+   *  cancel a later worldline's watch. */
+  private readonly instanceSidecarGenerations = new WeakMap<AgentTerminalInstance, number>();
+  private sidecarWatchSeq = 0;
   /** Live viewers per terminal. Empty does not pause PTY, sidecar, or session. */
   private readonly viewers = new Map<string, Set<string>>();
   private readonly egress: PtyEgressScheduler;
@@ -168,8 +184,13 @@ export class TerminalRuntime {
   }
 
   clear(): void {
-    for (const [id, tailer] of this.sidecarSources) tailer.stopWatching(id);
+    for (const id of [...this.sidecarSources.keys()]) this.stopSidecar(id);
     this.sidecarSources.clear();
+    for (const [id, tailer] of this.candidateSidecars) {
+      tailer.stopWatching(id);
+      tailer.stop?.();
+    }
+    this.candidateSidecars.clear();
     this.terminals.clear();
     this.viewers.clear();
   }
@@ -254,9 +275,9 @@ export class TerminalRuntime {
       }
       if (beforeError) throw beforeError;
     };
-    this.sidecarSources.set(inst.id, opts.tailer);
-    if (!opts.skipSidecarWatch) opts.tailer.watch(inst.id);
-    if (inst.type === "agent") opts.tailer.setExpectedProducer(inst.id, inst.pty.pid);
+    this.bindInstanceSidecar(inst, opts.tailer, opts.skipSidecarWatch === true);
+    const source = this.sidecarSources.get(inst.id)?.tailer ?? opts.tailer;
+    if (inst.type === "agent") source.setExpectedProducer(inst.id, inst.pty.pid);
   }
 
   /** Enqueue PTY output in the single fair, lossless delivery path. */
@@ -426,17 +447,109 @@ export class TerminalRuntime {
     this.sidecarQueues.delete(id);
   }
 
+  /**
+   * Create and start a candidate-owned tailer for a distinct events dir.
+   * Does not watch; call watchCandidateReady before spawn so the cursor is
+   * durable. Never merges into the primary tailer.
+   */
+  startCandidateSidecar(id: string, eventsDir: string): SidecarTailer {
+    if (!eventsDir) throw new Error("candidate events directory is missing");
+    if (this.terminals.has(id)) throw new Error(`terminal ${id} already exists`);
+    const tailer = new SidecarTailer(eventsDir);
+    this.ownCandidateSidecar(id, tailer);
+    return tailer;
+  }
+
+  /**
+   * Own a distinct candidate tailer. Tests pass a fake; production uses
+   * startCandidateSidecar. Does not call watch() — watchCandidateReady arms
+   * the cursor, or adopt({ skipSidecarWatch: true }) keeps it.
+   */
+  ownCandidateSidecar(id: string, tailer: RuntimeSidecarTailer): void {
+    if (this.terminals.has(id)) throw new Error(`terminal ${id} already exists`);
+    if (this.sidecarSources.has(id) || this.candidateSidecars.has(id)) this.stopSidecar(id);
+    this.candidateSidecars.set(id, tailer);
+    this.installSidecarSource(id, tailer);
+    tailer.start?.();
+  }
+
+  hasCandidateSidecar(id: string): boolean {
+    return this.candidateSidecars.has(id);
+  }
+
+  /** Establish a durable startup cursor on the candidate-owned tailer. */
+  watchCandidateReady(id: string): Promise<boolean> {
+    const tailer = this.candidateSidecars.get(id);
+    if (!tailer) return Promise.resolve(false);
+    if (tailer.watchReady) return tailer.watchReady(id);
+    tailer.watch(id);
+    return Promise.resolve(true);
+  }
+
+  /**
+   * Tail a sidecar id that has no PTY instance (child streams). Defaults to
+   * the primary tailer. Destroy via stopSidecar — never a second stopWatching.
+   */
+  watchSidecar(id: string, tailer?: RuntimeSidecarTailer): void {
+    const source = tailer ?? this.tailer;
+    if (!source) return;
+    this.installSidecarSource(id, source);
+    source.watch(id);
+  }
+
   /** Destroy-path only. Viewer detach must never call this. */
   stopSidecar(id: string): void {
-    this.sidecarSources.get(id)?.stopWatching(id);
+    this.stopSidecarWatch(id);
+  }
+
+  private installSidecarSource(id: string, tailer: RuntimeSidecarTailer): number {
+    const generation = ++this.sidecarWatchSeq;
+    this.sidecarSources.set(id, { tailer, generation });
+    return generation;
+  }
+
+  private bindInstanceSidecar(inst: AgentTerminalInstance, tailer: RuntimeSidecarTailer, skipWatch: boolean): void {
+    const existing = this.sidecarSources.get(inst.id);
+    if (existing) {
+      // Keep the armed cursor. A candidate watchReady already owns this id.
+      this.instanceSidecarGenerations.set(inst, existing.generation);
+      return;
+    }
+    const generation = this.installSidecarSource(inst.id, tailer);
+    this.instanceSidecarGenerations.set(inst, generation);
+    if (!skipWatch) tailer.watch(inst.id);
+  }
+
+  /**
+   * Stop the current watch for `id`, or no-op when `generation` no longer
+   * owns it (recycled term-N). Dedicated candidate tailers are stop()'d.
+   */
+  private stopSidecarWatch(id: string, generation?: number): void {
+    const watch = this.sidecarSources.get(id);
+    if (!watch) {
+      const leftover = this.candidateSidecars.get(id);
+      if (leftover && generation === undefined) {
+        this.candidateSidecars.delete(id);
+        leftover.stop?.();
+      }
+      return;
+    }
+    if (generation !== undefined && watch.generation !== generation) return;
+    this.sidecarSources.delete(id);
+    const dedicated = this.candidateSidecars.get(id);
+    if (dedicated === watch.tailer) this.candidateSidecars.delete(id);
+    watch.tailer.stopWatching(id);
+    if (dedicated === watch.tailer) dedicated.stop?.();
   }
 
   private release(inst: AgentTerminalInstance): void {
-    this.terminals.delete(inst.id);
-    this.viewers.delete(inst.id);
-    this.sidecarSources.get(inst.id)?.stopWatching(inst.id);
-    this.sidecarSources.delete(inst.id);
-    this.sidecarQueues.delete(inst.id);
-    this.egress.cancel(inst.id, inst.generation);
+    const generation = this.instanceSidecarGenerations.get(inst);
+    if (this.terminals.get(inst.id) === inst) {
+      this.terminals.delete(inst.id);
+      this.viewers.delete(inst.id);
+      this.sidecarQueues.delete(inst.id);
+      this.egress.cancel(inst.id, inst.generation);
+    }
+    this.stopSidecarWatch(inst.id, generation);
   }
 }
