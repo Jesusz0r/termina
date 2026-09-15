@@ -52,17 +52,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
     const compat = await import("../../../agent-core/openai-compat.ts");
     const cache = await import("../../../agent-core/cache.ts");
     const anthropicCache = await import("../../../agent-core/main/anthropic-cache.ts");
-    const coreLoad = await import("../../../agent-core/main.ts")
-      .then((module) => ({ module, error: null }))
-      .catch((error) => ({ module: null, error }));
-    const core = coreLoad.module;
-    
-    function requireCore() {
-      if (core) return core;
-      const detail = coreLoad.error instanceof Error ? coreLoad.error.message : String(coreLoad.error);
-      throw new Error(`agent-core/main.ts could not load: ${detail}`);
-    }
-    
+
     const failures: Array<{ name: string; error: unknown }> = [];
     
     async function test(name: string, fn: () => void | Promise<void>): Promise<void> {
