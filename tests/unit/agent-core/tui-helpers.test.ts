@@ -28,7 +28,7 @@ describe("TUI same-file helpers (#352)", () => {
   });
 
   it("prefix-matches slash names until a picker head is exact", () => {
-    expect(matchingSlashCommands("/logi").map((row) => row.name)).toEqual(["/login", "/logout"]);
+    expect(matchingSlashCommands("/log").map((row) => row.name)).toEqual(["/login", "/logout"]);
     expect(matchingSlashCommands("/mode").map((row) => row.name)).toEqual(["/model", "/models"]);
     expect(matchingSlashCommands("/effor").map((row) => row.name)).toEqual(["/effort"]);
     expect(matchingSlashCommands("/permiss").map((row) => row.name)).toEqual(["/permissions"]);
@@ -88,9 +88,11 @@ describe("TUI same-file helpers (#352)", () => {
     const frame = host.buildFrame({ cols: 80, rows: 24 }).text;
     expect(frame.split("\n").at(-1)).toBe(title);
     expect(title).toContain("▸ termina");
-    expect(title).toContain("anthropic/claude · max");
+    expect(title).toContain(" · max");
     expect(title).toContain("perm ask");
     expect(title).toContain("2 img");
     expect(title).toContain("queued");
+    const wide = host.titleLine(120);
+    expect(wide).toContain("anthropic/claude · max");
   });
 });
