@@ -110,7 +110,17 @@ function sessionFileTime(fileName: string, mtimeMs: number): number {
   return sessionTimestampFromName(fileName) || mtimeMs;
 }
 
-function formatSessionHitSnippet(role: string, text: string, matchIdx: number, matchLen: number): string {
+function formatSessionHitSnippet({
+  role,
+  text,
+  matchIdx,
+  matchLen,
+}: {
+  role: string;
+  text: string;
+  matchIdx: number;
+  matchLen: number;
+}): string {
   const prefix = `[${role}] `;
   if (text.length <= 300) return prefix + text;
   const start = Math.max(0, matchIdx - 60);
@@ -371,7 +381,7 @@ export async function searchSessionFiles(opts: {
                 hits.push({
                   sessionFile: file.name,
                   line: lineNum,
-                  text: formatSessionHitSnippet(parsed.role, parsed.text, matchIdx, needle.length),
+                  text: formatSessionHitSnippet({ role: parsed.role, text: parsed.text, matchIdx, matchLen: needle.length }),
                   before: prevText,
                   after: "",
                   ts: sessionFileTime(file.name, file.mtimeMs),

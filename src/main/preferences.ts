@@ -87,11 +87,18 @@ export function paintPreferences(prefs: AppPreferences, bindings: PreferencesBin
   bindings.forEachTerminal((view) => applyTerminalPreferences(view, prefs));
 }
 
+type ApplyPreferencesRequest = {
+  next: AppPreferences;
+  persist: boolean;
+  activateShortcuts: boolean;
+  confirmReset?: boolean;
+};
+
 export interface PreferencesController {
   get current(): AppPreferences;
   get committed(): AppPreferences | null;
   settingsView: SettingsView;
-  apply(next: AppPreferences, persist: boolean, activateShortcuts: boolean, confirmReset?: boolean): void;
+  apply(request: ApplyPreferencesRequest): void;
   retry(): Promise<void>;
   openSettings(): void;
 }
@@ -109,7 +116,7 @@ export async function createPreferences(bindings: PreferencesBindings): Promise<
     paintPreferences(prefs, bindings);
   }
 
-  function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean, confirmReset = false): void {
+  function applyPreferences({ next, persist, activateShortcuts, confirmReset = false }: ApplyPreferencesRequest): void {
     if (persist && !committedPreferences) {
       toast("Could not load settings", "error");
       return;
@@ -149,10 +156,10 @@ export async function createPreferences(bindings: PreferencesBindings): Promise<
   }
 
   const settingsView = new SettingsView({
-    onChange: (next) => applyPreferences(next, true, false),
-    onReset: (next) => applyPreferences(next, true, false, true),
+    onChange: (next) => applyPreferences({ next, persist: true, activateShortcuts: false }),
+    onReset: (next) => applyPreferences({ next, persist: true, activateShortcuts: false, confirmReset: true }),
     onOpen: () => void window.termina.setKeyboardShortcuts(emptyShortcuts()).catch(() => undefined),
-    onClose: (next) => applyPreferences(next, true, true),
+    onClose: (next) => applyPreferences({ next, persist: true, activateShortcuts: true }),
     onRetryLoad: () => void retryPreferences(),
   });
 
@@ -175,7 +182,7 @@ export async function createPreferences(bindings: PreferencesBindings): Promise<
     try {
       const result = await loadPreferencesWithRetry(() => window.termina.getPreferences());
       if (!result.ok) return;
-      applyPreferences(result.preferences, false, true);
+      applyPreferences({ next: result.preferences, persist: false, activateShortcuts: true });
       dismissPrefsLoadBanner();
       settingsView.setLoaded(result.preferences);
     } finally {
@@ -183,7 +190,7 @@ export async function createPreferences(bindings: PreferencesBindings): Promise<
     }
   }
 
-  if (committedPreferences) applyPreferences(preferences, false, true);
+  if (committedPreferences) applyPreferences({ next: preferences, persist: false, activateShortcuts: true });
   else showPrefsLoadBanner();
 
   return {

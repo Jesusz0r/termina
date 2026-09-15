@@ -2984,12 +2984,12 @@ export class WorldlineManager {
     }
     let entries: string[];
     try {
-      entries = await boundedWorldlineEntries(
-        worldsRoot,
-        MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
-        `worldline root contains too many entries (${MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES}); resolve retained recovery evidence before retrying`,
-        MAX_UNCERTAIN_SCAN_WORK_BYTES,
-      );
+      entries = await boundedWorldlineEntries({
+        path: worldsRoot,
+        limit: MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
+        message: `worldline root contains too many entries (${MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES}); resolve retained recovery evidence before retrying`,
+        workBudget: MAX_UNCERTAIN_SCAN_WORK_BYTES,
+      });
     } catch {
       return;
     }

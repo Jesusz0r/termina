@@ -164,6 +164,7 @@ export async function promotionDestination(primaryRoot: string, canonicalRoot: s
 }
 
 
+// Keep positional: abs, canonicalRoot, canonicalPath, and prebound are independent identity/binding primitives with no shared options meaning.
 export async function promotionParentIdentity(abs: string, canonicalRoot: string, canonicalPath: CanonicalPath, prebound: PromotionDirectoryPlan): Promise<PromotionParentIdentity> {
   const parent = await canonicalPath(dirname(abs));
   if (!isInside(canonicalRoot, parent)) throw new Error(`promotion parent escapes the primary project: ${abs}`);

@@ -107,12 +107,12 @@ export async function measurePromotionRetention(worldsRoot: string): Promise<Pro
 
   const limit = BigInt(MAX_PROMOTION_JOURNAL_BYTES + MAX_PROMOTION_OPERATION_BYTES);
   let bytes = rootInfo.size;
-  const entries = await boundedWorldlineEntries(
-    root,
-    MAX_PROMOTION_JOURNAL_ROOT_ENTRIES,
-    `promotion journal root contains too many entries (${MAX_PROMOTION_JOURNAL_ROOT_ENTRIES})`,
-    MAX_PROMOTION_SCAN_WORK_BYTES,
-  );
+  const entries = await boundedWorldlineEntries({
+    path: root,
+    limit: MAX_PROMOTION_JOURNAL_ROOT_ENTRIES,
+    message: `promotion journal root contains too many entries (${MAX_PROMOTION_JOURNAL_ROOT_ENTRIES})`,
+    workBudget: MAX_PROMOTION_SCAN_WORK_BYTES,
+  });
   for (const name of entries) {
     const child = join(root, name);
     const remaining = limit > bytes ? limit - bytes : 0n;
