@@ -12,6 +12,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+import { evictOldest } from "../shared/evict-oldest.js";
 import {
   IGNORED_SEGMENTS,
   matchGitignore,
@@ -880,12 +881,12 @@ export class ProjectWatcher {
     this.lastContents.set(key, content);
     this.lastOids.set(key, { sha1: blobOid(content, "sha1"), sha256: blobOid(content, "sha256") });
     while (this.lastContents.size > 1 && (this.lastContents.size > ProjectWatcher.CACHE_LIMIT || this.cacheBytes > ProjectWatcher.CACHE_BYTES)) {
-      const oldest = this.lastContents.keys().next().value;
-      if (oldest === undefined) break;
-      const evicted = this.lastContents.get(oldest);
-      this.cacheBytes -= evicted ? Buffer.byteLength(evicted, "utf8") : 0;
-      this.lastContents.delete(oldest);
-      this.lastOids.delete(oldest);
+      const evicted = evictOldest(this.lastContents, this.lastContents.size - 1);
+      if (evicted.length === 0) break;
+      for (const [oldest, cached] of evicted) {
+        this.cacheBytes -= Buffer.byteLength(cached, "utf8");
+        this.lastOids.delete(oldest);
+      }
     }
   }
 

@@ -6,6 +6,7 @@ import { lstat, mkdir, rm, writeFile, realpath as fsRealpath } from "node:fs/pro
 import { randomUUID } from "node:crypto";
 import { isErrno } from "../../../shared/guards.ts";
 import { syncParentDir } from "../../../shared/fsync.ts";
+import { evictOldest } from "../../../shared/evict-oldest.ts";
 import ts from "typescript";
 
 /**
@@ -137,10 +138,10 @@ const realDeleteBaseline = loadMethod("deleteBaseline", "private deleteBaseline(
 const realSetBaseline = loadMethod(
   "setBaseline",
   "private setBaseline(",
-  ["TerminaApp"],
-  [TerminaAppConsts],
+  ["TerminaApp", "evictOldest"],
+  [TerminaAppConsts, evictOldest],
 ) as SetBaseline;
-const realSetBounded = loadMethod("setBounded", "private setBounded<", [], []) as SetBounded;
+const realSetBounded = loadMethod("setBounded", "private setBounded<", ["evictOldest"], [evictOldest]) as SetBounded;
 const realRecordModified = loadMethod(
   "recordModified",
   "private async recordModified(",
