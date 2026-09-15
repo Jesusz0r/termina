@@ -13,5 +13,6 @@ These describe the product and architecture as they exist today. They are not im
 - [`reference/CALIBRATION.md`](reference/CALIBRATION.md) — handoff confidence policy
 - [`reference/AUDIT-LEDGER.md`](reference/AUDIT-LEDGER.md) — standing audit ledger rule
 - [`reference/LAZINESS-BASELINE.md`](reference/LAZINESS-BASELINE.md) — measurement write-up for issue #125
+- [`reference/MODULE-TEST-MATRIX.md`](reference/MODULE-TEST-MATRIX.md) — production module → unit-test owner, or none (issue #331)
 
 Images used by the repository README are kept in [`assets/`](assets/).
