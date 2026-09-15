@@ -13,11 +13,10 @@
 
 // Split into ./worldline-git/ modules (issue #38). This entry re-exports the public surface.
 export { captureRootInRepo, disposeWorldlineGitCore, gitCommitFile, gitCommitTree, gitCommittedChanges, gitCommonDir, gitHead, gitIgnoredFiles, gitObjectFormat, gitTopLevel, gitTrackedFiles, gitWorkingChanges, trustResourceHashes } from "./worldline-git/git-reads.js";
-export type { GitFileChange, GitTreeEntry } from "./worldline-git/git-reads.js";
 export { SnapshotStore } from "./worldline-git/snapshot-store.js";
-export type { SnapshotStoreDirectoryIdentity, SnapshotStoreGitLayout, SnapshotStoreLifecycle, SourceState } from "./worldline-git/snapshot-store.js";
+export type { SourceState } from "./worldline-git/snapshot-store.js";
 export { boundPromotionCopyFile, boundPromotionCopyTree, boundPromotionCreateDirectory, boundPromotionCreateSymlink, boundPromotionEnsureDirectory, boundPromotionInstallDirectory, boundPromotionListDirectories, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionRemoveTree, boundPromotionTransition, boundPromotionWriteFile, readBoundPromotionJournal } from "./worldline-git/bound-promotion.js";
-export type { BoundPromotionDirectoryResult, BoundPromotionExpectedLeaf, BoundPromotionExpectedMissing, BoundPromotionExpectedState, BoundPromotionJournalRead, BoundPromotionLeafResult, BoundPromotionTransitionRequest, BoundPromotionTransitionResult, PromotionFsIdentity } from "./worldline-git/bound-promotion.js";
+export type { BoundPromotionExpectedLeaf, PromotionFsIdentity } from "./worldline-git/bound-promotion.js";
 export { bindOwnedDirectory, bindOwnedEntry, boundPromotionWriteJsonFile, createOwnedDirectory, removeBoundOwnedDirectory, removeBoundOwnedEntry, writeBoundOwnedFile } from "./worldline-git/bound-owned.js";
-export type { BoundOwnedDirectory, BoundOwnedEntry } from "./worldline-git/bound-owned.js";
-export { MIN_WORLDS_FREE_BYTES, freeDiskBytes, platformHasCopyOnWrite, platformHasRecursiveWatcher, platformHasSandboxExec } from "./worldline-git/platform.js";
+export type { BoundOwnedDirectory } from "./worldline-git/bound-owned.js";
+export { MIN_WORLDS_FREE_BYTES, freeDiskBytes, platformHasRecursiveWatcher, platformHasSandboxExec } from "./worldline-git/platform.js";

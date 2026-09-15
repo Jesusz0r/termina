@@ -12,7 +12,8 @@ import { watch } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { platformHasRecursiveWatcher, platformHasSandboxExec, platformHasCopyOnWrite, freeDiskBytes } from "../../electron/worldline-git.js";
+import { platformHasRecursiveWatcher, platformHasSandboxExec, freeDiskBytes } from "../../electron/worldline-git.js";
+import { platformHasCopyOnWrite } from "../../electron/worldline-git/platform.js";
 import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 export default async function run(log: (msg: string) => void) {
