@@ -24,7 +24,7 @@ One responsibility → one owner. Reuse, extend, or replace — never add a para
 - `electron/session-fork.ts` → `electron/session-worker.ts` — only session fork path.
 - `shared/preferences.ts` — only prefs validator; `electron/preferences.ts` — only file store.
 - `electron/plan-board.ts` — Plan Board parse/progress/dispatch. `electron/worldlines/` — comparisons/promotion/evidence/runs. `electron/evidence.ts` only measures.
-- `shared/guards.ts` — only unknown-value inspectors (`isRecord`, `errorCode`, `isErrno`); `shared/fsync.ts` — only crash-durability fsyncs (`syncDirectory`, `syncParentDir`). Node-only except guards. `shared/durable-write.ts` — only durable async atomic replace (`durableAtomicWrite`). Node-only. Not cursor no-fsync writes, sync agent writers, or an fsync.ts expansion.
+- `shared/guards.ts` — only unknown-value inspectors (`isRecord`, `errorCode`, `isErrno`); `shared/fsync.ts` — only crash-durability fsyncs (`syncDirectory`, `syncParentDir`). Node-only except guards. `shared/durable-write.ts` — only durable async atomic replace (`durableAtomicWrite`). Node-only. Not cursor no-fsync writes, sync agent writers, or an fsync.ts expansion. `shared/evict-oldest.ts` — only insertion-order Map cap (`evictOldest`). Not a generic LRU.
 - `shared/grep-pattern.ts` — only grep-pattern validator (agent-core + main). `electron/content-search.ts` owns project content search; `electron/quick-open.ts` owns file-name search.
 - `src/theme-tokens.gen.ts` is generated from `src/styles.css` by `scripts/theme-tokens.ts` (runs in `scripts/build.ts`); never hand-edit the generated file.
 - `electron/sidecar.ts` owns sidecar parse/tail. Only writers: `agent-core/host.ts` + `logEvent` in `agent-core/main/sidecar.ts`.

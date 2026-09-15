@@ -17,6 +17,7 @@ import { rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { coreSessionFile, parseSessionBundlePath, sessionBundleExists } from "../agent-core/session.js";
+import { evictOldest } from "../shared/evict-oldest.js";
 import { subagentViewerId } from "./terminal-runtime.js";
 import {
   MAX_SUBAGENT_ERROR_CHARS,
@@ -768,12 +769,8 @@ export class SubagentHost {
     if (run.sessionFile) {
       this.pastSessions.set(this.runKey(run.parentTerminalId, run.runId), run.sessionFile);
       const evicted: string[] = [];
-      while (this.pastSessions.size > MAX_SUBAGENT_PAST_SESSIONS) {
-        const oldest = this.pastSessions.keys().next().value as string | undefined;
-        if (oldest === undefined) break;
-        const removed = this.pastSessions.get(oldest);
-        this.pastSessions.delete(oldest);
-        if (removed) evicted.push(removed);
+      for (const [, removed] of evictOldest(this.pastSessions, MAX_SUBAGENT_PAST_SESSIONS)) {
+        evicted.push(removed);
       }
       const live = new Set(this.pastSessions.values());
       for (const run of this.runs.values()) {

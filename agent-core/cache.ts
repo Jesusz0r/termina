@@ -7,6 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import { cacheRouteDomain } from "./auth.ts";
+import { evictOldest } from "../shared/evict-oldest.ts";
 import type {
   CacheCapabilityObservation,
   CacheCapabilityProvenance,
@@ -249,11 +250,7 @@ export function recordCapability(cache: CapabilityCache, input: RecordCapability
   };
   cache.entries.delete(key);
   cache.entries.set(key, record);
-  while (cache.entries.size > cache.maxEntries) {
-    const oldest = cache.entries.keys().next().value as string | undefined;
-    if (oldest === undefined) break;
-    cache.entries.delete(oldest);
-  }
+  evictOldest(cache.entries, cache.maxEntries);
   return { ...record, provenance: record.provenance ? { ...record.provenance } : null };
 }
 

@@ -12,6 +12,7 @@ import { stat, realpath as fsRealpath } from "node:fs/promises";
 import { join } from "node:path";
 import { terminateSandboxProcessGroup } from "./sandbox.js";
 import { writeBoundOwnedFile, type PromotionFsIdentity } from "./worldline-git.js";
+import { evictOldest } from "../shared/evict-oldest.js";
 
 /** Bound for one diagnostics run's captured output. */
 const MAX_DIAGNOSTICS_OUTPUT = 32 * 1024;
@@ -106,10 +107,7 @@ export class DiagnosticsRunner {
     // Refresh recency: re-setting a Map key keeps its original position.
     this.lastDiagnostics.delete(ws.id);
     this.lastDiagnostics.set(ws.id, { generation: last?.generation ?? -1, atMs: Date.now() });
-    if (this.lastDiagnostics.size > MAX_DIAGNOSTICS_WORKSPACES) {
-      const oldest = this.lastDiagnostics.keys().next().value;
-      if (oldest !== undefined && oldest !== ws.id) this.lastDiagnostics.delete(oldest);
-    }
+    evictOldest(this.lastDiagnostics, MAX_DIAGNOSTICS_WORKSPACES);
     let child: ReturnType<typeof spawn> | null = null;
     let output = "";
     let finished = false;

@@ -50,6 +50,7 @@ import { Explorer } from "./components/explorer";
 import { projectChangedPaths } from "./explorer-file";
 import { showUnsavedConfirm, toast } from "./components/modals";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
+import { evictOldest } from "../shared/evict-oldest";
 import { showContextMenu, type ContextMenuItem } from "./components/context-menu";
 import { applyEmptyStateShortcutHints, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
 import { CommandDispatcher } from "./commands";
@@ -2137,11 +2138,7 @@ window.termina.onFileChanged((p) => {
   const at = Date.now();
   lastChangePush.delete(key);
   lastChangePush.set(key, { at, changedLines: p.changedLines });
-  while (lastChangePush.size > MAX_LAST_CHANGE_PUSH) {
-    const oldestKey = lastChangePush.keys().next().value;
-    if (oldestKey === undefined) break;
-    lastChangePush.delete(oldestKey);
-  }
+  evictOldest(lastChangePush, MAX_LAST_CHANGE_PUSH);
   activityPane.dropStaleAcceptMarks(p.path);
   if (p.content !== undefined) {
     largeChangeEpoch.delete(key);

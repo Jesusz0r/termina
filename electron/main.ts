@@ -122,6 +122,7 @@ import {
 } from "./main/project-workspace.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
+import { evictOldest } from "../shared/evict-oldest.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
 import { syncParentDir } from "../shared/fsync.js";
 import { isErrno } from "../shared/guards.js";
@@ -4299,11 +4300,7 @@ class TerminaApp {
       existing.at = capped.at;
     } else {
       edits.set(capped.path, capped);
-      if (edits.size > TerminaApp.USER_EDITS_MAX) {
-        // Evict the oldest known edit (map order is insertion order).
-        const oldest = edits.keys().next().value;
-        if (oldest !== undefined) edits.delete(oldest);
-      }
+      evictOldest(edits, TerminaApp.USER_EDITS_MAX);
     }
     this.scheduleUserEditsWrite();
   }
@@ -6366,9 +6363,12 @@ class TerminaApp {
     if (value === null || stateId === undefined || stateId === null) inst.baselineStates.delete(path);
     else inst.baselineStates.set(path, stateId);
     while (inst.baselines.size > TerminaApp.MAX_BASELINE_FILES || inst.baselineBytes > TerminaApp.MAX_BASELINE_BYTES) {
-      const oldest = inst.baselines.keys().next().value;
-      if (oldest === undefined) break;
-      this.deleteBaseline(inst, oldest);
+      const evicted = evictOldest(inst.baselines, inst.baselines.size - 1);
+      if (evicted.length === 0) break;
+      for (const [oldest, previous] of evicted) {
+        if (previous !== null) inst.baselineBytes -= Buffer.byteLength(previous, "utf8");
+        inst.baselineStates.delete(oldest);
+      }
     }
   }
 
@@ -6385,11 +6385,9 @@ class TerminaApp {
     inst.runSnapshots.set(path, content);
     inst.runSnapshotBytes += Buffer.byteLength(content, "utf8");
     while (inst.runSnapshots.size > TerminaApp.MAX_RUN_SNAPSHOTS || inst.runSnapshotBytes > TerminaApp.MAX_RUN_SNAPSHOT_BYTES) {
-      const oldest = inst.runSnapshots.keys().next().value;
-      if (oldest === undefined) break;
-      const value = inst.runSnapshots.get(oldest);
-      if (value !== undefined) inst.runSnapshotBytes -= Buffer.byteLength(value, "utf8");
-      inst.runSnapshots.delete(oldest);
+      const evicted = evictOldest(inst.runSnapshots, inst.runSnapshots.size - 1);
+      if (evicted.length === 0) break;
+      for (const [, value] of evicted) inst.runSnapshotBytes -= Buffer.byteLength(value, "utf8");
     }
   }
 
@@ -6426,11 +6424,7 @@ class TerminaApp {
 
   private setBounded<K, V>(map: Map<K, V>, key: K, value: V, limit: number): void {
     map.set(key, value);
-    while (map.size > limit) {
-      const oldest = map.keys().next().value;
-      if (oldest === undefined) break;
-      map.delete(oldest);
-    }
+    evictOldest(map, limit);
   }
 
   /**
@@ -7110,10 +7104,7 @@ class TerminaApp {
       const lastWatch = this.lastWatchChange.get(path);
       const isDupWatch = lastWatch !== undefined && lastWatch.identity === watchIdentity && now - lastWatch.at < 5000;
       this.lastWatchChange.set(path, { identity: watchIdentity, at: now });
-      if (this.lastWatchChange.size > TerminaApp.LAST_WATCH_MAX) {
-        const oldest = this.lastWatchChange.keys().next().value;
-        if (oldest !== undefined) this.lastWatchChange.delete(oldest);
-      }
+      evictOldest(this.lastWatchChange, TerminaApp.LAST_WATCH_MAX);
       if (isDupWatch) return;
       // The generation moves only on a real tree change. A duplicate event
       // (same bytes within the merge window) must not trip the preflight or
