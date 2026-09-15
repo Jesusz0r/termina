@@ -19,7 +19,7 @@ const SIDECAR_EVENT_QUEUE_HIGH_WATER_BYTES = 32 * 1024 * 1024;
 const SIDECAR_EVENT_QUEUE_IN_FLIGHT_HIGH_WATER = 1;
 
 
-export type SidecarEventClass = "boundary" | "replaceable";
+type SidecarEventClass = "boundary" | "replaceable";
 
 
 const REPLACEABLE_SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
@@ -35,7 +35,7 @@ function sidecarEventClass(event: SidecarEvent): SidecarEventClass {
 }
 
 
-export interface SidecarEventQueueOptions {
+interface SidecarEventQueueOptions {
   maxItems?: number;
   maxBytes?: number;
   maxInFlight?: number;
@@ -59,7 +59,7 @@ export interface SidecarEventQueueOptions {
 }
 
 
-export interface SidecarEventQueueStats {
+interface SidecarEventQueueStats {
   /** All retained items, including the currently running item. */
   items: number;
   /** UTF-8 bytes retained by waiting and running items. */

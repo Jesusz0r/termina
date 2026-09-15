@@ -73,11 +73,11 @@ export interface BusyPayload {
 }
 
 /** Semantic run state derived in main from the sidecar tail (issue #291). */
-export const AGENT_ACTIVITY_STATES = ["idle", "working", "blocked"] as const;
+const AGENT_ACTIVITY_STATES = ["idle", "working", "blocked"] as const;
 export type AgentActivityState = (typeof AGENT_ACTIVITY_STATES)[number];
 
 /** Short blocked reasons. Never free text. */
-export const AGENT_ACTIVITY_REASONS = [
+const AGENT_ACTIVITY_REASONS = [
   "tool-error-loop",
   "stalled",
   "lease-wait",

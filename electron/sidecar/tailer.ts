@@ -25,7 +25,7 @@ interface StreamState {
 }
 
 
-export interface SidecarTailerOptions {
+interface SidecarTailerOptions {
   /** Maximum retained bytes from a paused terminal before overflow reporting. */
   maxBacklogBytes?: number;
   /** Maximum complete/partial JSONL record size. */

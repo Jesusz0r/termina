@@ -4,7 +4,7 @@
  */
 
 export type UnsavedCloseChoice = "save" | "discard" | "cancel";
-export type UnsavedCloseDecision = "save" | "proceed" | "abort";
+type UnsavedCloseDecision = "save" | "proceed" | "abort";
 
 /** No dirty buffers → proceed. Cancel/unknown → abort. Discard → proceed. Save → save. */
 export function decideUnsavedClose(hasDirty: boolean, choice: UnsavedCloseChoice | null): UnsavedCloseDecision {

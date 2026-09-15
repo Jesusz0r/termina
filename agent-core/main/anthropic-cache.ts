@@ -11,7 +11,7 @@
  * https://platform.claude.com/docs/en/build-with-claude/prompt-caching
  */
 
-export type AnthropicCacheMark = { type: "ephemeral" };
+type AnthropicCacheMark = { type: "ephemeral" };
 
 /** Anthropic's default five-minute TTL is sliding and avoids the 1-hour write premium. */
 export function anthropicCacheMark(): AnthropicCacheMark {

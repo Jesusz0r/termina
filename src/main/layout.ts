@@ -52,7 +52,7 @@ export interface LayoutElements {
   mainEl: HTMLElement;
 }
 
-export interface LayoutBindings {
+interface LayoutBindings {
   elements: LayoutElements;
   editorOccupied(): boolean;
   layoutEditors(): void;

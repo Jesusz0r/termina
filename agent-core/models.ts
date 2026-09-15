@@ -22,8 +22,6 @@ import { acceptedContextWindow, acceptedOutputLimit } from "./models/capabilitie
 import { subsequenceSpread } from "./tui-text.ts";
 import { isRecord } from "../shared/guards.ts";
 
-export { firstAuthenticatedProvider } from "./auth.ts";
-
 export type ModelInfo = {
   id: string;
   name?: string;

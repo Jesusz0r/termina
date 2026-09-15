@@ -3,10 +3,10 @@
  * Defines all application commands, their default shortcuts, and metadata.
  */
 
-export type CommandCategory = "File" | "Edit" | "Terminal" | "View" | "Settings";
-export type CommandScope = "main" | "renderer";
+type CommandCategory = "File" | "Edit" | "Terminal" | "View" | "Settings";
+type CommandScope = "main" | "renderer";
 
-export interface CommandDefinition {
+interface CommandDefinition {
   command: string;
   label: string;
   category: CommandCategory;
@@ -65,7 +65,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "content-search", label: "Search file contents", category: "View", description: "Grep the project and jump to a match", defaultShortcut: "CmdOrCtrl+Alt+F", scope: "renderer" },
   { command: "command-palette", label: "Command palette", category: "View", description: "Run a command by name", defaultShortcut: "CmdOrCtrl+K", scope: "renderer" },
   { command: "open-settings", label: "Open settings", category: "Settings", description: "Open this preferences window", defaultShortcut: "CmdOrCtrl+,", scope: "renderer" },
-] as const;
+] as const satisfies readonly CommandDefinition[];
 
 export type CommandId = (typeof COMMAND_DEFINITIONS)[number]["command"];
 export type ShortcutCommand = CommandId;

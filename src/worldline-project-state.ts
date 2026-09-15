@@ -25,7 +25,7 @@ function isCandidateTestPane(pane: WorldlineLabeledPane): pane is WorldlineCandi
  * retain their own last reconciled label until their authoritative hydration.
  * Losing a candidate label drops that pane's candidate test command so verify
  * cannot keep using the isolated tree after the badge is gone. */
-export function refreshWorldlinePaneLabel<TPane extends WorldlineLabeledPane>(
+function refreshWorldlinePaneLabel<TPane extends WorldlineLabeledPane>(
   activeProjectId: string | null,
   pane: TPane,
   labelOfTerminal: (instanceId: string) => WorldlineLabel | null,
@@ -92,7 +92,7 @@ export function applyProjectTestDetect<TPane extends WorldlineCandidateTestPane>
   }
 }
 
-export interface WorldlineCandidateTestBindings<TPane extends WorldlineCandidateTestPane> {
+interface WorldlineCandidateTestBindings<TPane extends WorldlineCandidateTestPane> {
   activeProjectId(): string | null;
   hydrationEpoch(): number;
   isActivePane(instanceId: string): boolean;
@@ -204,7 +204,7 @@ export interface WorldlineBusyPane {
   busy: boolean;
 }
 
-export interface WorldlineBusyBindings<TPane extends WorldlineBusyPane> {
+interface WorldlineBusyBindings<TPane extends WorldlineBusyPane> {
   paneById(instanceId: string): TPane | undefined;
   updatePaneTab(pane: TPane): void;
   updateEditorLock(): void;
@@ -246,7 +246,7 @@ export interface WorldlineInstancePane extends WorldlineCandidateTestPane {
   usage: string | null;
 }
 
-export interface WorldlineInstancesBindings<TPane extends WorldlineInstancePane> {
+interface WorldlineInstancesBindings<TPane extends WorldlineInstancePane> {
   paneById(instanceId: string): TPane | undefined;
   createPane(instanceId: string): TPane;
   updatePaneTab(pane: TPane): void;
