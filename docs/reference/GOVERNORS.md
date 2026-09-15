@@ -75,6 +75,10 @@ govern only the claim they assert.
 | User-guide sandbox/MCP phrases match `electron/sandbox.ts` and `agent-core/mcp/config.ts` | `tests/unit/docs/support-contract.test.ts` | **Governor** for those phrases only |
 | `dompurify` stays `3.4.14` (lockfile override) | `tests/unit/security/dompurify.test.ts`, `pnpm-workspace.yaml` | **Governor** for that pin |
 | Laziness fixture numbers | `tests/unit/scripts/laziness-metrics.test.ts` | **Measurement-only.** Pins `tests/fixtures/traces/laziness-baseline/`. Does not change runtime. |
+| No Quiet Wins settle | `agent-core/trace/quiet-wins.ts`, `tests/unit/agent-core/quiet-wins.test.ts` | **Governor** for a success claim after file edits with no observed bash check. Wired in `settleTraceTask`. |
+| One-ticket-one-run cite | `electron/verify-map.ts`, `tests/unit/electron/verify-map.test.ts` | **Governor** for the cite API. Not hooked to `verify:run`; main has no finding-ticket store. |
+| Handoff contract | `scripts/handoff-check.ts`, `tests/unit/scripts/handoff-check.test.ts` | **Governor** when the script runs. Rejects a missing field or a confidence value that is not `high` / `medium` / `low`. Not a settle gate. |
+| Audit ledger reconcile | `scripts/audit-ledger.ts`, `tests/unit/scripts/audit-ledger.test.ts` | **Governor** when the script runs. Pins `tests/fixtures/audit-ledger/`. |
 
 ## `AGENTS.md` owners
 
@@ -90,6 +94,7 @@ exercises behavior is not a uniqueness gate.
 | Plan Board, worldlines, evidence, sidecar, session-search, sandbox, terminal-runtime, agent-activity, subagents, `electron/main.ts` | Behavioral tests exist | **Convention** as a uniqueness rule |
 | `shared/guards.ts`, `shared/fsync.ts`, `shared/grep-pattern.ts` | Behavioral tests exist | **Convention** as a uniqueness rule |
 | Line-count review at 800 lines | None | **Unchecked** |
+| No Quiet Wins; one-ticket-one-run | Quiet-wins settle + `createVerifyMap().cite` | **Governor** for those two APIs. Session-routine text in `AGENTS.md` is also **convention** for work that never calls them. |
 | No backwards-compat shims; YAGNI; WIP=1; STE comments | None | **Convention** / **unchecked** |
 | Live provider-doc search before `agent-core` protocol edits | None | **Convention** / **unchecked** |
 | IPC `area:action`; terminals `term-N`; tags `v<version>` | Release workflow matches `v*` | **Convention** except the tag glob on release |
@@ -107,8 +112,10 @@ Do not treat these as gates.
 | `docs/reference/USER-GUIDE.md` | Product description. Advisory, except the sandbox/MCP phrases pinned by `tests/unit/docs/support-contract.test.ts`. |
 | `docs/reference/AGENT-CORE.md`, `docs/reference/WORLDLINES.md` | Architecture references. Not CI. |
 | `docs/reference/LAZINESS-BASELINE.md` | Measurement write-up for issue #125. |
-| `#123` / `#124` settle gates | Removed in `f77883c` (`agent-core/main/settle-gate.ts` deleted). A finished answer stands until the user stops or loop detection trips. **Do not list settle gates as governors.** |
-| `#125` laziness metrics | `scripts/laziness-metrics.ts` is measurement-only. The unit test pins the fixture corpus. No fail-closed settle policy. |
+| `docs/reference/CALIBRATION.md` | Policy for handoff fields. The checker is the governor, not this file. |
+| `docs/reference/AUDIT-LEDGER.md` | Ledger rule. The checker is the governor, not this file. |
+| `#123` / `#124` settle gates | Removed in `f77883c` (`agent-core/main/settle-gate.ts` deleted). Do not restore them. `#237` is the current settle gate (see the unit-test row). |
+| `#125` laziness metrics | `scripts/laziness-metrics.ts` is measurement-only. The unit test pins the fixture corpus. It does not settle a run. |
 | `cargo clippy` / `cargo fmt --check` | Named in `CONTRIBUTING.md`. No workflow step. **Unchecked.** |
 | `pnpm run test:e2e` (full Playwright matrix) | Local / on-demand. Not in `lint.yml`. |
 | `pnpm run test:rust` on every pull request | **Release-only** via `test:release`. |

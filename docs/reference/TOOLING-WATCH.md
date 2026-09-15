@@ -25,6 +25,7 @@ moves.
 |---|---|---|---|---|
 | `tests/fixtures/traces/laziness-baseline/` | 19 synthetic `turn-*.json` files. Schema or `scripts/laziness-metrics.ts` changes move the rates. | `tests/unit/scripts/laziness-metrics.test.ts` pins the #125 fixture baseline. Measurement-only. | Quarterly, or when the metrics script or the trace-v2 schema changes | 2026-09-15 |
 | `docs/reference/LAZINESS-BASELINE.md` | Hand-written table next to the same corpus | Same unit test | With the corpus | 2026-09-15 |
+| `tests/fixtures/audit-ledger/` | Tiny tree + `inventory.json` for the #241 checker | `tests/unit/scripts/audit-ledger.test.ts` | When the ledger rule or walk changes | 2026-09-15 |
 | `src/theme-tokens.gen.ts` | Generated from `src/styles.css` | `tests/unit/scripts/theme-tokens.test.ts`; `scripts/theme-tokens.ts` on `dev` / `build` | On stylesheet change | 2026-09-15 |
 | `tests/unit/electron/fixtures/core-client-admission-shim.ts`, `core-client-stderr-shim.ts` | Protocol shims | `tests/unit/electron/core-client.test.ts` | When `CoreClient` protocol changes | 2026-09-15 |
 
@@ -33,7 +34,7 @@ user-data dir, and `HOME` per run. It is a harness, not a checked-in
 corpus. Isolation is **convention** on pull requests: the full
 Playwright matrix is not in `.github/workflows/lint.yml`.
 
-No other `tests/fixtures/` trees exist today.
+Checked-in fixture trees today: `tests/fixtures/traces/laziness-baseline/` and `tests/fixtures/audit-ledger/`.
 
 ## Third-party pins (`package.json` / `pnpm-lock.yaml`)
 
@@ -115,8 +116,8 @@ Intentional gaps. Reasons only. No new gate.
 | No repo `rust-toolchain` file | CI pins `1.97.1`. A local rustc can differ (this check used 1.83.0). |
 | `@lydell/node-pty` is a beta (`^1.2.0-beta.14` → lock `1.2.0-beta.15`) | The app needs a maintained node-pty fork. Keep the pin; do not silently swap implementations. |
 | `dompurify` exact `3.4.14` plus pnpm override | Monaco ships a vendored copy. The override and `tests/unit/security/dompurify.test.ts` keep the sanitizer on the installed module. |
-| `#123` / `#124` settle gates are gone | Removed in `f77883c`. Do not restore them as implied governors. |
-| `#125` laziness metrics stay measurement-only | Fixture rates are not a fail-closed policy. |
+| `#123` / `#124` settle gates are gone | Removed in `f77883c`. Do not restore them. `#237` No Quiet Wins is the current settle gate. |
+| `#125` laziness metrics stay measurement-only | Fixture rates are not a fail-closed policy. `#237` owns settle. |
 | Live provider probes under `scripts/` stay off CI | `scripts/README.md`: they spend money and are not request-path code. |
 | `pages.yml` uses floating action tags | Website deploy only. `lint.yml` / `release.yml` pin SHAs. Do not add a pages job to the code gate. |
 
@@ -124,4 +125,4 @@ Intentional gaps. Reasons only. No new gate.
 
 | Date | What was read | Bumps |
 |---|---|---|
-| 2026-09-15 | Workflows, `package.json`, both lockfiles, `scripts/no-git-cli.sh`, `scripts/bundle-defs.ts`, `tests/e2e/fixtures.ts`, `tests/fixtures/traces/laziness-baseline/` (19 files) | None (watch only) |
+| 2026-09-15 | Workflows, `package.json`, both lockfiles, `scripts/no-git-cli.sh`, `scripts/bundle-defs.ts`, `tests/e2e/fixtures.ts`, `tests/fixtures/traces/laziness-baseline/` (19 files), `tests/fixtures/audit-ledger/` | None (watch only). Recorded #241 fixtures and #237 settle after those PRs landed. |
