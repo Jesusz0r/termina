@@ -88,9 +88,11 @@ export function collectTaskToolOutcomes(directory: string, runId: string, taskId
     try {
       parsed = JSON.parse(readFileSync(join(directory, name), "utf8"));
     } catch {
-      continue;
+      // A turn file we cannot read is an unobserved check fact, not an empty run.
+      return { readable: false, outcomes: [] };
     }
-    if (!isRecord(parsed) || parsed.recordType !== "attempt") continue;
+    if (!isRecord(parsed)) return { readable: false, outcomes: [] };
+    if (parsed.recordType !== "attempt") continue;
     if (parsed.runId !== runId || parsed.taskId !== taskId) continue;
     const raw = parsed.toolOutcomes ?? parsed.toolResults;
     if (Array.isArray(raw)) outcomes.push(...raw);

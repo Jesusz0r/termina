@@ -1888,6 +1888,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "isDirectRunFrom different missing entry is not",
       isDirectRunFrom(pathToFileURL(missingEntry).href, join(root, "other-missing.mjs")) === false,
     );
+    check(
+      "isDirectRunFrom accepts a file URL as argv1",
+      isDirectRunFrom(pathToFileURL(fakeEntry).href, pathToFileURL(fakeEntry).href) === true,
+    );
+    check(
+      "isDirectRunFrom does not mix a real file with a missing path",
+      isDirectRunFrom(pathToFileURL(fakeEntry).href, missingEntry) === false,
+    );
     
     const bundled = join(here, "..", "..", "..", "dist-electron", "agent-core.mjs");
     if (existsSync(bundled)) {

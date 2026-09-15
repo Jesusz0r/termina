@@ -143,6 +143,13 @@ describe("No Quiet Wins class (#237)", () => {
         readable: false,
         outcomes: [],
       });
+      writeFileSync(join(root, "turn-5.json"), "{");
+      const corrupt = collectTaskToolOutcomes(root, "run-a", "task-a");
+      expect(corrupt).toEqual({ readable: false, outcomes: [] });
+      expect(applyNoQuietWins("success", corrupt.readable ? corrupt.outcomes : null)).toEqual({
+        status: "failure",
+        criticalClass: "No Quiet Wins",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

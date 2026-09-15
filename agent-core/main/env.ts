@@ -123,22 +123,31 @@ export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): str
   return `<environment>\n${lines.join("\n")}\n</environment>`;
 }
 
-function canonicalEntryPath(path: string): string {
+function filesystemEntry(path: string): string {
+  if (!path.startsWith("file:")) return path;
+  try {
+    return fileURLToPath(path);
+  } catch {
+    return path;
+  }
+}
+
+function realpathOrNull(path: string): string | null {
   try {
     return realpathSync(path);
   } catch {
-    // realpath throws on a missing file and on transient EMFILE. Treating
-    // that as "imported as a library" skips main() and still exits 0.
-    return resolve(path);
+    return null;
   }
 }
 
 export function isDirectRunFrom(selfUrl: string, argv1: string | undefined): boolean {
   if (!argv1) return false;
-  try {
-    const self = selfUrl.startsWith("file:") ? fileURLToPath(selfUrl) : selfUrl;
-    return canonicalEntryPath(self) === canonicalEntryPath(argv1);
-  } catch {
-    return false;
-  }
+  const self = filesystemEntry(selfUrl);
+  const entry = filesystemEntry(argv1);
+  const left = realpathOrNull(self);
+  const right = realpathOrNull(entry);
+  // Never mix realpath and resolve: /tmp vs /private/tmp (or a one-sided
+  // EMFILE) would look like a library import and skip main().
+  if (left !== null && right !== null) return left === right;
+  return resolve(self) === resolve(entry);
 }
