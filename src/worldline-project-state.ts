@@ -30,6 +30,57 @@ export interface WorldlineCandidateTestPane extends WorldlineLabeledPane {
   candidateTestEpoch: number;
 }
 
+/** Candidate label wins; otherwise the project-tree detect. */
+export function resolvePaneTestCommand(
+  pane: Pick<WorldlineCandidateTestPane, "testCommand">,
+  projectCommand: string | null,
+): string | null {
+  return pane.testCommand ?? projectCommand;
+}
+
+/** Project detect lives on unlabeled panes of that project — one cache field. */
+export function projectTestCommandFromPanes<TPane extends WorldlineCandidateTestPane>(
+  projectId: string | null,
+  panes: Iterable<TPane>,
+): string | null {
+  if (!projectId) return null;
+  for (const pane of panes) {
+    if (pane.projectId === projectId && pane.worldlineLabel === null && pane.testCommand) {
+      return pane.testCommand;
+    }
+  }
+  return null;
+}
+
+/** Prefer the active unlabeled pane so detectTest uses the project tree. */
+export function projectTestDetectPane<TPane extends WorldlineCandidateTestPane>(
+  projectId: string | null,
+  activeId: string | null,
+  panes: Iterable<TPane>,
+): TPane | undefined {
+  if (!projectId) return undefined;
+  let fallback: TPane | undefined;
+  for (const pane of panes) {
+    if (pane.projectId !== projectId || pane.worldlineLabel !== null) continue;
+    if (pane.instanceId === activeId) return pane;
+    fallback ??= pane;
+  }
+  return fallback;
+}
+
+/** Write project-tree detect onto every unlabeled pane of the project. */
+export function applyProjectTestDetect<TPane extends WorldlineCandidateTestPane>(
+  projectId: string,
+  label: string | null,
+  panes: Iterable<TPane>,
+): void {
+  for (const pane of panes) {
+    if (pane.projectId === projectId && pane.worldlineLabel === null) {
+      pane.testCommand = label;
+    }
+  }
+}
+
 export interface WorldlineCandidateTestBindings<TPane extends WorldlineCandidateTestPane> {
   activeProjectId(): string | null;
   hydrationEpoch(): number;

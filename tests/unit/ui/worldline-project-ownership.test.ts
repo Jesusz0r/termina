@@ -1,11 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  applyProjectTestDetect,
   applyWorldlineHydration,
   applyWorldlineRemoval,
   beginWorldlineHydration,
   clearWorldlineProjectUi,
   handleWorldlineBusy,
+  projectTestCommandFromPanes,
+  projectTestDetectPane,
   refreshWorldlineCandidateTest,
+  resolvePaneTestCommand,
   updateWorldlinePaneTab,
   worldlineEventBelongsToProject,
   type WorldlineLabel,
@@ -331,5 +335,59 @@ describe("Worldline Multi-Project Ownership & UI Reconciliation", () => {
     expect(worldlineEventBelongsToProject(null, { projectId: "project-b" })).toBe(false);
     expect(worldlineEventBelongsToProject("project-a", { projectId: "project-b" })).toBe(false);
     expect(worldlineEventBelongsToProject("project-b", { projectId: "project-b" })).toBe(true);
+  });
+});
+
+describe("one test-command cache on the pane (issue #359)", () => {
+  function pane(overrides: Record<string, unknown> = {}) {
+    return {
+      instanceId: "term-1",
+      projectId: "project-a",
+      worldlineLabel: null as WorldlineLabel | null,
+      testCommand: null as string | null,
+      candidateTestEpoch: 0,
+      ...overrides,
+    };
+  }
+
+  it("prefers the pane field and falls back to project detect", () => {
+    expect(resolvePaneTestCommand({ testCommand: "pytest" }, "npm test")).toBe("pytest");
+    expect(resolvePaneTestCommand({ testCommand: null }, "npm test")).toBe("npm test");
+    expect(resolvePaneTestCommand({ testCommand: null }, null)).toBeNull();
+  });
+
+  it("reads project detect only from unlabeled panes of that project", () => {
+    const panes = [
+      pane({ instanceId: "cand", worldlineLabel: "A", testCommand: "cargo test" }),
+      pane({ instanceId: "proj", worldlineLabel: null, testCommand: "npm test" }),
+      pane({ instanceId: "other", projectId: "project-b", worldlineLabel: null, testCommand: "go test" }),
+    ];
+    expect(projectTestCommandFromPanes("project-a", panes)).toBe("npm test");
+    expect(projectTestCommandFromPanes("project-b", panes)).toBe("go test");
+    expect(projectTestCommandFromPanes(null, panes)).toBeNull();
+  });
+
+  it("detects from the active unlabeled pane, else any unlabeled sibling", () => {
+    const panes = [
+      pane({ instanceId: "cand", worldlineLabel: "B" }),
+      pane({ instanceId: "idle", worldlineLabel: null }),
+      pane({ instanceId: "front", worldlineLabel: null }),
+    ];
+    expect(projectTestDetectPane("project-a", "front", panes)?.instanceId).toBe("front");
+    expect(projectTestDetectPane("project-a", "cand", panes)?.instanceId).toBe("idle");
+    expect(projectTestDetectPane("project-a", "missing", panes)?.instanceId).toBe("idle");
+    expect(projectTestDetectPane("project-z", "front", panes)).toBeUndefined();
+  });
+
+  it("writes project detect onto unlabeled panes only", () => {
+    const panes = [
+      pane({ instanceId: "cand", worldlineLabel: "A", testCommand: "cargo test" }),
+      pane({ instanceId: "proj", worldlineLabel: null, testCommand: null }),
+      pane({ instanceId: "other", projectId: "project-b", worldlineLabel: null, testCommand: null }),
+    ];
+    applyProjectTestDetect("project-a", "npm test", panes);
+    expect(panes[0].testCommand).toBe("cargo test");
+    expect(panes[1].testCommand).toBe("npm test");
+    expect(panes[2].testCommand).toBeNull();
   });
 });

@@ -55,13 +55,17 @@ import { CommandDispatcher } from "./commands";
 import { PtySequenceLedger } from "./pty-sequence-ledger";
 import {
   applyInstanceSummary,
+  applyProjectTestDetect,
   applyWorldlineHydration,
   applyWorldlineRemoval,
   beginWorldlineHydration,
   clearWorldlineProjectUi,
   handleWorldlineBusy,
   handleWorldlineInstances,
+  projectTestCommandFromPanes,
+  projectTestDetectPane,
   refreshWorldlineCandidateTest,
+  resolvePaneTestCommand,
   updateWorldlinePaneTab,
   worldlineEventBelongsToProject,
 } from "./worldline-project-state";
@@ -1181,6 +1185,9 @@ function refreshCandidateTestCommand(pane: Pane): void {
     },
     onError: (err) => toast(`could not detect tests: ${(err as Error).message}`, "error"),
   });
+  // Unlabeled panes own the project-tree cache. Candidate refresh clears them;
+  // coalesce one project detect after a burst of those clears.
+  if (pane.worldlineLabel === null) scheduleProjectTestCommandRefresh(pane.projectId);
 }
 
 async function closePane(instanceId: string): Promise<void> {
@@ -1311,34 +1318,53 @@ function renderAgentStatus(pane: Pane): void {
 }
 
 /** Verify & Iterate: badge + button for the active terminal. */
-let testCommand: string | null = null;
-let testCommandRequestToken = 0;
+let projectTestRefreshQueued: string | null | false = false;
+function scheduleProjectTestCommandRefresh(projectId: string | null): void {
+  const pending = projectTestRefreshQueued !== false;
+  projectTestRefreshQueued = projectId;
+  if (pending) return;
+  queueMicrotask(() => {
+    const id = projectTestRefreshQueued;
+    projectTestRefreshQueued = false;
+    if (id === false) return;
+    void refreshTestCommand(id);
+  });
+}
 
 async function refreshTestCommand(projectId: string | null = activeProjectId): Promise<void> {
-  const requestToken = ++testCommandRequestToken;
   const requestedGeneration = activeProjectGeneration;
   const requestedProjectId = projectId;
-  const requestedPane = activeId ? panes.get(activeId) : undefined;
-  const terminalId = requestedPane?.projectId === requestedProjectId ? requestedPane.instanceId : undefined;
-  if (!requestedProjectId || !terminalId) {
-    if (requestToken === testCommandRequestToken && requestedGeneration === activeProjectGeneration && activeProjectId === requestedProjectId) {
-      testCommand = null;
-    }
-    return;
-  }
+  const detectPane = projectTestDetectPane(requestedProjectId, activeId, panes.values());
+  if (!requestedProjectId || !detectPane) return;
+  const requestEpoch = ++detectPane.candidateTestEpoch;
   try {
-    const t = await window.termina.detectTest(terminalId);
-    if (requestToken !== testCommandRequestToken || requestedGeneration !== activeProjectGeneration || activeProjectId !== requestedProjectId || activeId !== terminalId) return;
-    testCommand = t?.label ?? null;
+    const t = await window.termina.detectTest(detectPane.instanceId);
+    if (
+      detectPane.candidateTestEpoch !== requestEpoch
+      || requestedGeneration !== activeProjectGeneration
+      || activeProjectId !== requestedProjectId
+      || detectPane.worldlineLabel !== null
+      || panes.get(detectPane.instanceId) !== detectPane
+    ) return;
+    applyProjectTestDetect(requestedProjectId, t?.label ?? null, panes.values());
   } catch {
-    if (requestToken !== testCommandRequestToken || requestedGeneration !== activeProjectGeneration || activeProjectId !== requestedProjectId || activeId !== terminalId) return;
-    testCommand = null;
+    if (
+      detectPane.candidateTestEpoch !== requestEpoch
+      || requestedGeneration !== activeProjectGeneration
+      || activeProjectId !== requestedProjectId
+      || detectPane.worldlineLabel !== null
+    ) return;
+    applyProjectTestDetect(requestedProjectId, null, panes.values());
   }
   const pane = activeId ? panes.get(activeId) : undefined;
   if (pane) renderStatus(pane);
 }
 (window as unknown as Record<string, unknown>).__refreshTestCommand = refreshTestCommand;
-(window as unknown as Record<string, unknown>).__getTestCommand = () => testCommand;
+(window as unknown as Record<string, unknown>).__getTestCommand = () => {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (!pane) return null;
+  return resolvePaneTestCommand(pane, projectTestCommandFromPanes(pane.projectId, panes.values()));
+};
 
 function renderVerify(pane: Pane): void {
   const v = pane.verify;
@@ -1350,7 +1376,7 @@ function renderVerify(pane: Pane): void {
     return;
   }
   // Candidate terminals use their own tree's test command.
-  const command = pane.testCommand ?? testCommand;
+  const command = resolvePaneTestCommand(pane, projectTestCommandFromPanes(pane.projectId, panes.values()));
   btnVerify.disabled = v.state === "running" || !command;
   btnVerify.title = command ? `Run ${command}` : "No test command detected (package.json, pytest, cargo, go)";
   if (v.state === "untested") {
@@ -2829,10 +2855,10 @@ function applyFolderOpened(e: FolderOpenedPayload): void {
   reviewView?.resetForProject();
   refreshMine(projectId);
   activateProjectPane();
-  void refreshTestCommand(projectId);
   timelinePane.resetForProject();
   timelinePane.renderTimeline();
   hydrateWorldlines(projectId);
+  scheduleProjectTestCommandRefresh(projectId);
 }
 
 window.termina.onLoginHint((e) => {
@@ -2975,7 +3001,6 @@ async function boot(attempt = 0): Promise<void> {
   if (minimizedWork !== "editor" && !editorPaneOccupied()) syncEditorMinimizedForProject();
   if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
   restoreModifiedListHeight();
-  void refreshTestCommand();
 
   try {
     // Build the project tab bar; the active project owns the initial view.
@@ -3033,13 +3058,11 @@ async function boot(attempt = 0): Promise<void> {
       setActiveProject(bootProjectId);
       activateProjectPane();
     }
-    // The project may only be known after the instance list arrives —
-    // re-query the test command now that the project is known.
-    void refreshTestCommand();
-
     // Worldlines: rebuild the panel from the live list (push events keep it
-    // current after this).
+    // current after this). Project-tree test detect follows hydration so
+    // unlabeled pane clears do not wipe the one cache.
     hydrateWorldlines(activeProjectId);
+    scheduleProjectTestCommandRefresh(activeProjectId);
   } catch (err) {
     if (attempt < 2) {
       setTimeout(() => void boot(attempt + 1), 250 * (2 ** attempt));
