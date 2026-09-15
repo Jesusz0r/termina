@@ -5,6 +5,8 @@
  * (via write/edit/bash...), the watcher reads it and pushes the new content to
  * the renderer so Monaco updates in real time. It also feeds the "modified
  * files" panel for files changed outside of explicit write/edit tool calls.
+ *
+ * Keep-reason: ProjectWatcher is a single generation-fenced observer.
  */
 import { watch, type FSWatcher } from "node:fs";
 import { createHash } from "node:crypto";
