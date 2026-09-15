@@ -60,7 +60,7 @@
 
   const TUI_SCRIPT = [
     { cls: "dim", text: "$ pi" },
-    { cls: "dim", text: "✳ session ready — gemini-2.5-pro · plan mode off" },
+    { cls: "dim", text: "✳ session ready — your model · plan mode off" },
     { cls: "user", text: "add token caching to the auth middleware", type: true },
     { cls: "agent", text: "Reading the middleware and auth module first…", pauseAfter: 900 },
     { cls: "tool", text: "⚙ read_file  src/middleware.ts (84 lines)", pauseAfter: 700 },
