@@ -32,7 +32,6 @@ import {
   clampEffortLevel,
   thinkingRequestFor,
   adaptiveEffortFor,
-  effectiveEffortFor,
   reasoningEffortFor,
   includeEncryptedReasoning,
   type EffortLevel,
@@ -395,7 +394,7 @@ function contextWindow(): number {
 }
 
 function usableTokens(): number {
-  const thinking = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()) !== "off";
+  const thinking = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()) !== "off";
   const window = contextWindow();
   const reserved = Math.min(outputTokenBudget({ thinking }), Math.max(0, window - 1));
   return Math.max(1, window - reserved);
@@ -924,8 +923,8 @@ async function writeTraceAttempt(
     taskClass: attempt.task.taskClass,
     requestedEffort: attempt.role === "main" ? effortWanted : "off",
     effectiveEffort: attempt.role === "main"
-      ? effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels())
-      : effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off", providerProtocol(summaryRoute.provider, summaryRoute.model), routeReasoningLevels(summaryRoute.provider, summaryRoute.model)),
+      ? clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels())
+      : clampEffortLevel(summaryRoute.provider, summaryRoute.model, "off", providerProtocol(summaryRoute.provider, summaryRoute.model), routeReasoningLevels(summaryRoute.provider, summaryRoute.model)),
     status: fields.status,
     retryCount: attempt.retryCount,
     fallbackReason: attempt.fallbackReason,
@@ -3581,7 +3580,7 @@ async function callModel(
     content: m.content as string | Array<Record<string, unknown>>,
   }));
   const toolsForProvider = clientTools as ToolDef[];
-  const actualEffort = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
+  const actualEffort = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
   const catalogLimit = catalogOutputLimit(catalogs.get(route.provider)?.find((m) => m.id === route.model));
   const budgeted = outputTokenBudget({ thinking: actualEffort !== "off" });
   // Never request more output than the catalog-reported completion ceiling.
@@ -4612,7 +4611,7 @@ function logSettings(): void {
   sidecar.logEvent({
     t: "agent_settings",
     model: `${route.provider}/${route.model}`,
-    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
+    thinkingLevel: clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
     usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats(), route.provider),
   });
 }
@@ -4942,7 +4941,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     overlayBytes: activeRequestOverlay?.bytes ?? null,
     entryId: String(userMsg.sseq),
     parentEntryId: null,
-    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
+    thinkingLevel: clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
   });
   let storageFailure: string | null = null;
   let taskFailure: string | null = null;
@@ -6127,7 +6126,7 @@ function syncStatus(): void {
   surface?.setEffortLevels(supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model), routeReasoningLevels()));
   surface?.setStatus({
     model: `${route.provider}/${route.model}`,
-    effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
+    effort: clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
   });
   logSettings();
 }
@@ -6300,7 +6299,7 @@ function dispatchLine(line: string): void {
     }
     const available = supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model), routeReasoningLevels());
     if ("show" in effortCmd) {
-      const actual = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
+      const actual = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
       if (effortControlFor(route.provider, route.model, providerProtocol(route.provider, route.model), routeReasoningLevels()) === "provider-default") {
         out(`(effort provider-default; this route sends no effort control)\n`);
       } else {
@@ -6435,7 +6434,7 @@ async function main(): Promise<void> {
     surface.setEffortLevels(supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model), routeReasoningLevels()));
     surface.setStatus({
       model: `${route.provider}/${route.model}`,
-      effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
+      effort: clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
       permissions: permissionMode,
     });
     surface.setBusy(true);

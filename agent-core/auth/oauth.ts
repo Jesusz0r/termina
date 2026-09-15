@@ -43,14 +43,6 @@ export function parseOauthToken(
 }
 
 
-export function parseTokenResponse(
-  payload: unknown,
-  now = Date.now(),
-): { ok: true; access: string; refresh: string; expires: number } | { ok: false; error: string } {
-  return parseOauthToken(payload, now, { requireRefresh: true });
-}
-
-
 function sleepAsync(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -138,14 +130,14 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
         refresh_token: entry.refresh,
         client_id: ANTHROPIC_CLIENT_ID,
       });
-      parsed = parseTokenResponse(res.payload);
+      parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     } else if (providerId === "openai-codex") {
       const res = await postForm(tokenUrl(providerId), {
         grant_type: "refresh_token",
         refresh_token: entry.refresh,
         client_id: OPENAI_CODEX_CLIENT_ID,
       });
-      parsed = parseTokenResponse(res.payload);
+      parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     } else if (providerId === "xai") {
       const res = await postForm(tokenUrl(providerId), {
         grant_type: "refresh_token",
@@ -241,7 +233,7 @@ export async function exchangeAnthropic(
       },
       signal,
     );
-    const parsed = parseTokenResponse(res.payload);
+    const parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
     return persistOauth("anthropic", parsed, {}, opts);
@@ -270,7 +262,7 @@ export async function exchangeCodex(
       },
       signal,
     );
-    const parsed = parseTokenResponse(res.payload);
+    const parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
     const rec = isRecord(res.payload) ? res.payload : {};

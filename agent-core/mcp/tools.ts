@@ -182,11 +182,6 @@ function cloneMcpTool(tool: McpClientTool): { tool: McpClientTool } | { error: s
  * deterministic descriptor tie-breaker chooses the same winner in either
  * case.
  */
-export function normalizeMcpTools(discovered: readonly McpClientTool[]): McpClientTool[] {
-  return normalizeMcpDiscovery(discovered).tools;
-}
-
-
 export function normalizeMcpDiscovery(discovered: readonly McpClientTool[]): {
   tools: McpClientTool[];
   conflicts: string[];
@@ -264,7 +259,7 @@ export function selectMcpTools(
   discovered: McpClientTool[],
   kernelNames: ReadonlySet<string> = KERNEL_TOOL_NAMES,
 ): McpClientTool[] {
-  const normalized = normalizeMcpTools(discovered);
+  const normalized = normalizeMcpDiscovery(discovered).tools;
   const out: McpClientTool[] = [];
   const used = new Set<string>(kernelNames);
   let bytes = 0;

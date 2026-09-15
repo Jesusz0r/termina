@@ -39,7 +39,7 @@ export type ModelInfo = {
 
 export const MODEL_LIST_CAP = 200;
 /** No displayed model list exceeds this many rows; the rest get an explicit marker. */
-export const MODELS_DISPLAY_CAP = 200;
+export const MODELS_DISPLAY_CAP = MODEL_LIST_CAP;
 const CATALOG_TIMEOUT_MS = 10_000;
 const CATALOG_BODY_LIMIT = 1_048_576;
 const CATALOG_REDIRECT_LIMIT = 3;

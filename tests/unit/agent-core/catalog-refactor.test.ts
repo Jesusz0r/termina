@@ -105,6 +105,7 @@ describe("catalog provider policy composition", () => {
     expect(filterCatalogModels([...rows], "GPT").map((m) => m.id)).toEqual(["gpt-4o"]);
     expect(filterCatalogModels([...rows], "  ")).toHaveLength(3);
     expect(filterCatalogModels([...rows], "zzz")).toHaveLength(0);
+    expect(MODELS_DISPLAY_CAP).toBe(MODEL_LIST_CAP);
     const many = Array.from({ length: MODELS_DISPLAY_CAP + 5 }, (_, i) => ({ provider: "p", id: `m-${i}` }));
     const text = formatCatalogLines(many as CatalogModel[], "p", "m-0");
     expect(text.split("\n")).toHaveLength(MODELS_DISPLAY_CAP + 1);
