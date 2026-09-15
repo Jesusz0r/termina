@@ -11,7 +11,7 @@ import { emptyShortcuts } from "../settings-shortcuts";
 import { cssFontFamily, defaultAppPreferences, type AppPreferences, type UserPreferencePatch } from "../../shared/types";
 import { normalizeAppPreferences } from "../../shared/preferences";
 
-export interface PreferenceEditor {
+interface PreferenceEditor {
   setTheme(theme: AppPreferences["theme"]): void;
   setFontSize(size: number): void;
   setFontFamily(family: AppPreferences["fontFamily"]): void;
@@ -19,14 +19,14 @@ export interface PreferenceEditor {
   setMinimap(minimap: boolean): void;
 }
 
-export interface PreferenceReview {
+interface PreferenceReview {
   setTheme(theme: AppPreferences["theme"]): void;
   setFontSize(size: number): void;
   setFontFamily(family: AppPreferences["fontFamily"]): void;
   setWordWrap(wrap: boolean): void;
 }
 
-export interface PreferenceTerminal {
+interface PreferenceTerminal {
   setTheme(theme: AppPreferences["theme"]): void;
   setFontSize(size: number): void;
   setFontFamily(family: AppPreferences["fontFamily"]): void;
@@ -61,7 +61,7 @@ export function applyEditorPreferences(editor: PreferenceEditor, prefs: AppPrefe
   editor.setMinimap(prefs.minimap);
 }
 
-export function applyTerminalPreferences(view: PreferenceTerminal, prefs: AppPreferences): void {
+function applyTerminalPreferences(view: PreferenceTerminal, prefs: AppPreferences): void {
   view.setTheme(prefs.theme);
   view.setFontSize(prefs.terminalFontSize);
   view.setFontFamily(prefs.fontFamily);
@@ -74,7 +74,7 @@ export function applyReviewPreferences(view: PreferenceReview, prefs: AppPrefere
   view.setWordWrap(prefs.wordWrap);
 }
 
-export function paintPreferences(prefs: AppPreferences, bindings: PreferencesBindings): void {
+function paintPreferences(prefs: AppPreferences, bindings: PreferencesBindings): void {
   document.documentElement.dataset.theme = prefs.theme;
   // The app chrome (explorer, tabs, menus) inherits this token; canvases
   // set their own families directly below.

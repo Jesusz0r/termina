@@ -21,7 +21,7 @@ interface ActivityPaneState {
   planVersion: number;
 }
 
-export interface ActivityPaneElements {
+interface ActivityPaneElements {
   planPanel: HTMLElement;
   planList: HTMLElement;
   planCount: HTMLElement;

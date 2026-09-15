@@ -20,12 +20,12 @@ export type PtySequenceResult =
   | { kind: "duplicate" }
   | { kind: "rejected" };
 
-export interface PtySequenceLedgerOptions {
+interface PtySequenceLedgerOptions {
   /** Maximum number of sequence holes retained ahead of the watermark. */
   maxGap?: number;
 }
 
-export interface PtySequenceLedgerStats {
+interface PtySequenceLedgerStats {
   /** Largest contiguous sequence accepted by this document. */
   contiguousSequence: number;
   /** Number of out-of-order records retained while holes close. */

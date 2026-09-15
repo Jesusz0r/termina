@@ -4,7 +4,7 @@
  * reasons are presented here so status and timeline never print protocol tokens.
  */
 export const UNKNOWN_STATE = "unknown" as const;
-export type UnknownState = typeof UNKNOWN_STATE;
+type UnknownState = typeof UNKNOWN_STATE;
 
 export function asKnownState<T extends string>(
   value: unknown,
