@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as worldlines from "../../electron/worldlines/index.js";
+import { setPromotionRecoveryTestHookForTest, withPromotionTransaction } from "../../electron/worldlines/promotion-recovery.js";
 import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -45,8 +46,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     const recoveryContext = { primaryRoot: primary };
     await worldlines.recoverPromotionJournals(worlds, recoveryContext);
     recoveryContext.primaryRoot = realpathSync(primary);
-    const withLock = (worldlines as unknown as { withPromotionTransaction?: <T>(operation: () => Promise<T>) => Promise<T> }).withPromotionTransaction;
-    if (!withLock) throw new Error("shared promotion transaction lock is missing");
+    const withLock = withPromotionTransaction;
 
     const liveDir = seed(worlds, recoveryContext.primaryRoot, "live", "live.txt");
     let release!: () => void;
@@ -144,7 +144,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     const replacementSink = join(root, "replacement-sink");
     mkdirSync(replacementSink, { recursive: true });
     writeFileSync(join(replacementSink, "journal.json"), "{replacement}");
-    worldlines.setPromotionRecoveryTestHookForTest((stage, boundJournal) => {
+    setPromotionRecoveryTestHookForTest((stage, boundJournal) => {
       if (stage !== "after-journal-validation" || boundJournal !== boundSwappedJournal) return;
       renameSync(swappedJournal, swappedAway);
       symlinkSync(replacementSink, swappedJournal, "dir");
@@ -152,7 +152,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     try {
       await worldlines.recoverPromotionJournals(worlds, recoveryContext);
     } finally {
-      worldlines.setPromotionRecoveryTestHookForTest(null);
+      setPromotionRecoveryTestHookForTest(null);
     }
     if (readFileSync(join(primary, "post-validation-swap.txt"), "utf8") !== "applied\n") {
       throw new Error("post-validation journal swap mutated the primary path");
@@ -178,7 +178,7 @@ export default async function run(log: (message: string) => void): Promise<void>
       paths: [{ rel: "aba-forged-victim.txt", kind: "delete", beforeExists: false, beforeHash: hash(""), afterHash: hash("forged-applied\n") }],
     }));
     const abaCanonical = realpathSync(abaJournal);
-    worldlines.setPromotionRecoveryTestHookForTest((stage, boundJournal) => {
+    setPromotionRecoveryTestHookForTest((stage, boundJournal) => {
       if (stage !== "after-journal-validation" || boundJournal !== abaCanonical) return;
       renameSync(abaJournal, abaHeld);
       renameSync(abaForged, abaJournal);
@@ -188,7 +188,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     try {
       await worldlines.recoverPromotionJournals(worlds, recoveryContext);
     } finally {
-      worldlines.setPromotionRecoveryTestHookForTest(null);
+      setPromotionRecoveryTestHookForTest(null);
     }
     if (readFileSync(join(primary, "aba-authentic.txt"), "utf8") !== "before\n") {
       throw new Error("authentic journal was not recovered after an ABA swap-back");

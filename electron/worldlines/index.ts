@@ -6,19 +6,11 @@
  */
 export { WorldlineManager } from "./manager.js";
 export type { WorldlineDeps } from "./manager.js";
-export type { WorldlineState, WorldlineSummary } from "../../shared/types.js";
-export type {
-  BoundPromotionDirectory,
-  PromoteSeed,
-  PromotionRecoveryContext,
-  RunRecord,
-} from "./types.js";
+export type { RunRecord } from "./types.js";
 export { UNCERTAIN_COMPARISON_USAGE_LEDGER } from "./limits.js";
 export { disposeWorldlineGitCore } from "../worldline-git.js";
 export {
   ensurePromotionRoots,
   ensureBoundRetainedRoot,
   recoverPromotionJournals,
-  setPromotionRecoveryTestHookForTest,
-  withPromotionTransaction,
 } from "./promotion-recovery.js";

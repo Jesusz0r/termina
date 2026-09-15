@@ -10,7 +10,5 @@
 // Split into ./session-retention/ modules (issue #38). This entry re-exports the public surface.
 export { RETAINED_SESSION_ADMISSION_LOCK } from "../shared/session-retention-lock.js";
 export { MAX_RETAINED_SESSION_BUNDLES, MAX_RETAINED_SESSION_BUNDLE_BYTES, MAX_RETAINED_SESSION_BYTES, RETAINED_SESSION_USAGE_LEDGER } from "./session-retention/primitives.js";
-export type { RetainedSessionClaim } from "./session-retention/claims.js";
 export { SessionRetentionOwner } from "./session-retention/owner.js";
 export { disposeWorldlineGitCore } from "./worldline-git.js";
-export type { RetainedSessionTransaction, SessionRetentionOwnerOptions, SessionRetentionTransactionOptions } from "./session-retention/owner.js";
