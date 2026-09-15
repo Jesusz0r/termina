@@ -38,7 +38,7 @@ export interface TraceCacheDiagnostics extends CacheRequestDiagnostics {
   missAttribution: NonNullable<TraceCacheInput["missAttribution"]>;
 }
 
-export type CacheMarkerDetails = { count: number; positions: number[]; ttlMs: number | null };
+type CacheMarkerDetails = { count: number; positions: number[]; ttlMs: number | null };
 
 export function cacheMarkerDetails(value: unknown): CacheMarkerDetails {
   const details: CacheMarkerDetails = { count: 0, positions: [], ttlMs: null };

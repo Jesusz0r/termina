@@ -6,7 +6,7 @@
  */
 import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
 import { cleanPlanPathToken, looksLikePath } from "./plan-board.ts";
@@ -22,7 +22,7 @@ const MAX_PROJECT_FILE_MEMO_ENTRIES = 4096;
 /** Renderer queries are truncated to this before the walk (main and worker). */
 export const MAX_SESSION_SEARCH_QUERY = 256;
 
-export type SessionMessageParse = { role: string; text: string; paths: string[] };
+type SessionMessageParse = { role: string; text: string; paths: string[] };
 
 export type SessionFileEntry = { path: string; name: string; mtimeMs: number; segments?: string[] };
 
@@ -132,8 +132,8 @@ function formatSessionHitSnippet({
 /** Bounded concurrency for hit-path existence checks (main or worker). */
 const HIT_PATH_CONCURRENCY = 5;
 
-export type CanonicalizeFn = (absPath: string) => string | Promise<string>;
-export type ExistsFileFn = (absPath: string) => boolean | Promise<boolean>;
+type CanonicalizeFn = (absPath: string) => string | Promise<string>;
+type ExistsFileFn = (absPath: string) => boolean | Promise<boolean>;
 
 /**
  * Project-file admission: reject escapes, canonicalize the candidate, reject
@@ -213,17 +213,6 @@ async function resolveSessionHitPath(
   return null;
 }
 
-export async function sessionFileEntry(path: string): Promise<SessionFileEntry | null> {
-  if (!path.endsWith(".jsonl")) return null;
-  try {
-    const info = await stat(path);
-    if (!info.isFile()) return null;
-    return { path, name: basename(path), mtimeMs: info.mtimeMs };
-  } catch {
-    return null;
-  }
-}
-
 /** Newest first. Unique by path string. Caps at MAX_SESSION_SEARCH_FILES. */
 export function mergeSessionFiles(groups: SessionFileEntry[][]): SessionFileEntry[] {
   const seen = new Set<string>();
@@ -252,8 +241,8 @@ export function mergeSessionFiles(groups: SessionFileEntry[][]): SessionFileEntr
  * bundles) returns `error` so the modal can say the listing is uncertain
  * instead of showing a silent empty.
  */
-export type SessionSearchListing = { files: SessionFileEntry[]; error?: string };
-export type SessionSearchHits = { hits: SessionHit[]; error?: string };
+type SessionSearchListing = { files: SessionFileEntry[]; error?: string };
+type SessionSearchHits = { hits: SessionHit[]; error?: string };
 
 function sessionSearchUncertain(detail: string): string {
   return `session listing uncertain: ${detail}`;

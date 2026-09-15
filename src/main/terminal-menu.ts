@@ -4,7 +4,7 @@
  * Main wires the anchor button and pane callbacks; all menu state lives here.
  */
 
-export interface TerminalMenuPane {
+interface TerminalMenuPane {
   instanceId: string;
   error: boolean;
   exited: boolean;

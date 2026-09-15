@@ -17,13 +17,13 @@ export interface ExportPatchFile {
 }
 
 /** Files over this size (or with NUL bytes) export as stubs, not hunks. */
-export const MAX_EXPORT_FILE_BYTES = 256 * 1024;
+const MAX_EXPORT_FILE_BYTES = 256 * 1024;
 /** Export bundles retained under worlds/exports. */
 export const MAX_EXPORT_BUNDLES = 20;
 /** Candidate files per export: extra files stay listed, never patched. */
 export const MAX_EXPORT_FILES = 200;
 /** Files over this many lines export as stubs: the O(n*m) diff is bounded. */
-export const MAX_EXPORT_FILE_LINES = 2000;
+const MAX_EXPORT_FILE_LINES = 2000;
 const EXPORT_CONTEXT_LINES = 3;
 
 function splitLines(text: string): string[] {
@@ -183,7 +183,7 @@ function isBinary(text: string): boolean {
 
 /** Why a file is listed, not patched: binary bytes, over the byte cap, or
  * over the line cap (the O(n*m) diff is bounded). */
-export type ExportStubReason = "binary" | "oversized" | "long";
+type ExportStubReason = "binary" | "oversized" | "long";
 
 /** The stub reason for a patch file, or null when it is patchable. */
 export function exportStubReason(file: ExportPatchFile): ExportStubReason | null {
@@ -196,7 +196,7 @@ export function exportStubReason(file: ExportPatchFile): ExportStubReason | null
   return null;
 }
 
-export interface ExportStubFile {
+interface ExportStubFile {
   relPath: string;
   reason: ExportStubReason;
   beforeSize: number;
@@ -253,13 +253,13 @@ export function buildUnifiedPatch(files: ExportPatchFile[]): string {
   return out.length > 0 ? `${out.join("\n")}\n` : "";
 }
 
-export interface ExportEvidenceEntry {
+interface ExportEvidenceEntry {
   kind: string;
   status: string;
   reason: string | null;
 }
 
-export interface ExportBundleInput {
+interface ExportBundleInput {
   comparisonId: string;
   label: string;
   role: string;

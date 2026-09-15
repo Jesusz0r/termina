@@ -24,7 +24,7 @@ export const COMPLETION_STATES = Object.freeze([
 ] as const);
 
 export type CompletionState = (typeof COMPLETION_STATES)[number];
-export type BoundedTextDirection = "head" | "tail";
+type BoundedTextDirection = "head" | "tail";
 
 export type BoundedTextMarkerDetails = {
   state: CompletionState;
@@ -35,15 +35,15 @@ export type BoundedTextMarkerDetails = {
   direction: BoundedTextDirection;
 };
 
-export type BoundedTextMarker = string | ((details: BoundedTextMarkerDetails) => string);
+type BoundedTextMarker = string | ((details: BoundedTextMarkerDetails) => string);
 
-export type BoundedTextAccumulatorOptions = {
+type BoundedTextAccumulatorOptions = {
   maxBytes: number;
   direction?: BoundedTextDirection;
   marker?: BoundedTextMarker;
 };
 
-export type BoundedTextOptions = BoundedTextAccumulatorOptions & {
+type BoundedTextOptions = BoundedTextAccumulatorOptions & {
   state?: CompletionState;
 };
 
@@ -358,7 +358,7 @@ export function boundText(input: string | Uint8Array, options: BoundedTextOption
   return accumulator.finish(options.state ?? "complete");
 }
 
-export type BoundedToolResultOptions = BoundedTextOptions & {
+type BoundedToolResultOptions = BoundedTextOptions & {
   isError: boolean;
 };
 
@@ -374,13 +374,13 @@ export function boundedToolResult(
   });
 }
 
-export type BoundedResponseBodyReader = {
+type BoundedResponseBodyReader = {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
   cancel?(reason?: unknown): Promise<void> | void;
   releaseLock?(): void;
 };
 
-export type BoundedResponseBodyLike = {
+type BoundedResponseBodyLike = {
   body?: {
     getReader(): BoundedResponseBodyReader;
   } | null;
@@ -390,7 +390,7 @@ export type BoundedResponseBodyLike = {
   status?: number;
 };
 
-export type BoundedResponseBodyResult = BoundedText & Readonly<{
+type BoundedResponseBodyResult = BoundedText & Readonly<{
   /** The validated Content-Length, or null when the total was not declared safely. */
   contentLength: number | null;
   /** Whether inputBytes is a trusted total rather than only observed stream bytes. */

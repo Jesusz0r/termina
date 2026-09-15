@@ -40,7 +40,7 @@ export function cacheRouteForProvider(
   return documentedCacheRoute(provider);
 }
 
-export interface CacheCapabilityGate {
+interface CacheCapabilityGate {
   observe(provider: ProviderId, model: string, feature: string): CapabilityCacheRecord;
   supported(provider: ProviderId, model: string, feature: string): boolean;
   recordRejected(provider: ProviderId, model: string, feature: string, reason: string): void;

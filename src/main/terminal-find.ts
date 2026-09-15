@@ -5,7 +5,7 @@
  * pane's SearchAddon so switching panes never leaves stale highlights.
  */
 
-export interface TerminalFindView {
+interface TerminalFindView {
   clearFind(): void;
   findNext(term: string): boolean;
   findPrevious(term: string): boolean;
@@ -14,7 +14,7 @@ export interface TerminalFindView {
   getTerminal(): { getSelection(): string };
 }
 
-export interface TerminalFindPane {
+interface TerminalFindPane {
   instanceId: string;
   error: boolean;
   view: TerminalFindView;

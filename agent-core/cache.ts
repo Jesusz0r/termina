@@ -34,12 +34,12 @@ export interface CapabilityCacheRecord extends CacheCapabilityScope, CacheCapabi
   expiresAtMs: number | null;
 }
 
-export interface CapabilityCache {
+interface CapabilityCache {
   readonly maxEntries: number;
   readonly entries: Map<string, CapabilityCacheRecord>;
 }
 
-export interface RecordCapabilityInput {
+interface RecordCapabilityInput {
   scope: CacheCapabilityScope;
   supported?: boolean | null;
   status?: CacheCapabilityStatus;
@@ -450,7 +450,7 @@ export function cacheRequestDiagnostics(input: CacheRequestDiagnosticsInput): Ca
   };
 }
 
-export interface CacheUsageSnapshot {
+interface CacheUsageSnapshot {
   /** Uncached input tokens as reported by the provider. */
   inputTokens: number | null;
   cacheReadTokens: number | null;
@@ -470,7 +470,7 @@ export interface CacheAttemptSnapshot {
   postRevision: boolean;
 }
 
-export type CacheMissCause =
+type CacheMissCause =
   | "cache-policy-fallback"
   | "cache-policy-changed"
   | "cache-key-changed"
@@ -485,7 +485,7 @@ export type CacheMissCause =
   | "backend-or-unknown"
   | "unknown";
 
-export interface CacheMissClassification {
+interface CacheMissClassification {
   /** False for a hit, an unknown response, or an unproven backend miss. */
   attributed: boolean;
   primary: CacheMissCause | null;
