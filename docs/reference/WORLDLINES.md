@@ -514,7 +514,8 @@ only after the same canonical repository identity returns.
 The in-house agent (`agent-core`) writes the sidecar protocol itself; there
 is no injected bridge file and no project-trust interaction. The sidecar
 writer lives in the agent host (`agent-core/host.ts`, `logEvent` in
-`agent-core/main/sidecar.ts`); `electron/sidecar.ts` is the only parser. Nothing
+`agent-core/main/sidecar.ts`). `electron/sidecar.ts` is the public parse/tail
+entry; parse, queue, tailer, and events live in `electron/sidecar/`. Nothing
 agent-owned enters source capture.
 
 Host events carry:

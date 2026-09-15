@@ -51,7 +51,7 @@ deferred.
 | `electron/session-fork.ts` → `session-worker.ts` | Should-pin | Deferred. A fork already requires a paired session entry and source state. No extra pin store this wave. |
 | `electron/plan-board.ts` | Should-pin | Deferred. Plan tasks are live dispatch, not a published source-state artifact. |
 | `electron/verify-detect.ts` | Should-pin | Deferred. The test command is already read from a named store state. Not a published result pin. |
-| `electron/sidecar.ts` | Must-not-pin | Unbounded JSONL event stream. |
+| `electron/sidecar.ts` + `electron/sidecar/` (parse/queue/tailer/events) | Must-not-pin | Unbounded JSONL event stream. |
 | `electron/terminal-runtime.ts` | Must-not-pin | Live PTY egress and instance map. |
 | `electron/session-search.ts` | Must-not-pin | Walk over many session files. |
 | `electron/content-search.ts` | Must-not-pin | Project content search. |
