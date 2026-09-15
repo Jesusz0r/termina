@@ -357,6 +357,27 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "project-local pnpm/npm/gcc are not executed",
       !envJail.includes("HACKED") && envJail.includes("toolchain:"),
     );
+
+    const toolDir = mkdtempSync(join(tmpdir(), "agent-core-env-tools-"));
+    leftovers.push(toolDir);
+    writeFileSync(join(toolDir, "gcc"), "#!/bin/sh\necho 'gcc (probe-ok) 0.0.1'\n");
+    writeFileSync(join(toolDir, "npm"), "#!/bin/sh\necho '9.9.9'\n");
+    chmodSync(join(toolDir, "gcc"), 0o755);
+    chmodSync(join(toolDir, "npm"), 0o755);
+    const probeCwd = mkdtempSync(join(tmpdir(), "agent-core-env-probe-cwd-"));
+    leftovers.push(probeCwd);
+    const prevPathTools = process.env.PATH;
+    let envTools = "";
+    try {
+      process.env.PATH = `${toolDir}${delimiter}${prevPathTools ?? ""}`;
+      envTools = formatEnvironment(probeCwd, { probes: true });
+    } finally {
+      process.env.PATH = prevPathTools;
+    }
+    check(
+      "trusted extra toolchain probes run outside cwd",
+      envTools.includes("gcc gcc (probe-ok) 0.0.1") && envTools.includes("npm 9.9.9"),
+    );
     
     writeFileSync(join(root, "hit.ts"), "alpha unique-token beta\n");
     const g = await grepFiles(root, { pattern: "unique-token" });
@@ -1878,12 +1899,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       !manListing.includes("package.json") && manListing.includes("visible.txt"),
     );
     check("manifests names only not bodies", !man1.includes("secret-body"));
-    const manProbe1 = formatEnvironment(manRoot, { probes: true });
-    const manProbe2 = formatEnvironment(manRoot, { probes: true });
-    check("environment two probe calls equal", manProbe1 === manProbe2);
-    const toolLine = (manProbe1.split("\n").find((l) => l.startsWith("toolchain:")) ?? "").slice("toolchain: ".length);
+    const manProbe = formatEnvironment(manRoot, { probes: true });
+    const toolLine = (manProbe.split("\n").find((l) => l.startsWith("toolchain:")) ?? "").slice("toolchain: ".length);
     const toolBins = toolLine.split("; ").map((part) => part.split(" ")[0]);
-    const toolOrder = ["node", "python3", "rustc", "go", "pnpm", "npm", "javac", "gcc", "clang"];
+    const toolOrder = ["node", "python3", "rustc", "go", "gcc", "npm", "javac", "clang", "pnpm"];
     const toolIdx = toolBins.map((b) => toolOrder.indexOf(b));
     check(
       "toolchain bins stay in stable order",

@@ -28,7 +28,8 @@ const ROOT_MANIFESTS = [
   "Gemfile.lock",
 ] as const;
 
-const TOOLCHAIN_BINS = ["python3", "rustc", "go", "pnpm", "npm", "javac", "gcc", "clang"] as const;
+/** Existing probes first. Extra CLIs after, slower `--version` last so they cannot spend the whole 500ms budget. */
+const TOOLCHAIN_BINS = ["python3", "rustc", "go", "gcc", "npm", "javac", "clang", "pnpm"] as const;
 
 function extraBinDirs(): string[] {
   const home = homedir();
