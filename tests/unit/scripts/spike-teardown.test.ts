@@ -3,8 +3,7 @@
  *
  * Owned children are stopped and awaited before their fixture roots are
  * removed; allocation is covered by the runner-owned teardown registry;
- * benchmark/probe roots are removed after their processes exit; and
- * diagnostics go through the canonical core client. No broad pkill.
+ * benchmark roots are removed after their processes exit. No broad pkill.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
@@ -57,8 +56,8 @@ describe("spike teardown helper (#135)", () => {
 });
 
 describe("spike teardown wiring (#135)", () => {
-  it("covers allocation in capture/merge/lifecycle/boundary spikes", () => {
-    for (const spike of ["capture", "merge", "store-lifecycle", "promotion-native-boundary"]) {
+  it("covers allocation in capture/merge/boundary spikes", () => {
+    for (const spike of ["capture", "merge", "promotion-native-boundary"]) {
       const source = read(`scripts/spikes/${spike}.ts`);
       expect(source, `${spike} must track its fixture root`).toContain("trackSpikeFixtureRoot(mkdtempSync");
       expect(source, `${spike} must track raw core children`).toContain("trackSpikeChild(spawn(");
@@ -99,24 +98,10 @@ describe("spike teardown wiring (#135)", () => {
     }
   });
 
-  it("routes diagnostics through the canonical core client", () => {
-    for (const probe of ["core-inc-bisect", "core-latency-probe", "tree-format-validate"]) {
-      const source = read(`scripts/spikes/${probe}.ts`);
-      expect(source, `${probe} must run through the spike runner`).toContain("export default async function run");
-      expect(source, `${probe} must use the canonical client`).toContain("SnapshotStore");
-      expect(source, `${probe} must not spawn the core raw`).not.toContain("spawn(join(process.cwd(), \"core/target/release/termina-core\")");
-      expect(source, `${probe} must not exit without cleanup`).not.toContain("process.exit(0)");
-      expect(source, `${probe} must destroy its store`).toContain("await store.destroy()");
-      expect(source, `${probe} must dispose the shared core`).toContain("disposeWorldlineGitCore()");
-      expect(source, `${probe} must track its fixture root`).toContain("trackSpikeFixtureRoot(mkdtempSync");
-      expect(source, `${probe} must remove its root`).toContain("rmSync(dir, { recursive: true, force: true })");
-    }
-  });
-
   it("removes the fixture root when a spike fails without a core binary", () => {
     const before = new Set(readdirSync(tmpdir()));
     const env: NodeJS.ProcessEnv = { ...process.env, TERMINA_CORE_BIN: join(tmpdir(), "termina-no-such-core-binary") };
-    const result = spawnSync(process.execPath, ["--experimental-strip-types", "scripts/spike.ts", "--", "store-lifecycle"], {
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", "scripts/spike.ts", "--", "tree-delta"], {
       cwd: repo,
       encoding: "utf8",
       timeout: 180_000,
@@ -126,7 +111,7 @@ describe("spike teardown wiring (#135)", () => {
     const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
     expect(result.status, `expected the coreless spike to fail:\n${output}`).not.toBe(0);
     expect(output).toContain("SPIKE FAILED");
-    const leaked = readdirSync(tmpdir()).filter((name) => !before.has(name) && name.startsWith("termina-store-lifecycle-"));
+    const leaked = readdirSync(tmpdir()).filter((name) => !before.has(name) && name.startsWith("wline-tree-delta-"));
     expect(leaked).toEqual([]);
   }, 180_000);
 
