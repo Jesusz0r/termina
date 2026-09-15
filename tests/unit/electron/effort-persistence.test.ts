@@ -14,7 +14,7 @@ describe("Effort Persistence Invariants", () => {
 
   it("remembers sidecar-reported effort, skipping candidate terminals", () => {
     assert.match(main, /this\.rememberEffort\(inst, nextThinking\)/);
-    assert.match(main, /if \(this\.worldlineTailers\.has\(inst\.id\)\) return;/s);
+    assert.match(main, /if \(this\.runtime\.hasCandidateSidecar\(inst\.id\)\) return;/s);
     assert.match(main, /commitPreferencePatch\(\{ defaultEffort: level \}/);
   });
 
