@@ -68,7 +68,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const { formatEnvironment, trustedPath } = env;
     const grep = await import("../../../agent-core/main/grep.ts");
     const { grepFiles, formatGrepHits, completeGrepStdout } = grep;
-    const { scanSkills, formatSkillIndex, formatProjectInstructions, formatUserInstructions } = await import("../../../agent-core/main/skills.ts");
+    const { scanSkills, formatProjectInstructions, formatUserInstructions, SKILL_XML_CAP } = await import("../../../agent-core/main/skills.ts");
+    const { formatSkillIndex } = await import("../../../agent-core/skill-index.ts");
     const { tracesDirFor, isValidTerminalId } = await import("../../../agent-core/main/sidecar.ts");
     const {
       reproFor,
@@ -1199,11 +1200,20 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(join(userSkills, "demo", "SKILL.md"), "---\nname: demo\ndescription: from user\n---\n");
     mkdirSync(join(root, ".agents", "skills", "amp"), { recursive: true });
     writeFileSync(join(root, ".agents", "skills", "amp", "SKILL.md"), "---\nname: a&b\ndescription: x<y\n---\n");
-    const scanned = scanSkills([userSkills, join(root, ".agents", "skills")]);
+    const skillDirs = [userSkills, join(root, ".agents", "skills")];
+    const scanned = scanSkills(skillDirs);
     const demo = scanned.skills.find((s) => s.name === "demo");
     check("later project skill overrides user-global", demo?.description === "from project");
-    const xml = formatSkillIndex(scanned.skills);
+    const xml = formatSkillIndex(scanned.skills, {
+      roots: skillDirs,
+      capBytes: SKILL_XML_CAP,
+      capped: scanned.capped,
+    });
     check("XML-special name escaped", xml.includes("a&amp;b") && xml.includes("x&lt;y"));
+    check(
+      "skill index groups by scan roots",
+      xml.includes(`<skill-root path="${join(root, ".agents", "skills")}"`),
+    );
     check("missing skill dirs silent", scanSkills([join(root, "no-such-skills")]).skills.length === 0);
     
     const outside = mkdtempSync(join(tmpdir(), "agent-core-out-"));
