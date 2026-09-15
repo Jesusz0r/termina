@@ -89,6 +89,7 @@ export function done(
   value: string | (ToolTextResult & { cancellationScope?: McpCancellationScope }),
   isError?: boolean,
 ): ToolOutcome {
+  const cancellationScope = typeof value === "string" ? undefined : value.cancellationScope;
   const output = typeof value === "string"
     ? Object.freeze({ ...genericToolText(value, isError === true), repro: reproFor(use) ?? null })
     : value;
@@ -98,7 +99,7 @@ export function done(
     bounded: boundedMetadata(output),
     continuation: output.continuation ?? null,
     repro: output.repro ?? null,
-    ...(output.cancellationScope === undefined ? {} : { cancellationScope: output.cancellationScope }),
+    ...(cancellationScope === undefined ? {} : { cancellationScope }),
     ...(output.stdout ? { stdout: output.stdout } : {}),
     ...(output.stderr ? { stderr: output.stderr } : {}),
     ...(output.exitCode === undefined ? {} : { exitCode: output.exitCode }),
