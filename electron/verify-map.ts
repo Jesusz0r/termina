@@ -4,6 +4,10 @@
  * A verify run id maps to at most one finding ticket. A second ticket
  * that cites the same run fails closed. The same ticket may cite the
  * same run again.
+ *
+ * Finding tickets are audit/session identities, not `verify:run` IPC.
+ * Main has no ticket store; do not grow one here. Callers cite through
+ * this map. The in-memory table is process-local.
  */
 export type VerifyCiteOk = {
   readonly ok: true;
