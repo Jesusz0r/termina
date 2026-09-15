@@ -17,7 +17,7 @@ import { authBanner, resolveAuth } from "./resolve.ts";
 import { modifyProvider, readAuth, type AuthWriteOpts, assertStoredAuthSupported } from "./store.ts";
 
 
-export type LoginKind = "oauth" | "key";
+type LoginKind = "oauth" | "key";
 
 
 /** One row per login method. `/login openai oauth` is Codex; `/login openai key` is the API key. */
@@ -51,7 +51,7 @@ function loginPickerLabel(method: { name: string; kind: LoginKind }): string {
 }
 
 
-export type LoginPickerItem = {
+type LoginPickerItem = {
   label: string;
   hint: string;
   command: string;
@@ -350,9 +350,9 @@ function openBrowser(url: string): void {
 /** Interactive login input. `secret: true` asks the TUI to mask, skip
  * history, and echo a placeholder. Non-TTY stdin cannot mask and must not
  * be used for key or code entry. */
-export type LoginInputOpts = { secret?: boolean };
+type LoginInputOpts = { secret?: boolean };
 
-export type LoginIo = {
+type LoginIo = {
   write: (text: string) => void;
   waitForCode?: (opts?: LoginInputOpts) => Promise<string>;
   openUrl?: (url: string) => void;
