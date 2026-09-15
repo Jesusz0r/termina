@@ -228,7 +228,17 @@ async function measureUncertainComparisonTree(root: string, isClosing: () => boo
   return { ok: true, bytes: Number(bytes), entries, proof: digest.digest("hex") };
 }
 
-export async function boundedWorldlineEntries(path: string, limit: number, message: string, workBudget: number): Promise<string[]> {
+export async function boundedWorldlineEntries({
+  path,
+  limit,
+  message,
+  workBudget,
+}: {
+  path: string;
+  limit: number;
+  message: string;
+  workBudget: number;
+}): Promise<string[]> {
   let directory;
   try {
     directory = await opendir(path);
@@ -282,12 +292,12 @@ function sameUncertainIdentity(left: UncertainComparisonIdentity, right: Uncerta
 }
 
 async function uncertainComparisonRootNames(root: string): Promise<string[]> {
-  const names = await boundedWorldlineEntries(
-    root,
-    MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
-    `uncertain comparison evidence root contains too many entries (${MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES}); explicitly discard retained recovery evidence before retrying`,
-    MAX_UNCERTAIN_SCAN_WORK_BYTES,
-  );
+  const names = await boundedWorldlineEntries({
+    path: root,
+    limit: MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
+    message: `uncertain comparison evidence root contains too many entries (${MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES}); explicitly discard retained recovery evidence before retrying`,
+    workBudget: MAX_UNCERTAIN_SCAN_WORK_BYTES,
+  });
   const marked: string[] = [];
   for (const name of names) {
     const dir = join(root, name);
@@ -323,7 +333,17 @@ async function uncertainComparisonIsSafe(root: string, name: string, safeIds: Re
   return manifest !== null && manifest.status !== "uncertain" && manifest.uncertainSessionArtifacts.length === 0;
 }
 
-async function buildUncertainComparisonLedgerEntry(root: string, name: string, safeIds: ReadonlySet<string>, isClosing: () => boolean = () => false): Promise<UncertainComparisonLedgerEntry | null> {
+async function buildUncertainComparisonLedgerEntry({
+  root,
+  name,
+  safeIds,
+  isClosing = () => false,
+}: {
+  root: string;
+  name: string;
+  safeIds: ReadonlySet<string>;
+  isClosing?: () => boolean;
+}): Promise<UncertainComparisonLedgerEntry | null> {
   let info: BigIntStats;
   try {
     info = await lstatPath(join(root, name), { bigint: true });
@@ -512,7 +532,7 @@ async function buildUncertainComparisonUsageLedger(root: string, safeIds: Readon
   const names = await uncertainComparisonRootNames(root);
   const entries: UncertainComparisonLedgerEntry[] = [];
   for (const name of names) {
-    const entry = await buildUncertainComparisonLedgerEntry(root, name, safeIds, isClosing);
+    const entry = await buildUncertainComparisonLedgerEntry({ root, name, safeIds, isClosing });
     if (entry) entries.push(entry);
   }
   const usage = uncertainComparisonUsageFromEntries(entries);
@@ -713,13 +733,13 @@ export class UncertainComparisonAdmissionOwner {
     // newly allocated id; only that new tree is measured at release.
     const rescanExisting = id === null;
     if (id !== null) {
-      const entry = await buildUncertainComparisonLedgerEntry(root, id, safeIds);
+      const entry = await buildUncertainComparisonLedgerEntry({ root, name: id, safeIds });
       if (entry) entriesByName.set(id, entry);
     }
     for (const name of names) {
       const existing = entriesByName.get(name);
       if (!existing) {
-        const entry = await buildUncertainComparisonLedgerEntry(root, name, safeIds);
+        const entry = await buildUncertainComparisonLedgerEntry({ root, name, safeIds });
         if (entry) entriesByName.set(name, entry);
         continue;
       }
@@ -735,7 +755,7 @@ export class UncertainComparisonAdmissionOwner {
       if (safe) {
         entriesByName.set(name, { name, identity: uncertainIdentityOf(current), counted: false, bytes: 0, entries: 0, proof: "0".repeat(64) });
       } else if (rescanExisting || !existing.counted || !sameUncertainIdentity(uncertainIdentityOf(current), existing.identity)) {
-        const entry = await buildUncertainComparisonLedgerEntry(root, name, safeIds);
+        const entry = await buildUncertainComparisonLedgerEntry({ root, name, safeIds });
         if (entry) entriesByName.set(name, entry);
         else entriesByName.delete(name);
       }

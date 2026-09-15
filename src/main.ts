@@ -1616,7 +1616,7 @@ commands.register("toggle-thinking", () => {
   }
   const next = !prefs.committed.showThinking;
   void window.termina.updatePreferences({ patch: { showThinking: next }, activateShortcuts: false }).then((saved) => {
-    prefs.apply(saved, false, false);
+    prefs.apply({ next: saved, persist: false, activateShortcuts: false });
   }).catch(() => toast("Could not save settings", "error"));
 });
 commands.register("next-project", () => cycleProjects(1));
