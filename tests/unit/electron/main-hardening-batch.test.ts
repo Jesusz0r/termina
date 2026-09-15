@@ -10,6 +10,7 @@ import { normalizeAppPreferences } from "../../../shared/preferences.ts";
 import { emptyActivityInput } from "../../../electron/agent-activity.ts";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI } from "../../../shared/terminal-control.ts";
 import { CHALLENGE_PROFILES, DEFAULT_SHORTCUTS, defaultAppPreferences } from "../../../shared/types.ts";
+import { isChallengeProfile, isWorldlineLabel } from "../../../electron/main/ipc-validate.ts";
 import ts from "typescript";
 
 /**
@@ -23,6 +24,7 @@ import ts from "typescript";
 
 const root = process.cwd();
 const main = readFileSync(join(root, "electron", "main.ts"), "utf8");
+const projectWorkspace = readFileSync(join(root, "electron", "main", "project-workspace.ts"), "utf8");
 
 function extractMethod(source: string, signature: string): string {
   const start = source.indexOf(signature);
@@ -87,7 +89,7 @@ function loadHandler(channel: string, paramNames: string, names: string[], value
 
 describe("main hardening batch (refs #219)", () => {
   it("item 1: recorder display follows index completion, not a live promise", () => {
-    expect(main).toContain("indexDone: false");
+    expect(projectWorkspace).toContain("indexDone: false");
     expect(main.match(/ws\.indexDone = true/g) ?? []).toHaveLength(2);
     expect(main).toContain('startWs2 && !startWs2.indexDone ? "indexing" : "ready"');
     expect(main).toContain("!s || startWs2?.recordError");
@@ -95,18 +97,12 @@ describe("main hardening batch (refs #219)", () => {
   });
 
   it("item 2: every label-taking worldline handler validates its candidate", async () => {
-    // The real shared predicate, extracted from the registration scope.
-    const predAt = main.indexOf("const validLabel = ");
-    const predArrow = main.slice(predAt + "const validLabel = ".length, main.indexOf(";", predAt));
-    const validLabel = new Function(ts.transpileModule(`return (${predArrow});`, {
-      compilerOptions: { target: ts.ScriptTarget.ES2022 },
-    }).outputText)() as (label: unknown) => boolean;
-    expect(validLabel("A")).toBe(true);
-    expect(validLabel("B")).toBe(true);
-    for (const bad of ["C", "a", "", null, undefined, 0, ["A"]]) expect(validLabel(bad)).toBe(false);
+    expect(isWorldlineLabel("A")).toBe(true);
+    expect(isWorldlineLabel("B")).toBe(true);
+    for (const bad of ["C", "a", "", null, undefined, 0, ["A"]]) expect(isWorldlineLabel(bad)).toBe(false);
 
     // Promote (this-shaped): invalid labels never reach the manager.
-    const promote = loadHandler("worldline:promote", "_e, comparisonId, label, force", [], []) as (
+    const promote = loadHandler("worldline:promote", "_e, comparisonId, label, force", ["isWorldlineLabel"], [isWorldlineLabel]) as (
       event: unknown,
       comparisonId: string,
       label: unknown,
@@ -126,9 +122,9 @@ describe("main hardening batch (refs #219)", () => {
     // Details/file/open-terminal (wlOf-shaped): same gate, shared predicate.
     for (const channel of ["worldline:details", "worldline:file", "worldline:open-terminal"] as const) {
       const params = channel === "worldline:file" ? "_e, comparisonId, label, relPath" : "_e, comparisonId, label";
-      const handler = loadHandler(channel, params, ["wlOf", "validLabel"], [
+      const handler = loadHandler(channel, params, ["wlOf", "isWorldlineLabel"], [
         () => ({ details: () => ({ ok: true }), fileOf: () => ({ ok: true }), openTerminal: () => ({ ok: true }) }),
-        validLabel,
+        isWorldlineLabel,
       ]) as (...args: unknown[]) => Promise<{ ok: boolean; error?: string }>;
       const args = channel === "worldline:file" ? [{}, "cmp-1", "Z", "a.ts"] : [{}, "cmp-1", "Z"];
       expect(await handler.call({}, ...args)).toEqual({ ok: false, error: "invalid candidate" });
@@ -137,31 +133,11 @@ describe("main hardening batch (refs #219)", () => {
     }
 
     // Challenge-candidate: the label gate runs before profile validation.
-    const challengeFnStart = main.indexOf("function isChallengeProfile(");
-    const challengeBodyStart = main.indexOf("{", challengeFnStart);
-    let depth = 0;
-    let challengeEnd = -1;
-    for (let i = challengeBodyStart; i < main.length; i++) {
-      if (main[i] === "{") depth++;
-      else if (main[i] === "}") {
-        depth--;
-        if (depth === 0) {
-          challengeEnd = i + 1;
-          break;
-        }
-      }
-    }
-    const isChallengeProfile = new Function(
-      "CHALLENGE_PROFILES",
-      ts.transpileModule(`return ${main.slice(challengeFnStart, challengeEnd)};`, {
-        compilerOptions: { target: ts.ScriptTarget.ES2022 },
-      }).outputText,
-    )(CHALLENGE_PROFILES) as (value: unknown) => boolean;
     const challenge = loadHandler(
       "worldline:challenge-candidate",
       "_e, comparisonId, label, profile",
-      ["wlOf", "validLabel", "isChallengeProfile"],
-      [() => ({ challengeFromCandidate: () => ({ ok: true }) }), validLabel, isChallengeProfile],
+      ["wlOf", "isWorldlineLabel", "isChallengeProfile"],
+      [() => ({ challengeFromCandidate: () => ({ ok: true }) }), isWorldlineLabel, isChallengeProfile],
     ) as (...args: unknown[]) => Promise<{ ok: boolean; error?: string }>;
     expect(await challenge.call({}, {}, "cmp-1", "Z", "garbage-profile")).toEqual({ ok: false, error: "invalid candidate" });
     expect(await challenge.call({}, {}, "cmp-1", "A", "garbage-profile")).toEqual({
