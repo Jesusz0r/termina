@@ -84,8 +84,17 @@ function nonEmpty(value: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/** Policy levels only. "looks good" is not a level. */
+function calibratedConfidence(value: string): boolean {
+  return /^(high|medium|low)\b/i.test(value.trim());
+}
+
 function missingOf(found: Partial<Record<HandoffField, string>>): HandoffField[] {
-  return HANDOFF_FIELDS.filter((field) => nonEmpty(found[field]) === null);
+  return HANDOFF_FIELDS.filter((field) => {
+    const value = nonEmpty(found[field]);
+    if (value === null) return true;
+    return field === "confidence" && !calibratedConfidence(value);
+  });
 }
 
 function fail(found: Partial<Record<HandoffField, string>>): HandoffCheckFail {

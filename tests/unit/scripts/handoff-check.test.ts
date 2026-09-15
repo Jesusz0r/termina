@@ -149,6 +149,13 @@ describe("handoff check (#240)", () => {
     expect(result.missing).toEqual(["evidence"]);
   });
 
+  it("rejects a confidence value that is not a calibrated level", () => {
+    const result = checkHandoff(conformingMarkdown({ confidence: "looks good" }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.missing).toEqual(["confidence"]);
+  });
+
   it("does not absorb a JSON object that omits a field", () => {
     const result = checkHandoff(JSON.stringify({
       "as-is": "a",

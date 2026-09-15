@@ -68,8 +68,9 @@ node --experimental-strip-types --no-warnings scripts/handoff-check.ts <handoff-
 ```
 
 Exit 0 if the file meets the contract. Exit 1 if any required field is
-missing or empty. The process prints the missing names and stops. It
-does not complete the note.
+missing or empty, or if confidence is not `high`, `medium`, or `low`
+(plus why). The process prints the missing names and stops. It does
+not complete the note.
 
 ### Example (conforming)
 
