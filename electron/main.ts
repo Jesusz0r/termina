@@ -2171,6 +2171,7 @@ class TerminaApp {
     const terminalId = this.allocateTerminalId();
     if (!eventsDir) throw new Error("candidate events directory is missing");
     const tailer = this.runtime.startCandidateSidecar(terminalId, eventsDir);
+    const sidecarGeneration = this.runtime.sidecarWatchGeneration(terminalId);
     tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.bindSidecarHold(tailer);
     try {
@@ -2200,7 +2201,7 @@ class TerminaApp {
       }
       return { terminalId: inst.id, pid: inst.pty.pid };
     } catch (error) {
-      this.runtime.stopSidecar(terminalId);
+      this.runtime.stopSidecar(terminalId, sidecarGeneration);
       throw error;
     }
   }
@@ -6955,6 +6956,13 @@ class TerminaApp {
     const closingWorkspaceIds = new Set(project.workspaces.keys());
     const closingRoots = await Promise.all([...project.workspaces.values()].map((ws) => this.canonicalPath(ws.root)));
     const closingIds = [...project.terminalIds];
+    // Snapshot identity before the awaits below. Roster restore can reuse a
+    // free term-N; a late unfenced stop/close/drain would hit the new session.
+    const closingTerminals = closingIds.map((id) => ({
+      id,
+      sidecarGeneration: this.runtime.sidecarWatchGeneration(id),
+      inst: this.runtime.get(id) ?? null,
+    }));
     const closeLeaseRequester = `close:${projectId}`;
     let closeLeaseWorkspaceId: string | null = null;
     try {
@@ -6975,13 +6983,20 @@ class TerminaApp {
       project.worldlines = null;
       await this.clearMineFiles(project);
       // Drain only this project's terminals. Other open projects keep running.
-      for (const id of closingIds) {
-        this.runtime.stopSidecar(id);
-        this.closeTerminal(id);
+      // Skip a term-N that roster restore reused while dispose was in flight.
+      // A free slot is not "ours" across an await — release already dropped
+      // its queue, and restore can adopt the id before the next statement.
+      const closingInstanceOurs = (id: string, inst: AgentTerminalInstance | null): boolean =>
+        inst !== null && this.runtime.get(id) === inst;
+      const idsStillClosing = (): string[] =>
+        closingTerminals.filter(({ id, inst }) => closingInstanceOurs(id, inst)).map(({ id }) => id);
+      for (const { id, sidecarGeneration, inst } of closingTerminals) {
+        if (sidecarGeneration !== undefined) this.runtime.stopSidecar(id, sidecarGeneration);
+        if (closingInstanceOurs(id, inst)) this.closeTerminal(id);
       }
-      await this.drainTerminals(closingIds);
-      await this.drainSidecarQueues(closingIds);
-      this.clearSidecarQueues(closingIds);
+      await this.drainTerminals(closingIds, 2000, new Map(closingTerminals.map(({ id, inst }) => [id, inst])));
+      await this.drainSidecarQueues(idsStillClosing());
+      this.clearSidecarQueues(idsStillClosing());
       for (const ws of project.workspaces.values()) ws.watcher?.stop();
       for (const wsId of project.workspaces.keys()) this.workspaceOwners.delete(wsId);
       project.workspaces.clear();
@@ -6994,13 +7009,20 @@ class TerminaApp {
           this.lastWatchChange.delete(key);
         }
       }
-      for (const id of closingIds) {
+      for (const { id, inst } of closingTerminals) {
+        if (!closingInstanceOurs(id, inst) && this.runtime.has(id)) continue;
         this.busyAgents.delete(id);
         this.dispatchWorkers.delete(id);
         this.dispatchRuns.delete(id);
         this.clearMailbox(id);
       }
-      await this.teardownRecording(project, closingWorkspaceIds, closingIds);
+      await this.teardownRecording(
+        project,
+        closingWorkspaceIds,
+        closingTerminals
+          .filter(({ id, inst }) => closingInstanceOurs(id, inst) || !this.runtime.has(id))
+          .map(({ id }) => id),
+      );
       const projectIds = [...this.projects.keys()];
       const closingIndex = projectIds.indexOf(projectId);
       this.projects.delete(projectId);
@@ -7111,12 +7133,22 @@ class TerminaApp {
 
   /** Wait until the given killed terminals have exited. A terminal that
    *  survives the deadline receives SIGKILL. Pass null to drain every
-   *  terminal (app quit). */
-  private async drainTerminals(ids: Iterable<string> | null, timeoutMs = 2000): Promise<void> {
+   *  terminal (app quit). When `owned` is set, a recycled term-N whose
+   *  live instance is not the snapshotted one is left alone. */
+  private async drainTerminals(
+    ids: Iterable<string> | null,
+    timeoutMs = 2000,
+    owned?: ReadonlyMap<string, AgentTerminalInstance | null>,
+  ): Promise<void> {
     const target = ids === null ? null : new Set(ids);
+    const matches = (inst: AgentTerminalInstance): boolean => {
+      if (target === null) return true;
+      if (!target.has(inst.id)) return false;
+      return !owned || owned.get(inst.id) === inst;
+    };
     const anyAlive = (): boolean => {
       for (const inst of this.runtime.values()) {
-        if (target === null || target.has(inst.id)) return true;
+        if (matches(inst)) return true;
       }
       return false;
     };
@@ -7125,7 +7157,7 @@ class TerminaApp {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     for (const inst of [...this.runtime.values()]) {
-      if (target === null || target.has(inst.id)) {
+      if (matches(inst)) {
         inst.pty.killGroup("SIGKILL");
         inst.pty.kill("SIGKILL");
       }

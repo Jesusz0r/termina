@@ -34,7 +34,14 @@ describe("website index claims (#388)", () => {
     expect(install).toMatch(/first session/i);
     expect(install).toMatch(/Git repo/i);
     expect(install).toMatch(/macOS sandbox helpers/i);
-    expect(install).toMatch(/not on the Linux AppImage/i);
+    expect(install).toMatch(/not available on Linux/i);
+    expect(install).not.toMatch(/not on the Linux AppImage/i);
+  });
+
+  it("qualifies macOS-only APFS and sandbox-exec copy outside the ticker", () => {
+    const html = read("website/index.html");
+    expect(html).toContain("APFS copy-on-write forks (macOS)");
+    expect(html).toMatch(/sandbox-exec profile \(macOS\)/);
   });
 
   it("qualifies macOS-only ticker mechanisms and drops the stale 7× ticker", () => {
