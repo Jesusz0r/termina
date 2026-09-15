@@ -70,7 +70,7 @@ export const ACTIVE_NAME = "session.jsonl";
 
 export const CURRENT_DIR = "current";
 
-const STORED_IMAGE_NAME = /^[A-Za-z0-9._-]+-img-[1-9][0-9]{0,3}\.(png|jpe?g|webp|gif)$/;
+export const STORED_IMAGE_NAME = /^[A-Za-z0-9._-]+-img-[1-9][0-9]{0,3}\.(png|jpe?g|webp|gif)$/;
 
 export const READ_CHUNK = 64 * 1024;
 
