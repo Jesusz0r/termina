@@ -1210,9 +1210,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       capped: scanned.capped,
     });
     check("XML-special name escaped", xml.includes("a&amp;b") && xml.includes("x&lt;y"));
+    const projectSkillDir = join(root, ".agents", "skills");
+    const projectSkillPath = realpathSync(projectSkillDir);
     check(
       "skill index groups by scan roots",
-      xml.includes(`<skill-root path="${join(root, ".agents", "skills")}"`),
+      xml.includes(`<skill-root path="${projectSkillPath}"`) ||
+        xml.includes(`<skill-root path="${projectSkillDir}"`),
     );
     check("missing skill dirs silent", scanSkills([join(root, "no-such-skills")]).skills.length === 0);
     
