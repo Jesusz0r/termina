@@ -1,11 +1,12 @@
 // @ts-nocheck
 /**
- * Phase 0 spike runner.
+ * Native spike runner.
  *
- * Bundles a disposable spike (scripts/spikes/<name>.ts) together with the
- * durable modules it imports, then runs it under plain Node. Spikes prove
- * the risky Worldlines primitives before any UI work starts (WORLDLINES §7
- * Phase 0). Results print to stdout; pass `--save <file>` to record them.
+ * Bundles a release-gate spike (scripts/spikes/<name>.ts) together with the
+ * durable modules it imports, then runs it under plain Node. The remaining
+ * spikes are the portable native suites and the macOS platform suite
+ * (`test:native`, `test:release-macos`, `test:spikes`). Results print to
+ * stdout; pass `--save <file>` to record them.
  */
 import { build } from "esbuild";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
