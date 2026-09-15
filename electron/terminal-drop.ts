@@ -27,7 +27,7 @@ const JPEG_SIG = Buffer.from([0xff, 0xd8, 0xff]);
 const GIF87 = Buffer.from("GIF87a");
 const GIF89 = Buffer.from("GIF89a");
 
-export type DropImage = { bytes: Buffer; mediaType: PendingImageMediaType; id: string };
+type DropImage = { bytes: Buffer; mediaType: PendingImageMediaType; id: string };
 export type DropFailure = { ok: false; error: string };
 
 export function normalizeDroppedPaths(raw: unknown): { ok: true; paths: string[] } | DropFailure {

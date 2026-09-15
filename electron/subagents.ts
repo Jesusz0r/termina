@@ -40,22 +40,22 @@ import {
 } from "../agent-core/subagents.js";
 
 /** At most 4 child processes at once (Anthropic rule, host-wide). */
-export const MAX_SUBAGENT_HOST_CHILDREN = 4;
+const MAX_SUBAGENT_HOST_CHILDREN = 4;
 /** Manual fan-out bound: user explicitly asked for many agents. Mirrors the
  * registry user cap so manual runs fail closed instead of fork-bombing. */
-export const MAX_SUBAGENT_HOST_CHILDREN_USER = MAX_SUBAGENT_RUNS_USER;
+const MAX_SUBAGENT_HOST_CHILDREN_USER = MAX_SUBAGENT_RUNS_USER;
 /** Pre-child launch attempts per run before reporting failure. */
-export const SUBAGENT_MAX_ATTEMPTS = 3;
+const SUBAGENT_MAX_ATTEMPTS = 3;
 /** Backoff between failed launches (attempts 2 and 3); never replay started work. */
-export const SUBAGENT_RETRY_BACKOFF_MS = [1000, 2000];
+const SUBAGENT_RETRY_BACKOFF_MS = [1000, 2000];
 /** Stdout cap: transcript plus one framed line; the host takes the last frame. */
 export const SUBAGENT_STDOUT_CAP_BYTES = 256 * 1024;
 /** Stderr is evidence only, kept small. */
 export const SUBAGENT_STDERR_CAP_BYTES = 8 * 1024;
 /** Result text carried in the mailbox note; the file holds the full text. */
-export const SUBAGENT_NOTE_RESULT_CHARS = 4000;
+const SUBAGENT_NOTE_RESULT_CHARS = 4000;
 /** Task text carried in the mailbox note; the file holds the full task. */
-export const SUBAGENT_NOTE_TASK_CHARS = 2000;
+const SUBAGENT_NOTE_TASK_CHARS = 2000;
 
 export interface SubagentHostSinks {
   /** Owning terminal's events dir; null when the terminal is gone. */

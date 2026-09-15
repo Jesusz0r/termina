@@ -35,7 +35,7 @@ export function clampModifiedListHeight(px: number, max: number): number {
   return Math.min(cap, Math.max(MODIFIED_LIST_MIN, Math.round(px)));
 }
 
-export interface LayoutElements {
+interface LayoutElements {
   splitEl: HTMLElement;
   leftPane: HTMLElement;
   rightPaneEl: HTMLElement;

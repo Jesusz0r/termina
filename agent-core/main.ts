@@ -2034,8 +2034,6 @@ function pushUserPrompt(
   return pushMessage("user", projectedUserPromptContent(prompt, images) as string | ContentBlock[]);
 }
 
-export type { ReplayMessage } from "./session.ts";
-
 let postRevision = false;
 type RevisionKind = "prune" | "summarize" | "truncate";
 let revisions = 0;
