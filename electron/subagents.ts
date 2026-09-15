@@ -264,6 +264,7 @@ export class SubagentHost {
     return out;
   }
 
+  /** Test seam: child stream liveness fields. Production uses hasStream / noteChildEvent. */
   streamInfo(childTid: string): { runId: string; parentTerminalId: string; booted: boolean; lastActivityAt: number } | null {
     const stream = this.streams.get(childTid);
     if (!stream) return null;

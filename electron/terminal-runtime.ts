@@ -179,10 +179,6 @@ export class TerminalRuntime {
     return this.terminals.keys();
   }
 
-  get size(): number {
-    return this.terminals.size;
-  }
-
   clear(): void {
     for (const id of [...this.sidecarSources.keys()]) this.stopSidecar(id);
     this.sidecarSources.clear();
@@ -358,23 +354,6 @@ export class TerminalRuntime {
     }
   }
 
-  /** Drop viewer bookkeeping only. Does not stop the sidecar or PTY. */
-  detachAllViewers(terminalId?: string): void {
-    if (terminalId === undefined) {
-      this.viewers.clear();
-      return;
-    }
-    this.viewers.delete(terminalId);
-  }
-
-  viewersOf(terminalId: string): string[] {
-    return [...(this.viewers.get(terminalId) ?? [])];
-  }
-
-  viewerCount(terminalId: string): number {
-    return this.viewers.get(terminalId)?.size ?? 0;
-  }
-
   saveRoster(path: string, terminals: RosterTerminal[], unrestored: TerminalRosterEntry[]): void {
     if (!this.rosterStore) throw new Error("terminal runtime has no roster store");
     this.rosterStore.save(path, terminals, unrestored);
@@ -397,10 +376,6 @@ export class TerminalRuntime {
     sequence: number,
   ): boolean {
     return this.egress.acknowledge(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence);
-  }
-
-  cancel(terminalId: string, terminalGeneration: number): void {
-    this.egress.cancel(terminalId, terminalGeneration);
   }
 
   disposeEgress(): void {

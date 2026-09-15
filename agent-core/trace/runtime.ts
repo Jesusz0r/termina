@@ -4,50 +4,30 @@
  * Owns the TraceRuntime lock/manifest/index/queue lifecycle. Split from
  * agent-core/trace.ts (issue #38).
  */
-import { syncDirectoryAsync } from "../../shared/fsync.ts";
+import { DurableAtomicWriteError, durableAtomicWrite } from "../../shared/durable-write.ts";
 import { errorCode, isRecord } from "../../shared/guards.ts";
-import { mkdir, open as openFile, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, open as openFile, readFile, readdir, stat, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { freezeDeep } from "./normalize.ts";
 import { compositeKey, countTurnFiles, createAttemptRecord, createTaskSettledRecord, emptyExistingScan, emptyManifestLinkIndex, freezeManifest, inspectExisting, newestTurnFiles, nonnegativeCounter, normalizeNamespace, processAlive, retryableFailureKind, stableError, taskKey, timestamp, traceTurnFromName, validPriorManifest, validTraceLinkIndex } from "./records.ts";
 import type { ExistingScan } from "./records.ts";
 import { DEFAULT_TRACE_MAX_RECORD_BYTES, DEFAULT_TRACE_MAX_SCAN_FILES, DEFAULT_TRACE_RETENTION_CAP, LINK_INDEX_FILE, MANIFEST_FILE, MAX_TRACE_INDEX_BYTES, MAX_TRACE_INDEX_ENTRIES, MAX_TRACE_MANIFEST_BYTES, TRACE_SCHEMA_VERSION } from "./schema.ts";
 import type { ExistingTraceRole, FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptIndexEntry, TraceAttemptInput, TraceLinkIndex, TraceManifest, TraceManifestOutcome, TraceManifestReset, TraceRole, TraceRuntimeOptions, TraceSettlementIndexEntry, TraceStartupResult, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailure, TraceWriteFailureKind, TraceWriteOutcome } from "./schema.ts";
 
-let atomicFileCounter = 0;
-
-
 type AtomicWriteResult = { ok: true } | { ok: false; error: string; renamed: boolean };
 
 
+/** Trace result wrapper around the shared durable async writer. */
 async function atomicWrite(path: string, textValue: string): Promise<AtomicWriteResult> {
-  const temporary = `${path}.tmp-${process.pid}-${Date.now()}-${++atomicFileCounter}`;
-  let handle: Awaited<ReturnType<typeof openFile>> | null = null;
-  let renamed = false;
   try {
-    handle = await openFile(temporary, "wx", 0o600);
-    await handle.writeFile(textValue, { encoding: "utf8" });
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    await rename(temporary, path);
-    renamed = true;
-    await syncDirectoryAsync(dirname(path));
+    await durableAtomicWrite(path, textValue);
     return { ok: true };
   } catch (error) {
-    if (handle !== null) {
-      try {
-        await handle.close();
-      } catch {
-        /* best effort */
-      }
-    }
-    try {
-      await unlink(temporary);
-    } catch {
-      /* best effort */
-    }
-    return { ok: false, error: stableError(error), renamed };
+    return {
+      ok: false,
+      error: stableError(error),
+      renamed: error instanceof DurableAtomicWriteError && error.renamed,
+    };
   }
 }
 

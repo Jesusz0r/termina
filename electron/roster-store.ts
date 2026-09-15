@@ -107,6 +107,9 @@ export class TerminalRosterStore {
     const entries = fitTerminalRoster(composeTerminalRoster(live, unrestored));
     const dir = dirname(path);
     const previous = this.commits.get(path) ?? Promise.resolve();
+    // Local writer: same exclusive-temp + file sync + rename as
+    // shared/durable-write.ts, but parent-dir fsync is sync (`syncParentDir`)
+    // so roster tests can probe that sequence. Commit chaining stays here.
     const commit = previous.then(async () => {
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;

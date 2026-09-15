@@ -181,7 +181,7 @@ describe("TerminalRuntime", () => {
     assert.equal(runtime.has("term-1"), false);
     assert.deepEqual(tailer.stopped, ["term-1"]);
     assert.deepEqual(after, ["term-1"]);
-    assert.deepEqual(runtime.viewersOf("term-1"), []);
+    assert.equal(runtime.subscribe("term-1", "renderer"), false);
     runtime.disposeEgress();
   });
 
@@ -214,10 +214,9 @@ describe("TerminalRuntime", () => {
     runtime.adopt(inst, { tailer, rendererTarget: null });
     assert.equal(runtime.attachViewer(1, 1), true);
     assert.equal(runtime.attach("term-1", 1, 1, 1), true);
-    assert.deepEqual(runtime.viewersOf("term-1"), ["renderer"]);
     assert.deepEqual(tailer.watched, ["term-1"]);
     assert.equal(runtime.detachViewer(1, 1), true);
-    assert.deepEqual(runtime.viewersOf("term-1"), []);
+    assert.equal(runtime.unsubscribe("term-1", "renderer"), false);
     assert.equal((inst.pty as unknown as { paused: boolean }).paused, false);
     assert.deepEqual(tailer.stopped, []);
     assert.equal(runtime.acceptOutput("term-1", 1, "while-gone"), true);
@@ -255,11 +254,12 @@ describe("TerminalRuntime", () => {
     assert.equal(runtime.subscribe("term-1", "renderer"), true);
     assert.equal(runtime.subscribe("term-1", "worldline:c:A"), true);
     assert.equal(runtime.subscribe("term-1", "subagent:bg-1"), true);
-    assert.equal(runtime.viewerCount("term-1"), 3);
     assert.equal(runtime.enqueueSidecar("term-1", { t: "session_ready", bridgeId: "b", seq: 1 }).accepted, true);
     inst.timeline.push({ seq: 1, t: "agent_start", ts: 1 });
-    runtime.detachAllViewers("term-1");
-    assert.deepEqual(runtime.viewersOf("term-1"), []);
+    assert.equal(runtime.unsubscribe("term-1", "renderer"), true);
+    assert.equal(runtime.unsubscribe("term-1", "worldline:c:A"), true);
+    assert.equal(runtime.unsubscribe("term-1", "subagent:bg-1"), true);
+    assert.equal(runtime.unsubscribe("term-1", "renderer"), false);
     assert.equal(runtime.enqueueSidecar("term-1", { t: "agent_settled", bridgeId: "b", seq: 2 }).accepted, true);
     inst.timeline.push({ seq: 2, t: "agent_settled", ts: 2 });
     await runtime.drainSidecarQueues(["term-1"]);

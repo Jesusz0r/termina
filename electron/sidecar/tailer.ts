@@ -10,6 +10,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync, type FSWatcher
 import { link as linkFile, open as openFile, readdir as readDirectory, rename as renameFile, stat as statFile, unlink as unlinkFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { isValidTerminalId } from "../../agent-core/main/sidecar.js";
+import { durableAtomicWrite } from "../../shared/durable-write.js";
 import { syncDirectory, syncDirectoryAsync } from "../../shared/fsync.js";
 import { isRecord } from "../../shared/guards.js";
 import { MAX_SIDECAR_BYTES, MAX_SIDECAR_RECORD_BYTES, SIDECAR_BACKPRESSURE_FILE_PREFIX, SIDECAR_CURSOR_VERSION, SIDECAR_DRAIN_FILE_TOKEN, SIDECAR_FINAL_GUARD_FILE_TOKEN, SIDECAR_MAX_SEQUENCE_GAP_POLLS, SIDECAR_PROOF_MAX_BYTES, SIDECAR_QUARANTINE_FILE_PREFIX, SIDECAR_RETAINED_FILE_TOKEN, SIDECAR_SEALED_FILE_SUFFIX, SIDECAR_SEALED_PROOF_SUFFIX, SIDECAR_TAIL_READ_BYTES, SIDECAR_VERIFY_MAX_READS, SIDECAR_VERIFY_READ_CHUNK_BYTES } from "./events.js";
@@ -120,36 +121,9 @@ interface SealedRetirementProof {
 }
 
 
-/** Publish small sidecar metadata without blocking Electron's main thread. */
-async function durableAtomicWrite(path: string, content: string): Promise<void> {
-  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  let handle: Awaited<ReturnType<typeof openFile>> | undefined;
-  try {
-    handle = await openFile(temp, "wx", 0o600);
-    await handle.writeFile(content, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await renameFile(temp, path);
-    await syncParentDirectory(path);
-  } catch (error) {
-    try {
-      await handle?.close();
-    } catch {
-      /* best effort cleanup */
-    }
-    try {
-      await unlinkFile(temp);
-    } catch {
-      /* best effort cleanup */
-    }
-    throw error;
-  }
-}
-
-
 /**
- * Atomic cursor publish without durability syncs. Cursors live in the OS temp
+ * Atomic cursor publish without durability syncs. Markers and anchors use
+ * shared/durable-write.ts (written rarely). Cursors live in the OS temp
  * dir and every delivery persists before the stream advances (a redelivery
  * window of one event, which non-idempotent consumers such as run-state
  * resets depend on), so rename atomicity — not sync durability — is the
@@ -160,7 +134,6 @@ async function durableAtomicWrite(path: string, content: string): Promise<void> 
  * Skipping the two fsyncs lifts drain throughput from ~91
  * events/s toward the syscall floor without widening the app-crash
  * redelivery window.
- * Markers and anchors stay fully durable: they are written rarely.
  */
 async function atomicWriteFile(path: string, content: string): Promise<void> {
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -402,7 +375,7 @@ export class SidecarTailer {
     this.maxRecordBytes = Math.min(configuredMaxRecordBytes, MAX_SIDECAR_RECORD_BYTES);
   }
 
-  /** Watcher-driven vs poll-driven tail dispatches since start. */
+  /** Test seam: watch vs poll wake attribution. Production uses delivery, not these counts. */
   tailWakeCounts(): { poll: number; watch: number } {
     return { ...this.wakeCounts };
   }
@@ -863,23 +836,6 @@ export class SidecarTailer {
     this.backlogOverflowed.clear();
   }
 
-  /** Resume a terminal after its consumer has drained below its high-water. */
-  resume(id: string): void {
-    const generation = this.terminalGenerations.get(id);
-    if (!this.isLive(id, generation)) return;
-    if (this.quarantined.has(id)) return;
-    this.paused.delete(id);
-    const timer = this.resumeTimers.get(id);
-    if (timer) clearTimeout(timer);
-    this.resumeTimers.delete(id);
-    this.notifyHold(id);
-    this.schedule(id);
-  }
-
-  isPaused(id: string): boolean {
-    return this.paused.has(id);
-  }
-
   isHeld(id: string): boolean {
     return this.paused.has(id) || this.quarantined.has(id);
   }
@@ -889,10 +845,6 @@ export class SidecarTailer {
     if (this.lastHold.get(id) === held) return;
     this.lastHold.set(id, held);
     this.onHold(id, held);
-  }
-
-  isBacklogOverflowed(id: string): boolean {
-    return this.backlogOverflowed.has(id);
   }
 
   private isLive(id: string, generation: number | undefined): generation is number {
@@ -2195,9 +2147,8 @@ export class SidecarTailer {
     void this.setBackpressureMarker(id, 0, generation);
     void this.checkBacklog(id, undefined, generation);
     if (this.resumeTimers.has(id)) return;
-    // A retry is a safety net for consumers which do not explicitly call
-    // resume.  It remains paused between retries, so a hot producer cannot
-    // create one read task per polling tick.
+    // Pause auto-retries after 300 ms. It remains paused between retries,
+    // so a hot producer cannot create one read task per polling tick.
     const timer = setTimeout(async () => {
       this.resumeTimers.delete(id);
       if (!this.isLive(id, generation)) return;
