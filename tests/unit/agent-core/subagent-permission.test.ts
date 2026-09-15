@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { resolveSubagentPermissionMode } from "../../../agent-core/main.ts";
+import { resolveSubagentPermissionMode } from "../../../agent-core/subagents.ts";
 
 describe("subagent permission resolution (#206)", () => {
   it("applies ask and dangerous from the validated task file", () => {

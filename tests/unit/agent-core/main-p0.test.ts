@@ -12,6 +12,9 @@ import type { TraceWriteFailure } from "../../../agent-core/trace.ts";
 describe("Agent Core Main P0 Invariants", () => {
   it("passes P0 focused main integration tests", async () => {
     const core = await import("../../../agent-core/main.ts");
+    const compat = await import("../../../agent-core/openai-compat.ts");
+    const session = await import("../../../agent-core/session.ts");
+    const { traceWriteDisposition } = await import("../../../agent-core/trace.ts");
     
     const failures = [];
     function check(name: string, fn: () => void) {
@@ -26,8 +29,8 @@ describe("Agent Core Main P0 Invariants", () => {
     }
     
     check("main exposes nullable provider usage normalization", () => {
-      assert.equal(typeof core.normalizeProviderUsage, "function");
-      assert.deepEqual(core.normalizeProviderUsage({ input_tokens: 10, output_tokens: 4 }), {
+      assert.equal(typeof compat.normalizeProviderUsage, "function");
+      assert.deepEqual(compat.normalizeProviderUsage({ input_tokens: 10, output_tokens: 4 }), {
         input: 10,
         cacheRead: null,
         cacheWrite: null,
@@ -37,8 +40,8 @@ describe("Agent Core Main P0 Invariants", () => {
     });
     
     check("missing provider usage does not become a zero-token record", () => {
-      assert.equal(core.normalizeProviderUsage(undefined), null);
-      assert.deepEqual(core.normalizeProviderUsage({}), {
+      assert.equal(compat.normalizeProviderUsage(undefined), null);
+      assert.deepEqual(compat.normalizeProviderUsage({}), {
         input: null,
         cacheRead: null,
         cacheWrite: null,
@@ -72,7 +75,7 @@ describe("Agent Core Main P0 Invariants", () => {
     });
 
     check("settings pins prepare only an empty, writerless stream", () => {
-      const may = core.mayPrepareSessionForSettings;
+      const may = session.mayPrepareSessionForSettings;
       assert.equal(typeof may, "function");
       assert.equal(may(null, false, false), false);
       assert.equal(may("", false, false), false);
@@ -91,18 +94,18 @@ describe("Agent Core Main P0 Invariants", () => {
     });
     
     check("provider-reported cost gates on finite nonnegative dollars", () => {
-      assert.equal(core.providerReportedUsd({ reportedUsd: 0.0037756 }), 0.0037756);
-      assert.equal(core.providerReportedUsd({ reportedUsd: 0 }), 0);
-      assert.equal(core.providerReportedUsd({ reportedUsd: null }), null);
-      assert.equal(core.providerReportedUsd({}), null);
-      assert.equal(core.providerReportedUsd(null), null);
-      assert.equal(core.providerReportedUsd({ reportedUsd: -1 }), null);
-      assert.equal(core.providerReportedUsd({ reportedUsd: Number.NaN }), null);
+      assert.equal(compat.providerReportedUsd({ reportedUsd: 0.0037756 }), 0.0037756);
+      assert.equal(compat.providerReportedUsd({ reportedUsd: 0 }), 0);
+      assert.equal(compat.providerReportedUsd({ reportedUsd: null }), null);
+      assert.equal(compat.providerReportedUsd({}), null);
+      assert.equal(compat.providerReportedUsd(null), null);
+      assert.equal(compat.providerReportedUsd({ reportedUsd: -1 }), null);
+      assert.equal(compat.providerReportedUsd({ reportedUsd: Number.NaN }), null);
     });
 
     check("trace integration keeps failed writes retryable", () => {
-      assert.equal(typeof core.traceWriteDisposition, "function");
-      assert.deepEqual(core.traceWriteDisposition({ ok: false, persisted: false, retryable: true } as TraceWriteFailure), {
+      assert.equal(typeof traceWriteDisposition, "function");
+      assert.deepEqual(traceWriteDisposition({ ok: false, persisted: false, retryable: true } as TraceWriteFailure), {
         persisted: false,
         retry: true,
         terminal: false,

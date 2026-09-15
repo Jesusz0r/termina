@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as compat from "../../../agent-core/openai-compat.ts";
 import * as core from "../../../agent-core/main.ts";
+import { providerToolAdmissionError } from "../../../agent-core/tool-dispatch.ts";
 
 function completion(id: any, name: any, args: any) {
   return compat.completionResultFromEvents([
@@ -403,20 +404,20 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
       expect(changed.error ?? "").toMatch(/signature changed/i);
     });
 
-    it("exposes core provider tool admission invariant", () => {      expect(typeof core.providerToolAdmissionError).toBe("function");
+    it("exposes core provider tool admission invariant", () => {      expect(typeof providerToolAdmissionError).toBe("function");
       expect(
-        core.providerToolAdmissionError([{ type: "tool_use", id: "call-1", name: "bash", input: [] }] as any) ?? "",
+        providerToolAdmissionError([{ type: "tool_use", id: "call-1", name: "bash", input: [] }] as any) ?? "",
       ).toMatch(/tool call arguments.*object/i);
       expect(
-        core.providerToolAdmissionError([{ type: "tool_use", id: "", name: "bash", input: {} }] as any) ?? "",
+        providerToolAdmissionError([{ type: "tool_use", id: "", name: "bash", input: {} }] as any) ?? "",
       ).toMatch(/tool call identity/i);
       expect(
-        core.providerToolAdmissionError([{ type: "tool_use", id: "call-1", name: "bash", input: {} }] as any),
+        providerToolAdmissionError([{ type: "tool_use", id: "call-1", name: "bash", input: {} }] as any),
       ).toBeNull();
     });
 
     it("rejects duplicate call IDs before execution or persistence", () => {
-      expect(core.providerToolAdmissionError([
+      expect(providerToolAdmissionError([
         { type: "tool_use", id: "same", name: "bash", input: { command: "first" } },
         { type: "tool_use", id: "same", name: "bash", input: { command: "second" } },
       ])).toMatch(/duplicate tool call identity/);

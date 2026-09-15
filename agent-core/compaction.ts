@@ -200,6 +200,14 @@ export function serializeForSummary(messages: readonly CompactionMessage[]): str
   return parts.join("\n").slice(0, 60_000);
 }
 
+/** Provider window-overflow shapes across Anthropic/OpenAI/Gemini/xAI. Tested
+ * only against provider-thrown request errors, never user text. Generic nouns
+ * stay verb-guarded so benign messages (e.g. "context window info") cannot
+ * trigger a destructive summarize/truncate. */
+export function isContextOverflowMessage(message: string): boolean {
+  return /prompt is too long|maximum context|maximum prompt|context_length|request_too_large|request too large|too many tokens|tokens?\s+(exceed|exceeds|exceeded)|exceed.*tokens?|tokens?.*exceed|request contains .*tokens|input.*too long|prompt.*too (long|large|big)|context.*too (long|large|big)|context.*exceed|exceed.*context|token limit|context limit/i.test(message);
+}
+
 /** Build the cheap-lane summarization prompt: prior handoff plus the evicted span. */
 export function summaryPrompt(priorHandoffBody: string | null, serialized: string): string {
   const prior = priorHandoffBody ? `<previous-handoff>\n${priorHandoffBody}\n</previous-handoff>\n\n` : "";

@@ -54,6 +54,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const reclaim = await import("../../../agent-core/reclaim.ts");
     const compaction = await import("../../../agent-core/compaction.ts");
     const session = await import("../../../agent-core/session.ts");
+    const models = await import("../../../agent-core/models.ts");
+    const cache = await import("../../../agent-core/cache.ts");
+    const anthropicCache = await import("../../../agent-core/main/anthropic-cache.ts");
+    const { retryAfter } = await import("../../../agent-core/main/retry-after.ts");
     const trace = await import("../../../agent-core/trace.ts");
     const toolOutput = await import("../../../agent-core/tool-output.ts");
     
@@ -80,6 +84,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       shouldAskPermission,
       displayToolOutput,
     } = await import("../../../agent-core/main/tools.ts");
+    const { buildCachedPrefix, anthropicCacheMark, stampHistoryCache } = anthropicCache;
     const { FROZEN_IDENTITY, buildFrozenSystem } = await import("../../../agent-core/main/front-matter.ts");
     const { renderHistoryTranscript } = await import("../../../agent-core/main/history-view.ts");
     const { isDirectRunFrom } = await import("../../../agent-core/main/env.ts");
@@ -99,15 +104,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const {
       parsePrintPrompt,
       builtinClientTools,
-      buildCachedPrefix,
-      anthropicCacheMark,
       runBash,
       isDirectRun,
       WEB_SEARCH_TOOL,
       requestTools,
-      stampHistoryCache,
       compactStreamBlocks,
-      retryAfter,
       parseEffortCommand,
       outputTokenBudget,
       formatUsageIndicators,
@@ -4017,12 +4018,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     // Copilot is billed as OpenAI but serves its own model list (claude, grok,
     // gemini, kimi) and a different gpt-5-mini window (264k vs 400k). Reusing
     // the pricing mapping for context left 18 Copilot models with no entry.
-    check("catalog: copilot bills as openai", core.catalogProviderId("github-copilot") === "openai");
-    check("catalog: copilot resolves context as itself", core.contextCatalogProviderId("github-copilot") === "github-copilot");
-    check("catalog: codex resolves context as itself", core.contextCatalogProviderId("openai-codex") === "openai-codex");
-    check("catalog: relays share the opencode context list", core.contextCatalogProviderId("opencode-go") === "opencode" && core.contextCatalogProviderId("opencode-zen") === "opencode");
-    check("catalog: relays keep their own pricing entry", core.catalogProviderId("opencode-go") === "opencode-go");
-    check("catalog: plain providers map to themselves", core.contextCatalogProviderId("anthropic") === "anthropic" && core.catalogProviderId("anthropic") === "anthropic");
+    check("writeless routes treat null cache writes as exact", cache.cacheWriteSupportedFor("xai", null) === false && cache.cacheWriteSupportedFor("anthropic", null) === null);
+    check("catalog: copilot bills as openai", models.catalogProviderId("github-copilot") === "openai");
+    check("catalog: copilot resolves context as itself", models.contextCatalogProviderId("github-copilot") === "github-copilot");
+    check("catalog: codex resolves context as itself", models.contextCatalogProviderId("openai-codex") === "openai-codex");
+    check("catalog: relays share the opencode context list", models.contextCatalogProviderId("opencode-go") === "opencode" && models.contextCatalogProviderId("opencode-zen") === "opencode");
+    check("catalog: relays keep their own pricing entry", models.catalogProviderId("opencode-go") === "opencode-go");
+    check("catalog: plain providers map to themselves", models.contextCatalogProviderId("anthropic") === "anthropic" && models.catalogProviderId("anthropic") === "anthropic");
     // A named family must beat the floor; this is the bug that shipped.
     check("defaultContextWindow gpt-5 is not floored", defaultContextWindow("openai", "gpt-5") > defaultContextWindow("openai", "gpt-4o"));
     // An undocumented id must NOT inherit its flagship's window.

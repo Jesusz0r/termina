@@ -940,3 +940,8 @@ export type {
   SubagentApprovalRequest,
   SubagentInboxMessage,
 } from "./subagents/approval.ts";
+export {
+  isApprovalAnswer,
+  isLiveSubagentRun,
+  resolveSubagentPermissionMode,
+} from "./subagents/permission.ts";

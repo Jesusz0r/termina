@@ -519,3 +519,16 @@ export class SessionWriter {
     }
   }
 }
+
+/**
+ * Whether a settings pin may prepare the session itself: a bundle path
+ * exists, no writer is open yet, and nothing is stored. ensureRouteSettingsWritable
+ * in main.ts keeps the only production caller.
+ */
+export function mayPrepareSessionForSettings(
+  file: string | null,
+  writerOpen: boolean,
+  hasContent: boolean,
+): boolean {
+  return !!file && !writerOpen && !hasContent;
+}
