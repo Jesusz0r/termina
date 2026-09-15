@@ -200,7 +200,11 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
       expect(mainSource).toMatch(/this\.runtime\.stopSidecar\(terminalId, sidecarGeneration\)/);
       expect(mainSource).toMatch(/sidecarWatchGeneration\(id\)/);
       expect(mainSource).toMatch(/stopSidecar\(id, sidecarGeneration\)/);
-      expect(mainSource).toMatch(/if \(inst && this\.runtime\.get\(id\) === inst\) this\.closeTerminal\(id\)/);
+      expect(mainSource).toMatch(/if \(closingInstanceOurs\(id, inst\)\) this\.closeTerminal\(id\)/);
+      expect(mainSource).toMatch(/drainSidecarQueues\(idsStillClosing\(\)\)/);
+      expect(mainSource).toMatch(/clearSidecarQueues\(idsStillClosing\(\)\)/);
+      expect(mainSource).not.toMatch(/clearSidecarQueues\(leftoverIds\)/);
+      expect(mainSource).toMatch(/closingInstanceOurs\(id, inst\) \|\| !this\.runtime\.has\(id\)/);
       const worldlinesSource = await readFile("electron/worldlines/manager.ts", "utf8");
       const launchStart = worldlinesSource.indexOf("private async launchCandidate");
       const mapping = worldlinesSource.indexOf("this.terminalToComparison.set(terminalId", launchStart);

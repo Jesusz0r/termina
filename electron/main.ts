@@ -6984,16 +6984,19 @@ class TerminaApp {
       await this.clearMineFiles(project);
       // Drain only this project's terminals. Other open projects keep running.
       // Skip a term-N that roster restore reused while dispose was in flight.
-      const closingSlotOurs = (id: string, inst: AgentTerminalInstance | null): boolean =>
-        this.runtime.get(id) === inst || !this.runtime.has(id);
+      // A free slot is not "ours" across an await — release already dropped
+      // its queue, and restore can adopt the id before the next statement.
+      const closingInstanceOurs = (id: string, inst: AgentTerminalInstance | null): boolean =>
+        inst !== null && this.runtime.get(id) === inst;
+      const idsStillClosing = (): string[] =>
+        closingTerminals.filter(({ id, inst }) => closingInstanceOurs(id, inst)).map(({ id }) => id);
       for (const { id, sidecarGeneration, inst } of closingTerminals) {
         if (sidecarGeneration !== undefined) this.runtime.stopSidecar(id, sidecarGeneration);
-        if (inst && this.runtime.get(id) === inst) this.closeTerminal(id);
+        if (closingInstanceOurs(id, inst)) this.closeTerminal(id);
       }
       await this.drainTerminals(closingIds, 2000, new Map(closingTerminals.map(({ id, inst }) => [id, inst])));
-      const leftoverIds = closingTerminals.filter(({ id, inst }) => closingSlotOurs(id, inst)).map(({ id }) => id);
-      await this.drainSidecarQueues(leftoverIds);
-      this.clearSidecarQueues(leftoverIds);
+      await this.drainSidecarQueues(idsStillClosing());
+      this.clearSidecarQueues(idsStillClosing());
       for (const ws of project.workspaces.values()) ws.watcher?.stop();
       for (const wsId of project.workspaces.keys()) this.workspaceOwners.delete(wsId);
       project.workspaces.clear();
@@ -7007,13 +7010,19 @@ class TerminaApp {
         }
       }
       for (const { id, inst } of closingTerminals) {
-        if (!closingSlotOurs(id, inst)) continue;
+        if (!closingInstanceOurs(id, inst) && this.runtime.has(id)) continue;
         this.busyAgents.delete(id);
         this.dispatchWorkers.delete(id);
         this.dispatchRuns.delete(id);
         this.clearMailbox(id);
       }
-      await this.teardownRecording(project, closingWorkspaceIds, closingIds);
+      await this.teardownRecording(
+        project,
+        closingWorkspaceIds,
+        closingTerminals
+          .filter(({ id, inst }) => closingInstanceOurs(id, inst) || !this.runtime.has(id))
+          .map(({ id }) => id),
+      );
       const projectIds = [...this.projects.keys()];
       const closingIndex = projectIds.indexOf(projectId);
       this.projects.delete(projectId);
