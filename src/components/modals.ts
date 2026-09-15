@@ -1,6 +1,5 @@
 /**
- * Modal dialogs for pi's extension UI protocol (select/confirm/input/editor)
- * and generic toasts for notifications.
+ * Confirm, unsaved-close, input, and file-list modals, plus generic toasts.
  */
 
 import type { UnsavedCloseChoice } from "../../shared/unsaved-close";
