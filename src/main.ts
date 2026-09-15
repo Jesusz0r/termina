@@ -1062,9 +1062,12 @@ function refreshCandidateTestCommand(pane: Pane): void {
     },
     onError: (err) => toast(`could not detect tests: ${(err as Error).message}`, "error"),
   });
-  // Unlabeled panes own the project-tree cache. Candidate refresh clears them;
-  // coalesce one project detect after a burst of those clears.
-  if (pane.worldlineLabel === null) scheduleProjectTestCommandRefresh(pane.projectId);
+  // Unlabeled panes own the project-tree cache. Reconcile does not wipe it;
+  // coalesce one project detect so package.json changes still refresh.
+  if (pane.worldlineLabel === null) {
+    scheduleProjectTestCommandRefresh(pane.projectId);
+    if (activeId === pane.instanceId) renderStatus(pane);
+  }
 }
 
 async function closePane(instanceId: string): Promise<void> {

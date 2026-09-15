@@ -260,13 +260,13 @@ describe("Worldline Multi-Project Ownership & UI Reconciliation", () => {
     effects.refreshCandidateTest(panes[1]);
     expect(panes[1].testCommand).toBeNull();
 
-    // Clear on label removal
+    // Clear on label removal (demotion is the label refresh, not a project-cache wipe)
     const pendingB2Removal = deferred();
     pendingDetections.set("terminal-b2", pendingB2Removal);
     paneB.worldlineLabel = "B";
     effects.refreshCandidateTest(paneB);
-    paneB.worldlineLabel = null;
     paneB.testCommand = "stale candidate command";
+    updateWorldlinePaneTab("project-b", paneB, () => null, tabBadges.get(paneB.id) ?? null);
     effects.refreshCandidateTest(paneB);
     expect(paneB.testCommand).toBeNull();
     pendingB2Removal.resolve({ label: "late after removal" });
@@ -389,5 +389,37 @@ describe("one test-command cache on the pane (issue #359)", () => {
     expect(panes[0].testCommand).toBe("cargo test");
     expect(panes[1].testCommand).toBe("npm test");
     expect(panes[2].testCommand).toBeNull();
+  });
+
+  it("keeps the project-tree cache across unlabeled candidate refreshes", () => {
+    const project = pane({ testCommand: "npm test", candidateTestEpoch: 4 });
+    const changes: Array<string | null> = [];
+    refreshWorldlineCandidateTest(project, {
+      activeProjectId: () => "project-a",
+      hydrationEpoch: () => 1,
+      isActivePane: () => true,
+      paneById: () => project,
+      detectTest: async () => ({ label: "should-not-run" }),
+      onChanged: (current) => {
+        changes.push(current.testCommand);
+      },
+      onError: () => undefined,
+    });
+    expect(project.testCommand).toBe("npm test");
+    expect(project.candidateTestEpoch).toBe(4);
+    expect(changes).toEqual([]);
+  });
+
+  it("drops a demoted candidate command when the A/B label leaves", () => {
+    const candidate = pane({ worldlineLabel: "A", testCommand: "cargo test", candidateTestEpoch: 2 });
+    updateWorldlinePaneTab("project-a", candidate, () => null, {
+      textContent: "A",
+      style: { display: "" },
+      title: "",
+      classList: { toggle() {} },
+    });
+    expect(candidate.worldlineLabel).toBeNull();
+    expect(candidate.testCommand).toBeNull();
+    expect(candidate.candidateTestEpoch).toBe(3);
   });
 });

@@ -17,6 +17,8 @@ describe("renderer test-command cache (issue #359)", () => {
     expect(renderer).toContain("projectTestDetectPane(");
     expect(projectState).toContain("export function resolvePaneTestCommand");
     expect(projectState).toContain("return pane.testCommand ?? projectCommand");
+    expect(projectState).toContain("if (label === null) return;");
+    expect(projectState).toContain("previous !== null && pane.worldlineLabel === null");
   });
 
   it("points e2e seams at the pane cache, not a module global", () => {
