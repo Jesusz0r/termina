@@ -170,7 +170,7 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
       };
       extra = { ...entry, apiUrl: session.apiUrl };
     } else {
-      return { ok: true };
+      return { ok: false, error: "auth expired — run /login" };
     }
     if (!parsed.ok) return { ok: false, error: `auth refresh returned an invalid token response: ${parsed.error}` };
     const stored = persistOauth(providerId, parsed, extra);
