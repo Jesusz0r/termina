@@ -316,9 +316,40 @@ export function parseFailingTests(output: string): FailingTests {
 }
 
 /**
+ * Capture a candidate head. Fail closed when the commit or tree is
+ * missing. Stillness is the content-addressed tree: synthetic capture
+ * commits embed wall-clock timestamps, so two captures of identical
+ * bytes never share a commit.
+ */
+async function pinCandidateState(
+  captureHead: EvidenceDeps["captureHead"],
+  cand: CandidateFacts,
+  parent: string | null,
+  phase: "pin" | "re-verify",
+): Promise<{ commit: string; tree: string }> {
+  const fail = (detail: string): Error =>
+    new Error(
+      phase === "pin"
+        ? `could not pin the candidate state: ${detail}`
+        : `could not re-verify the candidate state: ${detail}`,
+    );
+  let head: { commit: string; tree: string };
+  try {
+    head = await captureHead(cand.root, join(cand.root, ".git"), parent);
+  } catch (err) {
+    throw fail(err instanceof Error ? err.message : String(err));
+  }
+  if (!head.commit || !head.tree) throw fail("missing commit or tree");
+  return head;
+}
+
+/**
  * The evidence engine. Verify, API, dependencies, and footprint run
  * per candidate. The caller serializes those A then B. Benchmarks warm
  * both sides, then interleave scored samples (WORLDLINES §6.8).
+ *
+ * `measure` pins a source-state id, writes that id on every record,
+ * and rechecks the tree before it returns (issue #239).
  */
 export class EvidenceEngine {
   constructor(private deps: EvidenceDeps) {}
@@ -326,8 +357,10 @@ export class EvidenceEngine {
   /** The non-benchmark evidence for one candidate. */
   async measure(_label: "A" | "B", cand: CandidateFacts): Promise<EvidenceRecord[]> {
     const out: EvidenceRecord[] = [];
-    const head = await this.deps.captureHead(cand.root, join(cand.root, ".git"), this.deps.baseStateId);
-    const stateId = head.commit;
+    // Pin the worktree before any measure read. A running candidate can
+    // move mid-measure and mix moments into one record set.
+    const startHead = await pinCandidateState(this.deps.captureHead, cand, this.deps.baseStateId, "pin");
+    const stateId = startHead.commit;
 
     const verify = await this.verifyEvidence(cand, stateId);
     if (verify) out.push(verify);
@@ -339,6 +372,11 @@ export class EvidenceEngine {
     if (footprint) out.push(footprint);
     const trajectory = await this.trajectoryEvidence(cand, stateId);
     if (trajectory) out.push(trajectory);
+
+    const endHead = await pinCandidateState(this.deps.captureHead, cand, null, "re-verify");
+    if (endHead.tree !== startHead.tree) {
+      throw new Error("the candidate changed during evidence");
+    }
     return out;
   }
 

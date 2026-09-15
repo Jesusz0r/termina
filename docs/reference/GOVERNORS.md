@@ -79,6 +79,7 @@ govern only the claim they assert.
 | One-ticket-one-run cite | `electron/verify-map.ts`, `tests/unit/electron/verify-map.test.ts` | **Governor** for the cite API. Not hooked to `verify:run`; main has no finding-ticket store. |
 | Handoff contract | `scripts/handoff-check.ts`, `tests/unit/scripts/handoff-check.test.ts` | **Governor** when the script runs. Rejects a missing field or a confidence value that is not `high` / `medium` / `low`. Not a settle gate. |
 | Audit ledger reconcile | `scripts/audit-ledger.ts`, `tests/unit/scripts/audit-ledger.test.ts` | **Governor** when the script runs. Pins `tests/fixtures/audit-ledger/`. |
+| Evidence source-state pin | `electron/evidence.ts` `measure`, `tests/unit/electron/evidence-pin.test.ts` | **Governor** for capture + recheck on `measure`. A moved tree throws. The renderer toasts that path. |
 
 ## `AGENTS.md` owners
 
@@ -114,6 +115,7 @@ Do not treat these as gates.
 | `docs/reference/LAZINESS-BASELINE.md` | Measurement write-up for issue #125. |
 | `docs/reference/CALIBRATION.md` | Policy for handoff fields. The checker is the governor, not this file. |
 | `docs/reference/AUDIT-LEDGER.md` | Ledger rule. The checker is the governor, not this file. |
+| `docs/reference/PINNED-CONTEXT.md` | Tier map. The evidence pin test is the governor, not this file. |
 | `#123` / `#124` settle gates | Removed in `f77883c` (`agent-core/main/settle-gate.ts` deleted). Do not restore them. `#237` is the current settle gate (see the unit-test row). |
 | `#125` laziness metrics | `scripts/laziness-metrics.ts` is measurement-only. The unit test pins the fixture corpus. It does not settle a run. |
 | `cargo clippy` / `cargo fmt --check` | Named in `CONTRIBUTING.md`. No workflow step. **Unchecked.** |
