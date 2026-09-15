@@ -8,7 +8,6 @@ use std::os::fd::AsRawFd;
 use serde_json::{Value, json};
 
 use crate::{
-    PROMOTION_COMPONENT_MAX_BYTES,
     PROMOTION_DIRECTORY_MAX_DEPTH,
     PROMOTION_PATH_MAX_BYTES,
 };
@@ -23,7 +22,7 @@ use crate::FileIdentity;
 use crate::promote_fs::{
     PromotionDirectoryStream, PromotionIdentity, PromotionObservedLeaf, PromotionObservedState,
     promotion_child_relative, promotion_identity_from_value, promotion_mkdir_at,
-    promotion_set_mode, promotion_symlink_at,
+    promotion_path_work_bytes, promotion_set_mode, promotion_symlink_at,
 };
 use crate::util::read_link_at;
 
@@ -74,18 +73,6 @@ impl PromotionCopyBudget {
         }
         Ok(())
     }
-}
-
-pub(crate) fn promotion_copy_path_len(relative: &str, name: &str) -> Result<usize, String> {
-    if name.is_empty() || name.len() > PROMOTION_COMPONENT_MAX_BYTES {
-        return Err("promotion tree copy entry name is invalid".to_string());
-    }
-    relative
-        .len()
-        .checked_add(if relative.is_empty() { 0 } else { 1 })
-        .and_then(|length| length.checked_add(name.len()))
-        .filter(|length| *length <= PROMOTION_PATH_MAX_BYTES)
-        .ok_or_else(|| "promotion traversal path exceeds its bounded work budget".to_string())
 }
 
 pub(crate) struct PromotionCopyFrame {
@@ -170,18 +157,8 @@ pub(crate) fn promotion_copy_tree_contents(
                 frame.relative.clone(),
             )
         };
-        let path_len = promotion_copy_path_len(&relative, &name)?;
-        let work = u64::try_from(path_len)
-            .map_err(|_| "promotion tree copy work accounting overflow")?
-            .checked_add(
-                u64::try_from(name.len())
-                    .map_err(|_| "promotion tree copy work accounting overflow")?,
-            )
-            .and_then(|value| {
-                value.checked_add(std::mem::size_of::<FileIdentity>() as u64)
-            })
-            .ok_or("promotion tree copy work accounting overflow")?;
-        budget.charge_work(work)?;
+        let path_work = promotion_path_work_bytes(&relative, &name)?;
+        budget.charge_work(path_work)?;
         let child_relative = promotion_child_relative(&relative, &name)?;
         let source_identity = stat_at(source_fd, &c_name).map_err(|error| {
             format!("stat promotion tree source {child_relative} failed: {error}")
