@@ -2,6 +2,7 @@
  * Authenticated HTTP primitives for auth flows.
  *
  * Owns bounded auth fetch, form/JSON posts, and response reading.
+ * `readBoundedUtf8` is the shared byte-capped UTF-8 body reader (catalog + auth).
  * Split from agent-core/auth.ts (issue #38).
  */
 import { TextDecoder } from "node:util";
