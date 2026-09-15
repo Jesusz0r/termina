@@ -446,7 +446,7 @@ export class TraceRuntime {
     });
   }
 
-  private async acquireLock(): Promise<{ ok: true } | { ok: false; error: string }> {
+  private async tryCreateLock(): Promise<{ ok: true } | { ok: false; error: string }> {
     try {
       const handle = await openFile(this.lockPath, "wx", 0o600);
       try {
@@ -462,41 +462,30 @@ export class TraceRuntime {
         return { ok: false, error: stableError(error) };
       }
     } catch (error) {
-      if (errorCode(error) !== "EEXIST") return { ok: false, error: stableError(error) };
-      let lockOwner: unknown = null;
-      try {
-        lockOwner = JSON.parse(await readFile(this.lockPath, "utf8")) as unknown;
-      } catch {
-        return { ok: false, error: "trace directory is already locked" };
-      }
-      const ownerPid = isRecord(lockOwner) && nonnegativeCounter(lockOwner.pid) && lockOwner.pid > 0 ? lockOwner.pid : null;
-      if (ownerPid === null || ownerPid === process.pid || processAlive(ownerPid)) {
-        return { ok: false, error: "trace directory is already locked" };
-      }
-      try {
-        await unlink(this.lockPath);
-        await syncDirectoryAsync(this.directory);
-      } catch {
-        return { ok: false, error: "trace directory is already locked" };
-      }
-      try {
-        const handle = await openFile(this.lockPath, "wx", 0o600);
-        try {
-          await handle.writeFile(JSON.stringify({ pid: process.pid, token: this.lockToken, startedAt: timestamp(this.now) }), { encoding: "utf8" });
-          await handle.sync();
-          await syncDirectoryAsync(this.directory);
-          this.lockHandle = handle;
-          return { ok: true };
-        } catch (retryError) {
-          await handle.close().catch(() => undefined);
-          await unlink(this.lockPath).catch(() => undefined);
-          await syncDirectoryAsync(this.directory).catch(() => undefined);
-          return { ok: false, error: stableError(retryError) };
-        }
-      } catch (retryError) {
-        return { ok: false, error: errorCode(retryError) === "EEXIST" ? "trace directory is already locked" : stableError(retryError) };
-      }
+      return { ok: false, error: errorCode(error) === "EEXIST" ? "trace directory is already locked" : stableError(error) };
     }
+  }
+
+  private async acquireLock(): Promise<{ ok: true } | { ok: false; error: string }> {
+    const created = await this.tryCreateLock();
+    if (created.ok || created.error !== "trace directory is already locked") return created;
+    let lockOwner: unknown = null;
+    try {
+      lockOwner = JSON.parse(await readFile(this.lockPath, "utf8")) as unknown;
+    } catch {
+      return { ok: false, error: "trace directory is already locked" };
+    }
+    const ownerPid = isRecord(lockOwner) && nonnegativeCounter(lockOwner.pid) && lockOwner.pid > 0 ? lockOwner.pid : null;
+    if (ownerPid === null || ownerPid === process.pid || processAlive(ownerPid)) {
+      return { ok: false, error: "trace directory is already locked" };
+    }
+    try {
+      await unlink(this.lockPath);
+      await syncDirectoryAsync(this.directory);
+    } catch {
+      return { ok: false, error: "trace directory is already locked" };
+    }
+    return this.tryCreateLock();
   }
 
   private async releaseLock(): Promise<void> {
@@ -564,17 +553,23 @@ export class TraceRuntime {
     });
   }
 
-  private prospectiveLinkIndex(record: FrozenTraceAttempt | FrozenTraceTaskSettled, updatedAt = timestamp(this.now)): TraceLinkIndex {
-    const attempts = new Map<string, TraceAttemptIndexEntry>();
-    const settlements = new Map<string, TraceSettlementIndexEntry>();
-    for (const attempt of this.attempts.values()) attempts.set(compositeKey(attempt.runId, attempt.attemptId), { ...attempt });
-    for (const settlement of this.settlements.values()) settlements.set(taskKey(settlement.runId, settlement.taskId), {
-      ...settlement,
-      attemptIds: settlement.attemptIds.slice(),
-      summaryAttemptIds: settlement.summaryAttemptIds.slice(),
+  private plannedLinkUpdates(record: FrozenTraceAttempt | FrozenTraceTaskSettled): {
+    attemptUpdates: Map<string, TraceAttemptIndexEntry>;
+    settlementUpdates: Map<string, TraceSettlementIndexEntry>;
+  } {
+    const attemptUpdates = new Map<string, TraceAttemptIndexEntry>();
+    const settlementUpdates = new Map<string, TraceSettlementIndexEntry>();
+    const unknownAttempt = (attemptId: string, role: TraceRole): TraceAttemptIndexEntry => ({
+      runId: record.runId,
+      taskId: record.taskId,
+      attemptId,
+      role,
+      retained: false,
+      traceTurn: null,
+      unknown: true,
     });
     if (record.recordType === "attempt") {
-      attempts.set(compositeKey(record.runId, record.attemptId), {
+      attemptUpdates.set(compositeKey(record.runId, record.attemptId), {
         runId: record.runId,
         taskId: record.taskId,
         attemptId: record.attemptId,
@@ -586,51 +581,29 @@ export class TraceRuntime {
       if (this.linkIndexComplete === false) {
         for (const parentId of [record.parentAttemptId, record.retryOfAttemptId]) {
           if (parentId === null) continue;
-          const key = compositeKey(record.runId, parentId);
-          if (!attempts.has(key)) attempts.set(key, {
-            runId: record.runId,
-            taskId: record.taskId,
-            attemptId: parentId,
-            role: "main",
-            retained: false,
-            traceTurn: null,
-            unknown: true,
-          });
+          const parentKey = compositeKey(record.runId, parentId);
+          if (!this.attempts.has(parentKey) && !attemptUpdates.has(parentKey)) {
+            attemptUpdates.set(parentKey, unknownAttempt(parentId, "main"));
+          }
         }
       }
     } else {
       for (const attemptId of record.attemptIds) {
         const key = compositeKey(record.runId, attemptId);
-        if (!attempts.has(key)) attempts.set(key, {
-          runId: record.runId,
-          taskId: record.taskId,
-          attemptId,
-          role: "main",
-          retained: false,
-          traceTurn: null,
-          unknown: true,
-        });
+        if (!this.attempts.has(key)) attemptUpdates.set(key, unknownAttempt(attemptId, "main"));
       }
       for (const attemptId of record.summaryAttemptIds) {
         const key = compositeKey(record.runId, attemptId);
-        const current = attempts.get(key);
+        const current = attemptUpdates.get(key) ?? this.attempts.get(key);
         if (current === undefined) {
-          attempts.set(key, {
-            runId: record.runId,
-            taskId: record.taskId,
-            attemptId,
-            role: "summary",
-            retained: false,
-            traceTurn: null,
-            unknown: true,
-          });
+          attemptUpdates.set(key, unknownAttempt(attemptId, "summary"));
         } else if (current.unknown) {
-          attempts.set(key, { ...current, role: "summary" });
+          attemptUpdates.set(key, { ...current, role: "summary" });
         }
       }
-      const unknown = record.attemptIds.some((attemptId) => attempts.get(compositeKey(record.runId, attemptId))?.unknown === true) ||
-        record.summaryAttemptIds.some((attemptId) => attempts.get(compositeKey(record.runId, attemptId))?.unknown === true);
-      settlements.set(taskKey(record.runId, record.taskId), {
+      const unknown = record.attemptIds.some((attemptId) => (attemptUpdates.get(compositeKey(record.runId, attemptId)) ?? this.attempts.get(compositeKey(record.runId, attemptId)))?.unknown === true) ||
+        record.summaryAttemptIds.some((attemptId) => (attemptUpdates.get(compositeKey(record.runId, attemptId)) ?? this.attempts.get(compositeKey(record.runId, attemptId)))?.unknown === true);
+      settlementUpdates.set(taskKey(record.runId, record.taskId), {
         runId: record.runId,
         taskId: record.taskId,
         attemptIds: record.attemptIds.slice(),
@@ -641,6 +614,21 @@ export class TraceRuntime {
         unknown,
       });
     }
+    return { attemptUpdates, settlementUpdates };
+  }
+
+  private prospectiveLinkIndex(record: FrozenTraceAttempt | FrozenTraceTaskSettled, updatedAt = timestamp(this.now)): TraceLinkIndex {
+    const attempts = new Map<string, TraceAttemptIndexEntry>();
+    const settlements = new Map<string, TraceSettlementIndexEntry>();
+    for (const attempt of this.attempts.values()) attempts.set(compositeKey(attempt.runId, attempt.attemptId), { ...attempt });
+    for (const settlement of this.settlements.values()) settlements.set(taskKey(settlement.runId, settlement.taskId), {
+      ...settlement,
+      attemptIds: settlement.attemptIds.slice(),
+      summaryAttemptIds: settlement.summaryAttemptIds.slice(),
+    });
+    const planned = this.plannedLinkUpdates(record);
+    for (const [key, attempt] of planned.attemptUpdates) attempts.set(key, attempt);
+    for (const [key, settlement] of planned.settlementUpdates) settlements.set(key, settlement);
     return this.buildLinkIndexFrom(attempts.values(), settlements.values(), updatedAt);
   }
 
@@ -888,88 +876,23 @@ export class TraceRuntime {
     settlementUpdates: Map<string, TraceSettlementIndexEntry>;
     protectedTasks: Set<string>;
   } {
-    const attemptUpdates = new Map<string, TraceAttemptIndexEntry>();
-    const settlementUpdates = new Map<string, TraceSettlementIndexEntry>();
     const protectedTasks = new Set<string>();
-    if (record === null) return { attemptUpdates, settlementUpdates, protectedTasks };
+    if (record === null) return { attemptUpdates: new Map(), settlementUpdates: new Map(), protectedTasks };
     protectedTasks.add(taskKey(record.runId, record.taskId));
     const protectKnownAttempt = (attemptId: string): void => {
       const existing = this.attempts.get(compositeKey(record.runId, attemptId));
       if (existing !== undefined) protectedTasks.add(taskKey(existing.runId, existing.taskId));
     };
     if (record.recordType === "attempt") {
-      const key = compositeKey(record.runId, record.attemptId);
-      attemptUpdates.set(key, {
-        runId: record.runId,
-        taskId: record.taskId,
-        attemptId: record.attemptId,
-        role: record.role,
-        retained: true,
-        traceTurn: this.nextTraceTurn,
-        unknown: false,
-      });
       for (const parentId of [record.parentAttemptId, record.retryOfAttemptId]) {
         if (parentId === null) continue;
         protectKnownAttempt(parentId);
-        const parentKey = compositeKey(record.runId, parentId);
-        if (this.linkIndexComplete === false && !this.attempts.has(parentKey)) attemptUpdates.set(parentKey, {
-          runId: record.runId,
-          taskId: record.taskId,
-          attemptId: parentId,
-          role: "main",
-          retained: false,
-          traceTurn: null,
-          unknown: true,
-        });
       }
     } else {
-      for (const attemptId of record.attemptIds) {
-        protectKnownAttempt(attemptId);
-        const key = compositeKey(record.runId, attemptId);
-        if (!this.attempts.has(key)) attemptUpdates.set(key, {
-          runId: record.runId,
-          taskId: record.taskId,
-          attemptId,
-          role: "main",
-          retained: false,
-          traceTurn: null,
-          unknown: true,
-        });
-      }
-      for (const attemptId of record.summaryAttemptIds) {
-        protectKnownAttempt(attemptId);
-        const key = compositeKey(record.runId, attemptId);
-        const current = attemptUpdates.get(key) ?? this.attempts.get(key);
-        if (current === undefined) {
-          attemptUpdates.set(key, {
-            runId: record.runId,
-            taskId: record.taskId,
-            attemptId,
-            role: "summary",
-            retained: false,
-            traceTurn: null,
-            unknown: true,
-          });
-        } else if (current.unknown) {
-          attemptUpdates.set(key, { ...current, role: "summary" });
-        }
-      }
-      const unknown = record.attemptIds.some((attemptId) => attemptUpdates.get(compositeKey(record.runId, attemptId))?.unknown === true ||
-        this.attempts.get(compositeKey(record.runId, attemptId))?.unknown === true) ||
-        record.summaryAttemptIds.some((attemptId) => attemptUpdates.get(compositeKey(record.runId, attemptId))?.unknown === true ||
-          this.attempts.get(compositeKey(record.runId, attemptId))?.unknown === true);
-      settlementUpdates.set(taskKey(record.runId, record.taskId), {
-        runId: record.runId,
-        taskId: record.taskId,
-        attemptIds: record.attemptIds.slice(),
-        summaryAttemptIds: record.summaryAttemptIds.slice(),
-        finalAttemptId: record.finalAttemptId,
-        retained: true,
-        traceTurn: this.nextTraceTurn,
-        unknown,
-      });
+      for (const attemptId of record.attemptIds) protectKnownAttempt(attemptId);
+      for (const attemptId of record.summaryAttemptIds) protectKnownAttempt(attemptId);
     }
-    return { attemptUpdates, settlementUpdates, protectedTasks };
+    return { ...this.plannedLinkUpdates(record), protectedTasks };
   }
 
   private indexSummary(plan: ReturnType<TraceRuntime["reservationPlan"]>, updatedAt: string): {
