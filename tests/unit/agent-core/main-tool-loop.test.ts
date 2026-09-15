@@ -176,7 +176,7 @@ describe("real tool loop regressions", () => {
       expect(result.events.find((row) => row.t === "agent_settled")?.error).toBeNull();
       expect(result.traces.some((row) => row.recordType === "attempt" && row.role === "critic")).toBe(false);
       const settled = result.traces.find((row) => row.recordType === "task-settled");
-      expect(settled?.critic).toBeNull();
+      expect(settled).not.toHaveProperty("critic");
       expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("v2\n");
       expectPaired(result.messages);
     });

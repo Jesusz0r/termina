@@ -27,7 +27,7 @@ type PrefixEvidence = {
 };
 
 type ToolOutcomeFixture = {
-  name: string;
+  toolName: string;
   status: string;
   complete: boolean;
   bytes: number;
@@ -84,7 +84,7 @@ type TaskSettledFixture = {
   finalAttemptId: string | null;
   attemptIds: string[];
   summaryAttemptIds: string[];
-  outcome: { status: string; correctness: string | null; criteriaHash?: string };
+  outcome: { status: string; criteriaHash?: string };
 };
 
 type PrefixExpectation = {
@@ -277,8 +277,8 @@ describe("Agent Core Trace V2 Invariants", () => {
         missContributors: ["stable-prefix", "working-set"],
         missGapMs: 10 * 60 * 1000,
         toolOutcomes: [
-          { name: "read_file", status: "ok", complete: true, bytes: 10 },
-          { name: "edit", status: "truncated", complete: false, bytes: 20 },
+          { toolName: "read_file", status: "ok", complete: true, bytes: 10 },
+          { toolName: "edit", status: "truncated", complete: false, bytes: 20 },
         ],
         reclaimEvidence: {
           planned: true,
@@ -337,7 +337,7 @@ describe("Agent Core Trace V2 Invariants", () => {
         finalAttemptId: "attempt-3",
         attemptIds: ["attempt-1", "attempt-2", "attempt-3", "summary-1"],
         summaryAttemptIds: ["summary-1"],
-        outcome: { status: "success", correctness: "correct", criteriaHash: "criteria-task-1" },
+        outcome: { status: "success", criteriaHash: "criteria-task-1" },
       },
       {
         schemaVersion: 2,
@@ -348,7 +348,7 @@ describe("Agent Core Trace V2 Invariants", () => {
         finalAttemptId: "attempt-4",
         attemptIds: ["attempt-4"],
         summaryAttemptIds: [],
-        outcome: { status: "failure", correctness: "unknown", criteriaHash: "criteria-task-2" },
+        outcome: { status: "failure", criteriaHash: "criteria-task-2" },
       },
     ];
     
@@ -415,9 +415,6 @@ describe("Agent Core Trace V2 Invariants", () => {
       assert.equal(report.attempts.total, 5);
       assert.equal(report.attempts.retries, 2);
       assert.equal(report.attempts.fallbacks, 1);
-      assert.equal(report.tasks.correctness.correct, 1);
-      assert.equal(report.tasks.correctness.incorrect, 0);
-      assert.equal(report.tasks.correctness.unknown, 1);
       assert.equal(report.tasks.unsettled, 0);
       assert.equal(report.tasks.interrupted, 0);
       assert.equal(report.tasks.cancelled, 0);
@@ -520,7 +517,7 @@ describe("Agent Core Trace V2 Invariants", () => {
           finalAttemptId: attemptId,
           attemptIds: [attemptId],
           summaryAttemptIds: [],
-          outcome: { status, correctness: null },
+          outcome: { status },
         });
       }
       outcomeRecords.push(attempt({
@@ -781,7 +778,7 @@ describe("Agent Core Trace V2 Invariants", () => {
       finalAttemptId: "missing",
       attemptIds: ["missing", "missing"],
       summaryAttemptIds: ["missing"],
-      outcome: { status: "success", correctness: "correct" },
+      outcome: { status: "success" },
     }));
     // The invalid fixture drops runId; rest-siblings are exempt from noUnusedLocals.
     const { runId: _droppedRunId, ...missingRun } = attempt({
@@ -816,7 +813,7 @@ describe("Agent Core Trace V2 Invariants", () => {
       finalAttemptId: null,
       attemptIds: "not-an-array",
       summaryAttemptIds: [],
-      outcome: { status: "failure", correctness: "unknown" },
+      outcome: { status: "failure" },
     }));
     check("reader rejects duplicate and dangling v2 links", () => {
       const invalidSource = readTraceDirectory(invalid);
@@ -848,7 +845,7 @@ describe("Agent Core Trace V2 Invariants", () => {
       finalAttemptId: "broken-parent",
       attemptIds: ["broken-parent"],
       summaryAttemptIds: [],
-      outcome: { status: "failure", correctness: "unknown" },
+      outcome: { status: "failure" },
     }));
     check("reader cascades invalid links through dependent settlements", () => {
       const cascadeSource = readTraceDirectory(cascade);

@@ -153,7 +153,6 @@ interface TaskAcc {
   roles: Map<string, number>;
   settled: boolean;
   outcomeStatus: string | null;
-  correctness: string | null;
   taskClass: string | null;
 }
 
@@ -165,7 +164,6 @@ export interface BaselineReport {
     readonly settled: number;
     readonly open: number;
     readonly byOutcome: { [key: string]: number };
-    readonly byCorrectness: { [key: string]: number };
     readonly byTaskClass: { [key: string]: number };
   };
   readonly attempts: {
@@ -219,7 +217,7 @@ function emptyReport(): BaselineReport {
   return {
     version: 1,
     records: { attempts: 0, settlements: 0 },
-    tasks: { count: 0, settled: 0, open: 0, byOutcome: {}, byCorrectness: {}, byTaskClass: {} },
+    tasks: { count: 0, settled: 0, open: 0, byOutcome: {}, byTaskClass: {} },
     attempts: { byRole: {}, byProvider: {}, byProtocol: {}, byModel: {}, byStatus: {}, retries: 0, fallbacks: 0 },
     usage,
     cache: {
@@ -327,7 +325,6 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
   const byModel = new Map<string, number>();
   const byStatus = new Map<string, number>();
   const byOutcome = new Map<string, number>();
-  const byCorrectness = new Map<string, number>();
   const byTaskClass = new Map<string, number>();
   const byMissCause = new Map<string, number>();
   const tasks = new Map<string, TaskAcc>();
@@ -337,7 +334,7 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
     const key = taskKey(runId, taskId);
     let acc = tasks.get(key);
     if (!acc) {
-      acc = { attempts: [], retries: 0, roles: new Map(), settled: false, outcomeStatus: null, correctness: null, taskClass: null };
+      acc = { attempts: [], retries: 0, roles: new Map(), settled: false, outcomeStatus: null, taskClass: null };
       tasks.set(key, acc);
     }
     return acc;
@@ -443,9 +440,7 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
       task.settled = true;
       const outcome = isRecord(parsed["outcome"]) ? (parsed["outcome"] as Record<string, unknown>) : {};
       const status = asString(outcome["status"]);
-      const correctness = asString(outcome["correctness"]);
       if (status !== null) task.outcomeStatus = status;
-      if (correctness !== null) task.correctness = correctness;
       const cls = asString(parsed["taskClass"]);
       if (cls !== null && task.taskClass === null) task.taskClass = cls;
     }
@@ -458,7 +453,6 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
   t["open"] = tasks.size - settledTasks.length;
   for (const task of settledTasks) {
     countKey(byOutcome, task.outcomeStatus ?? "unknown");
-    countKey(byCorrectness, task.correctness ?? "unknown");
     if (task.taskClass !== null) countKey(byTaskClass, task.taskClass);
   }
 
@@ -469,7 +463,6 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
   a["byModel"] = sortedObject(byModel);
   a["byStatus"] = sortedObject(byStatus);
   t["byOutcome"] = sortedObject(byOutcome);
-  t["byCorrectness"] = sortedObject(byCorrectness);
   t["byTaskClass"] = sortedObject(byTaskClass);
   (report.cache as unknown as Record<string, number | Record<string, number>>)["byMissCause"] = sortedObject(byMissCause);
   // Deterministic float addition order comes from sorted turn order; round display only.

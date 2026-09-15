@@ -246,7 +246,6 @@ describe("Agent Core Trace Runtime Invariants", () => {
       summaryAttemptIds: [],
       outcome: {
         status: "success",
-        correctness: "correct",
         criteriaHash: "criteria-hash",
       },
     });

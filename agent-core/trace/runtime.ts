@@ -12,7 +12,7 @@ import { freezeDeep } from "./normalize.ts";
 import { compositeKey, countTurnFiles, createAttemptRecord, createTaskSettledRecord, emptyExistingScan, emptyManifestLinkIndex, freezeManifest, inspectExisting, newestTurnFiles, nonnegativeCounter, normalizeNamespace, processAlive, retryableFailureKind, stableError, taskKey, timestamp, traceTurnFromName, validPriorManifest, validTraceLinkIndex } from "./records.ts";
 import type { ExistingScan } from "./records.ts";
 import { DEFAULT_TRACE_MAX_RECORD_BYTES, DEFAULT_TRACE_MAX_SCAN_FILES, DEFAULT_TRACE_RETENTION_CAP, LINK_INDEX_FILE, MANIFEST_FILE, MAX_TRACE_INDEX_BYTES, MAX_TRACE_INDEX_ENTRIES, MAX_TRACE_MANIFEST_BYTES, TRACE_SCHEMA_VERSION } from "./schema.ts";
-import type { FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptIndexEntry, TraceAttemptInput, TraceLinkIndex, TraceManifest, TraceManifestOutcome, TraceManifestReset, TraceRole, TraceRuntimeOptions, TraceSettlementIndexEntry, TraceStartupResult, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailure, TraceWriteFailureKind, TraceWriteOutcome } from "./schema.ts";
+import type { ExistingTraceRole, FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptIndexEntry, TraceAttemptInput, TraceLinkIndex, TraceManifest, TraceManifestOutcome, TraceManifestReset, TraceRole, TraceRuntimeOptions, TraceSettlementIndexEntry, TraceStartupResult, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailure, TraceWriteFailureKind, TraceWriteOutcome } from "./schema.ts";
 
 let atomicFileCounter = 0;
 
@@ -75,7 +75,7 @@ export class TraceRuntime {
     runId: string;
     taskId: string;
     attemptId: string;
-    role: TraceRole;
+    role: ExistingTraceRole;
     retained: boolean;
     traceTurn: number | null;
     unknown: boolean;

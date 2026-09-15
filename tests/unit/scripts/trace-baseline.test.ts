@@ -77,7 +77,7 @@ describe("trace-baseline consumer", () => {
         finalAttemptId: "a-3",
         attemptIds: ["a-1", "a-2", "a-3"],
         summaryAttemptIds: [],
-        outcome: { status: "success", correctness: null, criteriaHash: null },
+        outcome: { status: "success", criteriaHash: null },
       }),
     );
     writeFileSync(join(dir, "turn-4.json"), "{not json");
@@ -95,8 +95,6 @@ describe("trace-baseline consumer", () => {
     assert.equal(first.records.attempts, 3);
     assert.equal(first.records.settlements, 1);
     assert.deepEqual(first.tasks.byOutcome, { success: 1 });
-    // Correctness stays unknown: no evaluator supplied it.
-    assert.deepEqual(first.tasks.byCorrectness, { unknown: 1 });
     assert.equal(first.attempts.retries, 2);
     // Usage: known sums only; nulls counted, never coerced.
     assert.equal(first.usage.input.sum, 3200);
