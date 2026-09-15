@@ -1,8 +1,8 @@
 /**
  * Trace record factories, link validation, and scan support.
  *
- * Owns attempt/settlement factories, link-index validation, existing-file
- * scanning, and atomic-write helpers. Split from agent-core/trace.ts (issue #38).
+ * Owns attempt/settlement factories, link-index validation, and existing-file
+ * scanning. Split from agent-core/trace.ts (issue #38).
  */
 import { errorCode, isRecord } from "../../shared/guards.ts";
 import { readFile, readdir, stat } from "node:fs/promises";

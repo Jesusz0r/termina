@@ -36,7 +36,7 @@ export function text(value: unknown, name: string, required = false): string | n
   })) throw new Error(`${name} contains a control character`);
   const normalized = required ? value.trim() : value;
   if (required && normalized.length === 0) throw new Error(`${name} must not be empty`);
-  return normalized || (required ? null : null);
+  return normalized || null;
 }
 
 

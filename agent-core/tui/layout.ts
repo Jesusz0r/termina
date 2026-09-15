@@ -153,7 +153,7 @@ export function paintRow(frags: StyledSpan[], cols: number, entry: TranscriptEnt
               ? "\x1b[1;34m"
               : frag.style === 5
                 ? "\x1b[2m"
-                : frag.style === 6 || frag.style === 7
+                : frag.style === 6
                   ? "\x1b[2;90m"
                   : "";
     if (sgr) out += sgr;
