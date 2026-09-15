@@ -13,7 +13,13 @@ node --experimental-strip-types --no-warnings scripts/laziness-metrics.ts <trace
 Input is one trace-v2 directory (`turn-N.json` records, the same shape
 `scripts/trace-baseline.ts` reads). Output is deterministic JSON: sorted
 keys, no timestamps or paths. `scripts/laziness-metrics.ts` is
-measurement-only; it changes no runtime behavior.
+measurement-only; it changes no runtime behavior. The `No Quiet Wins`
+critical class (#237) is a settle gate, not a signal in this report.
+
+Issue #125 remains measurement-only. Confidence, evidence, and
+change-condition rules live in `docs/reference/CALIBRATION.md`. This
+baseline and `scripts/laziness-metrics.ts` do not settle a run and do
+not copy that policy.
 
 ## Corpus
 
