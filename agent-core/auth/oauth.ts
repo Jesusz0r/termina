@@ -9,7 +9,7 @@ import { COPILOT_HEADERS } from "./providers/github-copilot.ts";
 import { providerDefinition } from "./providers/index.ts";
 import { extractAccountId } from "./providers/openai-codex.ts";
 import { type ProviderId } from "./providers/types.ts";
-import { ANTHROPIC_CLIENT_ID, GITHUB_ACCESS_TOKEN_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_TOKEN_URL, GITHUB_DEVICE_GRANT, GITHUB_DEVICE_URL, OPENAI_CODEX_CLIENT_ID, XAI_CLIENT_ID, XAI_DEFAULT_EXPIRES_MS, XAI_DEFAULT_INTERVAL_MS, XAI_DEVICE_GRANT, XAI_MIN_INTERVAL_MS, XAI_POLL_MARGIN_MS, XAI_SCOPE, XAI_SLOW_DOWN_MS, deviceUrl, isSupportedProvider, redirectUri, testLoopbackOverride, tokenUrl, validateCopilotApiUrl } from "./endpoints.ts";
+import { ANTHROPIC_CLIENT_ID, GITHUB_ACCESS_TOKEN_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_TOKEN_URL, GITHUB_DEVICE_GRANT, GITHUB_DEVICE_URL, OPENAI_CODEX_CLIENT_ID, XAI_CLIENT_ID, XAI_DEFAULT_EXPIRES_MS, XAI_DEFAULT_INTERVAL_MS, XAI_DEVICE_GRANT, XAI_MIN_INTERVAL_MS, XAI_POLL_MARGIN_MS, XAI_SCOPE, XAI_SLOW_DOWN_MS, isSupportedProvider, redirectUri, testLoopbackOverride, tokenUrl, validateCopilotApiUrl, xaiDeviceUrl } from "./endpoints.ts";
 import { AUTH_REQUEST_CANCELLED, authFetch, authHttpError, isAuthHttpFailure, postForm, postJson } from "./http.ts";
 import { modifyProvider, readAuth, refreshFlights, type AuthWriteOpts } from "./store.ts";
 
@@ -170,7 +170,7 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
       };
       extra = { ...entry, apiUrl: session.apiUrl };
     } else {
-      return { ok: true };
+      return { ok: false, error: "auth expired — run /login" };
     }
     if (!parsed.ok) return { ok: false, error: `auth refresh returned an invalid token response: ${parsed.error}` };
     const stored = persistOauth(providerId, parsed, extra);
@@ -344,7 +344,7 @@ export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<{
   expiresMs: number;
 }> {
   const res = await postForm(
-    deviceUrl(),
+    xaiDeviceUrl(),
     { client_id: XAI_CLIENT_ID, scope: XAI_SCOPE, referrer: "termina" },
     signal,
   );

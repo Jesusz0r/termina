@@ -96,6 +96,24 @@ function countableToolTarget(target: string): boolean {
   return target.length > 0 && target !== "_";
 }
 
+function resetRun(
+  next: AgentActivityInput,
+  boundary: ActivityBoundary,
+  settledError: string | null,
+): void {
+  next.lastBoundary = boundary;
+  next.lastBoundarySeq = next.lastSeq;
+  next.lastBoundaryAt = next.lastAt;
+  next.lastSettledError = settledError;
+  next.openToolIds = [];
+  next.errorStreak = 0;
+  next.errorStreakTarget = null;
+  next.promptInFlight = false;
+  next.preflightInFlight = false;
+  next.preflightTimedOut = false;
+  next.ptyExitedMidRun = false;
+}
+
 export function applyActivityEvent(input: AgentActivityInput, event: ActivitySignal): AgentActivityInput {
   const next: AgentActivityInput = {
     ...input,
@@ -120,30 +138,10 @@ export function applyActivityEvent(input: AgentActivityInput, event: ActivitySig
       next.promptInFlight = true;
       break;
     case "agent_start":
-      next.lastBoundary = "agent_start";
-      next.lastBoundarySeq = event.seq;
-      next.lastBoundaryAt = event.at;
-      next.lastSettledError = null;
-      next.openToolIds = [];
-      next.errorStreak = 0;
-      next.errorStreakTarget = null;
-      next.promptInFlight = false;
-      next.preflightInFlight = false;
-      next.preflightTimedOut = false;
-      next.ptyExitedMidRun = false;
+      resetRun(next, "agent_start", null);
       break;
     case "agent_settled":
-      next.lastBoundary = "agent_settled";
-      next.lastBoundarySeq = event.seq;
-      next.lastBoundaryAt = event.at;
-      next.lastSettledError = event.error;
-      next.openToolIds = [];
-      next.errorStreak = 0;
-      next.errorStreakTarget = null;
-      next.promptInFlight = false;
-      next.preflightInFlight = false;
-      next.preflightTimedOut = false;
-      next.ptyExitedMidRun = false;
+      resetRun(next, "agent_settled", event.error);
       break;
     case "tool":
       if (countableToolTarget(event.target) && !next.openToolIds.includes(event.target)) {

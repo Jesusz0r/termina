@@ -5,7 +5,7 @@
  * agent-core/tui.ts (issue #38).
  */
 import { EMPTY_STATE_TEXT, SLASH_COMMANDS, applyFileMention, cellWidth, completeFileMention, completeSlashLine, effortCommandRows, fileMentionAt, formatPickerRow, formatToolSummary, matchingSlashCommands, splitGraphemes, truncateMiddle, wrapText, type SlashCommand } from "../tui-text.ts";
-import { INPUT_PREFIX, boxBorderRow, boxContentRow, clip, displayBudget, graphemeSafeTail, inputWrapWidth, layoutHeights, paintRow, sourceTail, tailSpans, wrapInput, wrapSpans } from "./layout.ts";
+import { INPUT_PREFIX, boxBorderRow, boxContentRow, clip, displayBudget, inputWrapWidth, layoutHeights, paintRow, sourceTail, tailSpans, wrapInput, wrapSpans } from "./layout.ts";
 import { HANDLE_ERROR, MAX_CSI, MAX_HISTORY, MAX_TRANSCRIPT, MAX_TRANSCRIPT_ENTRIES, SPIN, TRANSCRIPT_TRIM_TARGET, TRUNCATION_MARKER, closeSanitize, entryChars, freshMarkdownBoundary, freshSanitizer, parseMarkdown, sanitizeText, toolStatusLabel, transcriptHandleBrand } from "./transcript.ts";
 import type { StyledSpan, ToolTranscriptState, TranscriptEntry, TranscriptHandle, TuiIO, TuiInput } from "./transcript.ts";
 
@@ -448,10 +448,8 @@ export class AgentTui {
     if (this.activeStream?.entryId !== entry.id) return;
     const others = this.transcriptChars - entryChars(entry);
     const budget = Math.max(0, TRANSCRIPT_TRIM_TARGET - others - TRUNCATION_MARKER.length);
-    let tail = entry.text.length > budget ? graphemeSafeTail(entry.text, budget) : entry.text;
-    const nl = tail.indexOf("\n");
-    if (nl >= 0 && nl + 1 < tail.length) tail = tail.slice(nl + 1);
-    const next = TRUNCATION_MARKER + tail;
+    const tail = sourceTail(entry.text, budget);
+    const next = TRUNCATION_MARKER + tail.text;
     this.transcriptChars -= entryChars(entry);
     entry.text = next;
     this.resetMarkdown(entry);
@@ -1562,23 +1560,7 @@ export class AgentTui {
     this.out.write(tty);
   }
 
-  private buildFrame(size: { cols: number; rows: number }): {
-    text: string;
-    painted: string[];
-    cursorRow: number;
-    cursorCol: number;
-  } {
-    const { cols, rows } = size;
-    const matches = this.matches();
-    if (this.slashIndex >= matches.length) this.slashIndex = Math.max(0, matches.length - 1);
-    const { wrapped: inputWrapped, pos } = this.composerInput(cols);
-    const layout = layoutHeights(rows, Math.max(1, inputWrapped.length), matches.length);
-    const slashStart = Math.max(
-      0,
-      Math.min(this.slashIndex - layout.slash + 1, Math.max(0, matches.length - layout.slash)),
-    );
-    const shownSlash = matches.slice(slashStart, slashStart + layout.slash);
-    const view = this.visibleSlice(cols, layout.transcript, this.scroll);
+  private titleLine(cols: number): string {
     const spin = this.busy ? SPIN[this.spin]! : "";
     const imageN = this.pendingImageCount;
     const images = imageN > 0 ? `${imageN} img` : "";
@@ -1608,7 +1590,27 @@ export class AgentTui {
     const leftParts = [`▸ termina`, `${visibleModel}${modelSuffix}`, ...extraParts];
     const leftTitle = leftParts.join(separator);
     const gap = Math.max(1, cols - cellWidth(leftTitle) - 2);
-    const title = ` ${leftTitle}${" ".repeat(gap)} `;
+    return ` ${leftTitle}${" ".repeat(gap)} `;
+  }
+
+  private buildFrame(size: { cols: number; rows: number }): {
+    text: string;
+    painted: string[];
+    cursorRow: number;
+    cursorCol: number;
+  } {
+    const { cols, rows } = size;
+    const matches = this.matches();
+    if (this.slashIndex >= matches.length) this.slashIndex = Math.max(0, matches.length - 1);
+    const { wrapped: inputWrapped, pos } = this.composerInput(cols);
+    const layout = layoutHeights(rows, Math.max(1, inputWrapped.length), matches.length);
+    const slashStart = Math.max(
+      0,
+      Math.min(this.slashIndex - layout.slash + 1, Math.max(0, matches.length - layout.slash)),
+    );
+    const shownSlash = matches.slice(slashStart, slashStart + layout.slash);
+    const view = this.visibleSlice(cols, layout.transcript, this.scroll);
+    const title = this.titleLine(cols);
     const bashInput = this.chars[0] === "!" && !this.choicePrompt && !this.rawInput;
 
     // Placeholder when the prompt is empty

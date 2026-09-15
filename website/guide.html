@@ -164,7 +164,7 @@
       <p>While the agent works:</p>
       <ul>
         <li>The file watcher pushes every disk change into open editor models. You see edits land as the agent writes them.</li>
-        <li>Files the agent touches auto-open in editor tabs mid-run, so you can follow along without hunting for paths.</li>
+        <li>Files the agent touches auto-open in a replaceable preview tab mid-run, so you can follow along without hunting for paths — a long run never pins a tab per file. Edit, double-click, or Keep Open to pin one. Turn this off in Settings → General → <b>Open files the agent edits</b>.</li>
         <li>The Modified files panel (bottom of the terminal pane) lists every file the current run changed, with a badge per file: <code>A</code> created, <code>M</code> modified, <code>D</code> deleted.</li>
       </ul>
       <p>Files larger than 2&nbsp;MB cannot be opened in the editor; the terminal stays the place to inspect them.</p>
@@ -239,6 +239,7 @@
         <li><b>Hover a dot</b> for the time, the tool, the file, and an on-demand diff of what changed at that point.</li>
         <li><b>▶ Replay</b> walks through the run's snapshots step by step.</li>
         <li><b>Cmd/Ctrl+Click a forkable dot</b> to fork a candidate from that exact source state — any moment of any run becomes a branch point. See <a class="link" href="#fork-any-moment">Fork Any Moment</a>.</li>
+        <li><b>Keyboard</b>: <code>Tab</code> enters the strip once (not once per dot), <code>←</code>/<code>→</code> move the selection a moment at a time, <code>Home</code>/<code>End</code> go to the oldest and newest moment, <code>Enter</code> opens the selected moment, and <code>Cmd/Ctrl+Enter</code> forks a candidate from it. <code>Esc</code> stops a running replay.</li>
       </ul>
       <p>The recorder label next to the count tells you the recording health:</p>
       <table>
@@ -319,8 +320,9 @@
 
       <h3 id="fork-any-moment">Fork Any Moment</h3>
       <p>
-        <code>Cmd/Ctrl+Click</code> any forkable timeline dot to fork a candidate from that exact moment instead of a
-        run boundary. The candidate starts from that source state with the conversation branched at the matching point.
+        <code>Cmd/Ctrl+Click</code> or <code>Cmd/Ctrl+Enter</code> any forkable timeline dot to fork a candidate from
+        that exact moment instead of a run boundary. The candidate starts from that source state with the conversation
+        branched at the matching point.
       </p>
 
       <h3>Working with candidates</h3>
@@ -402,7 +404,15 @@
     <!-- ============ 11. SETTINGS ============ -->
     <section id="settings" class="guide-section">
       <h2>11 · Settings</h2>
-      <p>Open with <code>Cmd/Ctrl+,</code>.</p>
+      <p>Open with <code>Cmd/Ctrl+,</code>. Settings has three sections: <b>General</b>, <b>Appearance</b>, and <b>Keyboard</b>.</p>
+
+      <h3>General</h3>
+      <table>
+        <thead><tr><th>Setting</th><th>Options</th></tr></thead>
+        <tbody>
+          <tr><td>Open files the agent edits</td><td>On / off. When on, a file opens as a replaceable preview tab as the agent starts editing it. On by default.</td></tr>
+        </tbody>
+      </table>
 
       <h3>Appearance</h3>
       <table>
@@ -445,13 +455,14 @@
           <tr><td><code>Cmd/Ctrl+E</code></td><td>Toggle editor</td></tr>
           <tr><td><code>Cmd/Ctrl+Shift+F</code></td><td>Terminal fullscreen</td></tr>
           <tr><td><code>Cmd/Ctrl+Shift+P</code></td><td>Search sessions</td></tr>
-          <tr><td><code>Cmd/Ctrl+P</code></td><td>Quick Open a project file by name</td></tr>
+          <tr><td><code>Cmd/Ctrl+P</code></td><td>Quick Open (open a project file by name; in a focused core terminal, Ctrl+P cycles models instead)</td></tr>
           <tr><td><code>Cmd/Ctrl+K</code></td><td>Command palette — run any command by name</td></tr>
+          <tr><td><code>Cmd/Ctrl+Alt+F</code></td><td>Search file contents</td></tr>
           <tr><td><code>Cmd/Ctrl+F</code></td><td>Find in the active terminal's scrollback</td></tr>
           <tr><td><code>Cmd/Ctrl+,</code></td><td>Open settings</td></tr>
           <tr><td><code>Shift+Enter</code> / <code>Ctrl+Enter</code></td><td>Newline in the terminal input</td></tr>
           <tr><td><code>Option+Enter</code> (macOS)</td><td>Queue a follow-up while the agent runs</td></tr>
-          <tr><td><code>Cmd/Ctrl+Click</code> a timeline dot</td><td>Fork a candidate at that moment</td></tr>
+          <tr><td><code>Cmd/Ctrl+Click</code> / <code>Cmd/Ctrl+Enter</code> on a timeline dot</td><td>Fork a candidate at that moment</td></tr>
         </tbody>
       </table>
 
@@ -465,7 +476,8 @@
       <h3>Quick Open and Command Palette</h3>
       <p>
         <code>Cmd/Ctrl+P</code> finds any project file by name from a persistent index, so repeated searches stay
-        instant. <code>Cmd/Ctrl+K</code> runs any Termina command by name.
+        instant. In a focused core terminal, <code>Ctrl+P</code> cycles models instead.
+        <code>Cmd/Ctrl+K</code> runs any Termina command by name.
       </p>
     </section>
 
