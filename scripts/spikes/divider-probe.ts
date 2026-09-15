@@ -1,6 +1,16 @@
 // @ts-nocheck
 /** Probe: do the pane dividers still receive drags? */
-import { e2ePort } from "../e2e-port.ts";
+function e2ePort() {
+  const raw = process.env.TERMINA_E2E_PORT;
+  if (typeof raw !== "string" || !/^[1-9][0-9]{0,4}$/.test(raw)) {
+    throw new Error("TERMINA_E2E_PORT must be an integer from 1 to 65535");
+  }
+  const port = Number(raw);
+  if (!Number.isSafeInteger(port) || port > 65_535) {
+    throw new Error("TERMINA_E2E_PORT must be an integer from 1 to 65535");
+  }
+  return port;
+}
 
 const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
