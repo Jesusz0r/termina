@@ -136,11 +136,11 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
       const boundary = (seq: number): SidecarEvent => ({ bridgeId: "bridge", seq, t: "agent_start", sessionId: String(seq) });
       const plan = (seq: number, text: string): SidecarEvent => ({ bridgeId: "bridge", seq, t: "plan", text });
 
-      expect(queue.enqueue(boundary(1))).toBe(true);
-      expect(queue.enqueue(plan(2, "old"))).toBe(true);
-      expect(queue.enqueue(plan(3, "latest"))).toBe(true); // adjacent progress coalesces
-      expect(queue.enqueue(boundary(4))).toBe(true);
-      expect(queue.enqueue(boundary(5))).toBe(false); // backpressure!
+      expect(queue.enqueueTracked(boundary(1)).accepted).toBe(true);
+      expect(queue.enqueueTracked(plan(2, "old")).accepted).toBe(true);
+      expect(queue.enqueueTracked(plan(3, "latest")).accepted).toBe(true); // adjacent progress coalesces
+      expect(queue.enqueueTracked(boundary(4)).accepted).toBe(true);
+      expect(queue.enqueueTracked(boundary(5)).accepted).toBe(false); // backpressure!
       expect(queue.stats().items).toBe(3);
       expect(queue.stats().bytes).toBeGreaterThan(0);
 
@@ -156,7 +156,7 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
     it("enforces byte limits on incoming events", async () => {
       const plan = (seq: number, text: string): SidecarEvent => ({ bridgeId: "bridge", seq, t: "plan", text });
       const byteQueue = new SidecarEventQueue(async () => {}, { maxItems: 4, maxBytes: 64 });
-      expect(byteQueue.enqueue(plan(6, "x".repeat(512)))).toBe(false);
+      expect(byteQueue.enqueueTracked(plan(6, "x".repeat(512))).accepted).toBe(false);
     });
   });
 

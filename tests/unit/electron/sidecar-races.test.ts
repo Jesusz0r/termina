@@ -261,7 +261,7 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
       firstTailer.start();
       firstTailer.watch("term-restart");
       await appendFile(restartFile, `${JSON.stringify(record("restart", 1, "session_ready"))}\n`);
-      await waitFor(() => firstTailer.isPaused("term-restart"));
+      await waitFor(() => firstTailer.isHeld("term-restart"));
       firstTailer.stop();
       const afterRestart: number[] = [];
       const secondTailer = new SidecarTailer(restartDir, fakeWatch);

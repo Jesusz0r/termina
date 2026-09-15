@@ -304,7 +304,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
       await publishOwnerProof(secondSealed, repeatedId, repeatedGeneration, 3);
       await waitFor(() => readdirSync(eventsDir).some((name) => name.startsWith(basename(secondSealed) + ".retained-")), "chained generation was not anchored");
       assert.equal(existsSync(join(eventsDir, `.quarantine-${repeatedId}`)), false, "chained rotation quarantined");
-      assert.equal(repeatedTailer.isPaused(repeatedId), false, "chained rotation paused the terminal");
+      assert.equal(repeatedTailer.isHeld(repeatedId), false, "chained rotation paused the terminal");
       const repeatedRetained = readdirSync(eventsDir).filter((name) => name.startsWith(`.${repeatedId}.jsonl.`) && name.includes(".retained-"));
       assert.equal(repeatedRetained.length, 1, "chained rotation left more than one anchor");
       assert.equal(firstRetained.includes(repeatedRetained[0]!), false, "chained rotation did not retire the older anchor");
@@ -368,12 +368,12 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
         // second identity anchor or deleting the first one.
         const boundedDescriptor = await open(join(eventsDir, boundedRetainedAnchor), "a");
         await boundedDescriptor.write("x".repeat(2048));
-        await waitFor(() => boundedTailer.isPaused(boundedId) && existsSync(join(eventsDir, `.quarantine-${boundedId}`)), "concurrent retained growth did not reach the bounded quarantine");
+        await waitFor(() => boundedTailer.isHeld(boundedId) && existsSync(join(eventsDir, `.quarantine-${boundedId}`)), "concurrent retained growth did not reach the bounded quarantine");
         await boundedDescriptor.close();
         await appendFile(boundedActive, record(boundedId, 2));
         await rename(boundedActive, boundedSecondSealed);
         await writeFile(boundedActive, "");
-        await waitFor(() => boundedTailer.isPaused(boundedId) && existsSync(join(eventsDir, `.quarantine-${boundedId}`)), "retained-generation overflow did not enter terminal quarantine");
+        await waitFor(() => boundedTailer.isHeld(boundedId) && existsSync(join(eventsDir, `.quarantine-${boundedId}`)), "retained-generation overflow did not enter terminal quarantine");
         const boundedRetained = readdirSync(eventsDir).filter((name) => name.startsWith(`.${boundedId}.jsonl.`) && name.includes(".retained-"));
         assert.equal(boundedRetained.length, 1, "retained-generation overflow allocated unbounded anchors");
         assert.deepEqual(boundedReceived, [1]);
@@ -385,7 +385,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
         const boundedRestart = makeTailer();
         boundedRestart.watch(boundedId);
         try {
-          await waitFor(() => boundedRestart.isPaused(boundedId) && existsSync(join(eventsDir, `.quarantine-${boundedId}`)), "source quarantine did not survive restart");
+          await waitFor(() => boundedRestart.isHeld(boundedId) && existsSync(join(eventsDir, `.quarantine-${boundedId}`)), "source quarantine did not survive restart");
         } finally {
           boundedRestart.stop();
         }

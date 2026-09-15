@@ -99,14 +99,13 @@ describe("Wave 1 sidecar rotation regressions", () => {
       try {
         await waitFor(() => received.length === 2, 5000, "initial active records were not delivered");
         await appendFile(active, line("w1", 3, "agent_settled"));
-        await waitFor(() => tailer.isPaused(id), 5000, "rejected record did not pause the tailer");
+        await waitFor(() => tailer.isHeld(id), 5000, "rejected record did not pause the tailer");
 
         // External rotation beside the stale partial: the pre-rotation bytes
         // (including the rejected seq 3) move to a dotted sealed segment.
         const sealedName = `.${id}.jsonl.${Date.now().toString(36)}-${process.pid}-wave1a2b.sealed`;
         await rename(active, join(eventsDir, sealedName));
         await writeFile(active, line("w1", 4, "agent_start") + line("w1", 5, "agent_settled"));
-        tailer.resume(id);
 
         await waitFor(() => received.length === 5, 15000, "rotation beside a stale partial stalled the drain");
         expect(received).toEqual([1, 2, 3, 4, 5]);
@@ -357,7 +356,7 @@ describe("Wave 1 quarantine launch-scope regressions", () => {
       try {
         // A stale marker must not stop a brand-new terminal: watch-time
         // quarantine inheritance is synchronous, so this is deterministic.
-        expect(tailer.isPaused(id)).toBe(false);
+        expect(tailer.isHeld(id)).toBe(false);
         await appendFile(join(eventsDir, `${id}.jsonl`), line("new-bridge", 1, "session_ready") + line("new-bridge", 2, "agent_start"));
         await waitFor(() => received.length === 2, 10000, "recycled terminal did not go live");
         expect(received).toEqual([
@@ -391,10 +390,10 @@ describe("Wave 1 quarantine launch-scope regressions", () => {
       tailer.start();
       tailer.watch(id);
       try {
-        expect(tailer.isPaused(id)).toBe(false);
+        expect(tailer.isHeld(id)).toBe(false);
         await appendFile(join(eventsDir, `${id}.jsonl`), line("new-bridge", 1, "session_ready"));
         await waitFor(() => received.length === 1, 10000, "recycled terminal did not go live");
-        expect(tailer.isPaused(id)).toBe(false);
+        expect(tailer.isHeld(id)).toBe(false);
         await waitFor(() => !existsSync(join(eventsDir, `.quarantine-${id}`)), 5000, "dead-producer marker was not swept at watch");
       } finally {
         tailer.stop();
@@ -423,7 +422,7 @@ describe("Wave 1 quarantine launch-scope regressions", () => {
       tailer.start();
       tailer.watch(id);
       try {
-        expect(tailer.isPaused(id)).toBe(false);
+        expect(tailer.isHeld(id)).toBe(false);
         await waitFor(() => !existsSync(join(eventsDir, `.quarantine-${id}`)), 5000, "stale marker was not swept at watch");
         const writer = createSidecarWriter({ eventsDir, terminalId: id, bridgeId: "w2" });
         writer.logEvent({ t: "session_ready", ok: true });
@@ -463,7 +462,7 @@ describe("Wave 1 quarantine launch-scope regressions", () => {
         const quarantined = async (): Promise<boolean> => {
           try {
             await readFile(markerPath, "utf8");
-            return tailer.isPaused(id);
+            return tailer.isHeld(id);
           } catch {
             return false;
           }
@@ -477,9 +476,9 @@ describe("Wave 1 quarantine launch-scope regressions", () => {
         expect("bootId" in marker).toBe(true);
         // A re-watch in the same launch must inherit the live quarantine.
         tailer.stopWatching(id);
-        expect(tailer.isPaused(id)).toBe(false);
+        expect(tailer.isHeld(id)).toBe(false);
         tailer.watch(id);
-        expect(tailer.isPaused(id)).toBe(true);
+        expect(tailer.isHeld(id)).toBe(true);
       } finally {
         tailer.stop();
       }
@@ -798,7 +797,7 @@ describe("Wave 1 sidecar hardening regressions (refs #186)", () => {
         // Let several poll ticks run: an unpaused draining terminal must stay quiet.
         await new Promise((resolve) => setTimeout(resolve, 1000));
         expect(overflowCalls).toBe(0);
-        expect(tailer.isPaused(id)).toBe(false);
+        expect(tailer.isHeld(id)).toBe(false);
         expect((await readdir(eventsDir)).filter((name) => name.startsWith(`.quarantine-${id}`))).toEqual([]);
       } finally {
         tailer.stop();
@@ -858,7 +857,7 @@ describe("Wave 1 sidecar hardening regressions (refs #186)", () => {
         const quarantined = async (): Promise<boolean> => {
           try {
             await readFile(join(eventsDir, `.quarantine-${id}`), "utf8");
-            return second.isPaused(id);
+            return second.isHeld(id);
           } catch {
             return false;
           }
@@ -1021,8 +1020,8 @@ describe("Wave 1 sidecar hardening regressions (refs #186)", () => {
     }) as typeof JSON.stringify;
     try {
       const queue = new SidecarEventQueue(async () => {}, { maxItems: 8, maxBytes: 1_000_000 });
-      expect(queue.enqueue(event)).toBe(true);
-      expect(queue.enqueue(event)).toBe(true);
+      expect(queue.enqueueTracked(event).accepted).toBe(true);
+      expect(queue.enqueueTracked(event).accepted).toBe(true);
       await queue.drain();
       expect(calls).toBe(1);
       queue.dispose();

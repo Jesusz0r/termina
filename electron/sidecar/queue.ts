@@ -155,11 +155,6 @@ export class SidecarEventQueue {
   private readonly onError: (error: Error, event: SidecarEvent) => void;
   private readonly onDeadLetter: (event: SidecarEvent, error: Error, attempts: number) => void;
 
-  /** Admit one event. False means the caller must retry the same event. */
-  enqueue(event: SidecarEvent): boolean {
-    return this.enqueueTracked(event).accepted;
-  }
-
   /** Admit one event and expose the handler-completion acknowledgement. */
   enqueueTracked(event: SidecarEvent): SidecarEventDelivery {
     if (this.disposed) return { accepted: false };
@@ -177,8 +172,8 @@ export class SidecarEventQueue {
       resolve = resolvePromise;
       reject = rejectPromise;
     });
-    // Queue-only callers use enqueue() and cannot observe completion. Keep a
-    // rejection handler attached so shutdown never creates an unhandled one.
+    // Callers that ignore `completed` still must not raise unhandled
+    // rejections when dispose rejects in-flight acknowledgements.
     void completed.catch(() => {});
     const item = (className: SidecarEventClass = sidecarEventClass(event)): QueuedSidecarEvent => ({
       event,
@@ -212,6 +207,7 @@ export class SidecarEventQueue {
     return { accepted: true, completed };
   }
 
+  /** Diagnostics seam: drainSidecarQueues and tests read depth. Do not delete. */
   stats(): SidecarEventQueueStats {
     return {
       items: this.queue.length + this.inFlight,
@@ -227,6 +223,7 @@ export class SidecarEventQueue {
     await new Promise<void>((resolve) => this.drainWaiters.push(resolve));
   }
 
+  /** Test seam for standalone queues. Runtime drops the Map entry. */
   dispose(): void {
     this.disposed = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);

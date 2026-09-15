@@ -56,6 +56,9 @@ export class AppPreferencesStore {
     await this.pendingWrites;
   }
 
+  /** Local writer: same exclusive-temp + file sync + rename as
+   *  shared/durable-write.ts, but parent-dir fsync is sync (`syncParentDir`)
+   *  and this store owns reset/pending-write policy. */
   private async write(content: string): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
     const temporary = `${this.filePath}.tmp-${randomUUID()}`;
