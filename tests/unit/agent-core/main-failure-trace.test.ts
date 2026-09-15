@@ -11,6 +11,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +24,21 @@ describe("Agent Core Failed Provider Trace Contract", () => {
     const missing = join(tmpdir(), "termina-direct-run-missing", "entry.mjs");
     assert.equal(isDirectRunFrom(pathToFileURL(missing).href, missing), true);
     assert.equal(isDirectRunFrom(pathToFileURL(missing).href, join(tmpdir(), "other-missing.mjs")), false);
+  });
+
+  it("does not mix realpath and resolve when only one entry exists", () => {
+    const root = mkdtempSync(join(tmpdir(), "termina-direct-run-"));
+    try {
+      const entry = join(root, "entry.mjs");
+      writeFileSync(entry, "");
+      const alias = join(root, "alias.mjs");
+      symlinkSync(entry, alias);
+      assert.equal(isDirectRunFrom(pathToFileURL(entry).href, alias), true);
+      assert.equal(isDirectRunFrom(pathToFileURL(entry).href, pathToFileURL(entry).href), true);
+      assert.equal(isDirectRunFrom(pathToFileURL(entry).href, join(root, "missing.mjs")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("passes failed-provider trace contract", async () => {
@@ -40,8 +56,14 @@ describe("Agent Core Failed Provider Trace Contract", () => {
     const mainPath = fileURLToPath(mainUrl);
     const childScript = `
       const providerBase = ${JSON.stringify(providerBase)};
+      const requestUrl = (input) => {
+        if (typeof input === "string") return input;
+        if (input instanceof URL) return input.href;
+        if (input && typeof input === "object" && "url" in input) return String(input.url);
+        return String(input);
+      };
       globalThis.fetch = async (input) => {
-        const url = String(input);
+        const url = requestUrl(input);
         if (!url.startsWith(providerBase)) {
           return new Response(JSON.stringify({
             openai: { models: { "gpt-5.6-sol": { cost: {
