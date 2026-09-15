@@ -75,7 +75,7 @@ govern only the claim they assert.
 | User-guide sandbox/MCP phrases match `electron/sandbox.ts` and `agent-core/mcp/config.ts` | `tests/unit/docs/support-contract.test.ts` | **Governor** for those phrases only |
 | `dompurify` stays `3.4.14` (lockfile override) | `tests/unit/security/dompurify.test.ts`, `pnpm-workspace.yaml` | **Governor** for that pin |
 | Laziness fixture numbers | `tests/unit/scripts/laziness-metrics.test.ts` | **Measurement-only.** Pins `tests/fixtures/traces/laziness-baseline/`. Does not change runtime. |
-| No Quiet Wins settle | `agent-core/trace/quiet-wins.ts`, `tests/unit/agent-core/quiet-wins.test.ts` | **Governor** for a success claim after file edits with no observed bash check. Wired in `settleTraceTask`. |
+| No Quiet Wins settle | `agent-core/trace/quiet-wins.ts`, `tests/unit/agent-core/quiet-wins.test.ts` | **Governor** for a success claim after file edits with no observed bash check, or when the trace directory cannot be read. Wired in `settleTraceTask`. |
 | One-ticket-one-run cite | `electron/verify-map.ts`, `tests/unit/electron/verify-map.test.ts` | **Governor** for the cite API. Not hooked to `verify:run`; main has no finding-ticket store. |
 | Handoff contract | `scripts/handoff-check.ts`, `tests/unit/scripts/handoff-check.test.ts` | **Governor** when the script runs. Rejects a missing field or a confidence value that is not `high` / `medium` / `low`. Not a settle gate. |
 | Audit ledger reconcile | `scripts/audit-ledger.ts`, `tests/unit/scripts/audit-ledger.test.ts` | **Governor** when the script runs. Pins `tests/fixtures/audit-ledger/`. |

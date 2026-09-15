@@ -244,4 +244,18 @@ describe("manager hardening (issue #202)", () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it("turns a measure throw into a structured evidence failure", () => {
+    const src = readFileSync(new URL("../../../electron/worldlines/manager.ts", import.meta.url), "utf8");
+    const start = src.indexOf("private async runEvidence(");
+    expect(start).toBeGreaterThan(-1);
+    const tryIdx = src.indexOf("try {", start);
+    const catchIdx = src.indexOf("} catch (err) {", tryIdx);
+    const finallyIdx = src.indexOf("} finally {", catchIdx);
+    expect(catchIdx).toBeGreaterThan(tryIdx);
+    expect(finallyIdx).toBeGreaterThan(catchIdx);
+    const catchBody = src.slice(catchIdx, finallyIdx);
+    expect(catchBody).toContain("ok: false");
+    expect(catchBody).toContain("err instanceof Error ? err.message");
+  });
 });

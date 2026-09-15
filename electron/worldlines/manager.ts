@@ -2068,6 +2068,8 @@ export class WorldlineManager {
       if (!this.evidenceAttemptLive(cmp, attempt)) return { ok: false, error: "evidence was cancelled" };
       this.deps.onEvidenceUpdate(summary);
       return result;
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     } finally {
       for (const stateId of capturedStates) {
         if (!retainedStates.has(stateId)) await this.deps.releaseState(stateId);

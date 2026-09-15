@@ -56,22 +56,30 @@ export function hasFileEdits(outcomes: readonly unknown[]): boolean {
 
 /**
  * Fail closed when a success claim follows file edits and no observed check.
+ * `outcomes === null` means the trace directory could not be read: a success
+ * claim then fails closed because the check fact is unobserved.
  * Non-success statuses and read-only successes pass through unchanged.
  */
-export function applyNoQuietWins(status: string, outcomes: readonly unknown[]): QuietWinsSettle {
+export function applyNoQuietWins(status: string, outcomes: readonly unknown[] | null): QuietWinsSettle {
   if (!isSuccessClaim(status)) return { status, criticalClass: null };
+  if (outcomes === null) return { status: "failure", criticalClass: NO_QUIET_WINS_CLASS };
   if (hasObservedCheck(outcomes)) return { status, criticalClass: null };
   if (!hasFileEdits(outcomes)) return { status, criticalClass: null };
   return { status: "failure", criticalClass: NO_QUIET_WINS_CLASS };
 }
 
+export interface CollectedTaskOutcomes {
+  readonly readable: boolean;
+  readonly outcomes: readonly unknown[];
+}
+
 /** Collect tool outcomes already written for one task in a trace directory. */
-export function collectTaskToolOutcomes(directory: string, runId: string, taskId: string): unknown[] {
+export function collectTaskToolOutcomes(directory: string, runId: string, taskId: string): CollectedTaskOutcomes {
   let names: string[];
   try {
     names = readdirSync(directory);
   } catch {
-    return [];
+    return { readable: false, outcomes: [] };
   }
   const outcomes: unknown[] = [];
   for (const name of names) {
@@ -87,5 +95,5 @@ export function collectTaskToolOutcomes(directory: string, runId: string, taskId
     const raw = parsed.toolOutcomes ?? parsed.toolResults;
     if (Array.isArray(raw)) outcomes.push(...raw);
   }
-  return outcomes;
+  return { readable: true, outcomes };
 }

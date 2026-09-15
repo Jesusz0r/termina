@@ -82,6 +82,14 @@ describe("No Quiet Wins class (#237)", () => {
     ]).criticalClass).toBe("No Quiet Wins");
   });
 
+  it("fails a success claim when the trace directory is unreadable", () => {
+    expect(applyNoQuietWins("success", null)).toEqual({
+      status: "failure",
+      criticalClass: "No Quiet Wins",
+    });
+    expect(applyNoQuietWins("failure", null)).toEqual({ status: "failure", criticalClass: null });
+  });
+
   it("does not fail a read-only or already-failed settle", () => {
     expect(hasFileEdits([{ toolName: "read_file", isError: false }])).toBe(false);
     expect(applyNoQuietWins("success", [])).toEqual({ status: "success", criticalClass: null });
@@ -125,15 +133,28 @@ describe("No Quiet Wins class (#237)", () => {
         runId: "run-a",
         taskId: "task-a",
       }));
-      const outcomes = collectTaskToolOutcomes(root, "run-a", "task-a");
-      expect(outcomes).toEqual([
+      const collected = collectTaskToolOutcomes(root, "run-a", "task-a");
+      expect(collected.readable).toBe(true);
+      expect(collected.outcomes).toEqual([
         { toolName: "edit", isError: false },
         { toolName: "bash", isError: false, exitCode: 0 },
       ]);
-      expect(collectTaskToolOutcomes(join(root, "missing"), "run-a", "task-a")).toEqual([]);
+      expect(collectTaskToolOutcomes(join(root, "missing"), "run-a", "task-a")).toEqual({
+        readable: false,
+        outcomes: [],
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("fails closed when settle cannot observe the trace directory", () => {
+    const missing = collectTaskToolOutcomes(join(tmpdir(), "termina-quiet-wins-missing"), "run-a", "task-a");
+    expect(missing.readable).toBe(false);
+    expect(applyNoQuietWins("success", missing.readable ? missing.outcomes : null)).toEqual({
+      status: "failure",
+      criticalClass: "No Quiet Wins",
+    });
   });
 });
 
