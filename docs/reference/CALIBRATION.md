@@ -10,9 +10,9 @@ osmosis.
 
 ## Session routine
 
-AGENTS.md Session routine already says: **Done = checkable + proven by
-facts.** This file does not replace that sentence. It states the format
-a claim must use so the sentence can be checked.
+AGENTS.md Session routine already says: **Done = checkable + proven by facts.**
+This file does not replace that sentence. It states the format a claim
+must use so the sentence can be checked.
 
 This file does not edit AGENTS.md. Sister issue #237 owns the
 No-Quiet-Wins fail-closed settle rule.
