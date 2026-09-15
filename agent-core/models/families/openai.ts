@@ -2,9 +2,32 @@ import type { EffortLevelMap } from "../capabilities.ts";
 import type { ProviderId } from "../../auth.ts";
 import { modelLeaf, oSeriesModel } from "./identity.ts";
 
-export function gpt56ReasoningContext(model: string): "all_turns" | undefined {
+/** Official OpenAI ids: `gpt-*`, `chatgpt*`, and o-series (`o1`, `o3`, `o4`, …). */
+export function modelLooksOpenAI(model: string): boolean {
   const leaf = modelLeaf(model);
-  if (!(leaf.startsWith("gpt-5.6") || leaf.includes("gpt-5.6"))) return undefined;
+  return leaf.startsWith("gpt-") || leaf.startsWith("chatgpt") || oSeriesModel(model);
+}
+
+/** Codex-named ids (`gpt-5-codex`, `codex-mini-latest`). */
+export function modelLooksCodex(model: string): boolean {
+  return model.toLowerCase().includes("codex");
+}
+
+/**
+ * Responses routes that have a known `reasoning.effort` contract.
+ * Relocated from the former `RESPONSES_REASONING_FAMILIES` OpenAI rows
+ * (`gpt-[5-9]`, `gpt-oss`, `codex`, o-series) — not a new id class.
+ * https://developers.openai.com/api/docs/models
+ * https://developers.openai.com/api/docs/models/gpt-oss-20b
+ * https://developers.openai.com/api/docs/guides/reasoning
+ */
+export function openaiResponsesReasoningFamily(model: string): boolean {
+  const id = model.toLowerCase();
+  return /gpt-[5-9]/.test(id) || /gpt-oss/.test(id) || modelLooksCodex(model) || oSeriesModel(model);
+}
+
+export function gpt56ReasoningContext(model: string): "all_turns" | undefined {
+  if (!modelLeaf(model).startsWith("gpt-5.6")) return undefined;
   return "all_turns";
 }
 

@@ -1,5 +1,5 @@
-import { grokEffortLevelMap, nonReasoningGrok } from "./families/xai.ts";
-import { openaiProviderEffortLevelMap } from "./families/openai.ts";
+import { grokEffortLevelMap, modelLooksGrok, nonReasoningGrok } from "./families/xai.ts";
+import { openaiProviderEffortLevelMap, openaiResponsesReasoningFamily } from "./families/openai.ts";
 import type { ProviderId, ProviderProtocol } from "../auth.ts";
 import type { ModelInfo } from "../models.ts";
 import { gptVersion, modelLeaf, oSeriesModel } from "./families/identity.ts";
@@ -18,31 +18,12 @@ export type ThinkingRequest =
   | { type: "adaptive"; display: "summarized" }
   | { type: "enabled"; budget_tokens: number };
 
-/**
- * Model families with a known Responses `reasoning.effort` contract, matched
- * against the lowercased id (prefix included, so `openai/o3` still matches).
- * A new family is one row here — not a new predicate. Anchored entries
- * (gpt-[5-9], o-series) stay regexes so older or foreign models can't
- * smuggle in on a substring.
- */
-const RESPONSES_REASONING_FAMILIES: readonly RegExp[] = [
-  /gpt-[5-9]/,
-  /gpt-oss/,
-  /codex/,
-  /grok/,
-  /muse-spark/,
-];
-
-function responsesReasoningFamily(model: string): boolean {
-  const id = model.toLowerCase();
-  return RESPONSES_REASONING_FAMILIES.some((family) => family.test(id)) || oSeriesModel(model);
+function responsesProtocol(protocol: ProviderProtocol): boolean {
+  return protocol === "openai-responses" || protocol === "openai-codex-responses";
 }
 
-function responsesReasoningModel(model: string): boolean {
-  const id = model.toLowerCase();
-  // xAI's explicitly non-reasoning Grok variants reject reasoning.effort.
-  if (nonReasoningGrok(model)) return false;
-  return responsesReasoningFamily(model) || claudeThinkingApi(model) !== "none" || gemini3Model(id);
+function thinkingWireProtocol(protocol: ProviderProtocol): boolean {
+  return protocol === "anthropic-messages" || responsesProtocol(protocol);
 }
 
 /** Relay chat/completions models with a known reasoning contract. */
@@ -68,17 +49,8 @@ export function usesModelEffort(
   protocol: ProviderProtocol,
   reasoningLevels?: readonly string[],
 ): boolean {
-  if (usesAnthropicThinking(provider, model, protocol)) return true;
   if (reasoningLevels && reasoningLevels.length > 0) return wireEffortProtocol(protocol);
-  if ((protocol === "openai-responses" || protocol === "openai-codex-responses") && responsesReasoningModel(model)) return true;
-  if ((gemini3Model(model) || gemini25Model(model)) && (provider === "google" || protocol === "google-generate")) {
-    return true;
-  }
-  if (usesRelayCompletionsEffort(provider, model, protocol)) return true;
-  // GLM effort is only sent on the Responses/Completions wire shapes; on
-  // Messages the value is dropped, so the level must not be offered there.
-  if (!glmReasoningFamily(model)) return false;
-  return wireEffortProtocol(protocol);
+  return EFFORT_MAP_RULES.some((rule) => rule.match(provider, model, protocol));
 }
 
 /**
@@ -103,7 +75,8 @@ type EffortMapRule = {
 /**
  * First match wins. A new family is one row here — predicate and map live
  * in families/, next to the live-doc URLs they were verified against.
- * Unknown routes fall through to {} (provider default).
+ * `usesModelEffort` is whether a rule matched, or catalog `reasoningLevels`
+ * are present. Unknown routes fall through to {} (provider default).
  */
 const EFFORT_MAP_RULES: readonly EffortMapRule[] = [
   {
@@ -112,17 +85,30 @@ const EFFORT_MAP_RULES: readonly EffortMapRule[] = [
     map: (_provider, model) => geminiEffortLevelMap(model),
   },
   {
-    match: (_provider, model) => claudeThinkingApi(model) === "adaptive",
+    // Relay Gemini 3 on Responses has effort with provider-default levels.
+    match: (_provider, model, protocol) => gemini3Model(model) && responsesProtocol(protocol),
+    map: () => ({}),
+  },
+  {
+    match: (_provider, model, protocol) =>
+      claudeThinkingApi(model) === "adaptive" && thinkingWireProtocol(protocol),
     map: (_provider, model) => claudeEffortLevelMap(model),
   },
   {
     // Minimal has no documented effort wire value, so it rides low like the
     // adaptive map; the level list itself is unchanged.
-    match: (_provider, model) => opus45ComposesEffort(model),
+    match: (_provider, model, protocol) =>
+      opus45ComposesEffort(model) && thinkingWireProtocol(protocol),
     map: () => ({ minimal: "low" }),
   },
   {
-    match: (_provider, model) => glmReasoningFamily(model),
+    // Budget thinking still has wire control; the level list stays default.
+    match: (_provider, model, protocol) =>
+      claudeThinkingApi(model) !== "none" && thinkingWireProtocol(protocol),
+    map: () => ({}),
+  },
+  {
+    match: (_provider, model, protocol) => glmReasoningFamily(model) && wireEffortProtocol(protocol),
     map: (_provider, _model, protocol) => glmEffortLevelMap(protocol),
   },
   {
@@ -130,15 +116,18 @@ const EFFORT_MAP_RULES: readonly EffortMapRule[] = [
     map: () => relayCompletionsEffortLevelMap(),
   },
   {
-    match: (_provider, model) => responsesReasoningFamily(model) && model.toLowerCase().includes("grok"),
+    match: (_provider, model, protocol) =>
+      responsesProtocol(protocol) && modelLooksGrok(model) && !nonReasoningGrok(model),
     map: (_provider, model) => grokEffortLevelMap(model),
   },
   {
-    match: (_provider, model) => responsesReasoningFamily(model) && museSparkReasoningFamily(model),
+    match: (_provider, model, protocol) =>
+      responsesProtocol(protocol) && museSparkReasoningFamily(model),
     map: (_provider, model) => museSparkEffortLevelMap(model),
   },
   {
-    match: (_provider, model) => responsesReasoningFamily(model),
+    match: (_provider, model, protocol) =>
+      responsesProtocol(protocol) && openaiResponsesReasoningFamily(model),
     map: (provider, model) => openaiProviderEffortLevelMap(provider, model),
   },
 ];
