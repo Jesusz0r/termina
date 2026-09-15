@@ -1,7 +1,8 @@
 /**
  * Worldline comparison lifecycle owner (`electron/worldlines/`).
  * Owns comparisons, candidates, runs, evidence orchestration, and promotion
- * dispatch; durability primitives live in the sibling modules.
+ * dispatch; the candidate launch/reopen handshake lives in candidate-launch.ts;
+ * durability primitives live in the sibling modules.
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
@@ -32,6 +33,7 @@ import {
 import { type ExportPatchFile } from "./export.js";
 import { changedFiles, isSafeRelativePath } from "./candidate-files.js";
 import { exportCandidateRun } from "./export-candidate.js";
+import { CandidateLaunch } from "./candidate-launch.js";
 import { RunRegistry } from "./run-registry.js";
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps } from "../evidence.js";
 import type {
@@ -83,7 +85,6 @@ import {
   reservePromotionOperationBytes,
 } from "./promotion-journal.js";
 import {
-  awaitAbortable,
   boundPromotionExpectedLeaf,
   copyBoundBeforeImage,
   copyBoundPrivateFile,
@@ -95,7 +96,6 @@ import {
   isRestorablePromotionState,
   materializePromotionDirectoryPlan,
   probePromotionDirectory,
-  processStartMatches,
   promotionDestination,
   promotionDestinationComponents,
   promotionParentIdentity,
@@ -103,12 +103,10 @@ import {
   promotionStateHash,
   promotionStatesEqual,
   readComparisonManifestBound,
-  readProcessStart,
   readPromotionEntry,
   refreshComparisonBindings,
   rollbackPromotion,
   sha256Hex,
-  waitBounded,
   withPromotionTransaction,
   writeComparisonManifestBound,
   writeComparisonMarkerBound,
@@ -131,7 +129,6 @@ import {
   type ComparisonManifest,
   type ComparisonState,
   type EvidenceAttempt,
-  type PendingCandidateReady,
   type PromoteSeed,
   type PromotionDirectoryPlan,
   type PromotionEntryState,
@@ -143,7 +140,6 @@ import {
   type UncertainComparisonAdmissionLease,
 } from "./types.js";
 import {
-  CANDIDATE_CLEANUP_TIMEOUT_MS,
   MARKER,
   MAX_CANDIDATE_BYTES,
   MAX_IGNORED_BYTES,
@@ -308,13 +304,7 @@ export class WorldlineManager {
   private releaseUncertainAdmissionParticipant: (() => void) | null = null;
   private releasePromotionAdmissionParticipant: (() => void) | null = null;
   private closingComparisons = new Set<string>();
-  private terminalToComparison = new Map<string, { comparisonId: string; label: "A" | "B"; startupAttemptId?: string }>();
-  /** Reopen readiness is a one-shot handshake keyed by the new terminal id. */
-  private pendingCandidateReadies = new Map<string, PendingCandidateReady>();
-  /** Fresh candidate startup attempts stay addressable through teardown and
-   *  a late process-start identity result. */
-  private candidateLaunchAttempts = new Map<string, CandidateLaunchAttempt>();
-  private candidateLaunchGeneration = 0;
+  private launch: CandidateLaunch;
   /** Source comparison ids with a challenge launch in flight. */
   private challengeInFlight = new Set<string>();
   private evidenceByComparison = new Map<string, EvidenceSummary>();
@@ -326,6 +316,22 @@ export class WorldlineManager {
   private readyError: Error | null = null;
 
   constructor(private deps: WorldlineDeps) {
+    this.launch = new CandidateLaunch({
+      comparisons: this.comparisons,
+      closingComparisons: this.closingComparisons,
+      comparisonIsLive: (cmp) => this.comparisonIsLive(cmp),
+      ensureComparisonLive: (cmp) => this.ensureComparisonLive(cmp),
+      pushUpdate: (cmp, cand) => this.pushUpdate(cmp, cand),
+      updateManifest: (cmp, cand, attempt) => this.updateManifest(cmp, cand, attempt),
+      candidateLaunch: (cmp, cand) => this.candidateLaunch(cmp, cand),
+      writeControl: (cand, control) => this.writeControl(cand, control),
+      teardown: (comparisonId, state, error) => this.teardown(comparisonId, state, error),
+      createCandidate: (opts) => this.deps.createCandidate(opts),
+      createCandidateWorkspace: (root, baseStateId, comparisonId) =>
+        this.deps.createCandidateWorkspace(root, baseStateId, comparisonId),
+      terminateCandidate: (terminalId) => this.deps.terminateCandidate?.(terminalId),
+      terminalLive: (terminalId) => this.deps.terminalLive(terminalId),
+    });
     this.runs = new RunRegistry({
       releaseState: (stateId) => this.deps.releaseState(stateId),
       removePromptPayload: this.deps.removePromptPayload
@@ -601,14 +607,14 @@ export class WorldlineManager {
 
   /** The candidate events dir of a terminal, or null. */
   eventsDirOf(terminalId: string): string | null {
-    const hit = this.terminalToComparison.get(terminalId);
+    const hit = this.launch.terminalToComparison.get(terminalId);
     if (!hit) return null;
     return this.comparisons.get(hit.comparisonId)?.candidates.get(hit.label)?.eventsDir ?? null;
   }
 
   /** Native provenance for one candidate events directory, if it is live. */
   eventsBindingOf(terminalId: string): BoundPromotionDirectory | null {
-    const hit = this.terminalToComparison.get(terminalId);
+    const hit = this.launch.terminalToComparison.get(terminalId);
     const binding = hit
       ? this.comparisons.get(hit.comparisonId)?.candidates.get(hit.label)?.eventsBinding
       : undefined;
@@ -617,7 +623,7 @@ export class WorldlineManager {
 
   /** Update the latest captured state of a candidate. */
   async updateHeadState(terminalId: string, stateId: string): Promise<void> {
-    const hit = this.terminalToComparison.get(terminalId);
+    const hit = this.launch.terminalToComparison.get(terminalId);
     if (hit) await this.setCandidateHead(hit.comparisonId, hit.label, stateId);
   }
 
@@ -776,8 +782,8 @@ export class WorldlineManager {
         action: "structured",
         content: [{ type: "text", text: challengedPrompt(payload.text, profile) }, ...payload.images],
       });
-      await this.launchCandidate(ncmp, nA, wHead.commit);
-      await this.launchCandidate(ncmp, nB, ncmp.baseStateId);
+      await this.launch.launchCandidate(ncmp, nA, wHead.commit);
+      await this.launch.launchCandidate(ncmp, nB, ncmp.baseStateId);
       ncmp.phase = "running";
       ncmp.readyTimer = setTimeout(() => {
         if (ncmp.phase !== "running") return;
@@ -855,7 +861,7 @@ export class WorldlineManager {
 
   /** The comparison and candidate behind one terminal, or null. */
   candidateContextOf(terminalId: string): { sourceRunId: string; sessionFile: string | null } | null {
-    const hit = this.terminalToComparison.get(terminalId);
+    const hit = this.launch.terminalToComparison.get(terminalId);
     if (!hit) return null;
     const cmp = this.comparisons.get(hit.comparisonId);
     const cand = cmp?.candidates.get(hit.label);
@@ -873,7 +879,7 @@ export class WorldlineManager {
     profileBinding?: BoundPromotionDirectory;
     profileLeaf?: BoundPromotionExpectedLeaf;
   } | null {
-    const hit = this.terminalToComparison.get(terminalId);
+    const hit = this.launch.terminalToComparison.get(terminalId);
     if (!hit) return null;
     const cand = this.comparisons.get(hit.comparisonId)?.candidates.get(hit.label);
     if (!cand) return null;
@@ -1591,7 +1597,7 @@ export class WorldlineManager {
       // The moment chain of each candidate seeds from its own head: A is
       // the settled state, B is the run start.
       const head = cand.label === "A" ? run.settledStateId : run.startStateId;
-      await this.launchCandidate(cmp, cand, head);
+      await this.launch.launchCandidate(cmp, cand, head);
     }
   }
 
@@ -1707,14 +1713,14 @@ export class WorldlineManager {
 
   private async updateManifest(cmp: ComparisonState, cand: CandidateState, attempt?: CandidateLaunchAttempt): Promise<void> {
     try {
-      if (attempt) this.ensureCandidateLaunchLive(cmp, cand, attempt);
+      if (attempt) this.launch.ensureLive(cmp, cand, attempt);
       if (!cmp.rootBinding) throw new Error("comparison root is not natively bound");
       const freshRoot = await refreshBoundPromotionDirectory(cmp.rootBinding);
-      if (attempt) this.ensureCandidateLaunchLive(cmp, cand, attempt);
+      if (attempt) this.launch.ensureLive(cmp, cand, attempt);
       cmp.rootBinding = freshRoot;
       cmp.rootIdentity = promotionIdentityOf(freshRoot);
       const loaded = await readComparisonManifestBound(freshRoot, cmp.manifestLeaf);
-      if (attempt) this.ensureCandidateLaunchLive(cmp, cand, attempt);
+      if (attempt) this.launch.ensureLive(cmp, cand, attempt);
       const manifest = loaded.manifest;
       if (manifest.id !== cmp.id || manifest.sourceRunId !== cmp.sourceRunId) throw new Error("comparison manifest is not complete");
       manifest.candidates[cand.label] = { pid: cand.pid, lstart: cand.lstart, paths: [cand.dir, cand.supportDir] };
@@ -1724,10 +1730,10 @@ export class WorldlineManager {
         : Object.keys(manifest.candidates).length === cmp.expectedCandidates
           ? "complete"
           : "creating";
-      if (attempt) this.ensureCandidateLaunchLive(cmp, cand, attempt);
+      if (attempt) this.launch.ensureLive(cmp, cand, attempt);
       cmp.manifestLeaf = await writeComparisonManifestBound(freshRoot, manifest, loaded.leaf);
     } catch (error) {
-      if (attempt && !this.candidateLaunchLive(cmp, cand, attempt)) throw error;
+      if (attempt && !this.launch.live(cmp, cand, attempt)) throw error;
       // An unproven manifest makes the comparison retention-only at teardown.
       cmp.manifestWriteFailed = true;
     }
@@ -2699,7 +2705,7 @@ export class WorldlineManager {
       // inherits the captured model and thinking level of that moment
       // through the candidate env.
       await this.writeControl(cand, { opId: randomUUID(), action: "none" });
-      await this.launchCandidate(cmp, cand, opts.stateId);
+      await this.launch.launchCandidate(cmp, cand, opts.stateId);
       cmp.phase = "running";
       cmp.readyTimer = setTimeout(() => {
         if (cmp.phase !== "running") return;
@@ -2716,399 +2722,21 @@ export class WorldlineManager {
     }
   }
 
-  /** Launch one candidate inside its sandbox (A or a moment candidate). */
-  private async launchCandidate(cmp: ComparisonState, cand: CandidateState, headStateId: string | null): Promise<void> {
-    const attempt: CandidateLaunchAttempt = {
-      comparisonId: cmp.id,
-      label: cand.label,
-      opId: cand.startupControlOpId ?? randomUUID(),
-      controlOpId: cand.startupControlOpId ?? null,
-      generation: ++this.candidateLaunchGeneration,
-      controller: new AbortController(),
-      terminalId: null,
-      pid: null,
-      lstart: null,
-      identityPromise: null,
-      cancelled: false,
-      cleanupPromise: null,
-      fallbackRequested: false,
-      directCleanupRequested: false,
-      sessionReady: false,
-      sidecarGeneration: null,
-      operation: null,
-    };
-    cand.startupAttemptId = attempt.opId;
-    cand.startupGeneration = attempt.generation;
-    this.candidateLaunchAttempts.set(attempt.opId, attempt);
-
-    const operation = (async (): Promise<void> => {
-      this.ensureCandidateLaunchLive(cmp, cand, attempt);
-      const { cmd, args, env } = await this.candidateLaunch(cmp, cand);
-      this.ensureCandidateLaunchLive(cmp, cand, attempt);
-      cand.headStateId = headStateId ?? cand.headStateId ?? cmp.baseStateId;
-      const workspaceId = this.deps.createCandidateWorkspace(cand.dir, cand.headStateId, cmp.id);
-      let routedTerminalId: string | null = null;
-      const created = await this.deps.createCandidate({
-        root: cand.dir,
-        workspaceId,
-        engine: "core",
-        launch: { cmd, args, env },
-        signal: attempt.controller.signal,
-        beforeSpawn: (terminalId) => {
-          this.ensureCandidateLaunchLive(cmp, cand, attempt);
-          routedTerminalId = terminalId;
-          attempt.terminalId = terminalId;
-          this.installCandidateRouting(cmp, cand, terminalId, undefined, attempt.opId);
-        },
-      });
-      attempt.terminalId = attempt.terminalId ?? created.terminalId;
-      attempt.pid = created.pid;
-      this.ensureCandidateLaunchLive(cmp, cand, attempt);
-      const { terminalId, pid } = created;
-      if (routedTerminalId !== terminalId) throw new Error("candidate terminal routing was not installed before spawn");
-      cand.terminalId = terminalId;
-      cand.pid = pid;
-      // Register the terminal before the asynchronous process-identity lookup.
-      // The candidate tailer is armed before spawn, so an immediate
-      // session_ready may already be queued while this launch continuation is
-      // still awaiting ps(). Dropping that boundary would leave the candidate
-      // in "starting" until the readiness timeout.
-      this.terminalToComparison.set(terminalId, { comparisonId: cmp.id, label: cand.label, startupAttemptId: attempt.opId });
-      // `cand.lstart = await readProcessStart(pid)` is represented by the
-      // observed promise below so teardown can cancel the waiter safely.
-      const identity = pid > 0 ? readProcessStart(pid) : Promise.resolve(null);
-      attempt.identityPromise = identity;
-      // Teardown may have to use the late start identity after the launch
-      // waiter has already been cancelled. Keep observing the original ps()
-      // operation without allowing it to publish anything.
-      void identity.then(async (lstart) => {
-        attempt.lstart = lstart;
-        if (attempt.cancelled && lstart && !attempt.directCleanupRequested) {
-          attempt.directCleanupRequested = true;
-          await this.terminateCandidateGroup(attempt.pid, lstart);
-          if (attempt.terminalId && !attempt.fallbackRequested) {
-            attempt.fallbackRequested = true;
-            this.deps.terminateCandidate?.(attempt.terminalId);
-          }
-        }
-      }).catch(() => undefined);
-      const lstart = await awaitAbortable(identity, attempt.controller.signal);
-      attempt.lstart = lstart;
-      this.ensureCandidateLaunchLive(cmp, cand, attempt);
-      cand.lstart = lstart;
-      await this.updateManifest(cmp, cand, attempt);
-      this.ensureCandidateLaunchLive(cmp, cand, attempt);
-      this.pushUpdate(cmp, cand);
-    })();
-    attempt.operation = operation;
-    try {
-      await operation;
-      if (!this.candidateLaunchAttempts.has(attempt.opId)) return;
-      cand.startupAttemptId = undefined;
-      if (cand.startupGeneration === attempt.generation) cand.startupGeneration = undefined;
-      cand.startupControlOpId = undefined;
-      this.candidateLaunchAttempts.delete(attempt.opId);
-    } catch (error) {
-      await this.cleanupCandidateLaunchAttempt(cmp, cand, attempt);
-      throw error;
-    }
-  }
-
-  /** A fresh launch may publish only while its exact attempt still owns the
-   *  candidate. This fence is checked after every asynchronous boundary. */
-  private candidateLaunchLive(cmp: ComparisonState, cand: CandidateState, attempt: CandidateLaunchAttempt): boolean {
-    return this.comparisonIsLive(cmp)
-      && !attempt.cancelled
-      && cand.startupAttemptId === attempt.opId
-      && cand.startupGeneration === attempt.generation
-      && this.candidateLaunchAttempts.get(attempt.opId) === attempt;
-  }
-
-  private ensureCandidateLaunchLive(cmp: ComparisonState, cand: CandidateState, attempt: CandidateLaunchAttempt): void {
-    if (!this.candidateLaunchLive(cmp, cand, attempt)) throw new Error("candidate startup was cancelled");
-  }
-
-  /** Cancel every fresh launch for a comparison before candidate cleanup. */
-  private async cancelCandidateLaunches(comparisonId: string): Promise<void> {
-    const attempts = [...this.candidateLaunchAttempts.values()].filter((attempt) => attempt.comparisonId === comparisonId);
-    for (const attempt of attempts) {
-      attempt.cancelled = true;
-      attempt.controller.abort();
-      const cmp = this.comparisons.get(attempt.comparisonId);
-      const cand = cmp?.candidates.get(attempt.label) ?? null;
-      await this.cleanupCandidateLaunchAttempt(cmp ?? null, cand, attempt);
-    }
-    // The operation itself is normally released by the abort race above. A
-    // bounded wait prevents teardown from retaining a comparison forever if a
-    // provider-specific startup hook ignores its signal.
-    await Promise.all(attempts.map((attempt) => attempt.operation
-      ? waitBounded(attempt.operation.catch(() => undefined), CANDIDATE_CLEANUP_TIMEOUT_MS)
-      : Promise.resolve()));
-  }
-
-  /** Cancel one launch and retain enough identity to clean up a late pid. */
-  private async cleanupCandidateLaunchAttempt(
-    cmp: ComparisonState | null,
-    cand: CandidateState | null,
-    attempt: CandidateLaunchAttempt,
-  ): Promise<void> {
-    attempt.cancelled = true;
-    attempt.controller.abort();
-    if (!attempt.cleanupPromise) {
-      attempt.cleanupPromise = (async (): Promise<void> => {
-        if (attempt.pid && attempt.pid > 0 && attempt.lstart) {
-          attempt.directCleanupRequested = true;
-          await this.terminateCandidateGroup(attempt.pid, attempt.lstart);
-        }
-        if (attempt.terminalId && !attempt.fallbackRequested) {
-          attempt.fallbackRequested = true;
-          this.deps.terminateCandidate?.(attempt.terminalId);
-        }
-        const hit = attempt.terminalId ? this.terminalToComparison.get(attempt.terminalId) : undefined;
-        if (
-          attempt.terminalId
-          && hit?.comparisonId === attempt.comparisonId
-          && hit.label === attempt.label
-          && hit.startupAttemptId === attempt.opId
-        ) {
-          this.terminalToComparison.delete(attempt.terminalId);
-        }
-        if (cmp && cand && cand.startupAttemptId === attempt.opId) {
-          cand.startupAttemptId = undefined;
-          if (cand.startupGeneration === attempt.generation) cand.startupGeneration = undefined;
-          cand.startupControlOpId = undefined;
-          if (cand.terminalId === attempt.terminalId) cand.terminalId = null;
-          if (cand.pid === attempt.pid) cand.pid = null;
-          if (cand.lstart === attempt.lstart) cand.lstart = null;
-        }
-      })();
-    }
-    await attempt.cleanupPromise;
-    // A dependency that returns a late terminal identity after cancellation
-    // must still be closed. The first cleanup may have run before create() had
-    // published its pid, so re-check the attempt's immutable fields here.
-    if (attempt.pid && attempt.pid > 0 && attempt.lstart && !attempt.directCleanupRequested) {
-      attempt.directCleanupRequested = true;
-      await this.terminateCandidateGroup(attempt.pid, attempt.lstart);
-    }
-    if (attempt.terminalId && !attempt.fallbackRequested) {
-      attempt.fallbackRequested = true;
-      this.deps.terminateCandidate?.(attempt.terminalId);
-    }
-    // If ps() was still in flight, its callback owns the late identity cleanup
-    // and cannot touch a replacement candidate because it uses the old
-    // process-start value, never the mutable CandidateState pid.
-    if (attempt.identityPromise) {
-      void attempt.identityPromise.then(async (lstart) => {
-        attempt.lstart = lstart;
-        if (attempt.cancelled && lstart && !attempt.directCleanupRequested) {
-          attempt.directCleanupRequested = true;
-          await this.terminateCandidateGroup(attempt.pid, lstart);
-          if (attempt.terminalId && !attempt.fallbackRequested) {
-            attempt.fallbackRequested = true;
-            this.deps.terminateCandidate?.(attempt.terminalId);
-          }
-        }
-      }).catch(() => undefined);
-    }
-    if (cmp && cand && cand.startupAttemptId === attempt.opId) {
-      cand.startupAttemptId = undefined;
-      if (cand.startupGeneration === attempt.generation) cand.startupGeneration = undefined;
-      cand.startupControlOpId = undefined;
-      if (cand.terminalId === attempt.terminalId) cand.terminalId = null;
-      if (cand.pid === attempt.pid) cand.pid = null;
-      if (cand.lstart === attempt.lstart) cand.lstart = null;
-    }
-    if (this.candidateLaunchAttempts.get(attempt.opId) === attempt) this.candidateLaunchAttempts.delete(attempt.opId);
-  }
-
-  /** Install routing and, for a reopen, arm the exact startup handshake. */
-  private installCandidateRouting(
-    cmp: ComparisonState,
-    cand: CandidateState,
-    terminalId: string,
-    expectedOpId?: string,
-    startupAttemptId?: string,
-  ): void {
-    this.ensureComparisonLive(cmp);
-    const existing = this.terminalToComparison.get(terminalId);
-    if (existing && (existing.comparisonId !== cmp.id || existing.label !== cand.label)) {
-      throw new Error(`candidate terminal id ${terminalId} is already routed`);
-    }
-    if (expectedOpId && this.pendingCandidateReadies.has(terminalId)) {
-      throw new Error(`candidate terminal ${terminalId} already has a startup handshake`);
-    }
-    cand.terminalId = terminalId;
-    this.terminalToComparison.set(terminalId, {
-      comparisonId: cmp.id,
-      label: cand.label,
-      ...(startupAttemptId || expectedOpId ? { startupAttemptId: startupAttemptId ?? expectedOpId } : {}),
-    });
-    if (!expectedOpId) return;
-
-    let pending!: PendingCandidateReady;
-    let resolvePromise!: () => void;
-    let rejectPromise!: (error: Error) => void;
-    const promise = new Promise<void>((resolve, reject) => {
-      resolvePromise = resolve;
-      rejectPromise = reject;
-    });
-    pending = {
-      comparisonId: cmp.id,
-      label: cand.label,
-      terminalId,
-      expectedOpId,
-      state: "pending",
-      timer: setTimeout(() => {
-        if (pending.state !== "pending") return;
-        pending.state = "failed";
-        rejectPromise(new Error("the reopened candidate did not become ready in time"));
-      }, READY_TIMEOUT_MS),
-      promise,
-      resolve: resolvePromise,
-      reject: rejectPromise,
-    };
-    // Clearing a timer from either promise outcome keeps the manager quiescent
-    // after a fast session_ready or a deterministic startup failure. The
-    // rejection handler is explicit so a failed handshake is never unhandled.
-    void promise.then(
-      () => clearTimeout(pending.timer),
-      () => clearTimeout(pending.timer),
-    );
-    this.pendingCandidateReadies.set(terminalId, pending);
-  }
-
   // ------------------------------------------------------- session ready ----
 
   /** The bridge consumed its startup control. */
   onSessionReady(terminalId: string, ok: boolean, error: string | null, event: CandidateReadyEvent = {}): void {
-    const hit = this.terminalToComparison.get(terminalId);
-    if (!hit) return;
-    const cmp = this.comparisons.get(hit.comparisonId);
-    const cand = cmp?.candidates.get(hit.label);
-    if (!cmp || !cand) return;
-    // A terminal callback can race the first teardown tick. Once comparison
-    // admission closes, no startup event may mutate or publish stale state.
-    if (!this.comparisonIsLive(cmp)) return;
-
-    const pending = this.pendingCandidateReadies.get(terminalId);
-    if (pending) {
-      // Only the startup-control operation created for this reopen can settle
-      // it. Canonical sidecar metadata is required so a replayed line cannot
-      // impersonate the new producer generation.
-      const eventGeneration = event.generation;
-      const eventSeq = event.seq;
-      if (
-        pending.state !== "pending"
-        || pending.comparisonId !== cmp.id
-        || pending.label !== cand.label
-        || cand.terminalId !== terminalId
-        || event.opId !== pending.expectedOpId
-        || typeof event.bridgeId !== "string"
-        || event.bridgeId.length === 0
-        || typeof eventGeneration !== "string"
-        || eventGeneration.length === 0
-        || typeof eventSeq !== "number"
-        || !Number.isSafeInteger(eventSeq)
-        || eventSeq < 1
-      ) return;
-      if (!ok) {
-        pending.state = "failed";
-        pending.reject(new Error(`the candidate session failed to start: ${error ?? "unknown"}`));
-        return;
-      }
-      pending.state = "accepted";
-      pending.resolve();
-      // Keep the accepted record until openTerminal publishes ready. A
-      // replay arriving in that gap must not fall through to the ordinary
-      // (non-reopen) handler and publish early.
-      return;
-    }
-    const launchAttempt = cand.startupAttemptId ? this.candidateLaunchAttempts.get(cand.startupAttemptId) : undefined;
-    // The route retains the completed startup identity for the terminal's
-    // lifetime. Once its attempt has been retired, a replayed startup record
-    // cannot re-enter the ordinary ready handler or emit another update.
-    if (!launchAttempt && hit.startupAttemptId) return;
-    if (launchAttempt) {
-      // Fresh startup accepts only the control operation and sidecar writer
-      // generation belonging to this exact attempt. A delayed record from a
-      // prior process must never fail or ready the replacement.
-      if (
-        launchAttempt.comparisonId !== cmp.id
-        || launchAttempt.label !== cand.label
-        || launchAttempt.terminalId !== terminalId
-        || launchAttempt.cancelled
-        || cand.startupGeneration !== launchAttempt.generation
-        || (launchAttempt.controlOpId && event.opId !== launchAttempt.controlOpId)
-        || typeof event.bridgeId !== "string"
-        || event.bridgeId.length === 0
-        || typeof event.generation !== "string"
-        || event.generation.length === 0
-        || typeof event.seq !== "number"
-        || !Number.isSafeInteger(event.seq)
-        || event.seq < 1
-      ) return;
-      if (launchAttempt.sidecarGeneration && launchAttempt.sidecarGeneration !== event.generation) return;
-      launchAttempt.sidecarGeneration = event.generation;
-      launchAttempt.sessionReady = ok;
-    }
-    if (!ok) {
-      void this.teardown(cmp.id, "error", `the candidate session failed to start: ${error ?? "unknown"}`);
-      return;
-    }
-    cand.state = "ready";
-    cand.version++;
-    this.pushUpdate(cmp, cand);
-      // Both ready: the pair is complete.
-      if ([...cmp.candidates.values()].every((c) => c.state === "ready")) {
-      if (cmp.readyTimer) clearTimeout(cmp.readyTimer);
-      void (async () => {
-        try {
-          if (!cmp.rootBinding || !cmp.templateBinding) return;
-          const root = await refreshBoundPromotionDirectory(cmp.rootBinding);
-          const template = await refreshBoundPromotionDirectory(cmp.templateBinding);
-          await boundPromotionRemoveTree({
-            root: root.path,
-            rootIdentity: promotionIdentityOf(root),
-            components: ["template"],
-            parentIdentity: promotionIdentityOf(root),
-            expectedIdentity: { dev: template.dev, ino: template.ino },
-          });
-          cmp.rootBinding = root;
-          cmp.rootIdentity = promotionIdentityOf(root);
-          cmp.templateBinding = undefined;
-          cmp.templateIdentity = undefined;
-        } catch (error) {
-          // A leaf/root/ancestor swap retains the template as evidence; it is
-          // never removed through a pathname fallback.
-          console.warn(`[worldlines] template cleanup retained: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      })();
-      cmp.phase = "running";
-    }
+    this.launch.onSessionReady(terminalId, ok, error, event);
   }
 
   /** A candidate terminal exited. */
   terminalExited(terminalId: string): void {
-    const hit = this.terminalToComparison.get(terminalId);
+    const hit = this.launch.terminalToComparison.get(terminalId);
     if (!hit) return;
     const cmp = this.comparisons.get(hit.comparisonId);
     const cand = cmp?.candidates.get(hit.label);
     if (!cmp || !cand) return;
-    const launchAttempt = cand.startupAttemptId ? this.candidateLaunchAttempts.get(cand.startupAttemptId) : undefined;
-    if (launchAttempt && launchAttempt.terminalId === terminalId && cand.startupGeneration === launchAttempt.generation) {
-      launchAttempt.cancelled = true;
-      launchAttempt.controller.abort();
-      void this.cleanupCandidateLaunchAttempt(cmp, cand, launchAttempt);
-      if (cmp.phase !== "error") void this.teardown(cmp.id, "error", "the candidate exited during startup");
-      return;
-    }
-    const pending = this.pendingCandidateReadies.get(terminalId);
-    if (pending && (pending.state === "pending" || pending.state === "accepted")) {
-      pending.state = "failed";
-      pending.reject(new Error("the reopened candidate exited before startup completed"));
-      return;
-    }
+    if (this.launch.consumeTerminalExit(cmp, cand, terminalId)) return;
     if (cand.state === "ready" || cand.state === "running") {
       cand.state = "settled";
       cand.version++;
@@ -3138,192 +2766,7 @@ export class WorldlineManager {
 
   /** Attach a live candidate terminal, or reopen one whose PTY is gone. */
   async openTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }> {
-    const cmp = this.comparisons.get(comparisonId);
-    const cand = cmp?.candidates.get(label);
-    if (!cmp || !cand) return { ok: false, error: "candidate not found" };
-    if (!cand.sessionFile) return { ok: false, error: "the candidate has no session" };
-    if (cand.state === "creating") return { ok: false, error: "candidate startup is already in progress" };
-    // A mapped PTY is the session. State (promoting, settled-during-drain,
-    // error) must not spawn a second candidate on the same tree.
-    if (cand.terminalId && this.deps.terminalLive(cand.terminalId)) {
-      return { ok: true, terminalId: cand.terminalId };
-    }
-
-    const previousTerminalId = cand.terminalId;
-    if (previousTerminalId) {
-      // The old terminal identity must not be allowed to satisfy the new
-      // startup. Its process has normally already exited; removing only the
-      // routing is deliberate so a late old record cannot mark this reopen.
-      this.terminalToComparison.delete(previousTerminalId);
-      const previousPending = this.pendingCandidateReadies.get(previousTerminalId);
-      if (previousPending) {
-        previousPending.state = "failed";
-        clearTimeout(previousPending.timer);
-        this.pendingCandidateReadies.delete(previousTerminalId);
-        previousPending.reject(new Error("candidate startup was superseded"));
-      }
-    }
-    cand.terminalId = null;
-    cand.pid = null;
-    cand.lstart = null;
-    const startupAttemptId = randomUUID();
-    cand.startupAttemptId = startupAttemptId;
-    cand.state = "creating";
-    cand.error = null;
-    cand.version++;
-    this.pushUpdate(cmp, cand);
-
-    let routedTerminalId: string | null = null;
-    let launchedPid: number | null = null;
-    let launchedLstart: string | null = null;
-    try {
-      const { cmd, args, env } = await this.candidateLaunch(cmp, cand);
-      // A reopen gets a new control operation. Matching this operation is the
-      // durable identity boundary that excludes a stale/replayed ready line
-      // from the previous candidate process.
-      const opId = startupAttemptId;
-      this.ensureComparisonLive(cmp);
-      await this.writeControl(cand, { opId, action: "none" });
-      const workspaceId = this.deps.createCandidateWorkspace(cand.dir, cand.headStateId ?? cmp.baseStateId ?? null, cmp.id);
-      const created = await this.deps.createCandidate({
-        root: cand.dir,
-        workspaceId,
-        engine: "core",
-        launch: { cmd, args, env },
-        beforeSpawn: (terminalId) => {
-          routedTerminalId = terminalId;
-          this.installCandidateRouting(cmp, cand, terminalId, opId);
-        },
-      });
-      launchedPid = created.pid;
-      if (routedTerminalId === null) {
-        routedTerminalId = created.terminalId;
-        throw new Error("candidate terminal routing was not installed before spawn");
-      }
-      if (routedTerminalId !== created.terminalId) throw new Error("candidate terminal identity changed during startup");
-      const terminalId = routedTerminalId;
-      cand.terminalId = terminalId;
-      cand.pid = created.pid;
-      this.ensureComparisonLive(cmp);
-      const pending = this.pendingCandidateReadies.get(terminalId);
-      if (!pending) throw new Error("candidate startup handshake was not armed");
-      await pending.promise;
-      if (pending.state !== "accepted") throw new Error("candidate startup handshake did not complete");
-      cand.lstart = created.pid > 0 ? await readProcessStart(created.pid) : null;
-      launchedLstart = cand.lstart;
-      if (pending.state !== "accepted") throw new Error("candidate exited during startup identity lookup");
-      if (this.terminalToComparison.get(terminalId)?.comparisonId !== cmp.id || this.terminalToComparison.get(terminalId)?.label !== label) {
-        throw new Error("candidate terminal routing changed during startup");
-      }
-      // Publish ready only after routing, process identity, and the exact
-      // session_ready handshake have all completed.
-      this.ensureComparisonLive(cmp);
-      cand.state = "ready";
-      cand.version++;
-      cand.error = null;
-      await this.updateManifest(cmp, cand);
-      this.ensureComparisonLive(cmp);
-      if (pending.state !== "accepted") throw new Error("candidate exited before ready was published");
-      if (this.terminalToComparison.get(terminalId)?.comparisonId !== cmp.id || this.terminalToComparison.get(terminalId)?.label !== label) {
-        throw new Error("candidate terminal routing changed before ready was published");
-      }
-      this.pushUpdate(cmp, cand);
-      clearTimeout(pending.timer);
-      this.pendingCandidateReadies.delete(terminalId);
-      cand.startupAttemptId = undefined;
-      return { ok: true, terminalId };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await this.cleanupReopenedCandidate(cmp, cand, startupAttemptId, routedTerminalId, launchedPid, launchedLstart, message);
-      return { ok: false, error: message };
-    }
-  }
-
-  /** Remove one failed reopen and terminate only its exact process identity. */
-  private async cleanupReopenedCandidate(
-    cmp: ComparisonState,
-    cand: CandidateState,
-    startupAttemptId: string,
-    terminalId: string | null,
-    pid: number | null,
-    lstart: string | null,
-    error: string,
-  ): Promise<void> {
-    const pending = terminalId ? this.pendingCandidateReadies.get(terminalId) : undefined;
-    if (pending) {
-      if (pending.state === "pending") {
-        pending.state = "failed";
-        pending.reject(new Error(error));
-      }
-      clearTimeout(pending.timer);
-      this.pendingCandidateReadies.delete(terminalId!);
-    }
-    if (terminalId) {
-      const hit = this.terminalToComparison.get(terminalId);
-      if (hit?.comparisonId === cmp.id && hit.label === cand.label && hit.startupAttemptId === startupAttemptId) {
-        this.terminalToComparison.delete(terminalId);
-      }
-    }
-    const ownsCandidate = cand.startupAttemptId === startupAttemptId;
-    if (!ownsCandidate) {
-      // A later reopen may already own the candidate. It is still safe to
-      // terminate this failed attempt, but never let its error overwrite the
-      // newer candidate lifecycle.
-      await this.terminateCandidateProcess(terminalId, pid, lstart);
-      return;
-    }
-    cand.startupAttemptId = undefined;
-    cand.terminalId = null;
-    cand.pid = null;
-    cand.lstart = null;
-    // Teardown owns the terminal's final lifecycle once cancellation or
-    // discard has closed comparison admission. Do not overwrite that state
-    // with a late startup error, although the exact process still needs the
-    // same identity-checked cleanup below.
-    if (cmp.phase !== "error" && !this.closingComparisons.has(cmp.id)) {
-      cand.state = "error";
-      cand.error = error;
-      cand.version++;
-      this.pushUpdate(cmp, cand);
-    }
-    await this.terminateCandidateProcess(terminalId, pid, lstart);
-  }
-
-  /** Process-group cleanup is identity-checked; the main owner closes the
-   * terminal as a fallback when ps() cannot prove a start time. */
-  private async terminateCandidateGroup(pid: number | null, lstart: string | null): Promise<void> {
-    if (!pid || pid <= 0 || !lstart || !(await processStartMatches(pid, lstart))) return;
-    try {
-      process.kill(-pid, "SIGTERM");
-    } catch {
-      /* The process can exit before the signal. */
-    }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
-    if (await processStartMatches(pid, lstart)) {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        /* The process can exit before the signal. */
-      }
-    }
-  }
-
-  private async terminateCandidateProcess(terminalId: string | null, pid: number | null, lstart: string | null): Promise<void> {
-    await this.terminateCandidateGroup(pid, lstart);
-    if (terminalId) this.deps.terminateCandidate?.(terminalId);
-  }
-
-  /** Cancel reopen waiters when the owning comparison is closed. */
-  private cancelPendingCandidateReadies(comparisonId: string, error: string): void {
-    for (const [terminalId, pending] of [...this.pendingCandidateReadies]) {
-      if (pending.comparisonId !== comparisonId) continue;
-      if (pending.state === "pending") {
-        pending.state = "failed";
-        pending.reject(new Error(error));
-      }
-      clearTimeout(pending.timer);
-      this.pendingCandidateReadies.delete(terminalId);
-    }
+    return this.launch.openTerminal(comparisonId, label);
   }
 
   /** Mark the whole comparison failed and clean up. */
@@ -3338,14 +2781,14 @@ export class WorldlineManager {
     if (cmp.readyTimer) clearTimeout(cmp.readyTimer);
     cmp.phase = "error";
     cmp.error = error;
-    this.cancelPendingCandidateReadies(comparisonId, error ?? `comparison ${state}`);
+    this.launch.cancelPending(comparisonId, error ?? `comparison ${state}`);
     this.closingComparisons.add(comparisonId);
     const teardown = (async (): Promise<void> => {
       // Close admission before aborting. Every request already handed to the
       // shared worker is cancelled and drained before its directory is even
       // considered for deletion. Candidate startup has the same exact
       // attempt fence, including a late process-start identity callback.
-      await this.cancelCandidateLaunches(comparisonId);
+      await this.launch.cancelLaunches(comparisonId);
       await this.cancelEvidence(comparisonId);
       await this.cancelSessionForks(comparisonId);
       await Promise.all([...cmp.candidates.values()].map((cand) => cand.headCommit.catch(() => undefined)));
@@ -3362,7 +2805,7 @@ export class WorldlineManager {
       // 2. Terminate the exact candidate terminals/process groups. The main
       // owner is the safe fallback when a process-start proof is unavailable.
       await Promise.all([...cmp.candidates.values()].map((cand) =>
-        this.terminateCandidateProcess(cand.terminalId, cand.pid, cand.lstart),
+        this.launch.terminateCandidateProcess(cand.terminalId, cand.pid, cand.lstart),
       ));
 
       // 3. Recompute after the drain: a worker may have reported an
@@ -3382,9 +2825,7 @@ export class WorldlineManager {
         return;
       }
       // 4. Release the bookkeeping.
-      for (const [terminalId, hit] of [...this.terminalToComparison]) {
-        if (hit.comparisonId === comparisonId) this.terminalToComparison.delete(terminalId);
-      }
+      this.launch.clearRoutes(comparisonId);
       this.comparisons.delete(comparisonId);
       this.closingComparisons.delete(comparisonId);
       await this.dropEvidence(comparisonId);
@@ -3591,7 +3032,7 @@ export class WorldlineManager {
       for (const candidate of Object.values(manifest.candidates)) {
         // Post-crash orphans get the same TERM grace as live teardown, so a
         // clean shutdown can still write its settled markers.
-        await this.terminateCandidateGroup(candidate.pid, candidate.lstart);
+        await this.launch.terminateCandidateProcess(null, candidate.pid, candidate.lstart);
       }
       if (manifest.status === "uncertain") {
         // Keep the comparison addressable after restart. It is intentionally

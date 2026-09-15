@@ -113,7 +113,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
         created.push({ terminalId, beforeSpawn: useRouting });
         if (useRouting) {
           opts.beforeSpawn?.(terminalId);
-          mappingObservedBeforeReady = manager.terminalToComparison.get(terminalId)?.label === "A" && manager.list().at(-1)?.state === "creating";
+          mappingObservedBeforeReady = manager.launch.terminalToComparison.get(terminalId)?.label === "A" && manager.list().at(-1)?.state === "creating";
         }
         if (mode === "mapping-failure") return { terminalId, pid: 0 };
         const opId = controls.at(-1)?.opId;
@@ -300,12 +300,12 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       mode = "cancel";
       const pendingOpen = manager.openTerminal(comparison.id, "A");
       await new Promise((resolve) => setImmediate(resolve));
-      expect(manager.pendingCandidateReadies.size).toBe(1);
+      expect(manager.launch.pendingCandidateReadies.size).toBe(1);
       await manager.cancel(comparison.id);
       const cancelled = await pendingOpen;
       expect(cancelled.ok).toBe(false);
-      expect(manager.pendingCandidateReadies.size).toBe(0);
-      expect(manager.terminalToComparison.has("candidate-6")).toBe(false);
+      expect(manager.launch.pendingCandidateReadies.size).toBe(0);
+      expect(manager.launch.terminalToComparison.has("candidate-6")).toBe(false);
       expect(candidate.state).not.toBe("ready");
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -327,7 +327,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
 
     const create = methodBody("private async createComparison(", "  /** The comparison template");
     const challenge = methodBody("async challengeFromCandidate(", "  /** The ignored/generated writes");
-    const forkPoint = methodBody("async forkPoint(", "  /** Launch one candidate");
+    const forkPoint = methodBody("async forkPoint(", "  // ------------------------------------------------------- session ready");
     for (const body of [create, challenge, forkPoint]) {
       expect(body).toContain("this.constructComparison(");
       expect(body).not.toContain("allocateComparisonDirectory");
