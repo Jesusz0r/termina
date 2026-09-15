@@ -77,7 +77,7 @@ import {
 import {
   PromotionJournalAdmissionOwner,
   createPromotionOperationBudget,
-  dirBytes,
+  measurePromotionTreeBytes,
   promotionJournalAdmissionOwnerFor,
   releasePromotionJournalAdmissionOwner,
   reservePromotionOperationBytes,
@@ -1180,15 +1180,16 @@ export class WorldlineManager {
       cmp.sourceGitDir = store.sourceGitDir;
       cmp.primaryRoot = store.sourceRoot;
       await this.buildTemplate(cmp, store, run);
-      const templateBytes = await dirBytes(cmp.templateDir);
-      if (templateBytes > MAX_TEMPLATE_BYTES) {
-        throw new Error(`the comparison template exceeds the 2 GB budget (${(templateBytes / 1e9).toFixed(1)} GB)`);
+      // Saturates at the limit; +1 distinguishes "at cap" from "over cap".
+      const templateBytes = await measurePromotionTreeBytes(cmp.templateDir, BigInt(MAX_TEMPLATE_BYTES) + 1n);
+      if (templateBytes > BigInt(MAX_TEMPLATE_BYTES)) {
+        throw new Error(`the comparison template exceeds the 2 GB budget (${(Number(templateBytes) / 1e9).toFixed(1)} GB)`);
       }
       await this.cloneCandidates(cmp);
       await this.applySettledToA(cmp, store, run);
-      const aBytes = await dirBytes(cmp.candidates.get("A")!.dir);
-      if (aBytes > MAX_CANDIDATE_BYTES) {
-        throw new Error(`candidate A exceeds the 1 GB budget (${(aBytes / 1e9).toFixed(1)} GB)`);
+      const aBytes = await measurePromotionTreeBytes(cmp.candidates.get("A")!.dir, BigInt(MAX_CANDIDATE_BYTES) + 1n);
+      if (aBytes > BigInt(MAX_CANDIDATE_BYTES)) {
+        throw new Error(`candidate A exceeds the 1 GB budget (${(Number(aBytes) / 1e9).toFixed(1)} GB)`);
       }
       await this.forkSessions(cmp, run);
       await this.createSupportDirs(cmp);

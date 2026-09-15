@@ -61,7 +61,7 @@ function endTurn(): string {
 async function runPauseKernel(fetchProgram: string): Promise<{
   output: string;
   attempts: Array<{ status?: string }>;
-  settlements: Array<{ outcome?: { status?: string; correctness?: unknown } }>;
+  settlements: Array<{ outcome?: { status?: string } }>;
 }> {
   const root = mkdtempSync(join(tmpdir(), "agent-core-pause-limit-"));
   const project = join(root, "project");
@@ -142,7 +142,7 @@ async function runPauseKernel(fetchProgram: string): Promise<{
       ? readdirSync(traceDir)
         .filter((name) => name.startsWith("turn-") && name.endsWith(".json"))
         .sort((a, b) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]))
-        .map((name) => JSON.parse(readFileSync(join(traceDir, name), "utf8")) as { recordType?: string; status?: string; outcome?: { status?: string; correctness?: unknown } })
+        .map((name) => JSON.parse(readFileSync(join(traceDir, name), "utf8")) as { recordType?: string; status?: string; outcome?: { status?: string } })
       : [];
     return {
       output,
@@ -175,7 +175,7 @@ describe("Agent Core pause-turn continuation budget", () => {
     assert.equal(result.attempts[5]?.status, "pause-limit");
     assert.equal(result.settlements.length, 1);
     assert.equal(result.settlements[0]?.outcome?.status, "failure");
-    assert.equal(result.settlements[0]?.outcome?.correctness, null);
+    assert.equal("correctness" in (result.settlements[0]?.outcome ?? {}), false);
   }, 60_000);
 
   it("resets the consecutive pause streak after a client tool turn", async () => {

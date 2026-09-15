@@ -6,7 +6,6 @@
  */
 export { WorldlineManager } from "./manager.js";
 export type { WorldlineDeps } from "./manager.js";
-export { dirBytes } from "./promotion-journal.js";
 export { quoteShellArg } from "../../shared/terminal-control.js";
 export type { WorldlineState, WorldlineSummary } from "../../shared/types.js";
 export type {
@@ -16,8 +15,8 @@ export type {
   RunRecord,
 } from "./types.js";
 export { UNCERTAIN_COMPARISON_USAGE_LEDGER } from "./limits.js";
+export { disposeWorldlineGitCore } from "../worldline-git.js";
 export {
-  disposeWorldlineCoreClient,
   ensurePromotionRoots,
   ensureBoundRetainedRoot,
   recoverPromotionJournals,

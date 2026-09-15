@@ -42,7 +42,7 @@ function settled(overrides: Record<string, unknown> = {}): Record<string, unknow
     schemaVersion: 2,
     runId: "run",
     taskId: "task",
-    outcome: { status: "success", correctness: "correct" },
+    outcome: { status: "success" },
     taskClass: "implement",
     ...overrides,
   };
@@ -112,7 +112,7 @@ describe("laziness metrics (#125)", () => {
     const dir = writeCorpus([
       attempt({ taskId: "open", attemptId: "a1", toolOutcomes: [] }),
       attempt({ taskId: "failed", attemptId: "a2", toolOutcomes: [] }),
-      settled({ taskId: "failed", outcome: { status: "failure", correctness: "incorrect" } }),
+      settled({ taskId: "failed", outcome: { status: "failure" } }),
       attempt({ taskId: "good", attemptId: "a3", toolOutcomes: [{ toolName: "bash", isError: false, exitCode: 0 }] }),
       settled({ taskId: "good" }),
       "{not json",

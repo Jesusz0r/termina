@@ -51,7 +51,7 @@ describe("Session Retention Performance Probes", () => {
         build({ entryPoints: ["electron/session-retention.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: retentionBundle, logLevel: "silent" }),
         build({ entryPoints: ["electron/worldlines/index.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: worldlineBundle, logLevel: "silent" }),
       ]);
-      const { SessionRetentionOwner, RETAINED_SESSION_USAGE_LEDGER, disposeSessionRetentionCoreClient } = await import(pathToFileURL(retentionBundle).href);
+      const { SessionRetentionOwner, RETAINED_SESSION_USAGE_LEDGER, disposeWorldlineGitCore: disposeSessionRetentionCoreClient } = await import(pathToFileURL(retentionBundle).href);
       assert.equal(typeof RETAINED_SESSION_USAGE_LEDGER, "string");
     
       const source = join(work, "source", "source", "current", "session.jsonl");
@@ -202,7 +202,7 @@ describe("Session Retention Performance Probes", () => {
     
       function freshRetentionList(rootPath: string) {
         return spawnSync(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
-          const { SessionRetentionOwner, disposeSessionRetentionCoreClient } = await import(process.env.TERMINA_RETENTION_BUNDLE);
+          const { SessionRetentionOwner, disposeWorldlineGitCore } = await import(process.env.TERMINA_RETENTION_BUNDLE);
           try {
             await new SessionRetentionOwner(process.env.TERMINA_RETENTION_ROOT).list();
             process.exitCode = 0;
@@ -210,7 +210,7 @@ describe("Session Retention Performance Probes", () => {
             console.error(error instanceof Error ? error.message : String(error));
             process.exitCode = 17;
           } finally {
-            disposeSessionRetentionCoreClient();
+            disposeWorldlineGitCore();
           }
         `], {
           cwd: process.cwd(),
@@ -299,7 +299,7 @@ describe("Session Retention Performance Probes", () => {
         const ready = join(work, `retained-root-crash-${stage}.ready`);
         const release = join(work, `retained-root-crash-${stage}.release`);
         const child = spawn(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
-          const { SessionRetentionOwner, disposeSessionRetentionCoreClient } = await import(process.env.TERMINA_RETENTION_BUNDLE);
+          const { SessionRetentionOwner, disposeWorldlineGitCore } = await import(process.env.TERMINA_RETENTION_BUNDLE);
           const owner = new SessionRetentionOwner(process.env.TERMINA_RETENTION_ROOT, {
             testHooks: { beforeRootBinding: {
               stage: process.env.TERMINA_RETENTION_STAGE,
@@ -308,7 +308,7 @@ describe("Session Retention Performance Probes", () => {
             } },
           });
           await owner.list();
-          disposeSessionRetentionCoreClient();
+          disposeWorldlineGitCore();
         `], {
           cwd: process.cwd(),
           env: {
@@ -330,7 +330,7 @@ describe("Session Retention Performance Probes", () => {
         assert.equal(exitCode.signal, "SIGKILL", `${stage} probe was killed at the native seam (${stderr})`);
         rmSync(release, { force: true });
         const restart = spawnSync(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
-          const { SessionRetentionOwner, disposeSessionRetentionCoreClient } = await import(process.env.TERMINA_RETENTION_BUNDLE);
+          const { SessionRetentionOwner, disposeWorldlineGitCore } = await import(process.env.TERMINA_RETENTION_BUNDLE);
           try {
             await new SessionRetentionOwner(process.env.TERMINA_RETENTION_ROOT).list();
             process.exitCode = 0;
@@ -338,7 +338,7 @@ describe("Session Retention Performance Probes", () => {
             console.error(error instanceof Error ? error.message : String(error));
             process.exitCode = 19;
           } finally {
-            disposeSessionRetentionCoreClient();
+            disposeWorldlineGitCore();
           }
         `], {
           cwd: process.cwd(),

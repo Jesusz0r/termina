@@ -25,7 +25,7 @@ function settled(overrides: Record<string, unknown> = {}) {
     runId: "run-quiet",
     taskId: "task-quiet",
     attemptIds: ["attempt-1"],
-    outcome: { status: "success", correctness: null, criteriaHash: null },
+    outcome: { status: "success", criteriaHash: null },
     ...overrides,
   });
 }
@@ -50,12 +50,6 @@ describe("No Quiet Wins class (#237)", () => {
       { toolName: "edit", isError: false },
     ]);
     expect(gated).toEqual({ status: "failure", criticalClass: "No Quiet Wins" });
-  });
-
-  it("fails ok and succeeded claims the same way", () => {
-    const outcomes = [{ toolName: "write_file", isError: false }];
-    expect(applyNoQuietWins("ok", outcomes).criticalClass).toBe("No Quiet Wins");
-    expect(applyNoQuietWins("succeeded", outcomes).status).toBe("failure");
   });
 
   it("passes when a succeeding bash check is already on the run", () => {

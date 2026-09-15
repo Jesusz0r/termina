@@ -990,8 +990,7 @@ function traceAdapter(normalized: NormalizedProbeConfig, runId: string, taskId: 
     finalAttemptId: traceAttempts.at(-1)?.attemptId ?? null,
     attemptIds: traceAttempts.map((attempt) => attempt.attemptId),
     summaryAttemptIds: [],
-    // The probe cannot establish task correctness from an HTTP response.
-    outcome: { status: null, correctness: null, criteriaHash: null },
+    outcome: { status: null, criteriaHash: null },
   });
   return {
     format: "agent-core-trace-v2",

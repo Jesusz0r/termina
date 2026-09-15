@@ -3,8 +3,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Component, Path};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -14,11 +13,10 @@ use crate::{
 };
 use crate::util::{
     missing_path,
-    normalize_system_alias_path,
+    open_absolute_directory_nofollow,
     open_at,
     opt_s,
     s,
-    stat_file,
 };
 
 use super::capability::{PromotionIdentity, issue_promotion_root_capability, promotion_root_capabilities};
@@ -27,43 +25,7 @@ use super::io::{promotion_directory_identity_matches, promotion_mkdir_at};
 
 pub(crate) fn open_promotion_absolute_directory(path: &str, field: &str) -> Result<fs::File, String> {
     promotion_absolute_path(path, field)?;
-    // macOS exposes /var as a fixed system alias.  Accept that one
-    // system-owned spelling consistently with the source capture boundary;
-    // arbitrary caller-controlled symlink components remain rejected by the
-    // descriptor walk below.
-    let normalized = normalize_system_alias_path(Path::new(path), field)?;
-    let mut current = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open("/")
-        .map_err(|error| format!("open promotion root failed: {error}"))?;
-    for component in normalized.components() {
-        let Component::Normal(name) = component else {
-            if matches!(component, Component::RootDir) {
-                continue;
-            }
-            return Err(format!("promotion {field} must be canonical"));
-        };
-        let name = CString::new(name.to_string_lossy().as_bytes())
-            .map_err(|_| format!("promotion {field} contains invalid bytes"))?;
-        current = open_at(
-            current.as_raw_fd(),
-            &name,
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-        .map_err(|error| {
-            format!(
-                "open promotion {field} path {path} component {} failed: {error}",
-                name.to_string_lossy()
-            )
-        })?;
-    }
-    let identity =
-        stat_file(&current).map_err(|error| format!("fstat promotion {field} failed: {error}"))?;
-    if !identity.is_dir() {
-        return Err(format!("promotion {field} is not a directory"));
-    }
-    Ok(current)
+    open_absolute_directory_nofollow(Path::new(path), field)
 }
 
 pub(crate) struct PromotionCwd {

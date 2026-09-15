@@ -33,6 +33,7 @@ import {
   subagentResultFileName,
   subagentTaskFileName,
   truncateUtf8,
+  utf8TextSuffix,
   type SubagentOutcome,
   type SubagentTaskFile,
 } from "../agent-core/subagents.js";
@@ -191,21 +192,12 @@ function defaultLauncher(cmd: string, args: string[], opts: { cwd: string; env: 
   };
 }
 
-function truncateUtf8Tail(text: string, cap: number): string {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= cap) return text;
-  let start = buf.length - cap;
-  // Move forward over continuation bytes to the lead byte of a character.
-  while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start += 1;
-  return buf.toString("utf8", start);
-}
-
 function appendCapped(current: string, chunk: Buffer, cap: number): { text: string; truncated: boolean } {
   const next = current + chunk.toString("utf8");
   if (Buffer.byteLength(next, "utf8") <= cap) return { text: next, truncated: false };
   // Keep the tail: the host takes the LAST framed line, and stderr evidence
   // is read via tailLines. Head-truncation dropped both.
-  return { text: truncateUtf8Tail(next, cap), truncated: true };
+  return { text: utf8TextSuffix(next, cap), truncated: true };
 }
 
 export class SubagentHost {

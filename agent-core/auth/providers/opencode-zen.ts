@@ -1,23 +1,25 @@
 import type { ProviderDefinition, ProviderProtocol } from "./types.ts";
 import { openCodeHeaders } from "./shared.ts";
-import { modelLeaf } from "../../models/families/identity.ts";
 import { modelLooksClaude } from "../../models/families/anthropic.ts";
 import { modelLooksGemini } from "../../models/families/google.ts";
+import { museSparkReasoningFamily } from "../../models/families/muse-spark.ts";
+import { modelLooksCodex, modelLooksOpenAI } from "../../models/families/openai.ts";
 import { modelLooksQwen } from "../../models/families/relay.ts";
+import { modelLooksGrok } from "../../models/families/xai.ts";
 /**
  * OpenCode Zen picks an existing kernel protocol from the model id.
  * Claude and Qwen use Messages. GPT, Codex, Grok, and Muse Spark use Responses.
  * Gemini uses Google generateContent on /models/{id}.
+ * Endpoint map: https://opencode.ai/docs/zen
  */
 export function zenWireProtocol(model: string): ProviderProtocol {
-  const leaf = modelLeaf(model);
   if (modelLooksClaude(model) || modelLooksQwen(model)) return "anthropic-messages";
   if (modelLooksGemini(model)) return "google-generate";
   if (
-    /^(gpt-|o[0-9]|chatgpt)/.test(leaf) ||
-    leaf.includes("codex") ||
-    leaf.startsWith("grok") ||
-    leaf.startsWith("muse-spark")
+    modelLooksOpenAI(model) ||
+    modelLooksCodex(model) ||
+    modelLooksGrok(model) ||
+    museSparkReasoningFamily(model)
   ) {
     return "openai-responses";
   }

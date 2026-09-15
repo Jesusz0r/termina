@@ -122,7 +122,6 @@ Do not treat these as gates.
 | `pnpm run test:e2e` (full Playwright matrix) | Local / on-demand. Not in `lint.yml`. |
 | `pnpm run test:rust` on every pull request | **Release-only** via `test:release`. |
 | Live provider probes under `scripts/` | `scripts/README.md`: not wired into `package.json`, CI, or request paths. |
-| `node scripts/e2e.mjs` (still named in `CONTRIBUTING.md`) | Path does not exist. The Playwright entry is `pnpm run test:e2e`. |
 
 ## Related
 

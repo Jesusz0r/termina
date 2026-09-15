@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WorldlineManager, disposeWorldlineCoreClient, ensurePromotionRoots } from "../../../electron/worldlines/index.ts";
+import { WorldlineManager, disposeWorldlineGitCore, ensurePromotionRoots } from "../../../electron/worldlines/index.ts";
 import { MARKER } from "../../../electron/worldlines/limits.ts";
 import type { CandidateState, ComparisonState, RunRecord } from "../../../electron/worldlines/types.ts";
 import type { ChallengeProfile, TimelineEvent } from "../../../shared/types.ts";
@@ -505,7 +505,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
   });
 
   afterAll(() => {
-    disposeWorldlineCoreClient();
+    disposeWorldlineGitCore();
   });
 });
 

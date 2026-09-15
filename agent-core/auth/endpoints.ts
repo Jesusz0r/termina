@@ -152,23 +152,38 @@ export function testLoopbackOverride(name: string): string | undefined {
 export function authorizeUrl(id: ProviderId): string {
   const test = testLoopbackOverride("TERMINA_TEST_AUTHORIZE_URL");
   if (test) return test;
-  if (id === "openai-codex") return OPENAI_CODEX_AUTHORIZE;
-  if (id === "openrouter") return OPENROUTER_AUTHORIZE;
-  return ANTHROPIC_AUTHORIZE;
+  switch (id) {
+    case "anthropic":
+      return ANTHROPIC_AUTHORIZE;
+    case "openai-codex":
+      return OPENAI_CODEX_AUTHORIZE;
+    case "openrouter":
+      return OPENROUTER_AUTHORIZE;
+    default:
+      throw new Error(`no authorize URL for ${id}`);
+  }
 }
 
 
 export function tokenUrl(id: ProviderId): string {
   const test = testLoopbackOverride("TERMINA_TEST_TOKEN_URL");
   if (test) return test;
-  if (id === "openai-codex") return OPENAI_CODEX_TOKEN;
-  if (id === "xai") return XAI_TOKEN_URL;
-  if (id === "openrouter") return OPENROUTER_TOKEN;
-  return ANTHROPIC_TOKEN;
+  switch (id) {
+    case "anthropic":
+      return ANTHROPIC_TOKEN;
+    case "openai-codex":
+      return OPENAI_CODEX_TOKEN;
+    case "openrouter":
+      return OPENROUTER_TOKEN;
+    case "xai":
+      return XAI_TOKEN_URL;
+    default:
+      throw new Error(`no token URL for ${id}`);
+  }
 }
 
 
-export function deviceUrl(): string {
+export function xaiDeviceUrl(): string {
   return testLoopbackOverride("TERMINA_TEST_DEVICE_URL") || XAI_DEVICE_URL;
 }
 

@@ -28,6 +28,8 @@
  *   node --experimental-strip-types --no-warnings scripts/laziness-metrics.ts <trace-dir>
  */
 
+import { isRecord } from "../shared/guards.ts";
+
 export interface LazinessOptions {
   readonly maxFiles: number;
   readonly maxFileBytes: number;
@@ -47,10 +49,6 @@ const TRACE_SCHEMA_VERSION = 2;
 const EDIT_TOOLS = new Set(["edit", "write_file"]);
 const CHECK_TOOL = "bash";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
@@ -62,9 +60,7 @@ function rate(count: number, total: number): number {
 
 /** Same success mapping as the trace report's outcome classifier. */
 function isSuccessOutcome(status: string | null): boolean {
-  if (status === null) return false;
-  const normalized = status.toLowerCase();
-  return normalized === "success" || normalized === "succeeded" || normalized === "ok";
+  return status !== null && status.toLowerCase() === "success";
 }
 
 function isAttemptRecord(value: Record<string, unknown>): boolean {
@@ -100,7 +96,7 @@ function toolSignals(outcomes: unknown): ToolSignal {
   for (const entry of list) {
     if (!isRecord(entry)) continue;
     calls += 1;
-    const name = asString(entry["toolName"] ?? entry["name"] ?? entry["tool"]);
+    const name = asString(entry["toolName"]);
     if (name !== null && EDIT_TOOLS.has(name)) edits += 1;
     if (name === CHECK_TOOL && entry["isError"] !== true) {
       const exitCode = entry["exitCode"];
@@ -262,7 +258,7 @@ async function readLaziness(dir: string, options: LazinessOptions): Promise<Lazi
 
     if (parsed["recordType"] === "attempt") {
       task.attempts += 1;
-      const outcomes = parsed["toolOutcomes"] ?? parsed["toolResults"];
+      const outcomes = parsed["toolOutcomes"];
       const signals = toolSignals(outcomes);
       task.edits += signals.edits;
       task.checks += signals.checks;

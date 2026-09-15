@@ -65,7 +65,7 @@ import {
   updateWorldlinePaneTab,
   worldlineEventBelongsToProject,
 } from "./worldline-project-state";
-import { asKnownState, KNOWN_ACTIVITY_REASONS, KNOWN_ACTIVITY_STATES, KNOWN_VERIFY_BADGE_STATES } from "./known-state";
+import { asKnownState, KNOWN_ACTIVITY_STATES, KNOWN_VERIFY_BADGE_STATES, presentBlockedLabel } from "./known-state";
 import { CHALLENGE_PROFILES, cssFontFamily, defaultAppPreferences, isTuiOwnedShortcut, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
 import type { AgentActivityView, AppPreferences, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
@@ -1271,13 +1271,12 @@ function renderChrome(): void {
 
 function presentActivity(pane: Pane): { blocked: boolean; working: boolean; blockedLabel: string } {
   const state = asKnownState(pane.activity?.state, KNOWN_ACTIVITY_STATES);
-  const reason = pane.activity?.reason ? asKnownState(pane.activity.reason, KNOWN_ACTIVITY_REASONS) : "unknown";
   return {
     blocked: state === "blocked",
     // Explicit idle/working/blocked win. `busy` is only a fallback when
     // activity is missing or hostile so a settle fold cannot flash "working".
     working: state === "working" || (state === "unknown" && pane.busy),
-    blockedLabel: reason === "unknown" ? "blocked" : `blocked: ${reason}`,
+    blockedLabel: presentBlockedLabel(pane.activity?.reason),
   };
 }
 

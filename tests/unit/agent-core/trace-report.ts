@@ -173,7 +173,6 @@ type V2TaskGroup = {
   settled: boolean;
   outcomeStatus: string | null;
   outcomeClass: string;
-  correctness: string | null;
   taskClass: string | null;
   sessionLengthBucket: string | null;
 };
@@ -650,7 +649,7 @@ function normalizeV2ToolOutcome(value: TraceJsonValue): V2ToolOutcome | null {
   const status = boundedString(value.status ?? value.outcome ?? value.result)
     ?? (value.isError === true ? "error" : state);
   return {
-    name: boundedString(value.name ?? value.toolName ?? value.tool),
+    name: boundedString(value.toolName),
     status: status ?? "unknown",
     complete,
     truncated,
@@ -670,7 +669,7 @@ function normalizeV2ToolOutcome(value: TraceJsonValue): V2ToolOutcome | null {
 }
 
 function normalizeV2ToolOutcomes(record: TraceJsonObject): V2ToolOutcome[] {
-  const raw = record.toolOutcomes ?? record.toolResults;
+  const raw = record.toolOutcomes;
   if (!Array.isArray(raw)) return [];
   const outcomes: V2ToolOutcome[] = [];
   for (const value of raw.slice(0, MAX_REPORT_LIST_ITEMS)) {
@@ -990,7 +989,7 @@ function aggregateV2Reclaim(attempts: V2NormalizedAttempt[]) {
 function v2TaskOutcomeClass(status: string | null, settled: boolean): string {
   if (!settled) return "unsettled";
   const normalized = typeof status === "string" ? status.toLowerCase() : "";
-  if (normalized === "success" || normalized === "succeeded" || normalized === "ok") return "success";
+  if (normalized === "success") return "success";
   if (["failure", "failed", "error"].includes(normalized)) return "failure";
   if (normalized === "interrupted") return "interrupted";
   if (["cancelled", "canceled"].includes(normalized)) return "cancelled";
@@ -1108,7 +1107,6 @@ function summarizeV2Traces(records: TraceRecordList, label: string) {
       settled: false,
       outcomeStatus: null,
       outcomeClass: "unsettled",
-      correctness: null,
       taskClass: null,
       sessionLengthBucket: null,
     };
@@ -1138,7 +1136,6 @@ function summarizeV2Traces(records: TraceRecordList, label: string) {
     group.finalAttemptId = nonemptyString(settlement.finalAttemptId);
     group.outcomeStatus = nonemptyString(outcome?.status);
     group.outcomeClass = v2TaskOutcomeClass(group.outcomeStatus, true);
-    group.correctness = nonemptyString(outcome?.correctness);
     group.taskClass = nonemptyString(settlement.taskClass) ?? group.taskClass;
     group.sessionLengthBucket = normalizeV2SessionLengthBucket(settlement) ?? group.sessionLengthBucket;
     if (Array.isArray(settlement.attemptIds)) {
@@ -1347,11 +1344,6 @@ function summarizeV2Traces(records: TraceRecordList, label: string) {
       unsettled: taskGroups.size - settledGroups.length,
       byStatus: counts(taskStatuses),
       byOutcome: counts([...taskGroups.values()].map((group) => group.outcomeClass)),
-      correctness: {
-        correct: settledGroups.filter((group) => group.correctness === "correct").length,
-        incorrect: settledGroups.filter((group) => group.correctness === "incorrect").length,
-        unknown: taskGroups.size - settledGroups.filter((group) => group.correctness === "correct").length - settledGroups.filter((group) => group.correctness === "incorrect").length,
-      },
     },
     attempts: {
       total: attempts.length,

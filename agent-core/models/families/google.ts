@@ -6,6 +6,13 @@ export function modelLooksGemini(model: string): boolean {
   return leaf.startsWith("gemini") || n.includes("/gemini");
 }
 
+/** Gemma ids on the Gemini API (`gemma-4-31b-it`). https://ai.google.dev/gemini-api/docs/models */
+export function modelLooksGemma(model: string): boolean {
+  const leaf = modelLeaf(model);
+  const n = model.toLowerCase();
+  return leaf.startsWith("gemma") || n.includes("/gemma");
+}
+
 export function gemini3Model(model: string): boolean {
   return /gemini-[3-9]/.test(model.toLowerCase());
 }
