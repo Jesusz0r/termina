@@ -35,7 +35,7 @@ use crate::{
     promotion_directory_is_empty, promotion_rename_noreplace,
     promotion_rename_unsupported, promotion_unlink_at_field,
 };
-use crate::capture::promotion_remove_tree_contents;
+use crate::promotion_remove::promotion_remove_tree_contents;
 use crate::test_hooks::pause_at_hook;
 
 pub(crate) fn op_store_create(req: &Value) -> Result<Value, String> {

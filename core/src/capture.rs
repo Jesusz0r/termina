@@ -20,6 +20,6 @@ pub(crate) use refs::{
     exact_ref_target, publish_transaction_ref, sync_exact_transaction_ref,
     validate_transaction_ref,
 };
-pub(crate) use materialize::{materialize_state_bound, promotion_remove_tree_contents};
+pub(crate) use materialize::materialize_state_bound;
 pub(crate) use ops_capture::{op_capture, op_capture_incremental};
 pub(crate) use ops_apply::{op_apply_state, op_template};
