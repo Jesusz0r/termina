@@ -1,6 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, filterCatalogModels, formatCatalogLines, parseModelsPayload, type CatalogModel } from "../../../agent-core/models.ts";
+import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, catalogHeaders, filterCatalogModels, formatCatalogLines, parseModelsPayload, type CatalogModel } from "../../../agent-core/models.ts";
 import { catalogOutputLimit, catalogSupportsTools } from "../../../agent-core/models/capabilities.ts";
+
+describe("catalogHeaders denylist", () => {
+  it("copies auth headers and drops POST-only fields", () => {
+    const headers = catalogHeaders({
+      authorization: "Bearer x",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      originator: "codex_cli_rs",
+      "x-new-provider": "keep-me",
+    });
+    expect(headers).toEqual({
+      accept: "application/json",
+      authorization: "Bearer x",
+      originator: "codex_cli_rs",
+      "x-new-provider": "keep-me",
+    });
+  });
+});
 
 describe("catalog provider policy composition", () => {
   it("keeps Copilot metadata scoped to Copilot and preserves top-level context precedence", () => {
