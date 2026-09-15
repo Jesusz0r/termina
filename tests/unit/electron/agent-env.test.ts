@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -111,5 +111,26 @@ describe("filterAgentEnvironment", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("bundled-node PATH prefix (issue #328)", () => {
+  it("shares prependBundledNodePath across env builders and keeps filter owners", () => {
+    const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+    const agentEnv = readFileSync(new URL("../../../electron/agent-env.ts", import.meta.url), "utf8");
+    const sandbox = readFileSync(new URL("../../../electron/sandbox.ts", import.meta.url), "utf8");
+
+    expect(main).toContain("function prependBundledNodePath(");
+    expect(main).toContain("return prependBundledNodePath(filterAgentEnvironment(process.env));");
+    expect(main).toContain("return prependBundledNodePath(filterCandidateEnvironment(process.env, provider, []));");
+    expect(main).toContain("return prependBundledNodePath(filterVerifyEnvironment(process.env, []));");
+    expect((main.match(/join\(process\.resourcesPath, "node", "bin"\)/g) ?? []).length).toBe(1);
+
+    expect(agentEnv).toContain("export function filterAgentEnvironment");
+    expect(agentEnv).not.toMatch(/export function filterCandidateEnvironment/);
+    expect(agentEnv).not.toMatch(/export function filterVerifyEnvironment/);
+    expect(agentEnv).not.toContain("function prependBundledNodePath");
+    expect(sandbox).toContain("export function filterCandidateEnvironment");
+    expect(sandbox).toContain("export function filterVerifyEnvironment");
   });
 });
