@@ -5,5 +5,5 @@
 
 // Split into ./tui/ modules (issue #38). This entry re-exports the public surface.
 export { layoutHeights } from "./tui/layout.ts";
-export type { ToolTranscriptState, TranscriptHandle, TuiIO, TuiInput } from "./tui/transcript.ts";
+export type { TranscriptHandle } from "./tui/transcript.ts";
 export { AgentTui } from "./tui/app.ts";

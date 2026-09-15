@@ -8,8 +8,8 @@
 
 // Split into ./host/ modules (issue #38). This entry re-exports the public surface.
 export { HOST_CONTEXT_BYTES, ackPath, consumeStartupControl, firstPlanText, planTextIfChanged, promptFileName, readContextFilesResult, readProtectedPaths, structuredStartupText, visibleAssistantText, waitForAck, writePromptPayload } from "./host/context.ts";
-export type { ContextFileDigest, ContextFilesResult, ReadContextFilesOptions, StartupControl } from "./host/context.ts";
-export { MAX_IMAGE_BYTES, MAX_PENDING_IMAGES, MAX_PENDING_IMAGE_BATCH_BYTES, isSafeImageName, mediaTypeOfName, pendingImagesPath, withPendingImageLock } from "./host/images.ts";
-export type { ImageRef, LoadedImage, PendingImageClaim, PendingImageClaimResult, PendingImageInput, PendingImageMediaType, PendingImageResult, PendingImageStateResult } from "./host/images.ts";
+export type { ContextFilesResult } from "./host/context.ts";
+export { MAX_IMAGE_BYTES, MAX_PENDING_IMAGES, withPendingImageLock } from "./host/images.ts";
+export type { PendingImageMediaType } from "./host/images.ts";
 export { acknowledgePendingImages, appendPendingImages, claimPendingImages, pendingImageState } from "./host/image-queue.ts";
-export { expandFileImageSource, loadImageFromRoots, persistLoadedImages, persistSessionImage, structuredStartup } from "./host/image-store.ts";
+export { expandFileImageSource, loadImageFromRoots, persistLoadedImages, structuredStartup } from "./host/image-store.ts";
