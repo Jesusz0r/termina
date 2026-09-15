@@ -3,9 +3,10 @@
  *
  * terminal-roster.ts owns the on-disk shape (parse and cap); this module owns
  * the roster file: path shaping, atomic load/save, and the per-roster commit
- * chain that preserves close/open ordering off the main loop. Main owns when
- * to load and save, and supplies live terminals plus model validation behind
- * the TerminalRosterHost seam.
+ * chain that preserves close/open ordering off the main loop. The terminal
+ * runtime owns the store instance and save/drain; main decides when restore
+ * runs and supplies live terminals plus model validation behind the
+ * TerminalRosterHost seam.
  */
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename as fsRename, rm, stat } from "node:fs/promises";

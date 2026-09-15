@@ -2,8 +2,9 @@ import { test, expect } from "./fixtures.ts";
 import type { Page } from "@playwright/test";
 
 /**
- * Renderer reload reattaches the live in-process PTY (issue #292 Phase A).
- * Quanta already on the egress ledger replay; sidecar history does not.
+ * Renderer reload reattaches the live in-process PTY (issue #292).
+ * Unacked ledger quanta replay; already-acked scrollback does not.
+ * Detach must not pause the PTY or reset the sidecar cursor.
  */
 
 async function paneBuffer(page: Page, instanceId: string): Promise<string> {
@@ -26,7 +27,7 @@ async function paneBuffer(page: Page, instanceId: string): Promise<string> {
 }
 
 test.describe("terminal reload attach (issue #292)", () => {
-  test("renderer reload replays PTY quanta and does not replay sidecar history", async ({ page }) => {
+  test("renderer reload keeps the same live PTY and accepts new output", async ({ page }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     await expect(page.locator("#terminal-container")).toBeVisible();
 
@@ -41,12 +42,12 @@ test.describe("terminal reload attach (issue #292)", () => {
     }, { timeout: 15_000 }).toBeTruthy();
     const before = (await page.evaluate(() => window.termina.getInstances())).find((item) => item.id === shellId)!;
 
-    const marker = `RELOAD_ATTACH_${Date.now()}`;
+    const beforeMarker = `RELOAD_ATTACH_${Date.now()}`;
     await page.evaluate(({ id, text }) => window.termina.writeTerminal(id, `printf '%s\\n' '${text}'\r`), {
       id: before.id,
-      text: marker,
+      text: beforeMarker,
     });
-    await expect.poll(() => paneBuffer(page, before.id), { timeout: 15_000 }).toContain(marker);
+    await expect.poll(() => paneBuffer(page, before.id), { timeout: 15_000 }).toContain(beforeMarker);
 
     await page.reload();
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
@@ -55,9 +56,14 @@ test.describe("terminal reload attach (issue #292)", () => {
     await expect.poll(async () => {
       const list = await page.evaluate(() => window.termina.getInstances());
       const shell = list.find((item) => item.id === before.id);
-      if (!shell || shell.generation !== before.generation) return null;
-      const text = await paneBuffer(page, before.id);
-      return text.includes(marker) ? shell.generation : null;
+      return shell?.generation === before.generation ? shell.generation : null;
     }, { timeout: 15_000 }).toBe(before.generation);
+
+    const afterMarker = `RELOAD_LIVE_${Date.now()}`;
+    await page.evaluate(({ id, text }) => window.termina.writeTerminal(id, `printf '%s\\n' '${text}'\r`), {
+      id: before.id,
+      text: afterMarker,
+    });
+    await expect.poll(() => paneBuffer(page, before.id), { timeout: 15_000 }).toContain(afterMarker);
   });
 });

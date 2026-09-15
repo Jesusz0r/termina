@@ -420,7 +420,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(hydration.enqueue("hydrated", 1, "before-hydration"), true);
   await sleep(10);
   assert.deepEqual<PtyDataSend[]>(hydrationSends, [], "document load alone cannot deliver into an unbuilt pane");
-  assert.equal(hydrationSource.paused, true);
+  assert.equal(hydrationSource.paused, false, "a missing viewer must not pause the PTY");
   assert.equal(hydration.hydrateTerminal("hydrated", 1, 1, 1), true);
   await waitFor(() => hydrationSends.length === 1, "hydrated PTY output was not delivered");
   assert.equal(hydrationSends[0].sequence, 1);
@@ -429,6 +429,33 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   await waitFor(() => terminalStats(hydration, "hydrated").retainedChunks === 0, "hydrated output was not retained-acked");
   assert.equal(hydrationSource.paused, false);
   hydration.cancel("hydrated", 1);
+
+  // Detach drops the viewer without pausing the PTY. Later output stays on
+  // the ledger and replays from the unacked cursor on the next hydrate.
+  const detachSends: PtyDataSend[] = [];
+  const detach = testScheduler({
+    send: (...args) => {
+      const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;
+      detachSends.push({ id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data });
+      return true;
+    },
+  });
+  const detachSource = source();
+  detach.register("detach-live", 1, detachSource);
+  ready(detach, "detach-live", 1, 80, 1);
+  assert.equal(detach.enqueue("detach-live", 1, "visible"), true);
+  await waitFor(() => detachSends.length === 1, "pre-detach quantum was not delivered");
+  acknowledgeAll(detach, detachSends);
+  await waitFor(() => terminalStats(detach, "detach-live").retainedChunks === 0, "pre-detach quantum was not acked");
+  const pausesBeforeDetach = detachSource.pauseCount;
+  assert.equal(detach.setRendererReady(80, 1, false), true);
+  assert.equal(detachSource.paused, false);
+  assert.equal(detachSource.pauseCount, pausesBeforeDetach, "viewer detach must not pause the PTY");
+  assert.equal(detach.enqueue("detach-live", 1, "while-gone"), true);
+  assert.equal(detach.setRendererReady(80, 2, true), true);
+  assert.equal(detach.hydrateTerminal("detach-live", 1, 80, 2), true);
+  await waitFor(() => detachSends.some((item) => item.data === "while-gone"), "detached quantum was not replayed");
+  detach.cancel("detach-live", 1);
 
   // Unacknowledged bytes survive a renderer failure. Replay starts in order,
   // and a re-entrant readiness change cannot let one batch overrun the fence.
@@ -695,7 +722,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
       inFlightChunks: 0,
       retainedBytes: 4,
       retainedChunks: 1,
-      paused: true,
+      paused: false,
       closing: false,
       hydrated: false,
       terminalGeneration: 14,

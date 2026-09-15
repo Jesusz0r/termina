@@ -343,7 +343,6 @@ export class PtyEgressScheduler {
     };
     this.queues.set(terminalId, queue);
     this.order.push(terminalId);
-    if (!this.canDeliver(queue)) this.pauseSource(queue);
   }
 
   /**
@@ -485,8 +484,10 @@ export class PtyEgressScheduler {
         // Readiness loss can be reported without a generation transition
         // (for example did-fail-load). Do not let the old document's
         // hydration gate survive that lifecycle boundary.
+        // Detach drops the viewer only: keep the PTY writing into the
+        // ledger so attach can replay from the cursor. Pause stays a
+        // high-water / close concern, not a missing-renderer one.
         queue.hydrated = false;
-        this.pauseSource(queue);
       }
       if (this.pumpTimer !== null) {
         clearTimeout(this.pumpTimer);

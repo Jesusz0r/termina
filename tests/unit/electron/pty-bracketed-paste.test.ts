@@ -83,7 +83,7 @@ describe("bracketed-paste attach handshake (refs #278)", () => {
   it("replays DECSET 2004 on pty:ready before hydrate starts the pump", () => {
     const ready = main.slice(main.indexOf('ipcMain.on("pty:ready"'), main.indexOf('ipcMain.on("pty:ack"'));
     const modesAt = ready.indexOf("this.sendPtyModes(");
-    const hydrateAt = ready.indexOf("this.runtime.hydrateTerminal(");
+    const hydrateAt = ready.indexOf("this.runtime.attach(");
     expect(modesAt).toBeGreaterThan(0);
     expect(hydrateAt).toBeGreaterThan(modesAt);
     expect(main).toContain('win.webContents.send("pty:modes"');

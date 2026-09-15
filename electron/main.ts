@@ -89,7 +89,7 @@ import {
   MAX_TERMINAL_ROSTER,
   type TerminalRosterEntry,
 } from "./terminal-roster.js";
-import { TerminalRosterStore, loadRosterFile, rosterFilePath, type RosterTerminal } from "./roster-store.js";
+import { rosterFilePath, type RosterTerminal } from "./roster-store.js";
 import { AgentTerminalInstance } from "./terminal-instance.js";
 import { TerminalRuntime } from "./terminal-runtime.js";
 import {
@@ -512,6 +512,9 @@ class TerminaApp {
     onSidecarError: (error, failedEvent) => console.warn(`[main] sidecar ${failedEvent.t} failed: ${error.message}`),
     onPtyExitBeforeRelease: (inst, rendererTarget, details) => this.handlePtyExitBeforeRelease(inst, rendererTarget, details),
     onPtyExitAfterRelease: (inst, rendererTarget, details) => this.handlePtyExitAfterRelease(inst, rendererTarget, details),
+  }, {
+    eventsDir: process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-sidecars"),
+    rosterHost: { usableModel: (model) => this.usableAgentModel(model) },
   });
   /** Exit owner snapshot taken while the instance is still mapped. */
   private readonly ptyExitOwners = new WeakMap<AgentTerminalInstance, { exitOwner: ProjectState | null; persistOwner: ProjectState | null }>();
@@ -586,14 +589,18 @@ class TerminaApp {
   private loginHint: { mtimeMs: number; size: number; needsLogin: boolean } | null = null;
   private loginHintWatcher: FSWatcher | null = null;
   private loginHintTimer: ReturnType<typeof setTimeout> | null = null;
-  private eventsDir = process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-sidecars");
+  private get eventsDir(): string { return this.runtime.eventsDir; }
+  private get tailer(): SidecarTailer {
+    const tailer = this.runtime.tailer;
+    if (!tailer) throw new Error("terminal runtime has no events dir");
+    return tailer;
+  }
   /** The app-private session branch workspace. */
   private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
   /** Identity of the events root bound during this launch. */
   private eventsDirBinding: PromotionFsIdentity | null = null;
   /** True only when the persisted root provenance matched this launch. */
   private eventsDirProvenanceTrusted = false;
-  private tailer = new SidecarTailer(this.eventsDir);
   /** Headless background subagent runs (SUBAGENTS-PLAN.md Phase 2). */
   private subagents = new SubagentHost({
     eventsDirFor: (terminalId) => {
@@ -706,10 +713,6 @@ class TerminaApp {
   private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
   private preferences: AppPreferences = defaultAppPreferences();
   private preferenceCommits: Promise<void> = Promise.resolve();
-  /** Terminal roster persistence; main supplies live terminals when saving. */
-  private rosterStore = new TerminalRosterStore({
-    usableModel: (model) => this.usableAgentModel(model),
-  });
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   /** Renderer-reported scope: a live core TUI owns keyboard focus, so the menu blanks the Ctrl+P / Ctrl+R accelerators it would otherwise steal. */
   private coreTerminalFocused = false;
@@ -1104,7 +1107,7 @@ class TerminaApp {
     this.rendererLoadPending = true;
     this.rendererAwaitingNewFrame = false;
     this.rendererCrashedFrame = null;
-    this.runtime.setRendererReady(windowGeneration, this.rendererGeneration, false);
+    this.runtime.detachViewer(windowGeneration, this.rendererGeneration);
     this.rendererPendingLoad = this.currentPtyLifecycle();
     return true;
   }
@@ -1143,7 +1146,7 @@ class TerminaApp {
     this.rendererLoadPending = true;
     this.rendererAwaitingNewFrame = true;
     this.rendererCrashedFrame = { processId, frameRoutingId };
-    this.runtime.setRendererReady(windowGeneration, this.rendererGeneration, false);
+    this.runtime.detachViewer(windowGeneration, this.rendererGeneration);
     this.rendererPendingLoad = this.currentPtyLifecycle();
     return true;
   }
@@ -1165,7 +1168,7 @@ class TerminaApp {
     this.rendererLoadPending = true;
     this.rendererAwaitingNewFrame = true;
     this.rendererCrashedFrame = null;
-    this.runtime.setRendererReady(windowGeneration, this.rendererGeneration, false);
+    this.runtime.detachViewer(windowGeneration, this.rendererGeneration);
     this.rendererPendingLoad = this.currentPtyLifecycle();
     return true;
   }
@@ -1237,7 +1240,7 @@ class TerminaApp {
     this.rendererAwaitingNewFrame = true;
     this.rendererCrashedFrame = null;
     this.rendererPendingLoad = this.currentPtyLifecycle();
-    this.runtime.setRendererReady(windowGeneration, rendererGeneration, false);
+    this.runtime.detachViewer(windowGeneration, rendererGeneration);
     win.removeMenu();
     attachMacTitlebarReclaim(win, process.platform);
 
@@ -1251,7 +1254,7 @@ class TerminaApp {
       this.rendererAwaitingNewFrame = false;
       this.rendererCrashedFrame = null;
       this.rendererPendingLoad = null;
-      this.runtime.setRendererReady(windowGeneration, this.rendererGeneration, false);
+      this.runtime.detachViewer(windowGeneration, this.rendererGeneration);
       this.win = null;
       this.stopPaintWatchdog();
     });
@@ -2692,7 +2695,7 @@ class TerminaApp {
       if (!inst?.persist || inst.closed) continue;
       live.push(inst);
     }
-    this.rosterStore.save(
+    this.runtime.saveRoster(
       rosterFilePath(this.userDataDir, this.sanitizeSessionDir(project.canonicalRoot)),
       live,
       project.unrestoredTerminals,
@@ -2733,7 +2736,7 @@ class TerminaApp {
   }
 
   private async restoreProjectTerminals(project: ProjectState): Promise<void> {
-    const loaded = await loadRosterFile(rosterFilePath(this.userDataDir, this.sanitizeSessionDir(project.canonicalRoot)));
+    const loaded = await this.runtime.loadRoster(rosterFilePath(this.userDataDir, this.sanitizeSessionDir(project.canonicalRoot)));
     if (loaded.entries.length === 0) {
       // Only a genuinely new project gets a default terminal. An existing
       // empty roster is the durable result of closing the project's last tab.
@@ -7649,7 +7652,7 @@ class TerminaApp {
           && this.rendererGeneration === target.rendererGeneration
         ) {
           this.rendererReady = false;
-          this.runtime.setRendererReady(target.windowGeneration, target.rendererGeneration, false);
+          this.runtime.detachViewer(target.windowGeneration, target.rendererGeneration);
         }
       } catch {
         /* Teardown already fenced the document. */
@@ -7669,7 +7672,7 @@ class TerminaApp {
     try {
       if (!target.window.isDestroyed() && !target.webContents.isDestroyed()) {
         this.rendererReady = false;
-        this.runtime.setRendererReady(target.windowGeneration, target.rendererGeneration, false);
+        this.runtime.detachViewer(target.windowGeneration, target.rendererGeneration);
         this.reloadPtyDocument(target.window as BrowserWindow, target.windowGeneration);
       }
     } catch {
@@ -7962,10 +7965,10 @@ class TerminaApp {
       // document token), so a delayed failure/finish callback cannot strand a
       // valid replacement before hydration.
       if (this.rendererLoadPending || !this.rendererReady) {
+        if (!this.runtime.attachViewer(this.rendererWindowGeneration, this.rendererGeneration)) return;
         this.rendererLoadPending = false;
         this.rendererPendingLoad = null;
         this.rendererReady = true;
-        this.runtime.setRendererReady(this.rendererWindowGeneration, this.rendererGeneration, true);
       }
       // Restore DECSET 2004 before the first replayed quantum so xterm's
       // paste wrapper matches the child's mode. Pump is scheduled after this
@@ -7976,7 +7979,7 @@ class TerminaApp {
         this.rendererWindowGeneration,
         this.rendererGeneration,
       );
-      this.runtime.hydrateTerminal(
+      this.runtime.attach(
         id,
         generation,
         this.rendererWindowGeneration,
@@ -8817,7 +8820,7 @@ class TerminaApp {
     for (const project of this.projects.values()) {
       if (!this.projectIsSwitching(project.id)) this.saveTerminalRoster(project);
     }
-    await this.rosterStore.drain();
+    await this.runtime.drainRoster();
     // Shutdown is an intentional cancellation boundary: no queued bytes or
     // exit notifications may be delivered after the app has begun teardown.
     this.runtime.disposeEgress();

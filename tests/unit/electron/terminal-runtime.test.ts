@@ -59,8 +59,9 @@ function fakeTerminal(id: string, generation: number): {
     pty: {
       onData: (_data: string) => {},
       onExit: (_code: number) => {},
-      pause() {},
-      resume() {},
+      paused: false,
+      pause() { this.paused = true; },
+      resume() { this.paused = false; },
       pid: 42,
     },
     notePtyOutput(data: string) { noted.push(data); },
@@ -85,6 +86,13 @@ function hostWithSends(sends: ChunkSend[]): TerminalRuntimeHost {
 }
 
 describe("TerminalRuntime", () => {
+  it("owns the configured events dir", () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { eventsDir: "/tmp/termina-phase-b-events" });
+    assert.equal(runtime.eventsDir, "/tmp/termina-phase-b-events");
+    assert.ok(runtime.tailer);
+    runtime.disposeEgress();
+  });
+
   it("allocates and notes term-N ids without colliding", () => {
     const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
     assert.equal(runtime.allocateId(), "term-1");
@@ -118,17 +126,17 @@ describe("TerminalRuntime", () => {
     const tailer = fakeTailer();
     runtime.adopt(inst, { tailer, skipSidecarWatch: true, rendererTarget: null });
     assert.deepEqual(tailer.watched, []);
-    assert.equal(runtime.setRendererReady(1, 1, true), true);
-    assert.equal(runtime.hydrateTerminal("term-1", 2, 1, 1), true);
+    assert.equal(runtime.attachViewer(1, 1), true);
+    assert.equal(runtime.attach("term-1", 2, 1, 1), true);
     assert.equal(runtime.acceptOutput("term-1", 2, "hello"), true);
     assert.deepEqual(noted, ["hello"]);
     await waitFor(() => sends.length === 1, "initial PTY quantum was not delivered");
     assert.equal(sends[0]?.data, "hello");
     const sequence = sends[0]!.sequence;
 
-    assert.equal(runtime.setRendererReady(1, 1, false), true);
-    assert.equal(runtime.setRendererReady(1, 2, true), true);
-    assert.equal(runtime.hydrateTerminal("term-1", 2, 1, 2), true);
+    assert.equal(runtime.detachViewer(1, 1), true);
+    assert.equal(runtime.attachViewer(1, 2), true);
+    assert.equal(runtime.attach("term-1", 2, 1, 2), true);
     await waitFor(() => sends.length === 2, "ledger was not replayed on rehydrate");
     assert.equal(sends[1]?.data, "hello");
     assert.equal(sends[1]?.sequence, sequence);
@@ -176,6 +184,35 @@ describe("TerminalRuntime", () => {
     runtime.clear();
     assert.equal(runtime.has("term-1"), false);
     assert.deepEqual(tailer.stopped, ["term-1"]);
+    runtime.disposeEgress();
+  });
+
+  it("accepts PTY output before the first viewer attaches", () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst, noted } = fakeTerminal("term-1", 1);
+    runtime.adopt(inst, { tailer: fakeTailer(), rendererTarget: null });
+    assert.equal((inst.pty as unknown as { paused: boolean }).paused, false);
+    assert.equal(runtime.acceptOutput("term-1", 1, "before-attach"), true);
+    assert.deepEqual(noted, ["before-attach"]);
+    assert.equal(runtime.attach("term-1", 1, 1, 1), false, "hydrate needs a bound viewer");
+    runtime.disposeEgress();
+  });
+
+  it("keeps the PTY and sidecar live across viewer detach", () => {
+    const tailer = fakeTailer();
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    runtime.adopt(inst, { tailer, rendererTarget: null });
+    assert.equal(runtime.attachViewer(1, 1), true);
+    assert.equal(runtime.attach("term-1", 1, 1, 1), true);
+    assert.deepEqual(tailer.watched, ["term-1"]);
+    assert.equal(runtime.detachViewer(1, 1), true);
+    assert.equal((inst.pty as unknown as { paused: boolean }).paused, false);
+    assert.deepEqual(tailer.stopped, []);
+    assert.equal(runtime.acceptOutput("term-1", 1, "while-gone"), true);
+    assert.equal(runtime.attachViewer(1, 2), true);
+    assert.equal(runtime.attach("term-1", 1, 1, 2), true);
+    assert.deepEqual(tailer.watched, ["term-1"]);
     runtime.disposeEgress();
   });
 

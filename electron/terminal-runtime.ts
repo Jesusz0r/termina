@@ -1,13 +1,26 @@
 /**
  * In-process terminal lifecycle.
  *
- * Owns the live instance map, PTY spawn/exit, the egress ledger, sidecar
- * watch/queue, and generation fencing. Main is a client: it validates IPC,
+ * Owns the live instance map, PTY spawn/exit, the egress ledger, the primary
+ * events dir + tailer, the roster file store, sidecar watch/queue, generation
+ * fencing, and viewer attach/detach. Main is a client: it validates IPC,
  * folds activity, and owns projects/leases/snapshots. Renderer attach stays
  * `readyTerminal` / `acknowledgePtyData` — this module does not add IPC.
  */
 import { PtyEgressScheduler, type PtyEgressSchedulerOptions, type PtyRendererSendTarget } from "./pty-egress.js";
-import { SidecarEventQueue, type SidecarEvent, type SidecarEventDelivery } from "./sidecar.js";
+import {
+  SidecarEventQueue,
+  SidecarTailer,
+  type SidecarEvent,
+  type SidecarEventDelivery,
+} from "./sidecar.js";
+import {
+  TerminalRosterStore,
+  loadRosterFile,
+  type RosterTerminal,
+  type TerminalRosterHost,
+} from "./roster-store.js";
+import type { TerminalRosterEntry } from "./terminal-roster.js";
 import { AgentTerminalInstance } from "./terminal-instance.js";
 
 /** Exit teardown waits this long for the renderer to acknowledge the PTY
@@ -59,6 +72,13 @@ export interface TerminalRuntimeHost {
   ): void | Promise<void>;
 }
 
+export interface TerminalRuntimeOptions extends PtyEgressSchedulerOptions {
+  /** Primary sidecar root. `TERMINA_EVENTS_DIR` stays configurable at the caller. */
+  eventsDir?: string;
+  /** Present when this runtime persists the terminal roster file. */
+  rosterHost?: TerminalRosterHost;
+}
+
 export interface TerminalRuntimeSpawnOptions {
   id: string;
   cwd: string;
@@ -79,8 +99,9 @@ export interface TerminalRuntimeSpawnOptions {
 }
 
 /**
- * One in-process owner for every live PTY. Out-of-process detach is Phase B
- * and is not this module.
+ * One in-process owner for every live PTY. Clients attach and detach by
+ * `terminalId` + generation; a missing viewer never pauses PTY, sidecar, or
+ * the session. A separate process is still conditional and is not this module.
  */
 export class TerminalRuntime {
   private terminalSeq = 0;
@@ -88,17 +109,24 @@ export class TerminalRuntime {
   private readonly sidecarQueues = new Map<string, SidecarEventQueue>();
   private readonly sidecarSources = new Map<string, RuntimeSidecarTailer>();
   private readonly egress: PtyEgressScheduler;
+  readonly eventsDir: string;
+  readonly tailer: SidecarTailer | null;
+  private readonly rosterStore: TerminalRosterStore | null;
 
   constructor(
     private readonly host: TerminalRuntimeHost,
-    options: PtyEgressSchedulerOptions = {},
+    options: TerminalRuntimeOptions = {},
   ) {
+    const { eventsDir, rosterHost, ...egressOptions } = options;
+    this.eventsDir = eventsDir ?? "";
+    this.tailer = eventsDir ? new SidecarTailer(eventsDir) : null;
+    this.rosterStore = rosterHost ? new TerminalRosterStore(rosterHost) : null;
     this.egress = new PtyEgressScheduler({
       send: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) =>
         this.host.sendChunk(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data),
       sendExit: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code) =>
         this.host.sendExit(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code),
-    }, options);
+    }, egressOptions);
   }
 
   get(id: string): AgentTerminalInstance | undefined {
@@ -229,17 +257,48 @@ export class TerminalRuntime {
     return inst;
   }
 
-  setRendererReady(windowGeneration: number, rendererGeneration: number, ready: boolean): boolean {
-    return this.egress.setRendererReady(windowGeneration, rendererGeneration, ready);
+  /** Bind the current renderer document so per-terminal attach can hydrate. */
+  attachViewer(windowGeneration: number, rendererGeneration: number): boolean {
+    return this.egress.setRendererReady(windowGeneration, rendererGeneration, true);
   }
 
-  hydrateTerminal(
+  /**
+   * Drop the renderer document. The PTY keeps writing the ledger, the
+   * sidecar stays on its durable cursor, and the session bundle keeps
+   * appending. Next attach replays from those cursors.
+   */
+  detachViewer(windowGeneration: number, rendererGeneration: number): boolean {
+    return this.egress.setRendererReady(windowGeneration, rendererGeneration, false);
+  }
+
+  /**
+   * Hydrate one terminal for the current viewer. Replays the PTY ledger
+   * from the unacked cursor. Does not call watch() — that would start a
+   * new sidecar lifecycle and drop the durable cursor.
+   */
+  attach(
     terminalId: string,
     terminalGeneration: number,
     windowGeneration: number,
     rendererGeneration: number,
   ): boolean {
+    const inst = this.terminals.get(terminalId);
+    if (!inst || inst.closed || inst.generation !== terminalGeneration) return false;
     return this.egress.hydrateTerminal(terminalId, terminalGeneration, windowGeneration, rendererGeneration);
+  }
+
+  saveRoster(path: string, terminals: RosterTerminal[], unrestored: TerminalRosterEntry[]): void {
+    if (!this.rosterStore) throw new Error("terminal runtime has no roster store");
+    this.rosterStore.save(path, terminals, unrestored);
+  }
+
+  loadRoster(path: string): Promise<{ exists: boolean; entries: TerminalRosterEntry[] }> {
+    return loadRosterFile(path);
+  }
+
+  drainRoster(): Promise<void> {
+    if (!this.rosterStore) throw new Error("terminal runtime has no roster store");
+    return this.rosterStore.drain();
   }
 
   acknowledge(
