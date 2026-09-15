@@ -6,6 +6,7 @@ mod walk;
 mod tree_cache;
 mod refs;
 mod materialize;
+mod hash;
 mod ops_capture;
 mod ops_apply;
 

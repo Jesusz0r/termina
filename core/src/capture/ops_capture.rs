@@ -12,11 +12,7 @@ use crate::{
     BUDGET_MAX_PATHS,
 };
 use crate::util::{
-    after_cache_hooks,
-    apply_rewrite_hooks,
-    before_read_hooks,
     has_git_segment,
-    hash_path,
     is_safe_relative,
     now_ms,
     oid_ext,
@@ -36,6 +32,7 @@ use crate::{
 };
 
 use super::binding::{AnchoredPath, BoundSourceRepository, CaptureRoot, open_store, preload_cached_blobs};
+use super::hash::{after_cache_hooks, apply_rewrite_hooks, before_read_hooks, hash_path};
 use super::trees::{FlatEntry, nested_from_flat, write_nested_tree, write_tree_delta};
 use super::walk::{TreeLookupKind, collect_tree_map, resolve_tree, tree_lookup};
 use super::tree_cache::{cache_tree_map, collect_tree_map_cached};
