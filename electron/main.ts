@@ -36,7 +36,7 @@ import { IGNORED_SEGMENTS, ProjectWatcher, watchContentIdentity } from "./watche
 import { SnapshotStore, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionReadFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, gitCommonDir, gitHead, gitObjectFormat, gitTrackedFiles, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
 import { EvidenceHomeStore } from "./evidence-home.js";
 import { benchmarkConfigFrom, detectTestCommand, detectTestFromState } from "./verify-detect.js";
-import { WorldlineManager, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
+import { WorldlineManager, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
 import { classifyOpenedGitRoot, worldlineAppReadPaths, worldlineCaptureHead, worldlineCapturePrimary, worldlinePreflight } from "./worldlines/bootstrap.js";
 import {
   candidateSandboxLaunch,
@@ -105,7 +105,7 @@ import {
 import { PathLookup } from "./path-lookup.js";
 import { attachMacTitlebarReclaim, macWindowChrome } from "./window-chrome.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
-import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, thinkingStartupArgs } from "../shared/terminal-control.js";
+import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
 import { syncParentDir } from "../shared/fsync.js";
 import { isErrno } from "../shared/guards.js";
