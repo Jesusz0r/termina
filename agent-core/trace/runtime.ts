@@ -5,6 +5,7 @@
  * agent-core/trace.ts (issue #38).
  */
 import { DurableAtomicWriteError, durableAtomicWrite } from "../../shared/durable-write.ts";
+import { syncDirectoryAsync } from "../../shared/fsync.ts";
 import { errorCode, isRecord } from "../../shared/guards.ts";
 import { mkdir, open as openFile, readFile, readdir, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -13,6 +14,9 @@ import { compositeKey, countTurnFiles, createAttemptRecord, createTaskSettledRec
 import type { ExistingScan } from "./records.ts";
 import { DEFAULT_TRACE_MAX_RECORD_BYTES, DEFAULT_TRACE_MAX_SCAN_FILES, DEFAULT_TRACE_RETENTION_CAP, LINK_INDEX_FILE, MANIFEST_FILE, MAX_TRACE_INDEX_BYTES, MAX_TRACE_INDEX_ENTRIES, MAX_TRACE_MANIFEST_BYTES, TRACE_SCHEMA_VERSION } from "./schema.ts";
 import type { ExistingTraceRole, FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptIndexEntry, TraceAttemptInput, TraceLinkIndex, TraceManifest, TraceManifestOutcome, TraceManifestReset, TraceRole, TraceRuntimeOptions, TraceSettlementIndexEntry, TraceStartupResult, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailure, TraceWriteFailureKind, TraceWriteOutcome } from "./schema.ts";
+
+let atomicFileCounter = 0;
+
 
 type AtomicWriteResult = { ok: true } | { ok: false; error: string; renamed: boolean };
 
