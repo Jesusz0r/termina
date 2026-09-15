@@ -182,6 +182,17 @@ type PromptPayloadLookup =
   | { kind: "ok"; payload: PromptPayload }
   | { kind: "unreadable"; error: string };
 
+type ComparisonConstruction = {
+  sourceRunId: string;
+  sourceGitDir: string;
+  baseStateId: string | null;
+  model: string | null;
+  thinkingLevel: string | null;
+  expectedCandidates: 1 | 2;
+  candidates: ReadonlyArray<{ label: "A" | "B"; role: CandidateState["role"] }>;
+  admissionLease?: UncertainComparisonAdmissionLease | null;
+};
+
 function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -701,80 +712,23 @@ export class WorldlineManager {
     try {
     // Snapshot the candidate head as the new reference A.
     const wHead = await this.deps.captureHead(cand.dir, join(cand.dir, ".git"), cmp.baseStateId);
-    const { id, dir, identity: rootIdentity } = await this.allocateComparisonDirectory();
-    const rootBinding: BoundPromotionDirectory = { path: dir, dev: rootIdentity.dev, ino: rootIdentity.ino, capability: rootIdentity.capability };
-    admissionLease.bind?.(id);
-    const markerLeaf = await writeComparisonMarkerBound(rootBinding);
-    const manifestLeaf = await writeComparisonManifestBound(rootBinding, {
-      id,
-      sourceRunId: cmp.sourceRunId,
-      createdAt: Date.now(),
-      status: "creating",
-      expectedCandidates: 2,
-      candidates: {},
-      uncertainSessionArtifacts: [],
-    }, { state: { type: "missing" } });
-    const ncmp: ComparisonState = {
-      id,
-      dir,
-      rootIdentity,
-      rootBinding,
-      templateDir: join(dir, "template"),
-      markerLeaf,
-      manifestLeaf,
+    const ncmp = await this.constructComparison({
       sourceRunId: cmp.sourceRunId,
       sourceGitDir: store.sourceGitDir,
-      primaryRoot: this.deps.primaryRoot,
-      baseCommit: null,
       baseStateId: cmp.baseStateId,
       model: cmp.model,
       thinkingLevel: cmp.thinkingLevel,
-      engine: cmp.engine,
       expectedCandidates: 2,
-      uncertainSessionArtifacts: [],
-      manifestWriteFailed: false,
-      teardownPromise: null,
-      removeUncertainRequested: false,
-      createdAt: Date.now(),
-      candidates: new Map(),
-      phase: "creating",
-      error: null,
-      readyTimer: null,
-    };
-    const mk = (l: "A" | "B", role: "reference" | "challenge"): CandidateState => ({
-      label: l,
-      role,
-      dir: join(dir, l),
-      supportDir: join(dir, `${l}-support`),
-      homeDir: join(dir, `${l}-support`, "home"),
-      sessionDir: join(dir, `${l}-support`, "sessions"),
-      eventsDir: join(dir, `${l}-support`, "events"),
-      tmpDir: join(dir, `${l}-support`, "tmp"),
-      cacheDir: join(dir, `${l}-support`, "cache"),
-      profilePath: join(dir, "profiles", `${l}.sb`),
-      sessionFile: null,
-      comparisonBaseStateId: null,
-      promotionBaseStateId: null,
-      headStateId: null,
-      headCommit: Promise.resolve(),
-      terminalId: null,
-      pid: null,
-      lstart: null,
-      state: "creating",
-      version: 1,
-      error: null,
+      candidates: [
+        { label: "A", role: "reference" },
+        { label: "B", role: "challenge" },
+      ],
+      admissionLease,
     });
-    const nA = mk("A", "reference");
-    const nB = mk("B", "challenge");
-    ncmp.candidates.set("A", nA);
-    ncmp.candidates.set("B", nB);
-    for (const candidate of ncmp.candidates.values()) {
-      candidate.comparisonBaseStateId = ncmp.baseStateId;
-      candidate.promotionBaseStateId = ncmp.baseStateId;
-    }
+    const nA = ncmp.candidates.get("A")!;
+    const nB = ncmp.candidates.get("B")!;
     nA.headStateId = wHead.commit;
     nB.headStateId = ncmp.baseStateId;
-    this.comparisons.set(id, ncmp);
     try {
       await this.createSupportDirs(ncmp);
       // The template is the SHARED BASE (R), not the reference head: the
@@ -833,7 +787,7 @@ export class WorldlineManager {
       // on process group signals; do not hold the IPC handler for that.
       cmp.phase = "error";
       void this.teardown(comparisonId, "discarded", null);
-      return { ok: true, comparisonId: id };
+      return { ok: true, comparisonId: ncmp.id };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.teardown(ncmp.id, "error", message);
@@ -1258,18 +1212,24 @@ export class WorldlineManager {
     }
   }
 
-  private async createComparison(run: RunRecord, challengeProfile?: ChallengeProfile, uncertainAdmissionLease: UncertainComparisonAdmissionLease | null = null): Promise<ComparisonState> {
+  /**
+   * Allocate the comparison directory, write marker/manifest, and fill
+   * ComparisonState plus CandidateState support paths. Callers set head
+   * state and continue their own session, template, and launch path.
+   */
+  private async constructComparison(spec: ComparisonConstruction): Promise<ComparisonState> {
     const { id, dir, identity: rootIdentity } = await this.allocateComparisonDirectory();
     const rootBinding: BoundPromotionDirectory = { path: dir, dev: rootIdentity.dev, ino: rootIdentity.ino, capability: rootIdentity.capability };
-    uncertainAdmissionLease?.bind?.(id);
+    spec.admissionLease?.bind?.(id);
     // The marker proves ownership before any cleanup deletes the dir.
+    const createdAt = Date.now();
     const markerLeaf = await writeComparisonMarkerBound(rootBinding);
     const manifestLeaf = await writeComparisonManifestBound(rootBinding, {
       id,
-      sourceRunId: run.id,
-      createdAt: Date.now(),
+      sourceRunId: spec.sourceRunId,
+      createdAt,
       status: "creating",
-      expectedCandidates: 2,
+      expectedCandidates: spec.expectedCandidates,
       candidates: {},
       uncertainSessionArtifacts: [],
     }, { state: { type: "missing" } });
@@ -1281,40 +1241,41 @@ export class WorldlineManager {
       templateDir: join(dir, "template"),
       markerLeaf,
       manifestLeaf,
-      sourceRunId: run.id,
-      sourceGitDir: "",
+      sourceRunId: spec.sourceRunId,
+      sourceGitDir: spec.sourceGitDir,
       primaryRoot: this.deps.primaryRoot,
       baseCommit: null,
-      baseStateId: run.startStateId,
-      model: run.model,
-      thinkingLevel: run.thinkingLevel,
+      baseStateId: spec.baseStateId,
+      model: spec.model,
+      thinkingLevel: spec.thinkingLevel,
       engine: "core",
-      expectedCandidates: 2,
+      expectedCandidates: spec.expectedCandidates,
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
       teardownPromise: null,
       removeUncertainRequested: false,
-      createdAt: Date.now(),
+      createdAt,
       candidates: new Map(),
       phase: "creating",
       error: null,
       readyTimer: null,
     };
-    for (const label of ["A", "B"] as const) {
+    for (const { label, role } of spec.candidates) {
+      const supportDir = join(dir, `${label}-support`);
       cmp.candidates.set(label, {
         label,
-        role: label === "A" ? "reference" : challengeProfile ? "challenge" : "alternative",
+        role,
         dir: join(dir, label),
-        supportDir: join(dir, `${label}-support`),
-        homeDir: join(dir, `${label}-support`, "home"),
-        sessionDir: join(dir, `${label}-support`, "sessions"),
-        eventsDir: join(dir, `${label}-support`, "events"),
-        tmpDir: join(dir, `${label}-support`, "tmp"),
-        cacheDir: join(dir, `${label}-support`, "cache"),
+        supportDir,
+        homeDir: join(supportDir, "home"),
+        sessionDir: join(supportDir, "sessions"),
+        eventsDir: join(supportDir, "events"),
+        tmpDir: join(supportDir, "tmp"),
+        cacheDir: join(supportDir, "cache"),
         profilePath: join(dir, "profiles", `${label}.sb`),
         sessionFile: null,
-        comparisonBaseStateId: null,
-        promotionBaseStateId: null,
+        comparisonBaseStateId: spec.baseStateId,
+        promotionBaseStateId: spec.baseStateId,
         headStateId: null,
         headCommit: Promise.resolve(),
         terminalId: null,
@@ -1325,12 +1286,27 @@ export class WorldlineManager {
         error: null,
       });
     }
+    this.comparisons.set(id, cmp);
+    return cmp;
+  }
+
+  private async createComparison(run: RunRecord, challengeProfile?: ChallengeProfile, uncertainAdmissionLease: UncertainComparisonAdmissionLease | null = null): Promise<ComparisonState> {
+    const cmp = await this.constructComparison({
+      sourceRunId: run.id,
+      sourceGitDir: "",
+      baseStateId: run.startStateId,
+      model: run.model,
+      thinkingLevel: run.thinkingLevel,
+      expectedCandidates: 2,
+      candidates: [
+        { label: "A", role: "reference" },
+        { label: "B", role: challengeProfile ? "challenge" : "alternative" },
+      ],
+      admissionLease: uncertainAdmissionLease,
+    });
     for (const cand of cmp.candidates.values()) {
-      cand.comparisonBaseStateId = cmp.baseStateId;
-      cand.promotionBaseStateId = cmp.baseStateId;
       cand.headStateId = cand.label === "A" ? run.settledStateId : run.startStateId;
     }
-    this.comparisons.set(id, cmp);
     return cmp;
   }
 
@@ -2678,85 +2654,24 @@ export class WorldlineManager {
       admissionLease.release();
       return { ok: false, error: "the live worldline budget is exhausted" };
     }
-    let id: string;
-    let dir: string;
-    let rootIdentity: PromotionFsIdentity;
-    let rootBinding: BoundPromotionDirectory;
-    let markerLeaf: BoundPromotionExpectedLeaf;
-    let manifestLeaf: BoundPromotionExpectedLeaf;
+    let cmp: ComparisonState;
     try {
-      ({ id, dir, identity: rootIdentity } = await this.allocateComparisonDirectory());
-      rootBinding = { path: dir, dev: rootIdentity.dev, ino: rootIdentity.ino, capability: rootIdentity.capability };
-      admissionLease.bind?.(id);
-      markerLeaf = await writeComparisonMarkerBound(rootBinding);
-      manifestLeaf = await writeComparisonManifestBound(rootBinding, {
-        id,
+      cmp = await this.constructComparison({
         sourceRunId: opts.sourceRunId,
-        createdAt: Date.now(),
-        status: "creating",
+        sourceGitDir: store.sourceGitDir,
+        baseStateId: opts.baseStateId ?? null,
+        model: opts.model,
+        thinkingLevel: opts.thinkingLevel,
         expectedCandidates: 1,
-        candidates: {},
-        uncertainSessionArtifacts: [],
-      }, { state: { type: "missing" } });
+        candidates: [{ label: "A", role: "moment" }],
+        admissionLease,
+      });
     } catch (error) {
       admissionLease.release();
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    const cmp: ComparisonState = {
-      id,
-      dir,
-      rootIdentity,
-      rootBinding,
-      templateDir: join(dir, "template"),
-      markerLeaf,
-      manifestLeaf,
-      sourceRunId: opts.sourceRunId,
-      sourceGitDir: store.sourceGitDir,
-      primaryRoot: this.deps.primaryRoot,
-      baseCommit: null,
-      baseStateId: opts.baseStateId ?? null,
-      model: opts.model,
-      thinkingLevel: opts.thinkingLevel,
-      engine: "core",
-      expectedCandidates: 1,
-      uncertainSessionArtifacts: [],
-      manifestWriteFailed: false,
-      teardownPromise: null,
-      removeUncertainRequested: false,
-      createdAt: Date.now(),
-      candidates: new Map(),
-      phase: "creating",
-      error: null,
-      readyTimer: null,
-    };
-    const cand: CandidateState = {
-      label: "A",
-      role: "moment",
-      dir: join(dir, "A"),
-      supportDir: join(dir, "A-support"),
-      homeDir: join(dir, "A-support", "home"),
-      sessionDir: join(dir, "A-support", "sessions"),
-      eventsDir: join(dir, "A-support", "events"),
-      tmpDir: join(dir, "A-support", "tmp"),
-      cacheDir: join(dir, "A-support", "cache"),
-      profilePath: join(dir, "profiles", "A.sb"),
-      sessionFile: null,
-      comparisonBaseStateId: null,
-      promotionBaseStateId: null,
-      headStateId: null,
-      headCommit: Promise.resolve(),
-      terminalId: null,
-      pid: null,
-      lstart: null,
-      state: "creating",
-      version: 1,
-      error: null,
-    };
-    cmp.candidates.set("A", cand);
-    cand.comparisonBaseStateId = cmp.baseStateId;
-    cand.promotionBaseStateId = cmp.baseStateId;
+    const cand = cmp.candidates.get("A")!;
     cand.headStateId = opts.stateId;
-    this.comparisons.set(id, cmp);
     try {
       // The template IS the moment state: build it, then clone one candidate.
       await this.buildTemplateFromState(cmp, store, opts.stateId);
@@ -2790,7 +2705,7 @@ export class WorldlineManager {
         if (cmp.phase !== "running") return;
         void this.teardown(cmp.id, "error", "the candidate did not become ready in time");
       }, READY_TIMEOUT_MS);
-      return { ok: true, comparisonId: id };
+      return { ok: true, comparisonId: cmp.id };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`[worldlines] fork-point pipeline failed: ${(err as Error).stack ?? message}`);
