@@ -46,7 +46,10 @@ export const MAX_RECLAIM_TARGETS = 256;
 export const MAX_HOST_CONTEXT_FILES = 16;
 
 
-export type TraceRole = "main" | "summary" | "critic";
+export type TraceRole = "main" | "summary";
+
+/** On-disk traces may still name the retired critic role. New records do not write it. */
+export type ExistingTraceRole = TraceRole | "critic";
 
 
 export interface TraceUsage {
@@ -312,16 +315,7 @@ export interface TraceAttempt {
 
 export interface TraceTaskOutcome {
   readonly status: string | null;
-  readonly correctness: string | null;
   readonly criteriaHash: string | null;
-}
-
-
-/** Pre-settle reviewer verdict (#124). Null when the run skipped review. */
-export interface TraceCriticVerdict {
-  readonly verdict: "pass" | "fail";
-  readonly rationale: string | null;
-  readonly rounds: number;
 }
 
 
@@ -336,7 +330,6 @@ export interface TraceTaskSettled {
   readonly attemptIds: readonly string[];
   readonly summaryAttemptIds: readonly string[];
   readonly outcome: TraceTaskOutcome;
-  readonly critic: TraceCriticVerdict | null;
   /** Named critical class when settle fails closed; null otherwise. */
   readonly criticalClass: string | null;
 }
@@ -474,13 +467,7 @@ export interface TraceTaskSettledInput {
   readonly summaryAttemptIds?: readonly unknown[];
   readonly outcome?: {
     readonly status?: unknown;
-    readonly correctness?: unknown;
     readonly criteriaHash?: unknown;
-  } | null;
-  readonly critic?: {
-    readonly verdict?: unknown;
-    readonly rationale?: unknown;
-    readonly rounds?: unknown;
   } | null;
   readonly criticalClass?: unknown;
 }
@@ -511,7 +498,7 @@ export interface TraceAttemptIndexEntry {
   readonly runId: string;
   readonly taskId: string;
   readonly attemptId: string;
-  readonly role: TraceRole;
+  readonly role: ExistingTraceRole;
   readonly retained: boolean;
   readonly traceTurn: number | null;
   /** True when the identity came from an omitted/unscanned reference. */

@@ -22,7 +22,7 @@ const attempt = (attemptId: string, extra = {}) => ({
 const settlement = {
   schemaVersion: 2, recordType: "task-settled", runId: "run", taskId: "task",
   attemptCount: 2, attemptIds: ["parent", "child"], summaryAttemptIds: [], finalAttemptId: "child",
-  outcome: { status: "success", correctness: "unknown" },
+  outcome: { status: "success" },
 };
 function put(root: string, turn: number, record: unknown) {
   writeFileSync(join(root, `turn-${turn}.json`), JSON.stringify(record));

@@ -240,7 +240,7 @@ describe("Agent Core Provider Probe Invariants", () => {
         assert.equal(result.trace.attempts[0].taskId, result.trace.taskSettled.taskId);
         assert.equal(result.trace.attempts[1].retryOfAttemptId, result.trace.attempts[0].attemptId);
         assert.equal(result.trace.taskSettled.attemptCount, 2);
-        assert.equal(result.trace.taskSettled.outcome.correctness, null);
+        assert.equal("correctness" in result.trace.taskSettled.outcome, false);
         assert.equal(result.trace.attempts[1].cache.effective.rejected, null);
         assert.deepEqual(result.trace.providerUsage, [
           { attemptId: result.trace.attempts[0].attemptId, cacheWriteBreakdown: null },

@@ -22,14 +22,12 @@ export interface QuietWinsSettle {
 }
 
 function toolName(entry: Record<string, unknown>): string | null {
-  const value = entry.toolName ?? entry.name ?? entry.tool;
-  return typeof value === "string" ? value : null;
+  return typeof entry.toolName === "string" ? entry.toolName : null;
 }
 
 /** Same success mapping as the laziness-metrics outcome classifier. */
 export function isSuccessClaim(status: string): boolean {
-  const normalized = status.toLowerCase();
-  return normalized === "success" || normalized === "succeeded" || normalized === "ok";
+  return status.toLowerCase() === "success";
 }
 
 /** True when a succeeding bash outcome is already on the run. */
@@ -94,7 +92,7 @@ export function collectTaskToolOutcomes(directory: string, runId: string, taskId
     if (!isRecord(parsed)) return { readable: false, outcomes: [] };
     if (parsed.recordType !== "attempt") continue;
     if (parsed.runId !== runId || parsed.taskId !== taskId) continue;
-    const raw = parsed.toolOutcomes ?? parsed.toolResults;
+    const raw = parsed.toolOutcomes;
     if (Array.isArray(raw)) outcomes.push(...raw);
   }
   return { readable: true, outcomes };

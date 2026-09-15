@@ -269,7 +269,7 @@ import {
   type TraceAttemptInput,
   type TraceCacheInput,
   type TraceCostInput as TraceRecordCostInput,
-  type TraceCriticVerdict,
+  type TraceRole,
   type TraceRuntime,
   type TraceWriteOutcome,
 } from "./trace.ts";
@@ -703,7 +703,7 @@ type TraceTaskState = {
 type TraceAttemptState = {
   task: TraceTaskState;
   attemptId: string;
-  role: "main" | "summary" | "critic";
+  role: TraceRole;
   provider: ProviderId;
   protocol: string;
   model: string;
@@ -745,7 +745,7 @@ function beginTraceTask(): TraceTaskState {
 }
 
 function beginTraceAttempt(
-  role: "main" | "summary" | "critic",
+  role: TraceRole,
   opts: {
     parentAttemptId?: string | null;
     retryOfAttemptId?: string | null;
@@ -830,7 +830,7 @@ async function closeTraceRuntime(): Promise<boolean> {
 
 function traceCachePolicyInput(
   cache: TraceCacheDiagnostics,
-  role: "main" | "summary" | "critic",
+  role: TraceRole,
   rejected: boolean,
   effective: boolean,
 ): TraceCacheInput["requested"] {
@@ -989,7 +989,7 @@ async function writeTraceAttempt(
   }
 }
 
-async function settleTraceTask(status: string, critic: TraceCriticVerdict | null = null): Promise<void> {
+async function settleTraceTask(status: string): Promise<void> {
   const task = activeTraceTask;
   if (!task || task.settled) return;
   task.settled = true;
@@ -1009,8 +1009,7 @@ async function settleTraceTask(status: string, critic: TraceCriticVerdict | null
       finalAttemptId: task.finalAttemptId,
       attemptIds: task.attemptIds,
       summaryAttemptIds: task.summaryAttemptIds,
-      outcome: { status: gated.status, correctness: null, criteriaHash: task.criteriaHash },
-      critic,
+      outcome: { status: gated.status, criteriaHash: task.criteriaHash },
       criticalClass: gated.criticalClass,
     }));
   } catch (error) {
@@ -3164,8 +3163,7 @@ async function rotateProviderRetryAttempt(
       null,
       attempt.provider,
       attempt.model,
-      // Critic reviews ride the cheap lane; bill them on the summary scope.
-      attempt.role === "critic" ? "summary" : attempt.role,
+      attempt.role,
       cache,
     ),
     ttftMs: null,
@@ -3519,7 +3517,7 @@ async function completeText(
   system: string,
   prompt: string,
   signal: AbortSignal | undefined,
-  opts?: { traceRole?: "summary" | "critic" },
+  opts?: { traceRole?: "summary" },
 ): Promise<{ text: string; usage: Usage | null; ttftMs: number | null; cache: TraceCacheDiagnostics | null; traceAttempt: TraceAttemptState | null }> {
   let attempt = beginTraceAttempt(opts?.traceRole ?? "summary", { provider: providerId, model });
   let summaryCache: TraceCacheDiagnostics | null = null;

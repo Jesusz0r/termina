@@ -31,7 +31,7 @@ function settledInput(overrides: Record<string, unknown> = {}) {
     runId: "run-harden",
     taskId: "task-harden",
     attemptIds: ["attempt-1"],
-    outcome: { status: "success", correctness: null, criteriaHash: null },
+    outcome: { status: "success", criteriaHash: null },
     ...overrides,
   };
 }
@@ -45,7 +45,7 @@ describe("trace validation hardening (#227)", () => {
     expect(record.route).toBeNull();
     expect(record.recordType).toBe("attempt");
     const settled = createTaskSettledRecord(
-      settledInput({ taskClass: "bad\nclass", outcome: { status: 7, correctness: null, criteriaHash: null } }),
+      settledInput({ taskClass: "bad\nclass", outcome: { status: 7, criteriaHash: null } }),
     );
     expect(settled.taskClass).toBeNull();
     expect(settled.outcome.status).toBeNull();
@@ -54,6 +54,7 @@ describe("trace validation hardening (#227)", () => {
   it("still rejects malformed identities and links", () => {
     expect(() => createAttemptRecord(attemptInput({ attemptId: "bad\0id" }))).toThrow(/control character/);
     expect(() => createAttemptRecord(attemptInput({ role: "reviewer" as "main" }))).toThrow(/role must be/);
+    expect(() => createAttemptRecord(attemptInput({ role: "critic" as "main" }))).toThrow(/role must be/);
     expect(() => createTaskSettledRecord(settledInput({ runId: "" }))).toThrow();
   });
 
@@ -133,6 +134,7 @@ describe("trace validation hardening (#227)", () => {
       settlements: [],
     } as const;
     expect(validTraceLinkIndex({ ...base, attempts: [attempt("a1", 1), attempt("a2", 2)] })).toBe(true);
+    expect(validTraceLinkIndex({ ...base, attempts: [{ ...attempt("c1", 3), role: "critic" }] })).toBe(true);
     expect(validTraceLinkIndex({ ...base, attempts: [attempt("a1", 1), attempt("a2", 1)] })).toBe(false);
     // Unretained entries share no turn file, so nulls never collide.
     expect(
@@ -156,6 +158,29 @@ describe("trace validation hardening (#227)", () => {
 });
 
 describe("trace runtime hardening (#227)", () => {
+  it("keeps on-disk critic roles as a read-side tombstone", async () => {
+    const root = mkdtempSync(join(tmpdir(), "termina-trace-critic-tombstone-"));
+    try {
+      const directory = join(root, "traces");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "turn-1.json"), JSON.stringify({
+        schemaVersion: 2,
+        recordType: "attempt",
+        runId: "run-harden",
+        taskId: "task-harden",
+        attemptId: "attempt-c1",
+        role: "critic",
+      }));
+      const runtime = createTraceRuntime({ directory, namespace: "critic-tombstone" });
+      const startup = await runtime.ready;
+      expect(startup.ok).toBe(true);
+      expect(startup.malformedRecords).toBe(0);
+      await runtime.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("labels role-mismatched settlement links instead of duplicates", async () => {
     const root = mkdtempSync(join(tmpdir(), "termina-trace-mislabel-"));
     try {
@@ -173,7 +198,7 @@ describe("trace runtime hardening (#227)", () => {
           taskId: "task-mislabel",
           attemptIds: ["late"],
           summaryAttemptIds: ["late"],
-          outcome: { status: "success", correctness: null, criteriaHash: null },
+          outcome: { status: "success", criteriaHash: null },
         }),
       );
       expect(settled.ok).toBe(true);
@@ -241,7 +266,7 @@ describe("trace runtime hardening (#227)", () => {
           attemptIds: ids,
           summaryAttemptIds: [],
           finalAttemptId: ids[0],
-          outcome: { status: "success", correctness: null, criteriaHash: null },
+          outcome: { status: "success", criteriaHash: null },
         }),
       );
       expect(outcome.ok).toBe(false);
