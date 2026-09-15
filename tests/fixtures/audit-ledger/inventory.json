@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "root": "tree",
+  "entries": [
+    { "path": "alpha.txt", "status": "confirmed" },
+    { "path": "nested/beta.txt", "status": "refuted" },
+    { "path": "nested/gamma.txt", "status": "unknown", "owner": "audit-ledger" }
+  ],
+  "classes": [
+    {
+      "id": "future-multi-item",
+      "items": ["finding-a", "finding-b"],
+      "status": "open",
+      "batchIds": ["batch-example"]
+    },
+    {
+      "id": "future-single-item",
+      "items": ["finding-c"],
+      "status": "closed",
+      "batchIds": ["batch-example"]
+    }
+  ]
+}

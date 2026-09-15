@@ -273,6 +273,7 @@ import {
   type TraceRuntime,
   type TraceWriteOutcome,
 } from "./trace.ts";
+import { applyNoQuietWins, collectTaskToolOutcomes } from "./trace/quiet-wins.ts";
 import {
   SessionWriter,
   applySessionRecord,
@@ -998,6 +999,8 @@ async function settleTraceTask(status: string, critic: TraceCriticVerdict | null
     return;
   }
   try {
+    const outcomes = collectTaskToolOutcomes(traceRuntime.directory, task.runId, task.taskId);
+    const gated = applyNoQuietWins(status, outcomes);
     traceFailure(await traceRuntime.writeTaskSettled({
       runId: task.runId,
       taskId: task.taskId,
@@ -1006,8 +1009,9 @@ async function settleTraceTask(status: string, critic: TraceCriticVerdict | null
       finalAttemptId: task.finalAttemptId,
       attemptIds: task.attemptIds,
       summaryAttemptIds: task.summaryAttemptIds,
-      outcome: { status, correctness: null, criteriaHash: task.criteriaHash },
+      outcome: { status: gated.status, correctness: null, criteriaHash: task.criteriaHash },
       critic,
+      criticalClass: gated.criticalClass,
     }));
   } catch (error) {
     sidecar.logEvent({ t: "trace_write_failure", kind: "write-failure", persisted: false, error: error instanceof Error ? error.message : String(error) });

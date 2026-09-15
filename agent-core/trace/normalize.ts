@@ -5,7 +5,7 @@
  * inputs. Split from agent-core/trace.ts (issue #38).
  */
 import { isRecord } from "../../shared/guards.ts";
-import { MAX_ARRAY_ITEMS, MAX_CACHE_MARKER_POSITIONS, MAX_HOST_CONTEXT_FILES, MAX_ID_CHARS, MAX_RECLAIM_TARGETS, MAX_STRING_CHARS, MAX_TOOL_OUTCOMES } from "./schema.ts";
+import { MAX_ARRAY_ITEMS, MAX_CACHE_MARKER_POSITIONS, MAX_HOST_CONTEXT_FILES, MAX_ID_CHARS, MAX_RECLAIM_TARGETS, MAX_STRING_CHARS, MAX_TOOL_OUTCOMES, NO_QUIET_WINS_CLASS } from "./schema.ts";
 import type { TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceCriticVerdict, TraceHostContext, TraceHostContextFile, TraceReclaimEvidence, TraceReclaimTarget, TraceRevisions, TraceRevisionsInput, TraceTaskSettledInput, TraceToolOutcome, TraceUsage, TraceUsageInput } from "./schema.ts";
 
 
@@ -395,6 +395,14 @@ export function revisions(value: TraceRevisionsInput | null | undefined): TraceR
     count: nullableInteger(value?.count),
     kinds: stringArray(value?.kinds, "revision kinds"),
   });
+}
+
+
+/** Named critical class (#237); null when the settle is not that class. */
+export function criticalClass(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value !== NO_QUIET_WINS_CLASS) throw new Error("criticalClass must be No Quiet Wins or null");
+  return NO_QUIET_WINS_CLASS;
 }
 
 
