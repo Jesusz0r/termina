@@ -224,6 +224,7 @@ pub(crate) fn parse_promotion_expected_destination(
         .and_then(Value::as_str)
         .ok_or_else(|| format!("{field}.state.type is missing"))?;
     if state_type == "missing" {
+        // Invariant: the same borrowed Value already proved `state` is an object.
         let state = object
             .get("state")
             .and_then(Value::as_object)

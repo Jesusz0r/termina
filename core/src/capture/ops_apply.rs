@@ -218,6 +218,7 @@ pub(crate) fn op_template(req: &Value) -> Result<Value, String> {
             Repository::init_opts(Path::new("."), &init_opts).map_err(|e| e.to_string())?;
         promotion_test_pause(req, "promotion-template-repo-open")?;
 
+        // Invariant: Git layout names are compile-time literals (no NUL).
         let alternates_name = CString::new("alternates").expect("constant has no NUL");
         let alternates_parent = open_or_create_promotion_parent(
             &target,

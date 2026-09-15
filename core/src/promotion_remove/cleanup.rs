@@ -102,6 +102,7 @@ fn promotion_cleanup_tree_counts(
         PromotionDirectoryStream::open(dir.as_raw_fd())?,
         relative.to_string(),
     ));
+    // Invariant: last/pop see a frame while the stack is non-empty.
     while !stack.is_empty() {
         let next = stack
             .last_mut()
@@ -420,6 +421,7 @@ pub(crate) fn create_promotion_quarantine_container(
     expected_bytes: u64,
     expected_work_bytes: u64,
 ) -> Result<PromotionQuarantineReservation, String> {
+    // Invariant: ".." is a compile-time literal (no NUL).
     let grandparent_name = CString::new("..").expect("parent component has no NUL");
     let grandparent = open_at(
         parent.as_raw_fd(),
@@ -472,6 +474,7 @@ pub(crate) fn create_promotion_quarantine_container(
     }
     for _ in 0..64 {
         let sequence = PROMOTION_CLEANUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        // Invariant: prefix is a literal; sequence is hex. No request or dirent bytes.
         let name = CString::new(format!("{PROMOTION_QUARANTINE_PREFIX}{sequence:016x}"))
             .expect("promotion quarantine container name has no NUL");
         match promotion_mkdir_at(grandparent.as_raw_fd(), &name, 0o700) {

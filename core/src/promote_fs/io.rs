@@ -76,6 +76,7 @@ impl PromotionDirectoryStream {
         // through the bound descriptor instead so repeated scans (including
         // quarantine accounting followed by container reuse) remain
         // independent of the caller's stream state.
+        // Invariant: "." is a compile-time literal (no NUL).
         let dot = CString::new(".").expect("directory component has no NUL");
         let duplicate = unsafe {
             libc::openat(

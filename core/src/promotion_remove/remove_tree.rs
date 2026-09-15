@@ -43,6 +43,7 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
         "parentIdentity",
     )?;
     promotion_directory_identity_matches(&parent, parent_identity, "cleanup parent")?;
+    // Invariant: promotion_components_for rejects empty arrays.
     let (_, leaf) = components.last().expect("non-empty components");
     let expected = promotion_identity_from_value(
         req.get("expectedIdentity")
@@ -109,6 +110,7 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
         return Err("cleanup root ancestry changed; evidence retained".to_string());
     }
     let (expected_entries, expected_bytes, expected_work_bytes) = if child_identity.is_dir() {
+        // Invariant: directory cleanup opens the child; the is_dir branch never sees None.
         validate_promotion_cleanup_tree(
             child.as_ref().expect("directory cleanup child is opened"),
             req,
@@ -121,6 +123,7 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
         if after_leaf != after_open {
             return Err("cleanup root changed; evidence retained".to_string());
         }
+        // Invariant: promotion_components_for rejects empty arrays.
         let work = u64::try_from(components.last().expect("non-empty cleanup components").0.len())
             .map_err(|_| "cleanup root work accounting overflow")?
             .checked_add(std::mem::size_of::<FileIdentity>() as u64)
@@ -154,6 +157,7 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
     // accounting pass was running, do not consume a reservation calculated
     // for the old shape; dropping the reservation leaves the source intact.
     let (rechecked_entries, rechecked_bytes, rechecked_work_bytes) = if child_identity.is_dir() {
+        // Invariant: directory cleanup opens the child; the is_dir branch never sees None.
         validate_promotion_cleanup_tree(
             child.as_ref().expect("directory cleanup child is opened"),
             req,
@@ -173,6 +177,7 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
                 "cleanup root changed during quarantine admission; evidence retained".to_string(),
             );
         }
+        // Invariant: promotion_components_for rejects empty arrays.
         let work = u64::try_from(components.last().expect("non-empty cleanup components").0.len())
             .map_err(|_| "cleanup root work accounting overflow")?
             .checked_add(std::mem::size_of::<FileIdentity>() as u64)
@@ -208,6 +213,7 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
         .unwrap_or(0);
     for _ in 0..64 {
         let sequence = PROMOTION_CLEANUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        // Invariant: literals plus pid/nonce/sequence; no request or dirent bytes.
         let candidate = CString::new(format!(
             ".termina-promotion-cleanup-root-{}-{nonce:032x}-{sequence:016x}.tmp",
             std::process::id(),

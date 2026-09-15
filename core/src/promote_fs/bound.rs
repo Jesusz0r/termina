@@ -34,6 +34,7 @@ pub(crate) struct PromotionCwd {
 
 impl PromotionCwd {
     pub(crate) fn enter(directory: &fs::File, field: &str) -> Result<Self, String> {
+        // Invariant: "." is a compile-time literal (no NUL).
         let dot = CString::new(".").expect("directory component has no NUL");
         let previous = open_at(
             libc::AT_FDCWD,

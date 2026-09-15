@@ -283,6 +283,7 @@ impl BoundSourceRepository {
             return Err("source Git directory does not match the opened repository".to_string());
         }
 
+        // Invariant: "index" is a compile-time literal (no NUL).
         let index_name = CString::new("index").expect("index has no NUL");
         let index = match open_at(
             repository_git_dir.as_raw_fd(),
@@ -396,6 +397,7 @@ impl BoundSourceRepository {
             if index_identity != expected {
                 return Err("source repository index changed while captured".to_string());
             }
+            // Invariant: "index" is a compile-time literal (no NUL).
             let index_name = CString::new("index").expect("index has no NUL");
             let current = open_at(
                 self.repository_git_dir.as_raw_fd(),
@@ -410,6 +412,7 @@ impl BoundSourceRepository {
                 return Err("source repository index path changed while captured".to_string());
             }
         } else {
+            // Invariant: "index" is a compile-time literal (no NUL).
             let index_name = CString::new("index").expect("index has no NUL");
             match open_at(
                 self.repository_git_dir.as_raw_fd(),

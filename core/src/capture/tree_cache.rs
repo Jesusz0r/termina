@@ -22,6 +22,7 @@ pub(crate) fn collect_tree_map_cached(
     repo: &Repository,
     tree_oid: Oid,
 ) -> Result<std::sync::Arc<TreeMap>, String> {
+    // Invariant: core serves one request at a time, so this mutex is never poisoned.
     if let Some(hit) = tree_map_cache()
         .lock()
         .expect("tree-map cache mutex is never poisoned: core handles requests one at a time")
@@ -30,6 +31,7 @@ pub(crate) fn collect_tree_map_cached(
         return Ok(hit.clone());
     }
     let map = std::sync::Arc::new(collect_tree_map(repo, tree_oid)?);
+    // Invariant: core serves one request at a time, so this mutex is never poisoned.
     let mut cache = tree_map_cache()
         .lock()
         .expect("tree-map cache mutex is never poisoned: core handles requests one at a time");
@@ -45,6 +47,7 @@ pub(crate) fn collect_tree_map_cached(
 
 /// Remember the flat map of a freshly written tree.
 pub(crate) fn cache_tree_map(tree_oid: Oid, map: std::sync::Arc<TreeMap>) {
+    // Invariant: core serves one request at a time, so this mutex is never poisoned.
     let mut cache = tree_map_cache()
         .lock()
         .expect("tree-map cache mutex is never poisoned: core handles requests one at a time");

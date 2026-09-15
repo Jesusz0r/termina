@@ -274,6 +274,7 @@ pub(crate) fn read_store_generation_file(file: &mut fs::File) -> Result<String, 
 }
 
 pub(crate) fn read_store_generation_at(root: &fs::File) -> Result<String, String> {
+    // Invariant: STORE_GENERATION_FILE is a compile-time literal (no NUL).
     let name = CString::new(STORE_GENERATION_FILE)
         .expect("snapshot store generation name has no NUL");
     let mut file = open_at(

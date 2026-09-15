@@ -186,6 +186,7 @@ fn promotion_remove_stale_paths(
         PROMOTION_DIRECTORY_MAX_NAME_BYTES,
         "promotion stale-path scan",
     )?;
+    // Invariant: last/pop see a frame while the stack is non-empty.
     while !stack.is_empty() {
         let next = stack
             .last_mut()
@@ -196,6 +197,8 @@ fn promotion_remove_stale_paths(
             stack.pop();
             continue;
         };
+        // Bounded relative path (PROMOTION_PATH_MAX_BYTES). Clone keeps this
+        // frame's walk identity while later last()/push() reborrow the stack.
         let current_relative = stack.last().expect("stale-path frame exists").relative.clone();
         if current_relative.is_empty() && preserve.contains(&name) {
             continue;
