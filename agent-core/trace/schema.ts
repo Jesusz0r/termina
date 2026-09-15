@@ -38,6 +38,9 @@ export const MAX_TRACE_INDEX_BYTES = 1 * 1024 * 1024;
 
 export const MAX_TOOL_OUTCOMES = 256;
 
+/** Named critical class for an unverified success claim (#237). */
+export const NO_QUIET_WINS_CLASS = "No Quiet Wins";
+
 export const MAX_RECLAIM_TARGETS = 256;
 
 export const MAX_HOST_CONTEXT_FILES = 16;
@@ -334,6 +337,8 @@ export interface TraceTaskSettled {
   readonly summaryAttemptIds: readonly string[];
   readonly outcome: TraceTaskOutcome;
   readonly critic: TraceCriticVerdict | null;
+  /** Named critical class when settle fails closed; null otherwise. */
+  readonly criticalClass: string | null;
 }
 
 
@@ -477,6 +482,7 @@ export interface TraceTaskSettledInput {
     readonly rationale?: unknown;
     readonly rounds?: unknown;
   } | null;
+  readonly criticalClass?: unknown;
 }
 
 
