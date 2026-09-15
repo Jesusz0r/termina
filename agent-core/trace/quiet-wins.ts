@@ -14,8 +14,6 @@ import { NO_QUIET_WINS_CLASS, TRACE_FILE_PATTERN } from "./schema.ts";
 const EDIT_TOOLS = new Set(["edit", "write_file"]);
 const CHECK_TOOL = "bash";
 
-export { NO_QUIET_WINS_CLASS };
-
 interface QuietWinsSettle {
   readonly status: string;
   readonly criticalClass: string | null;

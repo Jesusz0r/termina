@@ -10,13 +10,19 @@
  * empty-directory cascades, and file/dir type changes.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SnapshotStore, gitHead } from "../../electron/worldline-git.js";
-import { blobOid } from "../../electron/watcher.js";
 import { trackSpikeFixtureRoot } from "./owned-fixtures.ts";
+
+/** Same Git blob oid as the watcher cache (`electron/watcher.ts`). */
+function blobOid(content: string, algorithm: "sha1" | "sha256"): string {
+  const header = Buffer.from(`blob ${Buffer.byteLength(content)}\0`);
+  return createHash(algorithm).update(header).update(content, "utf8").digest("hex");
+}
 
 /** Deterministic RNG so failures reproduce. */
 function mulberry32(seed: number): () => number {

@@ -22,8 +22,7 @@ import {
 
 // Live .gitignore files stay on the watcher. The compiler lives in shared/gitignore.ts.
 
-export { IGNORED_SEGMENTS, matchGitignore, parseGitignore };
-export type { GitignoreRule, GitignoreRules } from "../shared/gitignore.js";
+export { IGNORED_SEGMENTS };
 
 /** The precomputed Git blob oids of one cached content string. */
 interface CachedOids {
@@ -32,7 +31,7 @@ interface CachedOids {
 }
 
 /** The Git blob oid of a content string in one object format. */
-export function blobOid(content: string, algorithm: "sha1" | "sha256"): string {
+function blobOid(content: string, algorithm: "sha1" | "sha256"): string {
   const header = Buffer.from(`blob ${Buffer.byteLength(content)}\0`);
   return createHash(algorithm).update(header).update(content, "utf8").digest("hex");
 }

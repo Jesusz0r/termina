@@ -6,11 +6,8 @@
  * decides whether that text is a plan and how Dispatch claims rows.
  */
 import { isAbsolute, relative } from "node:path";
-import { HAS_PLAN_TASK, PLAN_HEADING_MARKER, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
+import { PLAN_HEADING_MARKER, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
 import type { CanonicalizePath, PlanTask } from "../shared/types.ts";
-
-export { HAS_PLAN_TASK, PLAN_TASK_MARKER };
-export type { CanonicalizePath };
 
 const PLAN_HEADING_LINE = new RegExp("^" + PLAN_HEADING_MARKER + "$", "i");
 const PLAN_LINE = new RegExp("^" + PLAN_TASK_MARKER + String.raw`(.+)$`);
