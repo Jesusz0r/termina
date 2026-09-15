@@ -6,7 +6,6 @@
  */
 export { WorldlineManager } from "./manager.js";
 export type { WorldlineDeps } from "./manager.js";
-export { dirBytes } from "./promotion-journal.js";
 export { quoteShellArg } from "../../shared/terminal-control.js";
 export type { WorldlineState, WorldlineSummary } from "../../shared/types.js";
 export type {
