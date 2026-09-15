@@ -32,7 +32,7 @@ isolation boundary.
 
 Every comparison must use candidates derived from the same base source state.
 Every evidence result must name the exact candidate source state that it tested.
-A later source change makes that evidence stale.
+A later source change makes that evidence stale. See [PINNED-CONTEXT.md](PINNED-CONTEXT.md) for which owners must pin that state.
 
 Promotion is the only operation that can write candidate changes to the primary
 project. Promotion must be recoverable after a process or application crash.
