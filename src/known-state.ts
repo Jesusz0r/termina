@@ -1,6 +1,7 @@
 /**
  * One owner for renderer IPC-state allowlists. Unknown values render as
- * "unknown", never as a meaningful neighboring state.
+ * "unknown", never as a meaningful neighboring state. Blocked activity
+ * reasons are presented here so status and timeline never print protocol tokens.
  */
 export const UNKNOWN_STATE = "unknown" as const;
 export type UnknownState = typeof UNKNOWN_STATE;
@@ -33,3 +34,25 @@ export const KNOWN_ACTIVITY_REASONS = [
   "sidecar-paused",
   "exited-mid-run",
 ] as const;
+
+/**
+ * User-facing blocked sentence for status + timeline.
+ * Protocol tokens (lease / sidecar) become a phrase or are omitted.
+ */
+const ACTIVITY_REASON_PHRASE = {
+  "tool-error-loop": "tool-error-loop",
+  stalled: "stalled",
+  "lease-wait": "waiting to write",
+  "sidecar-paused": "paused",
+  "exited-mid-run": "exited-mid-run",
+} as const satisfies Record<(typeof KNOWN_ACTIVITY_REASONS)[number], string | null>;
+
+/** Status bar, tab tooltip, and timeline share this blocked sentence. */
+export function presentBlockedLabel(reason: unknown): string {
+  const known = typeof reason === "string" && reason.length > 0
+    ? asKnownState(reason, KNOWN_ACTIVITY_REASONS)
+    : UNKNOWN_STATE;
+  if (known === UNKNOWN_STATE) return "blocked";
+  const phrase = ACTIVITY_REASON_PHRASE[known];
+  return phrase ? `blocked: ${phrase}` : "blocked";
+}

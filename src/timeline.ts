@@ -8,7 +8,7 @@
  * Cmd/Ctrl+Enter forks it, Escape stops a replay.
  */
 import type { AgentActivityView, TimelineEvent, RecorderState, TimelinePrefix, TimelineProgress } from "../shared/types";
-import { asKnownState, KNOWN_ACTIVITY_REASONS, KNOWN_ACTIVITY_STATES, KNOWN_RECORDER_STATES } from "./known-state";
+import { asKnownState, KNOWN_ACTIVITY_STATES, KNOWN_RECORDER_STATES, presentBlockedLabel } from "./known-state";
 
 export const MAX_TIMELINE_EVENTS = 400;
 
@@ -111,12 +111,9 @@ export class TimelineView {
     this.activity = p?.activity ?? null;
     const total = p ? p.ok + p.error + p.open : 0;
     const activityState = asKnownState(p?.activity?.state, KNOWN_ACTIVITY_STATES);
-    const activityReason = p?.activity?.reason
-      ? asKnownState(p.activity.reason, KNOWN_ACTIVITY_REASONS)
-      : "unknown";
     const activityLabel =
       activityState === "blocked"
-        ? activityReason === "unknown" ? "blocked" : `blocked: ${activityReason}`
+        ? presentBlockedLabel(p?.activity?.reason)
         : activityState === "working"
           ? "working"
           : "";
@@ -456,12 +453,9 @@ export class TimelineView {
     }
     const newest = this.newestSeq();
     const activityState = asKnownState(this.activity?.state, KNOWN_ACTIVITY_STATES);
-    const activityReason = this.activity?.reason
-      ? asKnownState(this.activity.reason, KNOWN_ACTIVITY_REASONS)
-      : "unknown";
     const blocked =
       newest === ev.seq && activityState === "blocked"
-        ? activityReason === "unknown" ? " — blocked" : ` — blocked: ${activityReason}`
+        ? ` — ${presentBlockedLabel(this.activity?.reason)}`
         : "";
     return base + blocked + this.progressLine(progress);
   }
