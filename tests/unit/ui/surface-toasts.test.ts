@@ -32,6 +32,11 @@ function toastCalls(body: string): string[] {
   while (from < body.length) {
     const start = body.indexOf(needle, from);
     if (start < 0) break;
+    // stickyToast is an actionable undo affordance, not a fire-and-forget toast.
+    if (start >= 6 && body.slice(start - 6, start) === "sticky") {
+      from = start + needle.length;
+      continue;
+    }
     let depth = 0;
     let end = start + needle.length - 1;
     for (; end < body.length; end++) {
@@ -56,12 +61,18 @@ describe("review accept/revert toasts", () => {
   it("does not flash accepted/reverted info toasts after the list mark updates", () => {
     const revert = methodBody(review, "async revert(): Promise<void>");
     const accept = methodBody(review, "accept(): void");
-    expect(revert).toContain("this.onReverted(this.path)");
+    expect(revert).toContain("this.onReverted(targetPath)");
     expect(accept).toContain("this.onAccepted(this.path)");
     expect(revert).not.toContain('toast("reverted"');
     expect(accept).not.toContain('toast("accepted"');
-    expect(hasInfoToast(revert)).toBe(false);
     expect(hasInfoToast(accept)).toBe(false);
+    // Revert may offer an undoable sticky toast; that is not a fire-and-forget flash.
+    expect(revert).toContain("stickyToast(");
+    expect(revert).toContain('label: "Undo"');
+    const flashInfo = toastCalls(revert).filter((args) =>
+      /, *["']info["']$/.test(args) && !args.includes("Restored changes"),
+    );
+    expect(flashInfo).toEqual([]);
   });
 
   it("still toasts revert and load failures", () => {
