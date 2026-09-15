@@ -9,8 +9,11 @@ import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rename, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
+import { STORED_IMAGE_NAME } from "../session.ts";
 import { ACK_ID, OPEN_NOFOLLOW_READ } from "./context.ts";
 
+
+export { STORED_IMAGE_NAME };
 
 export const MAX_PENDING_IMAGES = 4;
 
@@ -19,8 +22,6 @@ export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_PENDING_IMAGE_BATCH_BYTES = MAX_PENDING_IMAGES * MAX_IMAGE_BYTES;
 
 export const PENDING_IMAGE_NAME = /^image-[A-Za-z0-9._-]+\.(png|jpe?g|webp|gif)$/;
-
-export const STORED_IMAGE_NAME = /^[A-Za-z0-9._-]+-img-[1-9][0-9]{0,3}\.(png|jpe?g|webp|gif)$/;
 
 const STAGE_IMAGE_NAME = /^image-[A-Za-z0-9._-]+\.(png|jpe?g|webp|gif)\.stage-[A-Za-z0-9_-]+$/;
 
