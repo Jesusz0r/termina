@@ -999,8 +999,8 @@ async function settleTraceTask(status: string, critic: TraceCriticVerdict | null
     return;
   }
   try {
-    const outcomes = collectTaskToolOutcomes(traceRuntime.directory, task.runId, task.taskId);
-    const gated = applyNoQuietWins(status, outcomes);
+    const collected = collectTaskToolOutcomes(traceRuntime.directory, task.runId, task.taskId);
+    const gated = applyNoQuietWins(status, collected.readable ? collected.outcomes : null);
     traceFailure(await traceRuntime.writeTaskSettled({
       runId: task.runId,
       taskId: task.taskId,
