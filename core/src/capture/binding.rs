@@ -31,7 +31,7 @@ use crate::{
     validate_store_lifecycle,
 };
 
-use super::refs::pause_at_hook;
+use crate::test_hooks::pause_at_hook;
 
 /// One capture leaf resolved beneath an already-open root. The retained
 /// parent descriptor prevents later ancestor swaps from redirecting reads.

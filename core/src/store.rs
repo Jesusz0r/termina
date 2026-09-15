@@ -141,18 +141,6 @@ pub(crate) fn store_generation_path(store_dir: &Path) -> PathBuf {
     store_dir.join(STORE_GENERATION_FILE)
 }
 
-pub(crate) fn store_identity_at(store_dir: &Path) -> Result<StoreIdentity, String> {
-    let metadata = fs::symlink_metadata(store_dir)
-        .map_err(|error| format!("inspect snapshot store identity failed: {error}"))?;
-    if !metadata.file_type().is_dir() {
-        return Err("snapshot store path is not a real directory".to_string());
-    }
-    Ok(StoreIdentity {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-    })
-}
-
 pub(crate) fn store_directory_identity(path: &Path, label: &str) -> Result<StoreIdentity, String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("inspect {label} identity failed: {error}"))?;
@@ -300,7 +288,7 @@ pub(crate) fn read_store_generation_at(root: &fs::File) -> Result<String, String
 pub(crate) fn current_store_lifecycle(store_dir: &Path) -> Result<StoreLifecycle, String> {
     Ok(StoreLifecycle {
         generation: read_store_generation(store_dir)?,
-        identity: store_identity_at(store_dir)?,
+        identity: store_directory_identity(store_dir, "snapshot store")?,
         git: store_git_layout_at(store_dir)?,
     })
 }

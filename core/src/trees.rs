@@ -31,8 +31,10 @@ use crate::{
 use crate::promote_fs::open_promotion_bound_root;
 use crate::capture::TreeLookupKind;
 
+/// A burst of unrefs shares one prune: the walk does not rerun inside this
 /// many seconds.
 pub(crate) const PRUNE_MIN_INTERVAL_SECS: u64 = 60;
+/// Unref prunes loose objects only past this many files. Small stores skip
 /// the reachability walk.
 pub(crate) const PRUNE_LOOSE_THRESHOLD: u64 = 20_000;
 

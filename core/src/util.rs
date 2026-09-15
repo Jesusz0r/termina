@@ -1,21 +1,20 @@
 //! Shared plumbing: JSON request accessors, time, object-format helpers,
-//! path-safety checks, descriptor-relative file operations, and capture hooks.
+//! path-safety checks, and descriptor-relative file operations.
 use std::ffi::{CStr, CString};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use git2::{ObjectFormat, Oid, Repository, RepositoryOpenFlags};
+use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
-use serde_json::Value;
 
 use crate::store::FileIdentity;
-use crate::{PROMOTION_PATH_MAX_BYTES, StoreObjectTransaction, write_blob};
-use crate::capture::{AnchoredPath, CaptureRoot};
+use crate::PROMOTION_PATH_MAX_BYTES;
 
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
@@ -33,57 +32,6 @@ pub(crate) fn s(v: &Value, key: &str) -> Result<String, String> {
 
 pub(crate) fn opt_s(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(String::from)
-}
-
-/// The before-read test seams of a capture request.
-pub(crate) fn before_read_hooks(req: &Value) -> Vec<(String, String, bool)> {
-    req.pointer("/hooks/beforeRead")
-        .and_then(Value::as_array)
-        .map(|hooks| {
-            hooks
-                .iter()
-                .filter_map(|hook| {
-                    let path = hook.get("path").and_then(Value::as_str)?;
-                    let content = hook.get("content").and_then(Value::as_str)?;
-                    let restore_mtime = hook
-                        .get("restoreMtime")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    Some((path.to_string(), content.to_string(), restore_mtime))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The after-cache test seams of a full capture request.
-pub(crate) fn after_cache_hooks(req: &Value) -> Vec<(String, String, bool)> {
-    req.pointer("/hooks/afterCache")
-        .and_then(Value::as_array)
-        .map(|hooks| {
-            hooks
-                .iter()
-                .filter_map(|hook| {
-                    let path = hook.get("path").and_then(Value::as_str)?;
-                    let content = hook.get("content").and_then(Value::as_str)?;
-                    let restore_mtime = hook
-                        .get("restoreMtime")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    Some((path.to_string(), content.to_string(), restore_mtime))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// True when a capture path falls under a hook path: an exact match or a
-/// suffix at a segment boundary.
-pub(crate) fn hook_matches(rel_path: &str, hook_path: &str) -> bool {
-    rel_path == hook_path
-        || (rel_path.len() > hook_path.len()
-            && rel_path.ends_with(hook_path)
-            && rel_path.as_bytes()[rel_path.len() - hook_path.len() - 1] == b'/')
 }
 
 pub(crate) fn oid_ext(repo: &Repository, value: &str) -> Result<Oid, String> {
@@ -127,11 +75,6 @@ pub(crate) fn loose_path(repo: &Repository, oid: Oid) -> Option<PathBuf> {
     }
     Some(repo.path().join("objects").join(&hex[0..2]).join(&hex[2..]))
 }
-
-
-/// Serialize the complete store lifecycle across core processes. The lock is
-/// a stable sibling of the deletable store, so destroy/recreate cannot replace
-/// its inode while an older request still holds it.
 
 /// Decode a Git path that must be valid UTF-8. Non-UTF8 paths fail the
 /// operation instead of being dropped or forged as empty.
@@ -487,165 +430,4 @@ pub(crate) fn open_relative_directory(
         return Err(format!("{field} is not a directory"));
     }
     Ok(current)
-}
-
-// ------------------------------------------------ promotion native boundary --
-
-/// The native promotion boundary deliberately returns no parsed journal
-/// fields. Electron owns promotion policy; core only binds descriptors,
-/// verifies expected identities/states, and performs preservation-first
-/// namespace transitions.
-
-/// Run a Git operation with the process working directory set from an
-/// already-open directory descriptor.  libgit2 only accepts paths, but a
-/// descriptor-relative cwd keeps `Repository::init/open` and its subsequent
-/// index/object writes on the bound directory even if an ancestor is swapped
-/// while the request is in flight.  Core handles requests serially, so this
-/// short-lived cwd change cannot be observed by another core operation.
-
-/// Apply the spike-only rewrite after the read descriptor is open. Opening
-/// through the retained parent descriptor keeps the seam inside the same
-/// capture boundary as production reads.
-pub(crate) fn apply_rewrite_hooks(
-    path: &AnchoredPath,
-    before_read: &[(String, String, bool)],
-    original_mtime: Option<SystemTime>,
-) {
-    for (hook_path, content, restore_mtime) in before_read {
-        if !hook_matches(&path.rel_path, hook_path) {
-            continue;
-        }
-        let Ok(mut target) = open_at(
-            path.parent.as_raw_fd(),
-            &path.leaf,
-            libc::O_WRONLY | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        ) else {
-            continue;
-        };
-        target.write_all(content.as_bytes()).ok();
-        if *restore_mtime && let Some(modified) = original_mtime {
-            target
-                .set_times(fs::FileTimes::new().set_modified(modified))
-                .ok();
-        }
-    }
-}
-
-/// Hash one descriptor-anchored working-tree path into the store. Returns
-/// None for a directory (a gitlink). Returns (mode, oid, new bytes).
-pub(crate) fn hash_path(
-    transaction: &mut StoreObjectTransaction,
-    repo: &Repository,
-    capture_root: &CaptureRoot,
-    path: AnchoredPath,
-    max_file_bytes: u64,
-    current_new_blob_bytes: u64,
-    max_new_blob_bytes: u64,
-    before_read: &[(String, String, bool)],
-) -> Result<Option<(u32, Oid, u64)>, String> {
-    let display = capture_root.display_path(&path.rel_path);
-    if path.identity.is_symlink() {
-        let bytes = read_link_at(path.parent.as_raw_fd(), &path.leaf)
-            .map_err(|e| format!("readlink failed for {}: {e}", display.display()))?;
-        let after = stat_at(path.parent.as_raw_fd(), &path.leaf)
-            .map_err(|_| format!("symlink vanished while captured: {}", display.display()))?;
-        if path.identity != after {
-            return Err(format!(
-                "symlink changed while captured: {}",
-                display.display()
-            ));
-        }
-        std::str::from_utf8(&bytes)
-            .map_err(|_| format!("symlink target is not valid UTF-8: {}", display.display()))?;
-        let link_bytes =
-            u64::try_from(bytes.len()).map_err(|_| "symlink length does not fit u64")?;
-        if link_bytes > max_file_bytes {
-            return Err(format!(
-                "symlink exceeds the {max_file_bytes} byte budget: {}",
-                display.display()
-            ));
-        }
-        let (oid, new_bytes) = write_blob(
-            transaction,
-            repo,
-            &bytes,
-            current_new_blob_bytes,
-            max_new_blob_bytes,
-            None,
-        )?;
-        return Ok(Some((0o120000, oid, new_bytes)));
-    }
-    if path.identity.is_dir() {
-        return Ok(None);
-    }
-    if !path.identity.is_file() {
-        return Err("unsupported file type".to_string());
-    }
-    if path.identity.len > max_file_bytes {
-        return Err(format!(
-            "file exceeds the {max_file_bytes} byte budget: {}",
-            display.display()
-        ));
-    }
-    let mut file = open_at(
-        path.parent.as_raw_fd(),
-        &path.leaf,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-    )
-    .map_err(|e| format!("open failed for {}: {e}", display.display()))?;
-    let before = stat_file(&file).map_err(|e| format!("fstat failed: {e}"))?;
-    if path.identity != before || !before.is_file() {
-        return Err(format!(
-            "file replaced while captured: {}",
-            display.display()
-        ));
-    }
-    let original_mtime = file
-        .metadata()
-        .and_then(|metadata| metadata.modified())
-        .ok();
-    apply_rewrite_hooks(&path, before_read, original_mtime);
-    let mut bytes = Vec::new();
-    let read_limit = max_file_bytes.checked_add(1).unwrap_or(u64::MAX);
-    Read::by_ref(&mut file)
-        .take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("read failed: {e}"))?;
-    let after = stat_file(&file).map_err(|e| format!("fstat failed: {e}"))?;
-    if before != after {
-        return Err(format!(
-            "file changed while captured: {}",
-            display.display()
-        ));
-    }
-    let path_after = stat_at(path.parent.as_raw_fd(), &path.leaf)
-        .map_err(|_| format!("file vanished while captured: {}", display.display()))?;
-    if path_after != after {
-        return Err(format!(
-            "file replaced while captured: {}",
-            display.display()
-        ));
-    }
-    // The stat above approved the size. A file can grow between the stat
-    // and the read: verify the budget again after the bytes are in memory.
-    if bytes.len() as u64 > max_file_bytes {
-        return Err(format!(
-            "file grew past the {max_file_bytes} byte budget while captured: {}",
-            display.display()
-        ));
-    }
-    let mode = if before.mode & 0o111 != 0 {
-        0o100755
-    } else {
-        0o100644
-    };
-    let (oid, new_bytes) = write_blob(
-        transaction,
-        repo,
-        &bytes,
-        current_new_blob_bytes,
-        max_new_blob_bytes,
-        None,
-    )?;
-    Ok(Some((mode, oid, new_bytes)))
 }
