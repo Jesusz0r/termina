@@ -427,7 +427,7 @@ export function parsePrintPrompt(argv: string[]): string | null {
 }
 
 /** Headless subagent child mode: `--subagent-task <task-file>` (Phase 2). */
-export function parseSubagentTaskFlag(argv: string[]): string | null {
+function parseSubagentTaskFlag(argv: string[]): string | null {
   const i = argv.findIndex((a) => a === "--subagent-task");
   if (i < 0) return null;
   return (argv[i + 1] ?? "").trim();
@@ -841,7 +841,7 @@ async function settleTraceTask(status: string): Promise<void> {
   }
 }
 
-export function hashSystem(text: string): string {
+function hashSystem(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
 
@@ -1363,7 +1363,7 @@ let approvalQueue = Promise.resolve();
 const protectedTaskApprovals = new Set<string>();
 
 /** Resolve an in-flight permission prompt before tearing down its surface. */
-export function cancelPendingApproval(line = "/approve deny"): boolean {
+function cancelPendingApproval(line = "/approve deny"): boolean {
   const resolve = approvalResolve;
   if (!resolve) return false;
   approvalResolve = null;
@@ -2037,7 +2037,7 @@ function pushUserPrompt(
 export type { ReplayMessage } from "./session.ts";
 
 let postRevision = false;
-export type RevisionKind = "prune" | "summarize" | "truncate";
+type RevisionKind = "prune" | "summarize" | "truncate";
 let revisions = 0;
 let revisionKinds: RevisionKind[] = [];
 let lastBilledTokens: number | null = null;
@@ -3609,7 +3609,7 @@ function resetUsageContinuity(): void {
 }
 
 /** Aggregate prefix-flip rate for this run's cache continuity window. */
-export function cacheFlipStats(): CacheFlipTally {
+function cacheFlipStats(): CacheFlipTally {
   return { ...cacheFlipTally };
 }
 
@@ -4883,12 +4883,12 @@ let nonTtyTranscriptSection: "thinking" | "assistant" | null = null;
 let pendingImageRefresh: Promise<void> | null = null;
 let pendingImageRefreshAgain = false;
 
-export type ShutdownOptions = {
+type ShutdownOptions = {
   reason?: string;
   timeoutMs?: number;
 };
 
-export type ShutdownResult = {
+type ShutdownResult = {
   ok: boolean;
   timedOut: boolean;
   error: string | null;

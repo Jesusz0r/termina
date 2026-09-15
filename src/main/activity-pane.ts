@@ -8,7 +8,7 @@ import { showConfirm, toast } from "../components/modals";
 import { asKnownState, KNOWN_FILE_STATUSES, KNOWN_PLAN_STATES } from "../known-state";
 import type { ModifiedFile, PlanTask } from "../../shared/types";
 
-export interface ActivityPaneState {
+interface ActivityPaneState {
   instanceId: string;
   projectId: string | null;
   workspaceId: string;
@@ -33,7 +33,7 @@ export interface ActivityPaneElements {
   btnAcceptAll: HTMLButtonElement;
 }
 
-export interface ActivityPaneBindings<TPane extends ActivityPaneState> {
+interface ActivityPaneBindings<TPane extends ActivityPaneState> {
   elements: ActivityPaneElements;
   getActivePane(): TPane | undefined;
   getActivePaneId(): string | null;

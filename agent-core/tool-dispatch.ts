@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 
 type ToolCall = { name: string; input: unknown };
 type Schema = Record<string, unknown>;
-export type ToolExecutionEntry = { index: number; duplicateOf?: number; reuseResult?: boolean };
+type ToolExecutionEntry = { index: number; duplicateOf?: number; reuseResult?: boolean };
 const TOOL_CONCURRENCY = 4;
 // Only these built-ins are known to be observational. MCP annotations are not
 // a trust boundary, and bash can mutate anything regardless of its command name.

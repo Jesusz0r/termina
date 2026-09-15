@@ -32,7 +32,7 @@ export interface PreferenceTerminal {
   setFontFamily(family: AppPreferences["fontFamily"]): void;
 }
 
-export interface PreferencesBindings {
+interface PreferencesBindings {
   getBaseEditor(): PreferenceEditor | null;
   forEachProjectEditor(fn: (editor: PreferenceEditor) => void): void;
   getReviewView(): PreferenceReview | null;

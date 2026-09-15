@@ -20,7 +20,7 @@ export interface TerminalFindPane {
   view: TerminalFindView;
 }
 
-export interface TerminalFindBindings {
+interface TerminalFindBindings {
   termContainer: HTMLElement;
   getActivePane(): TerminalFindPane | undefined;
   getPaneById(id: string): TerminalFindPane | undefined;

@@ -7,7 +7,7 @@ import { MAX_TIMELINE_EVENTS, TimelineView } from "../timeline";
 import { toast } from "../components/modals";
 import type { TimelineEvent, TimelinePrefix } from "../../shared/types";
 
-export interface TimelinePaneState {
+interface TimelinePaneState {
   instanceId: string;
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
@@ -26,7 +26,7 @@ export interface TimelinePaneEditor {
   openSnapshot(terminalId: string, eventKey: string, relPath: string, content: string, label: string, replay?: boolean): void;
 }
 
-export interface TimelinePaneBindings<TPane extends TimelinePaneState> {
+interface TimelinePaneBindings<TPane extends TimelinePaneState> {
   container: HTMLElement;
   getActivePane(): TPane | undefined;
   getActivePaneId(): string | null;

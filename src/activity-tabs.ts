@@ -32,7 +32,7 @@ export function activityPanelTitleVisible(tabBarVisible: boolean): boolean {
   return !tabBarVisible;
 }
 
-export interface ActivityTabState {
+interface ActivityTabState {
   active: ActivityTab;
   content: Record<ActivityTab, boolean>;
   visible: Record<ActivityTab, boolean>;

@@ -10,7 +10,7 @@ export interface TerminalMenuPane {
   exited: boolean;
 }
 
-export interface TerminalMenuBindings {
+interface TerminalMenuBindings {
   anchor: HTMLButtonElement;
   getActivePane(): TerminalMenuPane | undefined;
   hasPane(instanceId: string): boolean;

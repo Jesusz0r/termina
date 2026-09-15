@@ -6,10 +6,9 @@
  */
 
 // Split into ./sidecar/ modules (issue #38). This entry re-exports the public surface.
-export { MAX_SIDECAR_BYTES, SIDECAR_SEALED_PROOF_SUFFIX } from "./sidecar/events.js";
-export type { AgentStartEvent, SidecarEvent, ToolEdits } from "./sidecar/events.js";
+export { MAX_SIDECAR_BYTES } from "./sidecar/events.js";
+export type { AgentStartEvent, SidecarEvent } from "./sidecar/events.js";
 export { SidecarEventQueue } from "./sidecar/queue.js";
-export type { SidecarEventClass, SidecarEventDelivery, SidecarEventQueueOptions, SidecarEventQueueStats } from "./sidecar/queue.js";
+export type { SidecarEventDelivery } from "./sidecar/queue.js";
 export { parseSidecarRecord, sidecarEventFromRecord } from "./sidecar/parse.js";
 export { SidecarTailer } from "./sidecar/tailer.js";
-export type { SidecarTailerOptions } from "./sidecar/tailer.js";

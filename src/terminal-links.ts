@@ -48,7 +48,7 @@ function safeDecodeUri(uri: string): string {
  * A leading `a/` or `b/` is a Git diff prefix only when the caller observed a
  * real diff header (`diffHeader: true`); ordinary paths keep it literally.
  */
-export function parseTargetReference(
+function parseTargetReference(
   target: string,
   opts: { diffHeader?: boolean } = {},
 ): { path: string; line?: number; column?: number } | null {

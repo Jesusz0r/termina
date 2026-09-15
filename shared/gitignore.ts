@@ -44,7 +44,7 @@ export const IGNORED_SEGMENTS = new Set([
 
 /** One segment of a compiled pattern body. A full "**" segment absorbs whole
  *  directories; any other segment is a glob ("*", "?") matched literally. */
-export type GitignoreSegment = { globstar: true } | { globstar: false; source: string };
+type GitignoreSegment = { globstar: true } | { globstar: false; source: string };
 
 /** One compiled pattern line of a .gitignore file. */
 export interface GitignoreRule {
