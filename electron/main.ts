@@ -238,16 +238,18 @@ interface LeaseWaiter {
   resolve: (result: { ok: boolean; generation: number; error?: string }) => void;
 }
 
-/** The environment for an agent process: the host env minus injection and session pins. */
-function cleanEnv(): Record<string, string | undefined> {
-  const env = filterAgentEnvironment(process.env);
-  // The packaged bundle ships its own node for the agent. Put it first on
-  // PATH so the agent binary and its child processes resolve it.
+/** Packaged node/bin first on PATH so agent and project commands resolve it. */
+function prependBundledNodePath(env: Record<string, string | undefined>): Record<string, string | undefined> {
   const bundledNode = join(process.resourcesPath, "node", "bin");
   if (existsSync(bundledNode)) {
     env.PATH = `${bundledNode}${env.PATH ? `:${env.PATH}` : ""}`;
   }
   return env;
+}
+
+/** The environment for an agent process: the host env minus injection and session pins. */
+function cleanEnv(): Record<string, string | undefined> {
+  return prependBundledNodePath(filterAgentEnvironment(process.env));
 }
 
 /**
@@ -264,8 +266,7 @@ function coreEngineBinary(): string {
  * namespace that may cross the boundary; copied auth files remain preferred.
  */
 function candidateEnv(provider: string | null): Record<string, string | undefined> {
-  const bundledNode = join(process.resourcesPath, "node", "bin");
-  return filterCandidateEnvironment(process.env, provider, existsSync(bundledNode) ? [bundledNode] : []);
+  return prependBundledNodePath(filterCandidateEnvironment(process.env, provider, []));
 }
 
 /**
@@ -276,8 +277,7 @@ function candidateEnv(provider: string | null): Record<string, string | undefine
  * idea as the candidate Verify env.
  */
 function verifyEnv(): Record<string, string | undefined> {
-  const bundledNode = join(process.resourcesPath, "node", "bin");
-  return filterVerifyEnvironment(process.env, existsSync(bundledNode) ? [bundledNode] : []);
+  return prependBundledNodePath(filterVerifyEnvironment(process.env, []));
 }
 
 /** Thinking levels the agent accepts. Reject anything else at spawn. */

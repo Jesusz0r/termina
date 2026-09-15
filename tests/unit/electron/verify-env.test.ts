@@ -132,6 +132,11 @@ describe("Verify/diagnostics environment isolation", () => {
       main.includes("function cleanEnv(): Record<string, string | undefined> {")
       && main.includes("baseEnv: () => cleanEnv(),")
       && main.includes("...cleanEnv(),"));
-    assert.ok(checks.length >= 6);
+    check("verifyEnv shares prependBundledNodePath",
+      main.includes("function prependBundledNodePath(")
+      && main.includes("return prependBundledNodePath(filterVerifyEnvironment(process.env, []));")
+      && main.includes("return prependBundledNodePath(filterCandidateEnvironment(process.env, provider, []));")
+      && main.includes("return prependBundledNodePath(filterAgentEnvironment(process.env));"));
+    assert.ok(checks.length >= 7);
   });
 });
