@@ -18,11 +18,15 @@ import {
   splitPtyData,
 } from "../../../electron/pty-egress.ts";
 import type {
-  PtyEgressQueueStats,
   PtyEgressSchedulerOptions,
-  PtyEgressTransport,
   PtyRendererSendTarget,
 } from "../../../electron/pty-egress.ts";
+
+type PtyEgressTransport = ConstructorParameters<typeof PtyEgressScheduler>[0];
+type PtyEgressQueueStats = Extract<
+  ReturnType<PtyEgressScheduler["stats"]>,
+  { hydrated: boolean }
+>;
 import {
   PtySequenceLedger,
   PTY_RENDERER_SEQUENCE_GAP_WINDOW,

@@ -18,7 +18,7 @@ interface CompactionBlock {
   stubbed?: unknown;
 }
 
-export interface CompactionMessage {
+interface CompactionMessage {
   role: "user" | "assistant";
   content: string | CompactionBlock[];
   tokens: number;

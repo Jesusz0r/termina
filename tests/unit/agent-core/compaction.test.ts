@@ -12,8 +12,9 @@ import {
   shouldCompactForCacheCost,
   summaryPrompt,
   truncateCut,
-  type CompactionMessage,
 } from "../../../agent-core/compaction.ts";
+
+type CompactionMessage = Parameters<typeof evictionBoundary>[0][number];
 
 function msg(role: "user" | "assistant", text: string, tokens: number): CompactionMessage {
   return { role, content: [{ type: "text", text }], tokens };

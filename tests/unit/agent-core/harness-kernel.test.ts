@@ -27,12 +27,15 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCheckReporter } from "../../test-support.ts";
-import type {
-  BuildRequestOverlayOptions,
-  ProjectionBlock,
-  ProjectionMessage,
-  RequestMessage,
-} from "../../../agent-core/request-projection.ts";
+import type { RequestMessage } from "../../../agent-core/request-projection.ts";
+
+type BuildRequestOverlayOptions = Parameters<
+  typeof import("../../../agent-core/request-projection.ts").buildRequestOverlay
+>[0];
+type ProjectionMessage = Parameters<
+  typeof import("../../../agent-core/request-projection.ts").projectPersistedMessages
+>[0]["messages"][number];
+type ProjectionBlock = Exclude<ProjectionMessage["content"], string>[number];
 import type { PendingImageMediaType } from "../../../agent-core/host.ts";
 import type { KernelMessage } from "../../../agent-core/openai-compat.ts";
 import type { TerminalRosterEntry } from "../../../electron/terminal-roster.ts";
