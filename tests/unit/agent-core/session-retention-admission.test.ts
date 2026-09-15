@@ -285,11 +285,11 @@ describe("Agent Core Session Retention Admission Invariants", () => {
     
       const session: typeof import("../../../agent-core/session.ts") = await import(pathToFileURL(sessionBundle).href);
       const {
-        disposeSessionRetentionCoreClient,
+        disposeWorldlineGitCore,
         MAX_RETAINED_SESSION_BUNDLES,
         SessionRetentionOwner,
       } = await import(pathToFileURL(retentionBundle).href);
-      disposeRetentionCoreClient = disposeSessionRetentionCoreClient;
+      disposeRetentionCoreClient = disposeWorldlineGitCore;
       const { SessionForkClient } = await import(pathToFileURL(forkBundle).href);
       client = new SessionForkClient();
       const source = seedSource(join(work, "source"), session);

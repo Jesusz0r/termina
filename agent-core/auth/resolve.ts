@@ -5,6 +5,10 @@
  * resolution. Split from agent-core/auth.ts (issue #38).
  */
 import { isRecord } from "../../shared/guards.ts";
+import { modelLooksClaude } from "../models/families/anthropic.ts";
+import { modelLooksGemma, modelLooksGemini } from "../models/families/google.ts";
+import { modelLooksOpenAI } from "../models/families/openai.ts";
+import { modelLooksGrok } from "../models/families/xai.ts";
 import { providerDefinition } from "./providers/index.ts";
 import { SUPPORTED_PROVIDERS, type ProviderId } from "./providers/types.ts";
 import { AUTH_PROVIDER_ORDER, baseUrl, isSupportedProvider, maskSecret, needsRefresh, requestHeaders, validateCopilotApiUrl } from "./endpoints.ts";
@@ -56,12 +60,13 @@ export function parseModelRef(
     if (isSupportedProvider(head)) {
       return { provider: head, model: trimmed.slice(slash + 1) || DEFAULT_MODELS[head].main };
     }
+    return null;
   }
   if (!trimmed) return null;
-  if (trimmed.startsWith("claude") || trimmed.startsWith("haiku")) return { provider: "anthropic", model: trimmed };
-  if (trimmed.startsWith("grok")) return { provider: "xai", model: trimmed };
-  if (trimmed.startsWith("gemini") || trimmed.startsWith("gemma")) return { provider: "google", model: trimmed };
-  if (/^(gpt-|o1|o3|o4|chatgpt)/.test(trimmed)) return { provider: "openai", model: trimmed };
+  if (modelLooksClaude(trimmed)) return { provider: "anthropic", model: trimmed };
+  if (modelLooksGrok(trimmed)) return { provider: "xai", model: trimmed };
+  if (modelLooksGemini(trimmed) || modelLooksGemma(trimmed)) return { provider: "google", model: trimmed };
+  if (modelLooksOpenAI(trimmed)) return { provider: "openai", model: trimmed };
   return null;
 }
 

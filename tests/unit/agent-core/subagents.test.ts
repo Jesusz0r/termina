@@ -24,10 +24,12 @@ import {
   subagentSpawnSidecarRecord,
   subagentTaskFileName,
   truncateUtf8,
+  utf8TextSuffix,
   visibleSubagentTools,
   writeSubagentTaskFile,
   type SubagentParent,
 } from "../../../agent-core/subagents.ts";
+import { utf8TextSuffix as toolOutputUtf8TextSuffix } from "../../../agent-core/tool-output.ts";
 import { supportedEffortLevels } from "../../../agent-core/models/capabilities.ts";
 
 const okAuth = async () => ({ ok: true });
@@ -708,6 +710,12 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(subagentChildTid("../x", "bg-1")).toBeNull();
     expect(subagentChildTid("term-7", "bg-")).toBeNull();
     expect(subagentChildTid("", "bg-1")).toBeNull();
+  });
+
+  it("re-exports the shared UTF-8 suffix cutter", () => {
+    expect(utf8TextSuffix).toBe(toolOutputUtf8TextSuffix);
+    expect(utf8TextSuffix("hello world", 5)).toBe("world");
+    expect(utf8TextSuffix("aé", 2)).toBe("é");
   });
 
   it("recognizes exactly the managed events-dir files", () => {

@@ -18,7 +18,7 @@ import { existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { utf8TextPrefix } from "./tool-output.ts";
 
-export { utf8TextPrefix as truncateUtf8 } from "./tool-output.ts";
+export { utf8TextPrefix as truncateUtf8, utf8TextSuffix } from "./tool-output.ts";
 import { readBoundedRegularFile } from "./main/files.ts";
 import {
   isSupportedProvider,

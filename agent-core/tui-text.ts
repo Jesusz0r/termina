@@ -93,6 +93,19 @@ export function pickerRowMatches(line: string, row: SlashCommand): boolean {
   return label.split(/[\s()/]+/).filter(Boolean).some((token) => token.startsWith(rest));
 }
 
+/** Prefix-match slash names when the typed token is not an exact picker head. */
+function pickerHead(
+  line: string,
+  space: number,
+  commands: SlashCommand[],
+  heads: readonly string[],
+): SlashCommand[] | null {
+  if (space < 0 && !heads.includes(line)) {
+    return commands.filter((c) => c.name.startsWith(line));
+  }
+  return null;
+}
+
 export function matchingSlashCommands(
   line: string,
   commands: SlashCommand[] = SLASH_COMMANDS,
@@ -103,17 +116,15 @@ export function matchingSlashCommands(
   const space = line.indexOf(" ");
   const head = space < 0 ? line : line.slice(0, space);
   if (head === "/login" || head === "/logout") {
-    if (space < 0 && line !== "/login" && line !== "/logout") {
-      return commands.filter((c) => c.name.startsWith(line));
-    }
+    const prefix = pickerHead(line, space, commands, ["/login", "/logout"]);
+    if (prefix) return prefix;
     const rows = authCommandRows(head);
     if (space < 0) return rows;
     return rows.filter((c) => pickerRowMatches(line, c));
   }
   if (head === "/models" || head === "/model") {
-    if (space < 0 && line !== "/models" && line !== "/model") {
-      return commands.filter((c) => c.name.startsWith(line));
-    }
+    const prefix = pickerHead(line, space, commands, ["/models", "/model"]);
+    if (prefix) return prefix;
     if (modelRows.length === 0) {
       return space < 0 ? commands.filter((c) => c.name === head) : [];
     }
@@ -123,16 +134,14 @@ export function matchingSlashCommands(
     return modelRows.filter((c) => pickerRowMatches(`/model ${rest}`, c));
   }
   if (head === "/effort") {
-    if (space < 0 && line !== "/effort") {
-      return commands.filter((c) => c.name.startsWith(line));
-    }
+    const prefix = pickerHead(line, space, commands, ["/effort"]);
+    if (prefix) return prefix;
     if (space < 0) return effortRows;
     return effortRows.filter((c) => pickerRowMatches(line, c));
   }
   if (head === "/permissions") {
-    if (space < 0 && line !== "/permissions") {
-      return commands.filter((c) => c.name.startsWith(line));
-    }
+    const prefix = pickerHead(line, space, commands, ["/permissions"]);
+    if (prefix) return prefix;
     if (space < 0) return PERMISSION_COMMANDS;
     const exact = PERMISSION_COMMANDS.find((c) => c.submit === line);
     return exact ? [exact] : PERMISSION_COMMANDS.filter((c) => pickerRowMatches(line, c));

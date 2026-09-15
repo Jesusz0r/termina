@@ -135,7 +135,7 @@ describe("Agent Core Canonical Cost Contract", () => {
         reasoning: 0,
         storage: null,
       });
-      assert.equal(attempt.cost.cacheWriteTtlClass, "30m");
+      assert.equal(attempt.cost.cacheWriteTtlClass, "unknown");
       assert.equal(attempt.cost.reasoningBilling, "separate");
       assert.equal(attempt.cost.scope.role, "main");
       assert.equal(typeof attempt.cache.serializedToolsHash, "string");

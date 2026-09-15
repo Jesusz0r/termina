@@ -1207,15 +1207,15 @@ source bytes and session branches exactly inside the declared boundary.
 
 Files expected to change:
 
-- new `electron/worldlines.ts`
+- new `electron/worldlines/`
 - new session worker entry
 - new sandbox launcher
 - `electron/main.ts`
 - `electron/pty-terminal.ts`
 - `electron/preload.ts`
 - `shared/types.ts`
-- `scripts/build.mjs`
-- `scripts/dev.mjs`
+- `scripts/build.ts`
+- `scripts/dev.ts`
 
 Work:
 
@@ -1262,7 +1262,7 @@ Work:
 Files expected to change:
 
 - `electron/worldline-git.ts`
-- `electron/worldlines.ts`
+- `electron/worldlines/`
 - `electron/main.ts`
 - `electron/preload.ts`
 - `shared/types.ts`
@@ -1290,7 +1290,7 @@ Files expected to change:
 - `electron/sidecar.ts`
 - `electron/watcher.ts`
 - `electron/worldline-git.ts`
-- `electron/worldlines.ts`
+- `electron/worldlines/`
 - `shared/types.ts`
 - `src/timeline.ts`
 - `src/main.ts`
@@ -1320,7 +1320,7 @@ Files expected to change:
 - new `electron/challenge.ts`
 - new `electron/evidence.ts`
 - evidence worker entries
-- `electron/worldlines.ts`
+- `electron/worldlines/`
 - `electron/main.ts`
 - `electron/preload.ts`
 - `shared/types.ts`
@@ -1422,10 +1422,16 @@ fallback.
 
 ## 10. Test plan
 
-Use fresh Electron instances, clean fixtures, dedicated event directories, and
-a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
+Run the Electron matrix with `pnpm run test:e2e` (`tests/e2e/`, including
+`tests/e2e/worldlines.spec.ts`). Use fresh Electron instances, clean fixtures,
+dedicated event directories, and a dedicated `TERMINA_WORLDS_DIR` on the
+fixture's filesystem for every suite.
 
-### `scripts/worldline-preflight-test.mjs`
+Implementation owners: `electron/worldlines/` (comparisons, promotion,
+evidence, runs; preflight and capture live in `bootstrap.ts`) and
+`electron/terminal-runtime.ts` (in-process terminal lifecycle).
+
+### Preflight
 
 - Reject a non-Git folder, app-owned candidate root, sparse checkout,
   partial/promisor clone, source object alternate, unresolved index, submodule,
@@ -1436,7 +1442,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Support an unborn repository and the source repository's Git object format.
 - Keep exact ineligibility reasons stable.
 
-### `scripts/worldline-capture-test.mjs`
+### Capture
 
 - Preserve working bytes for staged, unstaged, untracked, binary, executable,
   symlink, renamed, and deleted files.
@@ -1451,7 +1457,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Evict a dot and source state together.
 - Keep pinned states during budget eviction.
 
-### `scripts/worldline-isolation-test.mjs`
+### Isolation
 
 - Block primary writes through absolute file-tool paths, relative escapes,
   symlinks, Bash, custom tools, Verify commands, Git commands, and child
@@ -1470,7 +1476,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
   limits.
 - Kill grandchildren during discard.
 
-### `scripts/worldline-fork-run-test.mjs`
+### Fork Run
 
 - Create A from the settled run and B from the start.
 - Assert a shared base and independent candidate heads.
@@ -1484,7 +1490,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Mark manual unowned edits collaborative and disable Challenge ranking.
 - Fail one candidate creation and remove both candidates.
 
-### `scripts/worldline-any-moment-test.mjs`
+### Fork Any Moment
 
 - Assert that every visible dot has a session sequence and source state.
 - Fork before a later edit and exclude that edit.
@@ -1496,7 +1502,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Create no dot for transient starts, capture timeout, generation mismatch, or
   exhausted budget.
 
-### `scripts/worldline-evidence-test.mjs`
+### Evidence
 
 - Use the base Verify command for both candidates.
 - Run candidates serially with equivalent isolated environments.
@@ -1505,7 +1511,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Do not let added tests replace required checks.
 - Permit explicit manual promotion without an evidence-winner label.
 
-### `scripts/worldline-challenge-test.mjs`
+### Challenge
 
 - Launch each profile with one action and the same default model settings.
 - Submit the effective original task with hidden one-shot challenge context.
@@ -1519,7 +1525,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Show a tie for inconclusive evidence.
 - Confirm ranking performs no model call.
 
-### `scripts/worldline-promote-test.mjs`
+### Promote
 
 - Promote A and B independently.
 - Preserve unrelated primary edits made after the fork.
@@ -1537,7 +1543,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Change a journaled path externally after the crash and require a recovery
   conflict instead of overwriting it.
 
-### `scripts/worldline-trust-test.mjs`
+### Trust
 
 - Start the agent without project trust.
 - Inherit one-process trust only from a trusted matching base.
@@ -1545,7 +1551,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Keep an untrusted source untrusted.
 - Require review after trust-sensitive resource changes.
 
-### `scripts/worldline-cleanup-test.mjs`
+### Cleanup
 
 - Cancel pair creation at each phase.
 - Close one candidate terminal without silent discard.
@@ -1567,9 +1573,9 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 
 Also run:
 
-- `npx tsc --noEmit`
-- `npm run build`
-- every existing E2E suite against a fresh instance
+- `pnpm run typecheck`
+- `pnpm run build`
+- `pnpm run test:e2e`
 
 ## 11. Release gates
 

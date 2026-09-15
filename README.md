@@ -102,11 +102,11 @@ pnpm run typecheck                 # tsc --noEmit
 pnpm run test:agent-core           # agent-core kernel harness tests (no Electron)
 pnpm run build                     # production build (Electron main + renderer)
 pnpm run spike -- capture          # one plain-node store spike suite
-pnpm run test:spikes               # capture · merge · platform · tree-delta
+pnpm run test:spikes               # native spikes + platform
 node --experimental-strip-types scripts/perf-baseline.ts    # capture latency baselines
 node --experimental-strip-types scripts/perf-compare.ts     # Rust core vs Git CLI on equal work
 pnpm run test:e2e                  # the full Electron e2e matrix (fresh instances)
-pnpm test                          # typecheck + agent-core + build + spikes
+pnpm test                          # typecheck + unit
 ```
 
 A new folder opens an **Agent (core)** tab. New tabs default to core.
@@ -132,9 +132,11 @@ Termina terminal before running model-driven e2e suites.
   Review, explorer, worldlines panel, session search, settings window.
 - `shared/` — types, commands, and the preferences validator shared by
   main, preload, and renderer.
-- `scripts/` — the e2e suites, the launcher, and the build steps.
-- The maintained design lives in `docs/reference/WORLDLINES.md`; completed phase
-  records are archived under `docs/archive/worldlines/`.
+- `scripts/` — the launcher, build steps, and packaging helpers.
+- `tests/e2e/` — the Playwright Electron matrix (`pnpm run test:e2e`).
+- The maintained Worldlines design lives in `docs/reference/WORLDLINES.md`.
+  Implementation owners: `electron/worldlines/` and
+  `electron/terminal-runtime.ts`.
 
 ## Contributing
 

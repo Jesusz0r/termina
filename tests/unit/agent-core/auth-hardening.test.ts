@@ -169,8 +169,15 @@ describe("auth hardening batch", () => {
     expect(resolveMod.parseModelRef("openai/")).toEqual({ provider: "openai", model: resolveMod.DEFAULT_MODELS.openai.main });
     expect(resolveMod.parseModelRef("anthropic/")).toEqual({ provider: "anthropic", model: resolveMod.DEFAULT_MODELS.anthropic.main });
     expect(resolveMod.parseModelRef("openai/gpt-5")).toEqual({ provider: "openai", model: "gpt-5" });
+    expect(resolveMod.parseModelRef("claude-haiku-4-5")).toEqual({ provider: "anthropic", model: "claude-haiku-4-5" });
+    expect(resolveMod.parseModelRef("grok-4.6")).toEqual({ provider: "xai", model: "grok-4.6" });
+    expect(resolveMod.parseModelRef("gemini-3.7-flash")).toEqual({ provider: "google", model: "gemini-3.7-flash" });
+    expect(resolveMod.parseModelRef("gemma-3-27b-it")).toEqual({ provider: "google", model: "gemma-3-27b-it" });
+    expect(resolveMod.parseModelRef("o2-mini")).toEqual({ provider: "openai", model: "o2-mini" });
+    expect(resolveMod.parseModelRef("chatgpt-4o-latest")).toEqual({ provider: "openai", model: "chatgpt-4o-latest" });
     expect(resolveMod.parseModelRef("mystery-model")).toBeNull();
     expect(resolveMod.parseModelRef("vendor/unknown-id")).toBeNull();
+    expect(resolveMod.parseModelRef("vendor/claude-sonnet-5")).toBeNull();
     expect(resolveMod.parseModelRef("")).toBeNull();
   });
 

@@ -3191,28 +3191,6 @@ html[data-theme="light"] #statusbar .muted {
   resize: vertical;
 }
 
-.modal-options {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.modal-option {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 8px 10px;
-  cursor: pointer;
-  text-align: left;
-  color: var(--text);
-  font-size: 13px;
-}
-
-.modal-option:hover {
-  border-color: var(--accent);
-}
-
 .modal-footer {
   display: flex;
   justify-content: flex-end;

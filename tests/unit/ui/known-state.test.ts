@@ -12,6 +12,7 @@ import {
   KNOWN_RECORDER_STATES,
   KNOWN_VERIFY_BADGE_STATES,
   UNKNOWN_STATE,
+  presentBlockedLabel,
 } from "../../../src/known-state.ts";
 
 describe("asKnownState (issue #272)", () => {
@@ -48,5 +49,43 @@ describe("asKnownState (issue #272)", () => {
       expect(src).toContain("asKnownState(");
       expect(src).not.toMatch(/falls back to (creating|unavailable|modified|pending|cancelled|paused)/);
     }
+  });
+});
+
+describe("presentBlockedLabel (issue #348)", () => {
+  it("maps protocol reasons to user phrases and keeps the blocked state", () => {
+    expect(presentBlockedLabel("lease-wait")).toBe("blocked: waiting to write");
+    expect(presentBlockedLabel("sidecar-paused")).toBe("blocked: paused");
+    expect(presentBlockedLabel("lease-wait")).not.toMatch(/lease/i);
+    expect(presentBlockedLabel("sidecar-paused")).not.toMatch(/sidecar/i);
+  });
+
+  it("keeps user-facing known reasons and omits unknown or empty ones", () => {
+    expect(presentBlockedLabel("tool-error-loop")).toBe("blocked: tool-error-loop");
+    expect(presentBlockedLabel("stalled")).toBe("blocked: stalled");
+    expect(presentBlockedLabel("exited-mid-run")).toBe("blocked: exited-mid-run");
+    expect(presentBlockedLabel("evil-reason")).toBe("blocked");
+    expect(presentBlockedLabel(null)).toBe("blocked");
+    expect(presentBlockedLabel(undefined)).toBe("blocked");
+    expect(presentBlockedLabel("")).toBe("blocked");
+  });
+
+  it("never prints writerId or protocol tokens for any known reason", () => {
+    for (const reason of KNOWN_ACTIVITY_REASONS) {
+      const label = presentBlockedLabel(reason);
+      expect(label.startsWith("blocked")).toBe(true);
+      expect(label).not.toMatch(/lease-wait|sidecar-paused|writerId|sidecar|lease/i);
+    }
+  });
+
+  it("is the only blocked-reason presenter for status and timeline", () => {
+    const mainSrc = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+    const timelineSrc = readFileSync(new URL("../../../src/timeline.ts", import.meta.url), "utf8");
+    expect(mainSrc).toContain("presentBlockedLabel(pane.activity?.reason)");
+    expect(timelineSrc).toContain("presentBlockedLabel(p?.activity?.reason)");
+    expect(timelineSrc).toContain("presentBlockedLabel(this.activity?.reason)");
+    expect(mainSrc).not.toContain("`blocked: ${reason}`");
+    expect(timelineSrc).not.toContain("`blocked: ${activityReason}`");
+    expect(timelineSrc).not.toContain("` — blocked: ${activityReason}`");
   });
 });

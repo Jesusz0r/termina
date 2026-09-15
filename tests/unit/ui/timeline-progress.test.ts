@@ -191,4 +191,33 @@ describe("timeline activity prefix (issue #291)", () => {
     expect(h.prefix.textContent).toBe("blocked");
     expect(h.prefix.title).toBe("blocked");
   });
+
+  it("maps lease-wait to a user phrase and keeps the blocked prefix", () => {
+    const h = makeHarness(fake.document);
+    h.view.setPrefix({
+      ok: 0,
+      error: 0,
+      open: 0,
+      activity: { state: "blocked", reason: "lease-wait" },
+    });
+    expect(h.prefix.hidden).toBe(false);
+    expect(h.prefix.textContent).toBe("blocked: waiting to write");
+    expect(h.prefix.title).toBe("blocked: waiting to write");
+    expect(h.prefix.textContent).not.toMatch(/lease/i);
+  });
+
+  it("maps sidecar-paused on the newest-dot tooltip without protocol tokens", () => {
+    const h = makeHarness(fake.document);
+    h.view.push(toolEvent(1));
+    h.view.setPrefix({
+      ok: 1,
+      error: 0,
+      open: 0,
+      activity: { state: "blocked", reason: "sidecar-paused" },
+    });
+    expect(h.prefix.textContent).toContain("blocked: paused");
+    expect(h.dot(1).title).toContain("blocked: paused");
+    expect(h.dot(1).title).not.toMatch(/sidecar/i);
+    expect(h.dot(1).title).not.toContain("writerId");
+  });
 });

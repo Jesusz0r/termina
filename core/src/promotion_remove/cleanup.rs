@@ -2,7 +2,7 @@
 use std::ffi::CString;
 use std::fs;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::Ordering;
 
 use serde_json::Value;
@@ -35,6 +35,202 @@ use crate::promote_fs::{
     promotion_test_pause,
 };
 
+#[derive(Clone, Copy)]
+enum CleanupTreeKind {
+    Incoming,
+    Quarantine,
+}
+
+impl CleanupTreeKind {
+    fn work_label(self) -> &'static str {
+        match self {
+            Self::Incoming => "promotion cleanup quarantine incoming tree",
+            Self::Quarantine => "promotion cleanup quarantine",
+        }
+    }
+
+    fn skip_missing(self) -> bool {
+        matches!(self, Self::Incoming)
+    }
+
+    fn child(self) -> &'static str {
+        match self {
+            Self::Incoming => "cleanup entry",
+            Self::Quarantine => "promotion quarantine entry",
+        }
+    }
+
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Incoming => "cleanup directory",
+            Self::Quarantine => "promotion quarantine entry",
+        }
+    }
+
+    fn symlink(self) -> &'static str {
+        match self {
+            Self::Incoming => "cleanup symlink",
+            Self::Quarantine => "promotion quarantine symlink",
+        }
+    }
+
+    fn retained(self) -> &'static str {
+        match self {
+            Self::Incoming => "evidence retained",
+            Self::Quarantine => "resolve or export retained evidence before retrying",
+        }
+    }
+}
+
+/// Bounded nofollow walk that counts `(entries, bytes, work)`.  `after_child`
+/// runs after each observed child is counted and before a directory is opened.
+fn promotion_cleanup_tree_counts(
+    dir: &fs::File,
+    relative: &str,
+    mut entries: usize,
+    mut work_bytes: u64,
+    kind: CleanupTreeKind,
+    mut after_child: impl FnMut(RawFd, &CString, &str, FileIdentity) -> Result<(), String>,
+) -> Result<(usize, u64, u64), String> {
+    let mut bytes = 0u64;
+    let mut stack = Vec::with_capacity(PROMOTION_DIRECTORY_MAX_DEPTH);
+    stack.push((
+        dir.try_clone().map_err(|error| match kind {
+            CleanupTreeKind::Incoming => format!("clone cleanup tree failed: {error}"),
+            CleanupTreeKind::Quarantine => format!("clone promotion quarantine failed: {error}"),
+        })?,
+        PromotionDirectoryStream::open(dir.as_raw_fd())?,
+        relative.to_string(),
+    ));
+    while !stack.is_empty() {
+        let next = stack
+            .last_mut()
+            .expect("cleanup tree scan stack is not empty")
+            .1
+            .next_entry()?;
+        let Some((name, c_name)) = next else {
+            stack.pop();
+            continue;
+        };
+        let current_relative = stack.last().expect("cleanup tree scan frame exists").2.clone();
+        let path_work = promotion_path_work_bytes(&current_relative, &name)?;
+        promotion_add_work(
+            &mut work_bytes,
+            path_work,
+            PROMOTION_DIRECTORY_MAX_NAME_BYTES,
+            kind.work_label(),
+        )?;
+        let child_relative = promotion_child_relative(&current_relative, &name)?;
+        let directory = stack.last().expect("cleanup tree scan frame exists").0.as_raw_fd();
+        let identity = match stat_at(directory, &c_name) {
+            Ok(identity) => identity,
+            Err(error) if kind.skip_missing() && missing_path(&error) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "stat {} {child_relative} failed: {error}",
+                    kind.child()
+                ));
+            }
+        };
+        if matches!(kind, CleanupTreeKind::Quarantine)
+            && !identity.is_dir()
+            && !identity.is_symlink()
+            && !identity.is_file()
+        {
+            return Err(format!(
+                "{} {child_relative} has unsupported type; {}",
+                kind.child(),
+                kind.retained()
+            ));
+        }
+        entries = entries.checked_add(1).ok_or(match kind {
+            CleanupTreeKind::Incoming => "cleanup tree entry count overflow",
+            CleanupTreeKind::Quarantine => "promotion quarantine entry count overflow",
+        })?;
+        if entries > PROMOTION_QUARANTINE_MAX_ENTRIES {
+            return Err(match kind {
+                CleanupTreeKind::Incoming => format!(
+                    "{} exceeds its entry bound; resolve or export retained evidence before retrying",
+                    kind.work_label()
+                ),
+                CleanupTreeKind::Quarantine => format!(
+                    "{} is at its entry bound; resolve or export retained evidence before retrying",
+                    kind.work_label()
+                ),
+            });
+        }
+        if matches!(kind, CleanupTreeKind::Incoming)
+            && !identity.is_dir()
+            && !identity.is_symlink()
+            && !identity.is_file()
+        {
+            return Err(format!(
+                "{} {child_relative} has unsupported type; {}",
+                kind.child(),
+                kind.retained()
+            ));
+        }
+        let logical_bytes = if identity.is_file() {
+            identity.len
+        } else if identity.is_symlink() {
+            u64::try_from(
+                read_link_at(directory, &c_name)
+                    .map_err(|error| {
+                        format!("read {} {child_relative} failed: {error}", kind.symlink())
+                    })?
+                    .len(),
+            )
+            .map_err(|_| match kind {
+                CleanupTreeKind::Incoming => "cleanup symlink byte count overflow",
+                CleanupTreeKind::Quarantine => "promotion quarantine symlink byte count overflow",
+            })?
+        } else {
+            0
+        };
+        bytes = bytes.checked_add(logical_bytes).ok_or(match kind {
+            CleanupTreeKind::Incoming => "cleanup tree byte count overflow",
+            CleanupTreeKind::Quarantine => "promotion quarantine byte count overflow",
+        })?;
+        if bytes > PROMOTION_QUARANTINE_MAX_BYTES {
+            return Err(format!(
+                "{} exceeds its byte bound; resolve or export retained evidence before retrying",
+                kind.work_label()
+            ));
+        }
+        after_child(directory, &c_name, &child_relative, identity)?;
+        if identity.is_dir() && !identity.is_symlink() {
+            if stack.len() >= PROMOTION_DIRECTORY_MAX_DEPTH {
+                return Err(format!(
+                    "{} exceeds its depth bound; {}",
+                    kind.work_label(),
+                    kind.retained()
+                ));
+            }
+            let child = open_at(
+                directory,
+                &c_name,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+            .map_err(|error| {
+                format!("open {} {child_relative} failed: {error}", kind.directory())
+            })?;
+            let opened_identity = stat_file(&child).map_err(|error| {
+                format!("fstat {} {child_relative} failed: {error}", kind.directory())
+            })?;
+            if !promotion_cleanup_same_namespace_identity(opened_identity, identity) {
+                return Err(format!(
+                    "{} {child_relative} changed while opening; {}",
+                    kind.directory(),
+                    kind.retained()
+                ));
+            }
+            let child_stream = PromotionDirectoryStream::open(child.as_raw_fd())?;
+            stack.push((child, child_stream, child_relative));
+        }
+    }
+    Ok((entries, bytes, work_bytes))
+}
+
 /// Validate a cleanup tree through descriptors without mutating it.  The
 /// final cleanup operation moves the complete tree, so deleting individual
 /// children is unnecessary and would reintroduce an inode check/use race.
@@ -51,109 +247,32 @@ pub(crate) fn validate_promotion_cleanup_tree(
     if !root.is_dir() || root.is_symlink() {
         return Err(format!("cleanup tree {relative} is not a real directory"));
     }
-    let mut entries = 1usize;
-    let mut bytes = 0u64;
     let mut work_bytes = u64::try_from(relative.len())
         .map_err(|_| "cleanup tree work accounting overflow")?;
     promotion_add_work(
         &mut work_bytes,
         std::mem::size_of::<FileIdentity>() as u64,
         PROMOTION_DIRECTORY_MAX_NAME_BYTES,
-        "promotion cleanup quarantine incoming tree",
+        CleanupTreeKind::Incoming.work_label(),
     )?;
-    let mut stack = Vec::with_capacity(PROMOTION_DIRECTORY_MAX_DEPTH);
-    stack.push((
-        dir.try_clone().map_err(|error| format!("clone cleanup tree failed: {error}"))?,
-        PromotionDirectoryStream::open(dir.as_raw_fd())?,
-        relative.to_string(),
-    ));
-    while !stack.is_empty() {
-        let next = stack
-            .last_mut()
-            .expect("cleanup scan stack is not empty")
-            .1
-            .next_entry()?;
-        let Some((name, c_name)) = next else {
-            stack.pop();
-            continue;
-        };
-        let current_relative = stack.last().expect("cleanup scan frame exists").2.clone();
-        let path_work = promotion_path_work_bytes(&current_relative, &name)?;
-        promotion_add_work(
-            &mut work_bytes,
-            path_work,
-            PROMOTION_DIRECTORY_MAX_NAME_BYTES,
-            "promotion cleanup quarantine incoming tree",
-        )?;
-        let child_relative = promotion_child_relative(&current_relative, &name)?;
-        let directory = stack.last().expect("cleanup scan frame exists").0.as_raw_fd();
-        let identity = match stat_at(directory, &c_name) {
-            Ok(identity) => identity,
-            Err(error) if missing_path(&error) => continue,
-            Err(error) => {
-                return Err(format!("stat cleanup entry {child_relative} failed: {error}"));
-            }
-        };
-        entries = entries
-            .checked_add(1)
-            .ok_or("cleanup tree entry count overflow")?;
-        if entries > PROMOTION_QUARANTINE_MAX_ENTRIES {
-            return Err("promotion cleanup quarantine incoming tree exceeds its entry bound; resolve or export retained evidence before retrying".to_string());
-        }
-        if !identity.is_dir() && !identity.is_symlink() && !identity.is_file() {
-            return Err(format!(
-                "cleanup entry {child_relative} has unsupported type; evidence retained"
-            ));
-        }
-        let logical_bytes = if identity.is_file() {
-            identity.len
-        } else if identity.is_symlink() {
-            u64::try_from(
-                read_link_at(directory, &c_name)
-                    .map_err(|error| format!("read cleanup symlink {child_relative} failed: {error}"))?
-                    .len(),
-            )
-            .map_err(|_| "cleanup symlink byte count overflow")?
-        } else {
-            0
-        };
-        bytes = bytes
-            .checked_add(logical_bytes)
-            .ok_or("cleanup tree byte count overflow")?;
-        if bytes > PROMOTION_QUARANTINE_MAX_BYTES {
-            return Err("promotion cleanup quarantine incoming tree exceeds its byte bound; resolve or export retained evidence before retrying".to_string());
-        }
-        promotion_test_pause(req, "promotion-cleanup-leaf-validated")?;
-        let after_validation = stat_at(directory, &c_name)
-            .map_err(|error| format!("stat cleanup entry {child_relative} failed: {error}"))?;
-        if after_validation != identity {
-            return Err(format!(
-                "cleanup entry {child_relative} changed; evidence retained"
-            ));
-        }
-        if identity.is_dir() && !identity.is_symlink() {
-            if stack.len() >= PROMOTION_DIRECTORY_MAX_DEPTH {
-                return Err("promotion cleanup quarantine incoming tree exceeds its depth bound; evidence retained".to_string());
-            }
-            let child = open_at(
-                directory,
-                &c_name,
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-            .map_err(|error| format!("open cleanup directory {child_relative} failed: {error}"))?;
-            let child_identity = stat_file(&child).map_err(|error| {
-                format!("fstat cleanup directory {child_relative} failed: {error}")
-            })?;
-            if !promotion_cleanup_same_namespace_identity(child_identity, identity) {
+    promotion_cleanup_tree_counts(
+        dir,
+        relative,
+        1,
+        work_bytes,
+        CleanupTreeKind::Incoming,
+        |directory, c_name, child_relative, identity| {
+            promotion_test_pause(req, "promotion-cleanup-leaf-validated")?;
+            let after_validation = stat_at(directory, c_name)
+                .map_err(|error| format!("stat cleanup entry {child_relative} failed: {error}"))?;
+            if after_validation != identity {
                 return Err(format!(
-                    "cleanup directory {child_relative} changed while opening; evidence retained"
+                    "cleanup entry {child_relative} changed; evidence retained"
                 ));
             }
-            let child_stream = PromotionDirectoryStream::open(child.as_raw_fd())?;
-            stack.push((child, child_stream, child_relative));
-        }
-    }
-    Ok((entries, bytes, work_bytes))
+            Ok(())
+        },
+    )
 }
 
 /// Return the number of entries and logical bytes already retained under one
@@ -165,89 +284,18 @@ pub(crate) fn promotion_quarantine_tree_usage(dir: &fs::File) -> Result<(usize, 
     if !identity.is_dir() || identity.is_symlink() {
         return Err("promotion quarantine container is not a real directory".to_string());
     }
-    let mut entries = 0usize;
-    let mut bytes = 0u64;
-    let mut work_bytes = std::mem::size_of::<FileIdentity>() as u64;
+    let work_bytes = std::mem::size_of::<FileIdentity>() as u64;
     if work_bytes > PROMOTION_DIRECTORY_MAX_NAME_BYTES {
         return Err("promotion cleanup quarantine exceeds its work bound".to_string());
     }
-    let mut stack = Vec::with_capacity(PROMOTION_DIRECTORY_MAX_DEPTH);
-    stack.push((
-        dir.try_clone().map_err(|error| format!("clone promotion quarantine failed: {error}"))?,
-        PromotionDirectoryStream::open(dir.as_raw_fd())?,
-        String::new(),
-    ));
-    while !stack.is_empty() {
-        let next = stack
-            .last_mut()
-            .expect("quarantine scan stack is not empty")
-            .1
-            .next_entry()?;
-        let Some((name, c_name)) = next else {
-            stack.pop();
-            continue;
-        };
-        let current_relative = stack.last().expect("quarantine scan frame exists").2.clone();
-        let path_work = promotion_path_work_bytes(&current_relative, &name)?;
-        promotion_add_work(
-            &mut work_bytes,
-            path_work,
-            PROMOTION_DIRECTORY_MAX_NAME_BYTES,
-            "promotion cleanup quarantine",
-        )?;
-        let child_relative = promotion_child_relative(&current_relative, &name)?;
-        let directory = stack.last().expect("quarantine scan frame exists").0.as_raw_fd();
-        let child_identity = stat_at(directory, &c_name)
-            .map_err(|error| format!("stat promotion quarantine entry {child_relative} failed: {error}"))?;
-        if !child_identity.is_dir() && !child_identity.is_symlink() && !child_identity.is_file() {
-            return Err(format!(
-                "promotion quarantine entry {child_relative} has unsupported type; resolve or export retained evidence before retrying"
-            ));
-        }
-        entries = entries
-            .checked_add(1)
-            .ok_or("promotion quarantine entry count overflow")?;
-        if entries > PROMOTION_QUARANTINE_MAX_ENTRIES {
-            return Err("promotion cleanup quarantine is at its entry bound; resolve or export retained evidence before retrying".to_string());
-        }
-        let logical_bytes = if child_identity.is_file() {
-            child_identity.len
-        } else if child_identity.is_symlink() {
-            u64::try_from(
-                read_link_at(directory, &c_name)
-                    .map_err(|error| format!("read promotion quarantine symlink {child_relative} failed: {error}"))?
-                    .len(),
-            )
-            .map_err(|_| "promotion quarantine symlink byte count overflow")?
-        } else {
-            0
-        };
-        bytes = bytes
-            .checked_add(logical_bytes)
-            .ok_or("promotion quarantine byte count overflow")?;
-        if bytes > PROMOTION_QUARANTINE_MAX_BYTES {
-            return Err("promotion cleanup quarantine exceeds its byte bound; resolve or export retained evidence before retrying".to_string());
-        }
-        if child_identity.is_dir() && !child_identity.is_symlink() {
-            if stack.len() >= PROMOTION_DIRECTORY_MAX_DEPTH {
-                return Err("promotion cleanup quarantine exceeds its depth bound; resolve or export retained evidence before retrying".to_string());
-            }
-            let child = open_at(
-                directory,
-                &c_name,
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-            .map_err(|error| format!("open promotion quarantine entry {child_relative} failed: {error}"))?;
-            let opened_identity = stat_file(&child)
-                .map_err(|error| format!("fstat promotion quarantine entry {child_relative} failed: {error}"))?;
-            if !promotion_cleanup_same_namespace_identity(opened_identity, child_identity) {
-                return Err(format!("promotion quarantine entry {child_relative} changed while opening; resolve or export retained evidence before retrying"));
-            }
-            let child_stream = PromotionDirectoryStream::open(child.as_raw_fd())?;
-            stack.push((child, child_stream, child_relative));
-        }
-    }
-    Ok((entries, bytes, work_bytes))
+    promotion_cleanup_tree_counts(
+        dir,
+        "",
+        0,
+        work_bytes,
+        CleanupTreeKind::Quarantine,
+        |_, _, _, _| Ok(()),
+    )
 }
 
 /// Scan all app-created quarantine containers under the descriptor-bound

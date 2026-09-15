@@ -66,11 +66,10 @@
     <div class="ticker">
       <div class="ticker-track" id="ticker-track">
         <span><i>●</i>&nbsp; Zero Git pollution</span>
-        <span><i>●</i>&nbsp; ~7× faster snapshots than git</span>
-        <span><i>●</i>&nbsp; sandbox-exec isolation</span>
+        <span><i>●</i>&nbsp; sandbox-exec isolation (macOS)</span>
         <span><i>●</i>&nbsp; Offline evidence runs</span>
         <span><i>●</i>&nbsp; Three-way merge promotion</span>
-        <span><i>●</i>&nbsp; APFS copy-on-write forks</span>
+        <span><i>●</i>&nbsp; APFS copy-on-write forks (macOS)</span>
         <span><i>●</i>&nbsp; Crash-recovery journals</span>
         <span><i>●</i>&nbsp; Parallel dispatch workers</span>
         <span><i>●</i>&nbsp; Scheduled dispatch + auto-verify</span>
@@ -101,7 +100,7 @@
         <div class="mock-body">
           <!-- left: agent TUI -->
           <div class="tui">
-            <div class="pane-label"><span>agent — interactive tui (pty)</span><span>gemini-2.5-pro</span></div>
+            <div class="pane-label"><span>agent — interactive tui (pty)</span><span>your model</span></div>
             <div class="tui-screen" id="tui-screen"></div>
             <div class="tui-input"><b>&gt;</b> add token caching to the auth middleware<span class="caret"></span></div>
           </div>
@@ -233,7 +232,7 @@
           <text class="fk" x="80" y="143" text-anchor="middle">HUMAN</text>
           <text class="flabel" x="80" y="162" text-anchor="middle">you</text>
 
-          <!-- PI TUI -->
+          <!-- AGENT TUI -->
           <rect class="fnode" x="200" y="110" width="170" height="80" rx="10"/>
           <text class="fk" x="285" y="136" text-anchor="middle">PTY · REAL TUI</text>
           <text class="flabel" x="285" y="157" text-anchor="middle">agent</text>
@@ -433,7 +432,7 @@
       <div class="reveal">
         <span class="eyebrow">Speed</span>
         <h2 class="section-title">Fast enough to record everything.</h2>
-        <p class="section-sub">Watch-live means snapshotting on every agent action. The hot paths run in a compiled Rust binary — never the Git CLI. Every row below is measured, including the ones where git holds its own.</p>
+        <p class="section-sub">Watch-live means snapshotting on every agent action. The hot paths run in a compiled Rust binary — never the Git CLI. Rows below are historical samples from before the single-boundary timing fix, including the ones where git holds its own — not current claims.</p>
       </div>
 
       <div class="bench-chart reveal" id="bench-chart">
@@ -469,7 +468,7 @@
           </div>
           <div class="bench-speed" style="color:var(--amber)">0.6× — git wins</div>
         </div>
-        <div class="bench-note">medians of phased samples on an apple m4, release build · lower is better · the core owns merges for isolation and zero repo pollution, not raw speed · reproduce: node --experimental-strip-types scripts/perf-compare.ts · ratios predate the single-boundary timing fix — re-measurement pending</div>
+        <div class="bench-note">historical · pre-timing-fix medians of phased samples on an apple m4, release build · lower is better · the core owns merges for isolation and zero repo pollution, not raw speed · reproduce: node --experimental-strip-types scripts/perf-compare.ts · re-measurement pending — not a current performance claim</div>
       </div>
     </div>
   </section>
@@ -479,7 +478,8 @@
     <div class="container">
       <div class="reveal">
         <span class="eyebrow">Get it</span>
-        <h2 class="section-title">Two minutes from download<br>to your first worldline.</h2>
+        <h2 class="section-title">Two minutes from download<br>to your first session.</h2>
+        <p class="section-sub">Open a folder, then <code>/login</code> and <code>/models</code>. Worldlines — fork, compare, promote — need a Git repo and macOS sandbox helpers; they are not on the Linux AppImage yet.</p>
       </div>
 
       <div class="install-box reveal">

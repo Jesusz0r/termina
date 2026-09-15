@@ -29,7 +29,8 @@ Termina uses the agent configuration in `~/.termina/agent`.
 | `core/` | `termina-core`, the Rust snapshot core — all Git operations |
 | `src/` | the renderer: panes, Monaco editor, timeline, Change Review, explorer |
 | `shared/` | types shared between main, preload, and renderer |
-| `scripts/` | the e2e suites, the launcher, and the build steps |
+| `scripts/` | the launcher, build steps, and packaging helpers |
+| `tests/e2e/` | Playwright Electron matrix (`pnpm run test:e2e`) |
 
 The renderer never talks to the agent. It only renders what the main
 process pushes. The terminal stays the source of truth.
@@ -41,9 +42,9 @@ pnpm exec tsc --noEmit        # typecheck
 pnpm run build                # production build
 pnpm run test:spikes          # plain-node spike suites (capture, merge, platform)
 pnpm run test:e2e              # the full Electron e2e matrix
+pnpm run test:e2e -- tests/e2e/worldlines.spec.ts  # one Playwright spec
 pnpm run test:electron-focused  # area suites (also test:agent-core-focused, test:build-focused)
 pnpm exec vitest run <path>     # any single file or directory; one-off specs need no alias
-node scripts/e2e.mjs --skip-build worldline-capture-test.mjs   # one suite
 ```
 
 E2e isolation convention (`tests/e2e/fixtures.ts`). The full Playwright

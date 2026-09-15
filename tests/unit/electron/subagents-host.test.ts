@@ -2,7 +2,14 @@ import { describe, it, expect, afterAll } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SubagentHost, lastResultFrame, type SubagentChild, type SubagentLauncher } from "../../../electron/subagents.ts";
+import {
+  SUBAGENT_STDERR_CAP_BYTES,
+  SUBAGENT_STDOUT_CAP_BYTES,
+  SubagentHost,
+  lastResultFrame,
+  type SubagentChild,
+  type SubagentLauncher,
+} from "../../../electron/subagents.ts";
 import { parseSubagentResultFile } from "../../../agent-core/subagents.ts";
 
 const roots: string[] = [];
@@ -467,6 +474,32 @@ describe("SubagentHost", () => {
     const two = `SUBAGENT_RESULT {"ok":true,"result":"first"}\nlog\nSUBAGENT_RESULT {"ok":false,"error":"last"}\n`;
     expect(lastResultFrame(two)).toEqual({ ok: false, error: "last" });
     expect(lastResultFrame(`SUBAGENT_RESULT {broken\n`)).toBeNull();
+  });
+
+  it("keeps the last result frame when stdout exceeds the byte cap", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    const pad = "x".repeat(SUBAGENT_STDOUT_CAP_BYTES);
+    s.procs[0]!.out(`${pad}\nSUBAGENT_RESULT {"ok":true,"result":"kept-tail"}\n`);
+    s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("settled");
+    expect(s.readResult().result).toBe("kept-tail");
+  });
+
+  it("keeps the stderr tail when the stream exceeds the byte cap", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    const line = "yyyyyyyy\n";
+    const n = Math.ceil(SUBAGENT_STDERR_CAP_BYTES / line.length) + 20;
+    s.procs[0]!.err(`${line.repeat(n)}unique-stderr-marker\n`);
+    s.procs[0]!.exit(1);
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("failed");
+    expect(s.readResult().error).toContain("unique-stderr-marker");
   });
 
   it("tracks child streams for liveness and releases them on finish", async () => {

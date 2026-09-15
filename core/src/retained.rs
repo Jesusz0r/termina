@@ -14,3 +14,4 @@ pub(crate) const RETAINED_ROOT_MARKER_MAX_BYTES: usize = 128;
 pub(crate) const RETAINED_ROOT_PROVENANCE_MAX_BYTES: usize = 4096;
 
 pub(crate) use ops::op_promotion_bound_root_transaction;
+pub(crate) use private_files::promotion_read_private_bounded_opened;

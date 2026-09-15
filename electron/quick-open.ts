@@ -139,11 +139,10 @@ export async function readGitignoreFile(abs: string): Promise<string | null> {
 }
 
 /**
- * Load ancestor .gitignore files for one directory. Same nested-load as
- * content-search `ensureGitignoreChain`: each directory is read once,
- * parse/match stay in shared/gitignore.ts.
+ * Load ancestor .gitignore files for one directory. Each directory is
+ * read once; parse/match stay in shared/gitignore.ts.
  */
-async function ensureGitignoreChain(
+export async function ensureGitignoreChain(
   rules: GitignoreRules,
   loaded: Set<string>,
   root: string,

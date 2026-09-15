@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from "vitest";
 import { join } from "node:path";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { WorldlineManager, disposeWorldlineCoreClient } from "../../../electron/worldlines/index.ts";
+import { WorldlineManager, disposeWorldlineGitCore } from "../../../electron/worldlines/index.ts";
 
 describe("Worldline Manager, Core Client & Retention Performance Unit Suite", () => {
 
@@ -309,7 +309,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
   });
 
   afterAll(() => {
-    disposeWorldlineCoreClient();
+    disposeWorldlineGitCore();
   });
 
 

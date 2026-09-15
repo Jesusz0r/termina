@@ -39,6 +39,9 @@ describe("agent-core #262–#271 / #256", () => {
     expect(parseModelRef("vendor/unknown-id")).toBeNull();
     expect(parseModelRef("")).toBeNull();
     expect(parseModelRef("grok-4.6")).toEqual({ provider: "xai", model: "grok-4.6" });
+    expect(parseModelRef("gemma-3-27b-it")).toEqual({ provider: "google", model: "gemma-3-27b-it" });
+    expect(parseModelRef("o2-mini")).toEqual({ provider: "openai", model: "o2-mini" });
+    expect(parseModelRef("vendor/claude-sonnet-5")).toBeNull();
     expect(parseModelRef("mystery-model", "openai")).toEqual({ provider: "openai", model: "mystery-model" });
   });
 

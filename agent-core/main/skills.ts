@@ -1,10 +1,11 @@
 /**
- * Skills and instruction blocks: SKILL.md discovery, the skill index page,
- * and the project/user AGENTS.md wrappers. Stateless between calls.
+ * Skills and instruction blocks: SKILL.md discovery plus the project/user
+ * AGENTS.md wrappers. The skill index itself is rendered by skill-index.ts.
+ * Stateless between calls.
  */
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { formatSkillIndex as formatCompactSkillIndex, type SkillIndexSkill } from "../skill-index.ts";
+import type { SkillIndexSkill } from "../skill-index.ts";
 import { GREP_VISIT_CAP, classifyWalkPath, fileHasNul, readBoundedRegularFile, sortUtf8 } from "./files.ts";
 
 export type Skill = SkillIndexSkill;
@@ -100,10 +101,6 @@ export function scanSkills(dirs: string[]): { skills: Skill[]; capped: boolean }
     return Buffer.compare(Buffer.from(a.abs, "utf8"), Buffer.from(b.abs, "utf8"));
   });
   return { skills, capped };
-}
-
-export function formatSkillIndex(skills: Skill[], opts?: { capped?: boolean }): string {
-  return formatCompactSkillIndex(skills, { capBytes: SKILL_XML_CAP, capped: opts?.capped });
 }
 
 function capParagraph(md: string, max: number): { text: string; omitted: number } {

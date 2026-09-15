@@ -7,7 +7,7 @@
 import { coreSessionFile, isCoreSessionId, parseSessionBundlePath } from "../../agent-core/session.js";
 import { errorCode } from "../../shared/guards.js";
 import { acquireSessionRetentionLock, releaseSessionRetentionLock, type SessionRetentionLock } from "../../shared/session-retention-lock.js";
-import { boundPromotionOpenDirectory, disposeWorldlineGitCore } from "../worldline-git.js";
+import { boundPromotionOpenDirectory } from "../worldline-git.js";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { isUncertainRetentionResult, readRetainedClaimAsync, removeRetainedClaim, removeRetainedEntry, retainedClaimName, writeRetainedClaim } from "./claims.js";
@@ -393,10 +393,4 @@ export class SessionRetentionOwner {
     return { destination: coreSessionFile(root, runId), ledger };
   }
 
-}
-
-
-/** Stop the shared native helper when a focused retention harness exits. */
-export function disposeSessionRetentionCoreClient(): void {
-  disposeWorldlineGitCore();
 }

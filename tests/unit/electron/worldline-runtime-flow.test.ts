@@ -97,7 +97,7 @@ describe("Worldline Runtime Flow Suite", () => {
     const sandboxBundle = join(root, "sandbox.mjs");
     await build({ entryPoints: ["electron/worldlines/index.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: worldlineBundle, logLevel: "silent" });
     await build({ entryPoints: ["electron/sandbox.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: sandboxBundle, logLevel: "silent" });
-    const { WorldlineManager, disposeWorldlineCoreClient, ensurePromotionRoots } = await import(`${pathToFileURL(worldlineBundle).href}?${Date.now()}`);
+    const { WorldlineManager, disposeWorldlineGitCore, ensurePromotionRoots } = await import(`${pathToFileURL(worldlineBundle).href}?${Date.now()}`);
     const { terminateSandboxProcessGroup } = await import(`${pathToFileURL(sandboxBundle).href}?${Date.now()}`);
     
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -341,7 +341,7 @@ describe("Worldline Runtime Flow Suite", () => {
     } finally {
       process.env.PATH = realPath;
       await manager?.dispose().catch(() => {});
-      disposeWorldlineCoreClient();
+      disposeWorldlineGitCore();
       await rm(root, { recursive: true, force: true });
       await stop();
     }
