@@ -28,6 +28,8 @@
  *   node --experimental-strip-types --no-warnings scripts/laziness-metrics.ts <trace-dir>
  */
 
+import { isRecord } from "../shared/guards.ts";
+
 export interface LazinessOptions {
   readonly maxFiles: number;
   readonly maxFileBytes: number;
@@ -46,10 +48,6 @@ const TURN_FILE_PATTERN = /^turn-(\d+)\.json$/;
 const TRACE_SCHEMA_VERSION = 2;
 const EDIT_TOOLS = new Set(["edit", "write_file"]);
 const CHECK_TOOL = "bash";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;

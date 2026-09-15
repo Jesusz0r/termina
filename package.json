@@ -13,7 +13,6 @@
   "scripts": {
     "dev": "node --experimental-strip-types scripts/dev.ts",
     "build": "node --experimental-strip-types scripts/build.ts && vite build",
-    "start": "electron .",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tests/tsconfig.json",
     "lint:no-git-cli": "sh scripts/no-git-cli.sh",
@@ -36,10 +35,7 @@
     "test": "pnpm run typecheck && pnpm run test:unit",
     "test:spikes": "pnpm run test:native && pnpm run spike -- platform",
     "test:e2e": "playwright test",
-    "spike": "node --experimental-strip-types scripts/spike.ts",
-    "dist": "pnpm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder",
-    "dist:dir": "pnpm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder --dir",
-    "dist:mac": "pnpm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder --mac"
+    "spike": "node --experimental-strip-types scripts/spike.ts"
   },
   "dependencies": {
     "@lydell/node-pty": "^1.2.0-beta.14",
