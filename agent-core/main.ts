@@ -218,7 +218,6 @@ import {
   sidecarStartFor,
   toolOutcomeTraceFields,
   toolOutcomeTraceInput,
-  toolResult,
   toolTranscriptDetail,
   toolTranscriptOutput,
   type PermissionMode,
@@ -2133,23 +2132,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   }
   if (mcpSession?.tools.some((t) => t.name === use.name)) {
     const got = await mcpSession.call(use.name, use.input, { shouldStop: () => interrupted });
-    return {
-      result: toolResult(use, got.content),
-      isError: got.isError,
-    bounded: {
-        state: got.state,
-        direction: got.direction,
-        limitBytes: got.limitBytes,
-        inputBytes: got.inputBytes,
-        retainedBytes: got.retainedBytes,
-        omittedBytes: got.omittedBytes,
-        outputBytes: got.outputBytes,
-        truncated: got.truncated,
-      },
-      cancellationScope: got.cancellationScope,
-      continuation: got.continuation,
-      repro: reproFor(use) ?? null,
-    };
+    return done(use, got);
   }
   return done(use, `error: unknown tool ${use.name}`, true);
 }

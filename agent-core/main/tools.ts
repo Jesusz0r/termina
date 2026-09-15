@@ -84,7 +84,11 @@ function boundedMetadata(value: BoundedText): BoundedOutcomeMetadata {
   };
 }
 
-export function done(use: ToolUse, value: string | ToolTextResult, isError?: boolean): ToolOutcome {
+export function done(
+  use: ToolUse,
+  value: string | (ToolTextResult & { cancellationScope?: McpCancellationScope }),
+  isError?: boolean,
+): ToolOutcome {
   const output = typeof value === "string"
     ? Object.freeze({ ...genericToolText(value, isError === true), repro: reproFor(use) ?? null })
     : value;
@@ -94,6 +98,7 @@ export function done(use: ToolUse, value: string | ToolTextResult, isError?: boo
     bounded: boundedMetadata(output),
     continuation: output.continuation ?? null,
     repro: output.repro ?? null,
+    ...(output.cancellationScope === undefined ? {} : { cancellationScope: output.cancellationScope }),
     ...(output.stdout ? { stdout: output.stdout } : {}),
     ...(output.stderr ? { stderr: output.stderr } : {}),
     ...(output.exitCode === undefined ? {} : { exitCode: output.exitCode }),
