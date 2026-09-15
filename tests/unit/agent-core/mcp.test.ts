@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createServer } from "node:http";
+import { done, toolResult } from "../../../agent-core/main/tools.ts";
 import * as mcp from "../../../agent-core/mcp.ts";
 
 const {
@@ -361,6 +362,25 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
       expect(result.truncated).toBe(true);
       expect(result.content).toMatch(/mcp output incomplete: failed/);
       expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it("goes through done() with pass-through bounded metadata and cancellationScope (#373)", () => {
+      const use = { id: "call-mcp", name: "mcp_server_tool", input: {} };
+      const result = normalizeMcpCallResult({ content: [{ type: "text", text: "mcp-ok" }] });
+      const outcome = done(use, result);
+      expect(outcome.result).toEqual(toolResult(use, result.content));
+      expect(outcome.isError).toBe(false);
+      expect(outcome.cancellationScope).toBe("none");
+      expect(outcome.bounded).toEqual({
+        state: result.state,
+        direction: result.direction,
+        limitBytes: result.limitBytes,
+        inputBytes: result.inputBytes,
+        retainedBytes: result.retainedBytes,
+        omittedBytes: result.omittedBytes,
+        outputBytes: result.outputBytes,
+        truncated: result.truncated,
+      });
     });
   });
 });
