@@ -97,11 +97,11 @@ describe("mac window chrome", () => {
 
     const requests: boolean[] = [];
     const checks: boolean[] = [];
-    let openHandler: (() => { action: "deny" }) | null = null;
+    let openAction: { action: "deny" } | undefined;
     attachAppWindowSecurity({
       webContents: {
         setWindowOpenHandler(handler) {
-          openHandler = handler;
+          openAction = handler();
         },
         session: {
           setPermissionRequestHandler(handler) {
@@ -115,7 +115,7 @@ describe("mac window chrome", () => {
         },
       },
     });
-    expect(openHandler?.()).toEqual({ action: "deny" });
+    expect(openAction).toEqual({ action: "deny" });
     expect(requests).toEqual([true, false]);
     expect(checks).toEqual([true, false]);
   });
