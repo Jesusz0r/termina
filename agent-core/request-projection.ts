@@ -39,7 +39,6 @@ export type RequestOverlay = {
 };
 
 export type BuildRequestOverlayOptions = {
-  messages: readonly ProjectionMessage[];
   hostContext?: string;
   maxBytes?: number;
 };
@@ -123,7 +122,6 @@ function truncateHostOverlayBytes(hostBytes: Buffer, maxBytes: number): Buffer |
  * file operation, so request overlays never duplicate read/modified paths.
  */
 export function buildRequestOverlay(opts: BuildRequestOverlayOptions): RequestOverlay | null {
-  void opts.messages;
   const maxBytes = overlayByteCap(opts.maxBytes);
   const safe = hostContextSafe(opts.hostContext ?? "");
   if (!safe) return null;

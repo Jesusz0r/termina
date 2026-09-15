@@ -542,11 +542,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const hostBridge = "core-test-bridge";
     writeFileSync(join(hostDir, `verify-${hostId}.md`), "verify-body");
     writeFileSync(join(hostDir, `edits-${hostId}.md`), "edits-body");
-    const ctx = host.readContextFiles(hostDir, hostId);
+    const ctx = host.readContextFilesResult(hostDir, hostId).text;
     check("context concatenates verify and edits", ctx.includes("verify-body") && ctx.includes("edits-body") && ctx.includes("---"));
     check("context skips missing mailbox", !ctx.includes("mailbox"));
     writeFileSync(join(hostDir, `verify-${hostId}.md`), "x".repeat(host.HOST_CONTEXT_BYTES + 100));
-    const cappedContext = host.readContextFiles(hostDir, hostId);
+    const cappedContext = host.readContextFilesResult(hostDir, hostId).text;
     check("host context has a total byte cap", Buffer.byteLength(cappedContext) === host.HOST_CONTEXT_BYTES);
     check("host context reports truncation", cappedContext.endsWith("[host context truncated]"));
     const promptName = host.promptFileName(hostId, hostBridge, "abcd1234");
@@ -4356,15 +4356,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         stampedUserFirstText === "hi" &&
         stampedUserFirstMarkType === "ephemeral",
     );
-    check("request overlay omits empty", workingSetForTest({ messages: [] }) === "");
+    check("request overlay omits empty", workingSetForTest({}) === "");
     const overlayMsgs: ProjectionMessage[] = [
       { role: "assistant", content: [{ type: "tool_use", name: "edit", input: { path: "a.ts" } }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "ok" }] },
     ];
-    const overlay = workingSetForTest({ messages: overlayMsgs, hostContext: "verify failed" });
+    const overlay = workingSetForTest({ hostContext: "verify failed" });
     check("request overlay excludes edit inventory", !overlay.includes("a.ts") && !overlay.includes("<modified-files>"));
     check("request overlay includes host context", overlay.includes("verify failed") && overlay.startsWith("<working-set>"));
-    check("request overlay excludes history-only inventory", workingSetForTest({ messages: overlayMsgs }) === "");
+    check("request overlay excludes history-only inventory", workingSetForTest({}) === "");
     check("cache-cost compaction waits below 100k", shouldCompactForCacheCost(99_999, 0, 120_000, false) === false);
     check("cache-cost compaction waits on a cache hit", shouldCompactForCacheCost(120_000, 0.8, 120_000, false) === false);
     check("cache-cost compaction starts on an expensive miss", shouldCompactForCacheCost(120_000, 0.1, 120_000, false) === true);

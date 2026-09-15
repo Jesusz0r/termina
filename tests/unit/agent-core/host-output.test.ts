@@ -28,7 +28,7 @@ describe("Agent Core Host Output & Context Bounding", () => {
     writeFileSync(join(root, `mine-${terminalId}.md`), "legacy prompt instruction");
     writeFileSync(join(root, `mine-${terminalId}.json`), JSON.stringify([protectedFile]));
 
-    expect(host.readContextFiles(root, terminalId)).toBe("");
+    expect(host.readContextFilesResult(root, terminalId).text).toBe("");
     expect(host.readProtectedPaths(root, terminalId)).toEqual(new Set([protectedFile]));
   });
 
@@ -86,7 +86,6 @@ describe("Agent Core Host Output & Context Bounding", () => {
     expect(result.omittedBytes).toBeGreaterThan(0);
     expect(result.text).not.toContain("\uFFFD");
     expect(result.text).toMatch(/\[host context truncated\]$/);
-    expect(host.readContextFiles(root, terminalId)).toBe(result.text);
   });
 
   it("distinguishes an interrupted read", () => {

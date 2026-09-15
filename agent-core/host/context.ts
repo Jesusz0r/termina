@@ -330,12 +330,6 @@ export function readContextFilesResult(
 }
 
 
-/** Existing bridge contract: callers that only need text get the bounded view. */
-export function readContextFiles(eventsDir: string, terminalId: string): string {
-  return readContextFilesResult(eventsDir, terminalId).text;
-}
-
-
 /**
  * Read the machine-only Mine policy used by mutation tool gates.
  *
