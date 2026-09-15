@@ -1,7 +1,8 @@
 # Contributing to Termina
 
-Thanks for helping out. This guide covers the setup, the workflow, and
-the rules the project lives by.
+Thanks for helping out. This guide covers setup and workflow.
+The text below is convention and advisory. It does not add CI gates.
+See `docs/reference/GOVERNORS.md` for what actually fails a change.
 
 ## Development setup
 
@@ -45,7 +46,8 @@ pnpm exec vitest run <path>     # any single file or directory; one-off specs ne
 node scripts/e2e.mjs --skip-build worldline-capture-test.mjs   # one suite
 ```
 
-E2e rules that matter:
+E2e isolation convention (`tests/e2e/fixtures.ts`). The full Playwright
+matrix is not in pull-request CI:
 
 - Each runner invocation owns a fresh root containing its fixtures,
   events, worlds, Electron user-data profiles, and a HOME with its own
@@ -64,17 +66,16 @@ E2e rules that matter:
 
 ## Code conventions
 
-- Comments are written in Simplified Technical English (STE): short
-  active sentences, no abbreviations, no slang. Read `AGENTS.md` for
-  the full rules — they apply to every comment in the repo.
+- Convention: comments use Simplified Technical English (STE): short
+  active sentences, no abbreviations, no slang. `AGENTS.md` states the
+  same convention. No CI job checks comment wording.
 - IPC channels use the `area:action` pattern (`verify:run`,
   `timeline:get`).
 - Terminal ids use the `term-N` pattern.
-- Performance over everything: the main process must never block on
-  slow work — that is why captures, merges, and hashing run in the Rust
-  core.
-- No backwards compatibility: remove dead code immediately, and update
-  every place that depends on a changed feature.
+- Convention: keep the main process off slow work. Captures, merges,
+  and hashing run in the Rust core. Unchecked in CI.
+- Convention: do not keep backwards-compat shims. Remove dead code
+  and update callers. See `AGENTS.md`. Unchecked in CI.
 
 ## Changing the Rust core
 
@@ -87,14 +88,17 @@ under `electron/worldline-git/`. When you add an op:
    `electron/worldline-git.ts`.
 3. Run the spike suites (`pnpm run test:spikes`) — they exercise the
    store byte-for-byte through the real binary.
-4. Keep `cargo clippy` and `cargo fmt --check` clean.
+4. Convention (unchecked in CI): keep `cargo clippy` and
+   `cargo fmt --check` clean when you touch `core/`.
 
 ## Submitting changes
 
 1. Branch off `main`, keep changes focused.
 2. Run `pnpm exec tsc --noEmit`, `pnpm run build`, the spike suites, and the
    e2e suites that touch your change.
-3. Commit with the repo identity: `termina <dev@termina.local>`.
+3. Convention: app-created snapshot commits use
+   `termina <dev@termina.local>` (`AGENTS.md`). Contributor commit
+   identity is not gated.
 4. Open a pull request; describe what changed and what you verified.
 
 ## Releasing

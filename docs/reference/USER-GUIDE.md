@@ -1,6 +1,7 @@
 # Termina User Guide
 
-> **Status:** current product reference.
+> **Status:** current product reference. Advisory. This guide describes
+> the product. It does not govern implementation or CI.
 
 Termina is mission control for your coding agent: watch every edit live,
 verify in one click, fork any moment, and merge only the winner — your Git
