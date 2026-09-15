@@ -18,10 +18,7 @@ export const CACHE_CAPABILITY_FEATURE = {
   promptCacheKey: "prompt_cache_key",
   promptCacheOptions: "prompt_cache_options",
   promptCacheBreakpoint: "prompt_cache_breakpoint",
-  xaiConversationHeader: "x-grok-conv-id",
-  googleCachedContent: "google-cached-content",
   ttl: "cache-ttl",
-  lookback: "cache-lookback",
 } as const;
 
 
@@ -198,13 +195,14 @@ export function documentedCacheCapability(scope: CacheCapabilityScope): CacheCap
     }
     // x-grok-conv-id is Chat Completions only
     // (https://docs.x.ai/developers/advanced-api-usage/prompt-caching/maximizing-cache-hits).
-    // Production xAI is openai-responses and uses prompt_cache_key instead.
+    // Production xAI is openai-responses (`protocol: () => "openai-responses"`)
+    // and uses prompt_cache_key. cacheSessionHeaders still emits the header for
+    // an openai-completions identity, but that is not a live production route.
   }
   // Production Google speaks openai-completions against the OpenAI-compat
-  // endpoint. Native cachedContent/TTL live on generateContent
-  // (https://ai.google.dev/gemini-api/docs/generate-content/caching) and are
-  // not claimed: the google provider never selects google-generate, and
-  // Zen-Gemini stays an opaque relay.
+  // endpoint. Native generateContent cachedContent CRUD
+  // (https://ai.google.dev/gemini-api/docs/caching) is not claimed: the google
+  // provider never selects google-generate, and Zen-Gemini stays an opaque relay.
   return unknownCapability("feature-not-documented-for-route");
 }
 

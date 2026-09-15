@@ -619,8 +619,7 @@ function cacheIdentityForRole(role: "main" | "summary", provider: ProviderId, mo
   // selected model happens to be a Grok model.
   if (
     provider === "xai" &&
-    !cacheCapabilitySupported(provider, model, CACHE_CAPABILITY_FEATURE.promptCacheKey) &&
-    !cacheCapabilitySupported(provider, model, CACHE_CAPABILITY_FEATURE.xaiConversationHeader)
+    !cacheCapabilitySupported(provider, model, CACHE_CAPABILITY_FEATURE.promptCacheKey)
   ) {
     return null;
   }

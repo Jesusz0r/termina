@@ -36,23 +36,16 @@ describe("unwired surface removed, live cache surface kept (refs #203 item 1)", 
     expect("catalogReasoningLevels" in capabilities).toBe(false);
   });
 
-  it("keeps the wired text helper and the cachedContent serializer field", () => {
+  it("keeps the wired text helper and does not emit unused cachedContent", () => {
     expect("textFromCompletionPayload" in compat).toBe(true);
-    const native = compat.googleGenerateBody(
-      "sys",
-      [{ role: "user", content: "hi" }],
-      [],
-      { provider: "google", cachedContent: "cachedContents/cache-1" },
-    );
-    expect(native.cachedContent).toBe("cachedContents/cache-1");
-    expect(() =>
-      compat.googleGenerateBody("sys", [{ role: "user", content: "hi" }], [], { provider: "google", cachedContent: "cache-1" }),
-    ).toThrow(/cached content name/i);
+    expect("isGoogleCachedContentName" in compat).toBe(false);
+    const native = compat.googleGenerateBody("sys", [{ role: "user", content: "hi" }], [], { provider: "google" });
+    expect(native.cachedContent).toBeUndefined();
   });
 
   it("does not claim native Gemini cache on unreachable google-generate scopes (refs #216)", () => {
-    expect(CACHE_CAPABILITY_FEATURE.googleCachedContent).toBe("google-cached-content");
-    const native = { provider: "google", protocol: "google-generate", route: "generativelanguage.googleapis.com", model: "gemini-3.7-flash", feature: CACHE_CAPABILITY_FEATURE.googleCachedContent } as const;
+    expect("googleCachedContent" in CACHE_CAPABILITY_FEATURE).toBe(false);
+    const native = { provider: "google", protocol: "google-generate", route: "generativelanguage.googleapis.com", model: "gemini-3.7-flash", feature: "google-cached-content" } as const;
     expect(documentedCacheCapability(native).supported).toBeNull();
     expect(documentedCacheCapability({ ...native, protocol: "openai-completions" }).supported).toBeNull();
   });
