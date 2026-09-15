@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile, lstat, realpath } from "node:f
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
-  disposeWorldlineCoreClient,
+  disposeWorldlineGitCore,
   ensurePromotionRoots,
   recoverPromotionJournals,
 } from "../../../electron/worldlines/index.js";
@@ -444,6 +444,6 @@ describe("Promotion after-applied crash recovery", () => {
   });
 
   afterAll(() => {
-    disposeWorldlineCoreClient();
+    disposeWorldlineGitCore();
   });
 });

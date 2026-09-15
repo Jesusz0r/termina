@@ -10,4 +10,4 @@ export { createPromotionArtifactManifest, setPromotionRecoveryTestHookForTest, w
 export { readComparisonManifestBound, writeComparisonManifestBound, writeComparisonMarkerBound } from "./promotion-recovery/manifests.js";
 export { copyBoundPrivateFile, createSnapshotTemplateDirectory, ensureBoundChildDirectory, ensureBoundDirectory, ensureBoundRetainedRoot, materializePromotionDirectoryPlan, probePromotionDirectory, refreshComparisonBindings } from "./promotion-recovery/bound-dirs.js";
 export { boundPromotionExpectedLeaf, copyBoundBeforeImage, isMaterializedPromotionState, isRestorablePromotionState, promotionDestination, promotionDestinationComponents, promotionParentIdentity, promotionSourceComponents, promotionStateHash, promotionStatesEqual, readPromotionEntry } from "./promotion-recovery/entry-state.js";
-export { disposeWorldlineCoreClient, ensurePromotionRoots, recoverPromotionJournals, rollbackPromotion } from "./promotion-recovery/recovery.js";
+export { ensurePromotionRoots, recoverPromotionJournals, rollbackPromotion } from "./promotion-recovery/recovery.js";

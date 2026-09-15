@@ -16,8 +16,7 @@ import {
   type BoundOwnedDirectory,
   type PromotionFsIdentity,
 } from "./worldline-git.js";
-
-const MAX_AGENT_RESOURCE_BYTES = 200 * 1024 * 1024;
+import { MAX_AGENT_RESOURCE_BYTES } from "./worldlines/limits.js";
 
 /** Live reads into main-owned state, evaluated at call time. */
 export interface EvidenceHomeHost {
