@@ -21,6 +21,7 @@ use crate::promote_fs::{
     promotion_test_pause,
     stat_promotion_journal_file,
 };
+use crate::retained::promotion_read_private_bounded_opened;
 
 pub(crate) fn op_promotion_bound_read_journal(req: &Value) -> Result<Value, String> {
     let (root, _root_identity, _capability) = open_promotion_bound_root(
@@ -97,9 +98,9 @@ pub(crate) fn op_promotion_bound_read_journal(req: &Value) -> Result<Value, Stri
 
 /// Read one private regular file below a descriptor-bound parent.  This is
 /// used for root provenance records, which live beside (rather than inside)
-/// the mutable root leaf.  The file descriptor and its parent/name identity
-/// are checked before and after the bounded read so a pathname replacement
-/// cannot supply or alter the provenance bytes.
+/// the mutable root leaf.  The retained private-file helper authenticates
+/// the descriptor and pathname before and after the bounded read so a
+/// pathname replacement cannot supply or alter the provenance bytes.
 pub(crate) fn op_promotion_bound_read_file(req: &Value) -> Result<Value, String> {
     let (root, _root_identity, _capability) =
         open_promotion_bound_root(req, "root", "rootIdentity", "rootCapability")?;
@@ -128,45 +129,24 @@ pub(crate) fn op_promotion_bound_read_file(req: &Value) -> Result<Value, String>
         libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
     )
     .map_err(|error| format!("open promotion read file failed: {error}"))?;
-    let opened = stat_promotion_journal_file(&file)
-        .map_err(|error| format!("fstat promotion read file failed: {error}"))?;
-    if !opened.file.is_file()
-        || opened.file.mode & 0o077 != 0
-        || opened.uid != unsafe { libc::geteuid() as u64 }
-        || opened.links != 1
-        || opened.file.len > max_bytes
-    {
-        return Err("promotion read file is not a bounded private regular file".to_string());
-    }
+    let (identity, bytes) = promotion_read_private_bounded_opened(
+        &parent,
+        leaf,
+        file,
+        max_bytes as usize,
+        "promotion read file",
+    )?;
     if let Some(expected) = expected {
-        if opened.file.dev != expected.dev || opened.file.ino != expected.ino {
+        if identity.dev != expected.dev || identity.ino != expected.ino {
             return Err("promotion read file identity mismatch".to_string());
         }
-    }
-    let mut bytes = Vec::new();
-    let read_limit = max_bytes
-        .checked_add(1)
-        .ok_or("promotion read file budget overflow")?;
-    (&file)
-        .take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read promotion file failed: {error}"))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err("promotion read file exceeds its bounded read budget".to_string());
-    }
-    let after = stat_promotion_journal_file(&file)
-        .map_err(|error| format!("fstat promotion read file failed: {error}"))?;
-    let path_after = stat_at(parent.as_raw_fd(), leaf)
-        .map_err(|error| format!("stat promotion read file failed: {error}"))?;
-    if opened != after || after.file != path_after {
-        return Err("promotion read file changed while reading".to_string());
     }
     Ok(json!({
         "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
         "byteLength": bytes.len(),
         "identity": {
-            "dev": after.file.dev.to_string(),
-            "ino": after.file.ino.to_string(),
+            "dev": identity.dev.to_string(),
+            "ino": identity.ino.to_string(),
         },
     }))
 }

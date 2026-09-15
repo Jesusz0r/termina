@@ -11,7 +11,7 @@ import { boundPromotionCreateDirectory, boundPromotionOpenDirectory, boundPromot
 import type { BoundPromotionExpectedLeaf, BoundPromotionExpectedMissing, PromotionFsIdentity } from "./bound-promotion.js";
 
 
-const NON_PRIVATE_PROMOTION_READ = "promotion read file is not a bounded private regular file";
+const NON_PRIVATE_PROMOTION_READ = "promotion read file is not a bounded private app-owned file";
 
 
 /**
