@@ -439,9 +439,23 @@ test.describe("Explorer filter", () => {
     await expect.poll(shown, { timeout: 10_000 }).toBe(0);
     await expect(input).toHaveClass(/no-matches/);
 
-    // Escape clears and the tree returns.
+    const clear = page.locator("#explorer-filter-clear");
+    await expect(clear).toBeVisible();
+    await clear.click();
+    await expect(input).toHaveValue("");
+    await expect(clear).toBeHidden();
+    await expect(page.locator("#explorer-tree").getByText("greeting.ts")).toBeVisible();
+    await expect(input).toBeFocused();
+  });
+
+  test("Escape also clears the filter and returns to the tree", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const input = page.locator("#explorer-filter-input");
+    await input.fill("zzzqqq");
+    await expect(page.locator("#explorer-filter-clear")).toBeVisible();
     await input.press("Escape");
     await expect(input).toHaveValue("");
+    await expect(page.locator("#explorer-filter-clear")).toBeHidden();
     await expect(page.locator("#explorer-tree").getByText("greeting.ts")).toBeVisible();
   });
 
@@ -472,6 +486,7 @@ test.describe("Explorer filter", () => {
     const input = page.locator("#explorer-filter-input");
     await input.fill("greeting");
     await expect(input).toHaveValue("greeting");
+    await expect(page.locator("#explorer-filter-clear")).toBeVisible();
 
     const other = join(runRoot, "filter-other");
     mkdirSync(other, { recursive: true });
@@ -479,6 +494,7 @@ test.describe("Explorer filter", () => {
     await expect(page.locator(".project-tab")).toHaveCount(2, { timeout: 10_000 });
     // A query from the previous project must not carry over.
     await expect(input).toHaveValue("");
+    await expect(page.locator("#explorer-filter-clear")).toBeHidden();
   });
 });
 

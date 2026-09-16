@@ -71,6 +71,7 @@ export class Explorer {
    *  branch still shows that something inside it changed. */
   private changedDirRel = new Set<string>();
   private filterInput: HTMLInputElement | null = null;
+  private filterClearBtn: HTMLButtonElement | null = null;
   /** The entry behind each row, so keyboard actions act on the same object the
    *  mouse does. Keyed by element so a rebuilt row never inherits a stale one. */
   private readonly rowEntry = new WeakMap<HTMLElement, ExplorerEntry>();
@@ -84,14 +85,20 @@ export class Explorer {
   constructor(container: HTMLElement) {
     this.treeEl = container.querySelector("#explorer-tree") as HTMLElement;
     this.filterInput = container.querySelector<HTMLInputElement>("#explorer-filter-input");
-    this.filterInput?.addEventListener("input", () => this.filter.setFilter(this.filterInput?.value ?? ""));
+    this.filterClearBtn = container.querySelector<HTMLButtonElement>("#explorer-filter-clear");
+    this.filterInput?.addEventListener("input", () => {
+      this.syncFilterClear();
+      this.filter.setFilter(this.filterInput?.value ?? "");
+    });
+    // Keep focus in the box: mousedown on × would otherwise steal it.
+    this.filterClearBtn?.addEventListener("mousedown", (e) => e.preventDefault());
+    this.filterClearBtn?.addEventListener("click", () => this.clearFilter(true));
     this.filterInput?.addEventListener("keydown", (e) => {
       // Escape clears the filter and hands focus back to the tree, so the
       // arrow keys keep working without a mouse trip.
       if (e.key === "Escape" && this.filterInput?.value) {
         e.preventDefault();
-        this.filterInput.value = "";
-        this.filter.setFilter("");
+        this.clearFilter(false);
         this.keyboard.restoreFocus();
         return;
       }
@@ -209,6 +216,19 @@ export class Explorer {
     }
   }
 
+  /** Empty the filter box and drop the live query. × keeps focus; Escape does not. */
+  private clearFilter(keepInputFocus: boolean): void {
+    if (this.filterInput) this.filterInput.value = "";
+    this.filter.setFilter("");
+    this.syncFilterClear();
+    if (keepInputFocus) this.filterInput?.focus();
+  }
+
+  /** × is only in the tab order while the box has text. */
+  private syncFilterClear(): void {
+    if (this.filterClearBtn) this.filterClearBtn.hidden = !this.filterInput?.value;
+  }
+
   /**
    * Folder a File-menu create should land in: the selected folder, the parent of
    * the selected file, or the project root when nothing is selected. The context
@@ -236,6 +256,7 @@ export class Explorer {
     // The filter is project-relative too; clear it rather than carry matches over.
     this.filter.reset();
     if (this.filterInput) this.filterInput.value = "";
+    this.syncFilterClear();
     // Keyboard state is project-relative as well.
     this.keyboard.reset();
     this.clearExpandTimer();

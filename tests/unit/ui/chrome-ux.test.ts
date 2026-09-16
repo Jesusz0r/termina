@@ -201,6 +201,16 @@ describe("clear modified confirm", () => {
   });
 });
 
+describe("explorer filter chrome", () => {
+  it("ships a clear control on the filter box", () => {
+    const explorerSrc = readFileSync(new URL("../../../src/components/explorer.ts", import.meta.url), "utf8");
+    expect(html).toContain('id="explorer-filter-clear"');
+    expect(html).toContain('aria-label="Clear filter"');
+    expect(explorerSrc).toContain("clearFilter(true)");
+    expect(explorerSrc).toContain("this.filterClearBtn.hidden = !this.filterInput?.value");
+  });
+});
+
 describe("settings chrome", () => {
   it("opens from the command/menu path and lands on General", () => {
     expect(html).not.toContain("btn-settings");

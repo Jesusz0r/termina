@@ -3445,13 +3445,14 @@ html[data-theme="light"] #statusbar .muted {
  * the tree keeps the remaining flexible height. */
 .explorer-filter {
   flex: 0 0 auto;
+  position: relative;
   padding: 6px 8px 4px;
 }
 
 .explorer-filter-input {
   width: 100%;
   box-sizing: border-box;
-  padding: 4px 8px;
+  padding: 4px 22px 4px 8px;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
@@ -3459,6 +3460,36 @@ html[data-theme="light"] #statusbar .muted {
   font: inherit;
   font-size: 12px;
   -webkit-app-region: no-drag;
+}
+
+.explorer-filter-clear {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.explorer-filter-clear:hover,
+.explorer-filter-clear:focus-visible {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.explorer-filter-clear:focus-visible {
+  outline: 1px solid var(--accent);
+}
+
+.explorer-filter-clear[hidden] {
+  display: none;
 }
 
 .explorer-filter-input::placeholder {
