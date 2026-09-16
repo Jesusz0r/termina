@@ -9,9 +9,9 @@ test.describe("Settings & Preferences E2E", () => {
     const modal = page.locator(".settings-modal");
     await expect(modal).toBeVisible();
 
-    // Check Appearance is selected by default
+    // Check General is selected by default
     const activeNav = modal.locator(".settings-nav-item.active");
-    await expect(activeNav).toHaveText("Appearance");
+    await expect(activeNav).toHaveText("General");
 
     // Close settings modal
     await modal.locator(".settings-close").click();
@@ -25,6 +25,8 @@ test.describe("Settings & Preferences E2E", () => {
     const modal = page.locator(".settings-modal");
     await expect(modal).toBeVisible();
 
+    await modal.locator(".settings-nav-item", { hasText: "Appearance" }).click();
+
     // Click light theme card
     const lightThemeCard = modal.locator('.settings-theme-card[data-theme="light"]');
     await lightThemeCard.click();
@@ -37,6 +39,7 @@ test.describe("Settings & Preferences E2E", () => {
     await expect(modal).toBeHidden();
 
     await page.evaluate(() => (window as any).__openSettings());
+    await page.locator(".settings-modal .settings-nav-item", { hasText: "Appearance" }).click();
     await expect(page.locator('.settings-theme-card[data-theme="light"]')).toHaveClass(/selected/);
 
     // Reset to default
@@ -71,6 +74,8 @@ test.describe("Settings & Preferences E2E", () => {
     await page.evaluate(() => (window as any).__openSettings());
     const modal = page.locator(".settings-modal");
     await expect(modal).toBeVisible();
+
+    await modal.locator(".settings-nav-item", { hasText: "Appearance" }).click();
 
     const rowBefore = await page.evaluate(() => {
       const row = document.querySelector("#explorer-tree .explorer-row");
@@ -129,7 +134,6 @@ test.describe("Settings & Preferences E2E", () => {
     const modal = page.locator(".settings-modal");
     await expect(modal).toBeVisible();
 
-    await modal.locator(".settings-nav-item", { hasText: "General" }).click();
     const toggle = modal.locator(".settings-check-row", { hasText: "Open files the agent edits" }).locator("input");
     await expect(toggle).toBeChecked();
 
@@ -140,7 +144,6 @@ test.describe("Settings & Preferences E2E", () => {
     await expect(modal).toBeHidden();
 
     await page.evaluate(() => (window as any).__openSettings());
-    await page.locator(".settings-modal .settings-nav-item", { hasText: "General" }).click();
     await expect(page.locator(".settings-modal .settings-check-row", { hasText: "Open files the agent edits" }).locator("input")).not.toBeChecked();
 
     // Restore the default for later suites.

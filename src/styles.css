@@ -754,11 +754,11 @@ body {
   text-overflow: ellipsis;
 }
 
-.terminal-tab .tab-status {
-  width: 7px;
-  height: 7px;
+.terminal-tab .tab-status,
+.project-tab .tab-status {
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: var(--green);
   flex: 0 0 auto;
 }
 
@@ -866,24 +866,37 @@ body {
   white-space: nowrap;
 }
 
-.terminal-tab .tab-status.busy {
+.terminal-tab .tab-status.idle,
+.project-tab .tab-status.idle {
+  background: var(--green);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 55%, var(--bg-panel));
+}
+
+.terminal-tab .tab-status.busy,
+.project-tab .tab-status.busy {
   background: var(--accent);
-  animation: blink 1.2s ease-in-out infinite;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, var(--bg-panel));
+  animation: activity-pulse 1.1s ease-in-out infinite;
 }
 
-.terminal-tab .tab-status.blocked {
+.terminal-tab .tab-status.blocked,
+.project-tab .tab-status.blocked {
   background: var(--yellow);
-  animation: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--yellow) 55%, var(--bg-panel));
+  animation: activity-pulse 1.1s ease-in-out infinite;
 }
 
-.terminal-tab .tab-status.verify-fail {
+.terminal-tab .tab-status.verify-fail,
+.project-tab .tab-status.verify-fail {
   background: var(--red);
   animation: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 55%, var(--bg-panel));
 }
 
 .terminal-tab .tab-status.verify-timeout {
   background: var(--yellow);
   animation: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--yellow) 55%, var(--bg-panel));
 }
 
 .terminal-tab .tab-close {
@@ -2139,7 +2152,7 @@ body {
   cursor: pointer;
   max-width: 220px;
   white-space: nowrap;
-  overflow: hidden;
+  overflow: visible;
   -webkit-app-region: no-drag;
 }
 
@@ -2156,6 +2169,7 @@ body {
 .project-tab .tab-name {
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .project-tab .tab-close {
@@ -2169,17 +2183,6 @@ body {
 .project-tab .tab-close:hover {
   color: var(--text);
   background: var(--bg-hover);
-}
-
-.project-tab .tab-status {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-}
-
-.project-tab .tab-status.verify-fail {
-  background: var(--red);
 }
 
 /* The new-project stub reads as half a tab tucked behind the open tabs.
@@ -2701,9 +2704,11 @@ html[data-theme="light"] #statusbar .muted {
   }
 }
 
-#status-state.busy,
-#status-state.blocked {
+#statusbar #status-state.busy,
+#statusbar #status-state.blocked {
   font-weight: 700;
+  opacity: 1;
+  animation: status-pulse 1.1s ease-in-out infinite;
 }
 
 #btn-app-update {
@@ -3349,13 +3354,25 @@ html[data-theme="light"] #statusbar .muted {
   display: none;
 }
 
-@keyframes blink {
+@keyframes activity-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.55);
+    opacity: 0.45;
+  }
+}
+
+@keyframes status-pulse {
   0%,
   100% {
     opacity: 1;
   }
   50% {
-    opacity: 0.35;
+    opacity: 0.45;
   }
 }
 

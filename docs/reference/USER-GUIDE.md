@@ -78,6 +78,12 @@ and worldlines. Switching tabs never interrupts a running agent — every
 project keeps working in the background. Reopening a folder that already has
 a tab reactivates that tab instead of duplicating it.
 
+A status dot on the tab matches the terminals: green while every agent is
+idle, a glowing pulse while one is working, amber glow when one is blocked.
+An unseen verify failure in a background project turns that project's dot
+red instead. Settling or blocking plays a short chime unless you are
+already looking at that terminal.
+
 ---
 
 ## 2. The layout
@@ -120,7 +126,8 @@ Click `＋` next to the terminal tabs to open the terminal chooser:
 - **Shells** — any shell detected on your system (`zsh`, `bash`, …).
 
 Shell tabs show the shell name as a badge. `Cmd/Ctrl+T` opens the chooser.
-Opening a folder starts one **Agent (core)** tab.
+Opening a folder starts one **Agent (core)** tab. Each terminal tab carries
+the same idle / working / blocked status dot as the project tab.
 
 Cycle without the mouse: `Ctrl+Tab` / `Ctrl+Shift+Tab` move between terminal
 tabs, `Cmd/Ctrl+Shift+[` / `]` move between project tabs, and scrolling over a
@@ -419,8 +426,8 @@ current Mine set before merging.
 
 ## 11. Settings
 
-Open with `Cmd/Ctrl+,`. Settings has three sections: **General**,
-**Appearance**, and **Keyboard**.
+Open with `Cmd/Ctrl+,` or **Termina → Settings**. It opens on **General**.
+Settings has three sections: **General**, **Appearance**, and **Keyboard**.
 
 **General**
 

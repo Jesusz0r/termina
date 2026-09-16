@@ -202,13 +202,14 @@ describe("clear modified confirm", () => {
 });
 
 describe("settings chrome", () => {
-  it("adds a statusbar Settings control wired to the existing settings view", () => {
-    expect(html).toMatch(/id="btn-settings"[^>]*aria-label="Settings"/);
-    expect(html).toContain("btn-settings");
-    expect(html.indexOf("btn-settings")).toBeLessThan(html.indexOf("btn-app-update"));
-    expect(mainSrc).toContain('getElementById("btn-settings")');
-    expect(mainSrc).toContain("btnSettings.addEventListener(\"click\", () => prefs.openSettings())");
+  it("opens from the command/menu path and lands on General", () => {
+    expect(html).not.toContain("btn-settings");
+    expect(mainSrc).not.toContain('getElementById("btn-settings")');
     expect(mainSrc).toContain('commands.register("open-settings", () => prefs.openSettings())');
+    expect(mainSrc).toContain("__openSettings = () => prefs.openSettings()");
+    const settingsSrc = readFileSync(new URL("../../../src/settings.ts", import.meta.url), "utf8");
+    expect(settingsSrc).toContain('this.activeSection = "general"');
+    expect(settingsSrc).not.toContain('this.activeSection = "appearance"');
   });
 });
 
@@ -225,6 +226,22 @@ describe("status activity copy (issue #348)", () => {
     expect(presentSrc).not.toContain("sidecar-paused");
     expect(presentSrc).not.toContain("writerId");
     expect(mainSrc).toContain('statusState.textContent = presented.blocked');
-    expect(mainSrc).toContain("pane.statusEl.title = presented.blocked ? presented.blockedLabel");
+    expect(mainSrc).toContain("else if (presented.blocked) el.title = presented.blockedLabel");
+  });
+});
+
+describe("tab activity dots", () => {
+  it("paints idle/working/blocked on terminal and project tabs from one helper", () => {
+    expect(mainSrc).toContain("function applyTabActivity(");
+    expect(mainSrc).toContain('el.classList.toggle("idle", !working && !presented.blocked)');
+    expect(mainSrc).toContain('el.classList.toggle("busy", working)');
+    expect(mainSrc).toContain('el.classList.toggle("blocked", presented.blocked)');
+    expect(mainSrc).toContain('el.title = "agent working"');
+    expect(mainSrc).toContain('el.title = "idle"');
+    expect(mainSrc).toContain("applyTabActivity(pane.statusEl, presented, { fail: failDot, timeout: timeoutDot })");
+    expect(mainSrc).toContain("updateProjectAttention(pane.projectId)");
+    expect(mainSrc).toContain("noteActivityCue(");
+    expect(mainSrc).toContain("viewing: activeId === pane.instanceId");
+    expect(mainSrc).toContain("windowFocused: document.hasFocus()");
   });
 });

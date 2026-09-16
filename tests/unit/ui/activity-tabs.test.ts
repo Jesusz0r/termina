@@ -203,7 +203,6 @@ describe("activity tabs", () => {
       { id: "btn-min-terminal", visible: "Minimize" },
       { id: "btn-min-editor", visible: "Minimize" },
       { id: "btn-app-update", visible: "Update" },
-      { id: "btn-settings", visible: "Settings" },
     ];
     for (const action of actions) {
       const markup = buttonMarkup(action.id);

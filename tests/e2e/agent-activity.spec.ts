@@ -82,11 +82,13 @@ test.describe("agent activity roster and timeline (issue #291)", () => {
     const sidecarFile = join(eventsDir, `${instanceId}.jsonl`);
     const status = page.locator("#status-state");
     const tabDot = page.locator(".terminal-tab .tab-status").first();
+    const projectDot = page.locator(".project-tab .tab-status").first();
     const prefix = page.locator("#timeline-prefix");
 
     await appendSidecarRecord(sidecarFile, { t: "agent_start" });
     await expect(status).toContainText("agent working", { timeout: 15_000 });
     await expect(tabDot).toHaveClass(/busy/);
+    await expect(projectDot).toHaveClass(/busy/);
     await expect(prefix).toContainText("working");
 
     for (let i = 0; i < 3; i++) {
@@ -94,11 +96,16 @@ test.describe("agent activity roster and timeline (issue #291)", () => {
     }
     await expect(status).toContainText("blocked: tool-error-loop", { timeout: 15_000 });
     await expect(tabDot).toHaveClass(/blocked/);
+    await expect(projectDot).toHaveClass(/blocked/);
     await expect(prefix).toContainText("blocked: tool-error-loop");
 
     await appendSidecarRecord(sidecarFile, { t: "agent_settled" });
     await expect(status).toHaveText("idle", { timeout: 15_000 });
+    await expect(tabDot).toHaveClass(/idle/);
     await expect(tabDot).not.toHaveClass(/blocked/);
     await expect(tabDot).not.toHaveClass(/busy/);
+    await expect(projectDot).toHaveClass(/idle/);
+    await expect(projectDot).not.toHaveClass(/busy/);
+    await expect(projectDot).not.toHaveClass(/blocked/);
   });
 });

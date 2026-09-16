@@ -72,6 +72,7 @@ import {
   worldlineEventBelongsToProject,
 } from "./worldline-project-state";
 import { asKnownState, KNOWN_ACTIVITY_STATES, KNOWN_VERIFY_BADGE_STATES, presentBlockedLabel } from "./known-state";
+import { forgetActivityCue, noteActivityCue } from "./activity-cue";
 import { CHALLENGE_PROFILES, isTuiOwnedShortcut, pathBasename } from "../shared/types";
 import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
@@ -176,8 +177,8 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
   closeEl.textContent = "×";
   closeEl.title = "Close this project";
   const statusEl = document.createElement("span");
-  statusEl.className = "tab-status";
-  statusEl.title = "unseen verify failure";
+  statusEl.className = "tab-status idle";
+  statusEl.title = "idle";
   tabEl.append(statusEl, nameEl, closeEl);
   tabEl.addEventListener("click", () => {
     void window.termina.projectActivate(project.id).catch((err) => {
@@ -464,7 +465,6 @@ const statusCwd = document.getElementById("status-cwd")!;
 const statusState = document.getElementById("status-state")!;
 const statusUsage = document.getElementById("status-usage")!;
 const btnAppUpdate = document.getElementById("btn-app-update") as HTMLButtonElement;
-const btnSettings = document.getElementById("btn-settings") as HTMLButtonElement;
 const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
@@ -769,7 +769,8 @@ function createPaneShell(instanceId: string): Pane {
   const tabEl = document.createElement("div");
   tabEl.className = "terminal-tab";
   const statusEl = document.createElement("span");
-  statusEl.className = "tab-status";
+  statusEl.className = "tab-status idle";
+  statusEl.title = "idle";
   const typeEl = document.createElement("span");
   typeEl.className = "tab-type";
   const wlineEl = document.createElement("span");
@@ -919,22 +920,55 @@ function activatePaneWhenReady(instanceId: string): void {
   if (pane && !pane.exited) activatePane(instanceId);
 }
 
-/** Mirror unseen verify failures onto the project tab so background
- *  projects nudge too. The active project shows its own terminal dots. */
+/** Paint a tab status dot from activity plus optional unseen-verify flags. */
+function applyTabActivity(
+  el: HTMLElement,
+  presented: { blocked: boolean; working: boolean; blockedLabel: string },
+  verify: { fail: boolean; timeout: boolean },
+): void {
+  const working = presented.working && !presented.blocked;
+  el.classList.toggle("idle", !working && !presented.blocked);
+  el.classList.toggle("busy", working);
+  el.classList.toggle("blocked", presented.blocked);
+  el.classList.toggle("verify-fail", verify.fail);
+  el.classList.toggle("verify-timeout", verify.timeout);
+  if (verify.fail) el.title = "unseen verify failure";
+  else if (verify.timeout) el.title = "unseen verify timeout";
+  else if (presented.blocked) el.title = presented.blockedLabel;
+  else if (working) el.title = "agent working";
+  else el.title = "idle";
+}
+
+/** Project tab: idle/working/blocked from its agents, plus unseen verify
+ *  failures on background projects. The active project shows those on its
+ *  own terminal dots. */
 function updateProjectAttention(projectId: string | null): void {
   if (!projectId) return;
   const view = projectViews.get(projectId);
   const dot = view?.tabEl.querySelector(".tab-status") as HTMLElement | null;
   if (!view || !dot) return;
   let fail = false;
+  let blocked = false;
+  let working = false;
+  let blockedLabel = "blocked";
   for (const pane of panes.values()) {
-    if (pane.projectId !== projectId || !pane.verifyAttention) continue;
-    if (pane.verify.state === "fail" || pane.verify.state === "timeout") {
+    if (pane.projectId !== projectId) continue;
+    if (pane.verifyAttention && (pane.verify.state === "fail" || pane.verify.state === "timeout")) {
       fail = true;
-      break;
+    }
+    if (pane.error) continue;
+    const presented = presentActivity(pane);
+    if (presented.blocked) {
+      if (!blocked) blockedLabel = presented.blockedLabel;
+      blocked = true;
+    } else if (presented.working) {
+      working = true;
     }
   }
-  dot.classList.toggle("verify-fail", fail && projectId !== activeProjectId);
+  applyTabActivity(dot, { blocked, working, blockedLabel }, {
+    fail: fail && projectId !== activeProjectId,
+    timeout: false,
+  });
 }
 
 function activatePane(instanceId: string): void {
@@ -1077,6 +1111,7 @@ async function closePane(instanceId: string): Promise<void> {
   const terminalGeneration = pane.generation;
   closingPanes.set(instanceId, { generation: terminalGeneration });
   panes.delete(instanceId);
+  forgetActivityCue(instanceId);
   for (const [projectId, activeInstanceId] of lastActivePane) {
     if (activeInstanceId === instanceId) lastActivePane.delete(projectId);
   }
@@ -1085,6 +1120,7 @@ async function closePane(instanceId: string): Promise<void> {
   pane.view.dispose();
   pane.container.remove();
   pane.tabEl.remove();
+  updateProjectAttention(pane.projectId);
   try {
     await window.termina.closeTerminal(instanceId, terminalGeneration);
   } catch (err) {
@@ -1117,15 +1153,19 @@ function updatePaneTab(pane: Pane): void {
           : " · core agent"
       }`;
   const presented = presentActivity(pane);
-  pane.statusEl.classList.toggle("busy", presented.working && !presented.blocked);
-  pane.statusEl.classList.toggle("blocked", presented.blocked);
-  pane.statusEl.title = presented.blocked ? presented.blockedLabel : "unseen verify failure";
   // Unseen verify failures hold the tab dot until first view; any newer
   // verify state clears them.
   const failDot = pane.verifyAttention && pane.verify.state === "fail";
   const timeoutDot = pane.verifyAttention && pane.verify.state === "timeout";
-  pane.statusEl.classList.toggle("verify-fail", failDot);
-  pane.statusEl.classList.toggle("verify-timeout", timeoutDot);
+  applyTabActivity(pane.statusEl, presented, { fail: failDot, timeout: timeoutDot });
+  if (!pane.error) {
+    noteActivityCue(
+      pane.instanceId,
+      presented.blocked ? "blocked" : presented.working ? "working" : "idle",
+      { viewing: activeId === pane.instanceId, windowFocused: document.hasFocus() },
+    );
+  }
+  updateProjectAttention(pane.projectId);
   applyTypeBadge(pane);
   // Worldline candidates carry the A/B badge on their tab.
   const wlineEl = pane.tabEl.querySelector(".tab-worldline") as HTMLElement;
@@ -1804,7 +1844,6 @@ commands.register("content-search", () => quickOpen.open("content"));
 commands.register("command-palette", () => quickOpen.open("actions"));
 
 // Settings
-btnSettings.addEventListener("click", () => prefs.openSettings());
 commands.register("open-settings", () => prefs.openSettings());
 
 window.termina.onMenuCommand((cmd) => {
@@ -2294,6 +2333,7 @@ window.termina.onInstances((list: InstanceSummary[]) => {
   for (const [id, pane] of [...panes.entries()]) {
     if (liveIds.has(id) || !pane.fromRoster) continue;
     panes.delete(id);
+    forgetActivityCue(id);
     prunedPane = true;
     for (const [projId, activeInstId] of lastActivePane) {
       if (activeInstId === id) lastActivePane.delete(projId);
@@ -2304,7 +2344,10 @@ window.termina.onInstances((list: InstanceSummary[]) => {
     if (activeId === id) activeId = null;
   }
   // A pruned pane takes its changed-file contributions with it.
-  if (prunedPane) syncExplorerChanged();
+  if (prunedPane) {
+    syncExplorerChanged();
+    for (const view of projectViews.values()) updateProjectAttention(view.id);
+  }
 
   handleWorldlineInstances(list, {
     paneById: (instanceId) => panes.get(instanceId),

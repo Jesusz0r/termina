@@ -103,6 +103,12 @@
         never interrupts a running agent — every project keeps working in the background. Reopening a folder that
         already has a tab reactivates that tab instead of duplicating it.
       </p>
+      <p>
+        A status dot on the tab matches the terminals: green while every agent is idle, a glowing pulse while one
+        is working, amber glow when one is blocked. An unseen verify failure in a background project turns that
+        project's dot red instead. Settling or blocking plays a short chime unless you are already looking at
+        that terminal.
+      </p>
     </section>
 
     <!-- ============ 2. LAYOUT ============ -->
@@ -138,7 +144,10 @@
         <li><b>Agent (core)</b> — Termina's in-house coding agent.</li>
         <li><b>Shells</b> — any shell detected on your system (<code>zsh</code>, <code>bash</code>, …).</li>
       </ul>
-      <p>Shell tabs show the shell name as a badge. <code>Cmd/Ctrl+T</code> opens the chooser.</p>
+      <p>
+        Shell tabs show the shell name as a badge. <code>Cmd/Ctrl+T</code> opens the chooser.
+        Each terminal tab carries the same idle / working / blocked status dot as the project tab.
+      </p>
       <p>
         Cycle without the mouse: <code>Ctrl+Tab</code> / <code>Ctrl+Shift+Tab</code> move between terminal tabs,
         <code>Cmd/Ctrl+Shift+[</code> / <code>]</code> move between project tabs, and scrolling over a tab strip
@@ -404,7 +413,7 @@
     <!-- ============ 11. SETTINGS ============ -->
     <section id="settings" class="guide-section">
       <h2>11 · Settings</h2>
-      <p>Open with <code>Cmd/Ctrl+,</code>. Settings has three sections: <b>General</b>, <b>Appearance</b>, and <b>Keyboard</b>.</p>
+      <p>Open with <code>Cmd/Ctrl+,</code> or <b>Termina → Settings</b>. It opens on <b>General</b>. Settings has three sections: <b>General</b>, <b>Appearance</b>, and <b>Keyboard</b>.</p>
 
       <h3>General</h3>
       <table>
