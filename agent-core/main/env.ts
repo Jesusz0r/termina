@@ -3,7 +3,7 @@
  * outside the cwd jail, toolchain probes, and the `<environment>` block.
  * Pure over the process environment and filesystem; no retained state.
  */
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
@@ -40,6 +40,14 @@ function extraBinDirs(): string[] {
   ];
 }
 
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
 /** Add user binary directories that a GUI launch leaves off PATH. Search the process PATH first. */
 export function trustedPath(pathEnv = process.env.PATH ?? "", cwdRoot?: string): string {
   const seen = new Set<string>();
@@ -63,6 +71,7 @@ export function trustedPath(pathEnv = process.env.PATH ?? "", cwdRoot?: string):
 }
 
 export function resolveTrustedBin(bin: string, cwdRoot: string): string | null {
+  const root = freezeCwd(cwdRoot);
   for (const dir of trustedPath(process.env.PATH, cwdRoot).split(delimiter)) {
     if (!dir || !isAbsolute(dir)) continue;
     let realDir: string;
@@ -71,32 +80,41 @@ export function resolveTrustedBin(bin: string, cwdRoot: string): string | null {
     } catch {
       continue;
     }
-    if (underRoot(realDir, cwdRoot)) continue;
+    if (underRoot(realDir, root)) continue;
     const cand = join(realDir, bin);
     try {
-      if (statSync(cand).isFile()) return cand;
+      if (!statSync(cand).isFile()) continue;
     } catch {
       continue;
     }
+    const realCand = realpathOrNull(cand);
+    // Skip bins we cannot canonicalize, and bins whose real path is inside cwd.
+    if (realCand === null || underRoot(realCand, root)) continue;
+    return cand;
   }
   return null;
 }
 
-function probeAbs(absBin: string, remainingMs: number): string | null {
+function probeArgv(bin: string): string[] {
+  return bin === "go" ? ["version"] : ["--version"];
+}
+
+function firstProbeLine(text: string): string {
+  return text.split("\n")[0]?.trim() ?? "";
+}
+
+function probeAbs(absBin: string, argv: string[], remainingMs: number): string | null {
   if (remainingMs <= 0) return null;
-  try {
-    const out = execFileSync(absBin, ["--version"], {
-      timeout: remainingMs,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const line = String(out).split("\n")[0]?.trim() ?? "";
-    return line ? line.slice(0, 80) : null;
-  } catch (err) {
-    const extra = err as { stdout?: string; stderr?: string };
-    const line = `${extra.stdout ?? ""}${extra.stderr ?? ""}`.split("\n")[0]?.trim() ?? "";
-    return line ? line.slice(0, 80) : null;
-  }
+  const result = spawnSync(absBin, argv, {
+    timeout: remainingMs,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error || result.status !== 0) return null;
+  const line = (
+    firstProbeLine(String(result.stdout ?? "")) || firstProbeLine(String(result.stderr ?? ""))
+  ).slice(0, 80);
+  return line || null;
 }
 
 function listRootManifests(root: string): string[] {
@@ -147,8 +165,8 @@ export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): str
     for (const bin of TOOLCHAIN_BINS) {
       const abs = resolveTrustedBin(bin, root);
       if (!abs) continue;
-      const ver = probeAbs(abs, deadline - Date.now());
-      if (ver) tools.push(`${bin} ${ver}`);
+      const ver = probeAbs(abs, probeArgv(bin), deadline - Date.now());
+      tools.push(ver ? `${bin} ${ver}` : bin);
     }
     lines.push(`toolchain: ${tools.join("; ")}`);
   }
@@ -161,14 +179,6 @@ function filesystemEntry(path: string): string {
     return fileURLToPath(path);
   } catch {
     return path;
-  }
-}
-
-function realpathOrNull(path: string): string | null {
-  try {
-    return realpathSync(path);
-  } catch {
-    return null;
   }
 }
 

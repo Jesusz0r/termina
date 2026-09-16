@@ -363,6 +363,54 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       process.env.PATH = prevPathForJail;
     }
     check("trusted pnpm version is reported", envTrustedPnpm.includes("pnpm 9.0.0-test"));
+
+    const probeCaseDir = mkdtempSync(join(tmpdir(), "agent-core-env-probe-"));
+    leftovers.push(probeCaseDir);
+    const probeCwd = mkdtempSync(join(tmpdir(), "agent-core-env-probe-cwd-"));
+    leftovers.push(probeCwd);
+    writeFileSync(join(probeCaseDir, "gcc"), "#!/bin/sh\necho 'flag provided but not defined: -version' >&2\nexit 2\n", { mode: 0o755 });
+    writeFileSync(join(probeCaseDir, "javac"), "#!/bin/sh\necho 'javac 21.0.0-test' >&2\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(probeCaseDir, "pnpm"), "#!/bin/sh\nsleep 2\necho too-late\n", { mode: 0o755 });
+    chmodSync(join(probeCaseDir, "gcc"), 0o755);
+    chmodSync(join(probeCaseDir, "javac"), 0o755);
+    chmodSync(join(probeCaseDir, "pnpm"), 0o755);
+    let envProbeCases = "";
+    try {
+      process.env.PATH = probeCaseDir;
+      envProbeCases = formatEnvironment(probeCwd, { probes: true });
+    } finally {
+      process.env.PATH = prevPathForJail;
+    }
+    const probeParts = (envProbeCases.split("\n").find((line) => line.startsWith("toolchain:")) ?? "")
+      .slice("toolchain: ".length)
+      .split("; ");
+    const probeByBin = new Map(probeParts.map((part) => {
+      const i = part.indexOf(" ");
+      return i < 0 ? [part, ""] : [part.slice(0, i), part.slice(i + 1)];
+    }));
+    check(
+      "failed probe does not leak error text",
+      !envProbeCases.includes("flag provided but not defined") && probeByBin.has("gcc") && probeByBin.get("gcc") === "",
+    );
+    check("stderr-only javac version is used", probeByBin.get("javac") === "javac 21.0.0-test");
+    check("slow pnpm is still named", probeByBin.has("pnpm") && !String(probeByBin.get("pnpm")).includes("too-late"));
+
+    const linkCwd = mkdtempSync(join(tmpdir(), "agent-core-env-link-cwd-"));
+    leftovers.push(linkCwd);
+    const linkDir = mkdtempSync(join(tmpdir(), "agent-core-env-link-dir-"));
+    leftovers.push(linkDir);
+    mkdirSync(join(linkCwd, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(linkCwd, "node_modules", ".bin", "pnpm"), "#!/bin/sh\necho HACKED-LINK\n", { mode: 0o755 });
+    chmodSync(join(linkCwd, "node_modules", ".bin", "pnpm"), 0o755);
+    symlinkSync(join(linkCwd, "node_modules", ".bin", "pnpm"), join(linkDir, "pnpm"));
+    let envLinkJail = "";
+    try {
+      process.env.PATH = linkDir;
+      envLinkJail = formatEnvironment(linkCwd, { probes: true });
+    } finally {
+      process.env.PATH = prevPathForJail;
+    }
+    check("trusted-path symlink into cwd is not executed", !envLinkJail.includes("HACKED-LINK"));
     
     writeFileSync(join(root, "hit.ts"), "alpha unique-token beta\n");
     const g = await grepFiles(root, { pattern: "unique-token" });
