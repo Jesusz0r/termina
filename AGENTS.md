@@ -53,6 +53,8 @@ When a touched file exceeds 800 lines, assess extraction. Extract cohesive respo
 
 **Product:** sensible defaults over config; progressive disclosure; terminal stays source of truth; never expose sidecars/leases/core protocol in UI.
 
+**User-facing harness:** `~/.agents/AGENTS.md`, project `AGENTS.md`, and skills (`~/.agents/skills` then `<cwd>/.agents/skills`). Skill bodies stay out of zone 1; the index lists names and the model loads `SKILL.md` with `read_file`. Future harness experiments land as a skill, a project instruction, or a change to the single `FROZEN_IDENTITY`. No prompt optimizer, in-app harness archive, second skill catalog, or harness editor over sidecars/leases/core protocol. Discovery and index caps stay in `agent-core/main/skills.ts` and `agent-core/skill-index.ts`. See `docs/reference/AGENT-CORE.md`.
+
 ## Process isolation
 
 Renderer never talks directly to the agent or performs privileged fs/pty/snapshot work. Preload exposes only the typed `window.termina` bridge; validate privileged requests in main. Write leases prevent two writers on one tree — don't bypass. Use the existing candidate sandboxes / offline evidence profile for isolation; a separate process or tree alone is not a sandbox. Strip `PI_SESSION_*` (and other `PI_*`) from agent and MCP child env so a leftover host install cannot pin the wrong session.

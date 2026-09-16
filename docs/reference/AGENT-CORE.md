@@ -26,6 +26,14 @@ are overflow-recoverable. The kernel does not call the snapshot store.
 OpenAI, ChatGPT Codex OAuth, GitHub Copilot, xAI, Google, OpenRouter,
 OpenCode Go, OpenCode Zen.
 
+The user-facing harness is those two `AGENTS.md` files plus skills. Skill
+bodies stay out of zone 1. Future harness experiments land as a skill, a
+project instruction, or a change to the single `FROZEN_IDENTITY` in
+`agent-core/main/front-matter.ts`. Do not add a prompt optimizer, in-app
+harness archive, second skill catalog, or a UI that edits sidecars, leases,
+or the core protocol. Discovery and index caps stay in
+`agent-core/main/skills.ts` and `agent-core/skill-index.ts`.
+
 ## Why this document exists
 
 Wall-clock per agent turn is ~99% network wait. Money and tokens are spent on
