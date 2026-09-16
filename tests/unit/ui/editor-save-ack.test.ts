@@ -23,7 +23,7 @@ function memberBody(source: string, signature: string): string {
 
 describe("editor save acknowledgment (refs #126)", () => {
   it("captures the submitted text and version before awaiting IPC", () => {
-    const saveActive = memberBody(editor, "private async saveActive()");
+    const saveActive = memberBody(editor, "async saveActive()");
     expect(saveActive).toContain("const submittedText = live.model.getValue()");
     expect(saveActive).toContain("const submittedVersion = live.model.getAlternativeVersionId()");
     expect(saveActive).toContain("const savedAtSubmit = live.savedVersionId");
@@ -48,7 +48,7 @@ describe("editor save acknowledgment (refs #126)", () => {
     const ack = memberBody(editor, "private acknowledgeSave(");
     expect(ack).toContain("submittedVersion");
     expect(ack).toContain("savedAtSubmit");
-    expect(memberBody(editor, "private async saveActive()")).toContain("this.acknowledgeSave(");
+    expect(memberBody(editor, "async saveActive()")).toContain("this.acknowledgeSave(");
     expect(memberBody(editor, "async flushKeys(keys: string[], writerId?: string): Promise<{ ok: boolean; failed: string[] }>")).toContain("this.acknowledgeSave(");
   });
 
@@ -72,7 +72,7 @@ describe("editor save acknowledgment (refs #126)", () => {
     const ack = memberBody(editor, "private acknowledgeSave(");
     expect(ack).toContain("const tab = this.tabs.get(key)");
     expect(ack).toContain("if (!tab || tab.model !== model) return;");
-    const saveActive = memberBody(editor, "private async saveActive()");
+    const saveActive = memberBody(editor, "async saveActive()");
     expect(saveActive).toContain("if (!live || live !== tab || !live.owner) return;");
     const flushKeys = memberBody(editor, "async flushKeys(keys: string[], writerId?: string): Promise<{ ok: boolean; failed: string[] }>");
     expect(flushKeys).toContain("if (!live || live !== tab || !live.owner) return false;");
@@ -82,12 +82,12 @@ describe("editor save acknowledgment (refs #126)", () => {
     expect(editor).toContain("private saveQueue = new Map<string, Promise<unknown>>()");
     const chain = memberBody(editor, "private chainSave<T>(");
     expect(chain).toContain("prev.then(op, op)");
-    expect(memberBody(editor, "private async saveActive()")).toContain("this.chainSave(tab.key");
+    expect(memberBody(editor, "async saveActive()")).toContain("this.chainSave(tab.key");
     expect(memberBody(editor, "async flushKeys(keys: string[], writerId?: string): Promise<{ ok: boolean; failed: string[] }>")).toContain("this.chainSave(key");
   });
 
   it("treats a rejected save IPC as a failure, not an unhandled rejection", () => {
-    const saveActive = memberBody(editor, "private async saveActive()");
+    const saveActive = memberBody(editor, "async saveActive()");
     expect(saveActive).toContain("} catch (err) {");
     expect(saveActive).toContain("could not save");
     const flushKeys = memberBody(editor, "async flushKeys(keys: string[], writerId?: string): Promise<{ ok: boolean; failed: string[] }>");

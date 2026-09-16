@@ -25,6 +25,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "rename", label: "Rename", category: "File", description: "Rename the selected explorer entry", defaultShortcut: "F2", scope: "renderer" },
   { command: "delete", label: "Delete", category: "File", description: "Delete the selected explorer entry", defaultShortcut: "", scope: "renderer" },
   { command: "refresh", label: "Refresh explorer", category: "File", description: "Reload the file tree", defaultShortcut: "", scope: "renderer" },
+  { command: "save", label: "Save", category: "File", description: "Save the active editor file", defaultShortcut: "CmdOrCtrl+S", scope: "renderer" },
   { command: "save-all", label: "Save all", category: "File", description: "Save every dirty editor", defaultShortcut: "CmdOrCtrl+Alt+S", scope: "renderer" },
   { command: "close-window", label: "Close window", category: "File", description: "Close the application window", defaultShortcut: "CmdOrCtrl+W", scope: "main" },
   { command: "undo", label: "Undo", category: "Edit", description: "Undo in the focused surface", defaultShortcut: "CmdOrCtrl+Z", scope: "renderer" },

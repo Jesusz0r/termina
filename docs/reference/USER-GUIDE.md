@@ -405,14 +405,15 @@ measurements report a tie.
 
 Full file tree with VS Code-style interactions: right-click context menu,
 New File / New Folder, Cut / Copy / Paste, Copy Path and Copy Relative Path,
-Rename (`F2`), Delete, and Refresh.
+Rename (`F2`), Delete, and Refresh. The **Filter files** box narrows the tree
+as you type; click × or press `Escape` to clear.
 
 ### Editor
 
 - Preview tabs: single-click opens a replaceable preview; editing the file or
   double-clicking the tab pins it. Middle-click closes; drag reorders; tab
   context menus offer close and pin actions.
-- Unsaved edits show a dot on the tab; **Save all** is `Cmd/Ctrl+Alt+S`.
+- Unsaved edits show a dot on the tab; **Save** is `Cmd/Ctrl+S`, **Save all** is `Cmd/Ctrl+Alt+S`.
 - Word wrap and minimap follow your Settings preferences.
 
 ### Mine marks
@@ -469,6 +470,7 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 | `Cmd/Ctrl+Alt+N` | New file |
 | `Cmd/Ctrl+Alt+Shift+N` | New folder |
 | `F2` | Rename selected explorer entry |
+| `Cmd/Ctrl+S` | Save the active editor file |
 | `Cmd/Ctrl+Alt+S` | Save all dirty editors |
 | `Cmd/Ctrl+B` | Toggle explorer |
 | `Cmd/Ctrl+Shift+E` | Toggle terminal |

@@ -227,7 +227,6 @@ export class EditorManager {
       stickyScroll: { enabled: false },
     });
 
-    this.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void this.saveActive());
     this.editor.onDidChangeModel(() => {
       this.syncEmptyState();
       // Timeline snapshots are read-only views of the past.
@@ -707,7 +706,7 @@ export class EditorManager {
     if (this.order.length === 0) this.onBecameEmpty();
   }
 
-  private async saveActive(): Promise<void> {
+  async saveActive(): Promise<void> {
     if (!this.activeKey || this.activeKey.startsWith("timeline:")) return;
     const tab = this.tabs.get(this.activeKey);
     if (!tab) return;
@@ -1059,25 +1058,82 @@ export class EditorManager {
   }
 
   /**
+   * True when Edit/clipboard commands should hit this editor. Text focus is
+   * the usual case. The EditContext IME textarea can hold DOM focus without
+   * `hasTextFocus()`, and menu routing that required text focus then fell
+   * through to a native clipboard command that no-ops. Find/replace inputs
+   * keep their own clipboard.
+   */
+  private editorOwnsClipboard(): boolean {
+    if (this.editor.hasTextFocus()) return true;
+    const node = this.editor.getContainerDomNode();
+    const el = document.activeElement;
+    if (!node || !el || !node.contains(el)) return false;
+    return !(el instanceof HTMLInputElement);
+  }
+
+  /**
+   * Copy/cut/paste via the host clipboard. Monaco's clipboard actions call
+   * `execCommand`, which does not reliably fire under EditContext in this
+   * Electron renderer (`isNative` is false, so Monaco's Electron workaround
+   * never runs). The menu still eats Cmd/Ctrl+X/C/V, so this is the one path.
+   */
+  private async runEditorClipboard(kind: "copy" | "cut" | "paste"): Promise<void> {
+    const readOnly = this.editor.getOption(monaco.editor.EditorOption.readOnly);
+    if (kind === "paste") {
+      if (readOnly) return;
+      let text: string;
+      try {
+        text = await window.termina.readClipboard();
+      } catch {
+        toast("could not access the clipboard", "warning");
+        return;
+      }
+      this.editor.trigger("keyboard", "paste", { text });
+      return;
+    }
+    const model = this.editor.getModel();
+    const selection = this.editor.getSelection();
+    if (!model || !selection) return;
+    const text = selection.isEmpty()
+      ? model.getLineContent(selection.startLineNumber) + model.getEOL()
+      : model.getValueInRange(selection);
+    try {
+      const res = await window.termina.writeClipboard(text);
+      if (!res.ok) {
+        toast(res.error ?? "could not access the clipboard", "warning");
+        return;
+      }
+    } catch {
+      toast("could not access the clipboard", "warning");
+      return;
+    }
+    if (kind === "cut" && !readOnly) this.editor.trigger("keyboard", "cut", null);
+  }
+
+  /**
    * Run a menu command on the editor. Return false when the editor is
    * not focused. The caller can then use the terminal or the browser.
    * Undo/redo use the core command ids: the `editor.action.undo` /
    * `editor.action.redo` aliases no longer exist in current Monaco, so
-   * triggering them is a silent no-op. Clipboard goes through Monaco's
-   * clipboard actions: the Electron menu eats the keystroke, and with
-   * the EditContext renderer there is no focused textarea for a native
-   * cut/copy/paste to act on.
+   * triggering them is a silent no-op.
    */
   runMenuEdit(kind: "undo" | "redo" | "select-all" | "find" | "copy" | "cut" | "paste"): boolean {
+    if (kind === "copy" || kind === "cut" || kind === "paste") {
+      if (!this.editorOwnsClipboard()) return false;
+      void this.runEditorClipboard(kind);
+      return true;
+    }
+    if (kind === "select-all") {
+      if (!this.editorOwnsClipboard()) return false;
+      this.editor.trigger("menu", "editor.action.selectAll", null);
+      return true;
+    }
     if (!this.editor.hasTextFocus()) return false;
     const actions = {
       undo: "undo",
       redo: "redo",
-      "select-all": "editor.action.selectAll",
       find: "actions.find",
-      copy: "editor.action.clipboardCopyAction",
-      cut: "editor.action.clipboardCutAction",
-      paste: "editor.action.clipboardPasteAction",
     } as const;
     this.editor.trigger("menu", actions[kind], null);
     return true;

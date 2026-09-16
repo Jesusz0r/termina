@@ -1407,6 +1407,7 @@ class TerminaApp {
           { type: "separator" },
           { label: "Refresh Explorer", accelerator: shortcut("refresh"), click: send("refresh") },
           { type: "separator" },
+          { label: "Save", accelerator: shortcut("save"), click: send("save") },
           { label: "Save All", accelerator: shortcut("save-all"), click: send("save-all") },
           { type: "separator" },
           { label: "Close Window", accelerator: shortcut("close-window"), role: "close" },

@@ -1604,8 +1604,9 @@ function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
 }
 
 function runClipboardCommand(command: "copy" | "cut" | "paste"): void {
-  // The Electron menu eats the keystroke before Monaco sees it, so route
-  // the focused editor through its clipboard actions first.
+  // The Electron menu eats the keystroke before Monaco sees it. Clipboard
+  // writes go through the host clipboard IPC, not execCommand, because
+  // EditContext has no focused textarea for a native cut/copy/paste.
   if (activeEditor().runMenuEdit(command)) return;
   const pane = activeId ? panes.get(activeId) : undefined;
   const term = pane?.view.getTerminal();
@@ -1630,6 +1631,9 @@ commands.register("new-folder", () => explorer.handleCommand("new-folder"));
 commands.register("rename", () => explorer.handleCommand("rename"));
 commands.register("delete", () => explorer.handleCommand("delete"));
 commands.register("refresh", () => explorer.handleCommand("refresh"));
+commands.register("save", () => {
+  void activeEditor().saveActive();
+});
 commands.register("save-all", () => {
   void activeEditor().flushAll().then((res) => {
     if (!res.ok) toast(`could not save: ${res.failed.map((p) => pathBasename(p)).join(", ")}`, "warning");

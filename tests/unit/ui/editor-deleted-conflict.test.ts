@@ -53,7 +53,7 @@ describe("external deletion keeps dirty buffers (refs #127)", () => {
   it("restores a deleted buffer through one save IPC, not a renderer create-then-save", () => {
     expect(editor).not.toContain("restoreDeletedBeforeSave");
     expect(editor).not.toContain("createEntry");
-    const saveActive = memberBody(editor, "private async saveActive()");
+    const saveActive = memberBody(editor, "async saveActive()");
     expect(saveActive).toContain("const restore = this.deletedOnDisk.has(live.key)");
     expect(saveActive).toContain("window.termina.saveFile(live.key, submittedText, live.owner, restore)");
     const flushKeys = memberBody(editor, "async flushKeys(keys: string[], writerId?: string): Promise<{ ok: boolean; failed: string[] }>");
@@ -78,8 +78,8 @@ describe("external deletion keeps dirty buffers (refs #127)", () => {
   });
 
   it("names the deletion in the failed-restore toast", () => {
-    expect(memberBody(editor, "private async saveActive()")).toContain("could not restore");
-    expect(memberBody(editor, "private async saveActive()")).toContain("(deleted on disk)");
+    expect(memberBody(editor, "async saveActive()")).toContain("could not restore");
+    expect(memberBody(editor, "async saveActive()")).toContain("(deleted on disk)");
   });
 
   it("discards only through the existing unsaved close decision", () => {

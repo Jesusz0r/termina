@@ -1,11 +1,13 @@
 import { test, expect } from "./fixtures.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // The Electron Edit menu eats Cmd/Ctrl+Z/X/C/V/A before Monaco sees them,
 // so these must round-trip through the menu-command routing. Regression
 // coverage: undo/redo used the removed `editor.action.undo` alias (silent
 // no-op) and cut/copy/paste bypassed Monaco entirely, which has no focused
 // textarea to receive a native clipboard command under the EditContext
-// renderer.
+// renderer. Save is a File-menu command (Cmd/Ctrl+S), not a Monaco keybinding.
 const mod = process.platform === "darwin" ? "Meta" : "Control";
 
 function editorText(page: any): Promise<string | null> {
@@ -56,5 +58,46 @@ test.describe("Editor keyboard editing", () => {
 
     await page.keyboard.press(`${mod}+v`);
     await expect.poll(() => editorText(page), { timeout: 5_000 }).toBe(before);
+  });
+
+  test("clicking the editor then Cmd/Ctrl+X cuts without a programmatic focus", async ({ page }) => {
+    await openGreeting(page);
+    await page.locator(".project-editor .monaco-editor").first().click({ position: { x: 100, y: 60 } });
+
+    const before = await editorText(page);
+    await page.keyboard.press(`${mod}+a`);
+    await page.keyboard.press(`${mod}+x`);
+    await expect.poll(() => editorText(page), { timeout: 5_000 }).toBe("");
+
+    await page.keyboard.press(`${mod}+v`);
+    await expect.poll(() => editorText(page), { timeout: 5_000 }).toBe(before);
+  });
+
+  test("Cmd/Ctrl+C copies and Cmd/Ctrl+V pastes", async ({ page }) => {
+    await openGreeting(page);
+    await page.locator(".project-editor .monaco-editor").first().click({ position: { x: 100, y: 60 } });
+
+    const before = await editorText(page);
+    await page.keyboard.press(`${mod}+a`);
+    await page.keyboard.press(`${mod}+c`);
+    await page.keyboard.type("replaced");
+    await expect.poll(() => editorText(page), { timeout: 5_000 }).toBe("replaced");
+
+    await page.keyboard.press(`${mod}+a`);
+    await page.keyboard.press(`${mod}+v`);
+    await expect.poll(() => editorText(page), { timeout: 5_000 }).toBe(before);
+  });
+
+  test("Cmd/Ctrl+S saves the active file", async ({ page, projectRoot }) => {
+    await openGreeting(page);
+    await page.locator(".project-editor .monaco-editor").first().click({ position: { x: 100, y: 60 } });
+    await page.keyboard.type("SAVED");
+
+    const dirty = page.locator(".editor-tab").filter({ hasText: "greeting.ts" }).locator(".tab-dirty");
+    await expect(dirty).toBeVisible();
+
+    await page.keyboard.press(`${mod}+s`);
+    await expect(dirty).toBeHidden({ timeout: 10_000 });
+    await expect.poll(() => readFileSync(join(projectRoot, "greeting.ts"), "utf8"), { timeout: 10_000 }).toContain("SAVED");
   });
 });
