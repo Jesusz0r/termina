@@ -31,7 +31,7 @@ const THEME_OPTIONS: Array<{ id: ThemeId; label: string; description: string }> 
 export class SettingsView {
   private preferences: AppPreferences;
   private backdrop: HTMLElement | null = null;
-  private activeSection: "general" | "appearance" | "shortcuts" = "appearance";
+  private activeSection: "general" | "appearance" | "shortcuts" = "general";
   private recording: ShortcutCommand | null = null;
   private captureError: string | null = null;
   /** True when the boot prefs read has not succeeded. Do not treat defaults as saved. */
@@ -55,7 +55,7 @@ export class SettingsView {
     if (preferences) this.preferences = normalizeAppPreferences(preferences);
     this.recording = null;
     this.captureError = null;
-    this.activeSection = "appearance";
+    this.activeSection = "general";
     if (!this.unavailable) this.callbacks.onOpen();
 
     const backdrop = document.createElement("div");
