@@ -182,6 +182,17 @@ describe("ignore and instruction reads (#155)", () => {
     expect(env).toContain("<environment>");
   });
 
+  it("startup environment build survives a FIFO root manifest", FAST, () => {
+    const root = project();
+    expect(makeFifo(join(root, "package.json"))).toBe(true);
+    writeFileSync(join(root, "a.txt"), "x");
+    const started = Date.now();
+    const env = formatEnvironment(root, { probes: false });
+    expect(Date.now() - started).toBeLessThan(FAST.timeout);
+    const manLine = env.split("\n").find((line) => line.startsWith("manifests:"));
+    expect(manLine).toBeUndefined();
+  });
+
   it("directory listings survive a FIFO .gitignore", FAST, () => {
     const root = project();
     expect(makeFifo(join(root, ".gitignore"))).toBe(true);

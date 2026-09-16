@@ -3,7 +3,7 @@
  * outside the cwd jail, toolchain probes, and the `<environment>` block.
  * Pure over the process environment and filesystem; no retained state.
  */
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
@@ -14,6 +14,22 @@ import { freezeCwd, gitignoreSkips, readIgnoreFile, sortUtf8, underRoot } from "
 const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
 
+/** Well-known root markers. Names only, fixed order, omit missing. */
+const ROOT_MANIFESTS = [
+  "package.json",
+  "pnpm-lock.yaml",
+  "package-lock.json",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+  "Cargo.toml",
+  "go.mod",
+  "pyproject.toml",
+  "Gemfile",
+] as const;
+
+const TOOLCHAIN_BINS = ["python3", "rustc", "go", "gcc", "javac", "clang", "npm", "pnpm"] as const;
+
 function extraBinDirs(): string[] {
   const home = homedir();
   return [
@@ -22,6 +38,14 @@ function extraBinDirs(): string[] {
     join(home, ".local", "bin"),
     join(home, ".cargo", "bin"),
   ];
+}
+
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
 }
 
 /** Add user binary directories that a GUI launch leaves off PATH. Search the process PATH first. */
@@ -47,6 +71,7 @@ export function trustedPath(pathEnv = process.env.PATH ?? "", cwdRoot?: string):
 }
 
 export function resolveTrustedBin(bin: string, cwdRoot: string): string | null {
+  const root = freezeCwd(cwdRoot);
   for (const dir of trustedPath(process.env.PATH, cwdRoot).split(delimiter)) {
     if (!dir || !isAbsolute(dir)) continue;
     let realDir: string;
@@ -55,32 +80,54 @@ export function resolveTrustedBin(bin: string, cwdRoot: string): string | null {
     } catch {
       continue;
     }
-    if (underRoot(realDir, cwdRoot)) continue;
+    if (underRoot(realDir, root)) continue;
     const cand = join(realDir, bin);
     try {
-      if (statSync(cand).isFile()) return cand;
+      if (!statSync(cand).isFile()) continue;
     } catch {
       continue;
     }
+    const realCand = realpathOrNull(cand);
+    // Skip bins we cannot canonicalize, and bins whose real path is inside cwd.
+    if (realCand === null || underRoot(realCand, root)) continue;
+    return cand;
   }
   return null;
 }
 
-function probeAbs(absBin: string, remainingMs: number): string | null {
+function probeArgv(bin: string): string[] {
+  return bin === "go" ? ["version"] : ["--version"];
+}
+
+function firstProbeLine(text: string): string {
+  return text.split("\n")[0]?.trim() ?? "";
+}
+
+function probeAbs(absBin: string, argv: string[], remainingMs: number): string | null {
   if (remainingMs <= 0) return null;
-  try {
-    const out = execFileSync(absBin, ["--version"], {
-      timeout: remainingMs,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const line = String(out).split("\n")[0]?.trim() ?? "";
-    return line ? line.slice(0, 80) : null;
-  } catch (err) {
-    const extra = err as { stdout?: string; stderr?: string };
-    const line = `${extra.stdout ?? ""}${extra.stderr ?? ""}`.split("\n")[0]?.trim() ?? "";
-    return line ? line.slice(0, 80) : null;
+  const result = spawnSync(absBin, argv, {
+    timeout: remainingMs,
+    killSignal: "SIGKILL",
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error || result.status !== 0) return null;
+  const line = (
+    firstProbeLine(String(result.stdout ?? "")) || firstProbeLine(String(result.stderr ?? ""))
+  ).slice(0, 80);
+  return line || null;
+}
+
+function listRootManifests(root: string): string[] {
+  const found: string[] = [];
+  for (const name of ROOT_MANIFESTS) {
+    try {
+      if (statSync(join(root, name)).isFile()) found.push(name);
+    } catch {
+      /* missing or unreadable */
+    }
   }
+  return found;
 }
 
 export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): string {
@@ -109,14 +156,18 @@ export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): str
   } catch {
     /* unreadable cwd */
   }
+  const manifests = listRootManifests(root);
+  if (manifests.length > 0) {
+    lines.push(`manifests: ${manifests.map((n) => JSON.stringify(n)).join(", ")}`);
+  }
   if (opts?.probes !== false) {
     const tools: string[] = [`node ${process.version}`];
     const deadline = Date.now() + PROBE_TIMEOUT_MS;
-    for (const bin of ["python3", "rustc", "go"]) {
+    for (const bin of TOOLCHAIN_BINS) {
       const abs = resolveTrustedBin(bin, root);
       if (!abs) continue;
-      const ver = probeAbs(abs, deadline - Date.now());
-      if (ver) tools.push(`${bin} ${ver}`);
+      const ver = probeAbs(abs, probeArgv(bin), deadline - Date.now());
+      tools.push(ver ? `${bin} ${ver}` : bin);
     }
     lines.push(`toolchain: ${tools.join("; ")}`);
   }
@@ -129,14 +180,6 @@ function filesystemEntry(path: string): string {
     return fileURLToPath(path);
   } catch {
     return path;
-  }
-}
-
-function realpathOrNull(path: string): string | null {
-  try {
-    return realpathSync(path);
-  } catch {
-    return null;
   }
 }
 

@@ -337,6 +337,80 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(join(root, "bin", "python3"), "#!/bin/sh\necho HACKED\n", { mode: 0o755 });
     const envProbe = formatEnvironment(root, { probes: true });
     check("project-local python3 is not executed", !envProbe.includes("HACKED"));
+    for (const bin of ["pnpm", "npm", "javac", "gcc", "clang"]) {
+      writeFileSync(join(root, "bin", bin), "#!/bin/sh\necho HACKED\n", { mode: 0o755 });
+    }
+    mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(root, "node_modules", ".bin", "pnpm"), "#!/bin/sh\necho HACKED\n", { mode: 0o755 });
+    const prevPathForJail = process.env.PATH;
+    let envJail = "";
+    try {
+      process.env.PATH = `${join(root, "bin")}${delimiter}${join(root, "node_modules", ".bin")}${delimiter}${prevPathForJail ?? ""}`;
+      envJail = formatEnvironment(root, { probes: true });
+    } finally {
+      process.env.PATH = prevPathForJail;
+    }
+    check("project-local toolchain bins are not executed", !envJail.includes("HACKED"));
+    const trustedPnpmDir = mkdtempSync(join(tmpdir(), "agent-core-pnpm-"));
+    leftovers.push(trustedPnpmDir);
+    writeFileSync(join(trustedPnpmDir, "pnpm"), "#!/bin/sh\necho 9.0.0-test\n", { mode: 0o755 });
+    chmodSync(join(trustedPnpmDir, "pnpm"), 0o755);
+    let envTrustedPnpm = "";
+    try {
+      process.env.PATH = trustedPnpmDir;
+      envTrustedPnpm = formatEnvironment(root, { probes: true });
+    } finally {
+      process.env.PATH = prevPathForJail;
+    }
+    check("trusted pnpm version is reported", envTrustedPnpm.includes("pnpm 9.0.0-test"));
+
+    const probeCaseDir = mkdtempSync(join(tmpdir(), "agent-core-env-probe-"));
+    leftovers.push(probeCaseDir);
+    const probeCwd = mkdtempSync(join(tmpdir(), "agent-core-env-probe-cwd-"));
+    leftovers.push(probeCwd);
+    writeFileSync(join(probeCaseDir, "gcc"), "#!/bin/sh\necho 'flag provided but not defined: -version' >&2\nexit 2\n", { mode: 0o755 });
+    writeFileSync(join(probeCaseDir, "javac"), "#!/bin/sh\necho 'javac 21.0.0-test' >&2\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(probeCaseDir, "pnpm"), "#!/bin/sh\nexec /bin/sleep 30\necho too-late\n", { mode: 0o755 });
+    chmodSync(join(probeCaseDir, "gcc"), 0o755);
+    chmodSync(join(probeCaseDir, "javac"), 0o755);
+    chmodSync(join(probeCaseDir, "pnpm"), 0o755);
+    let envProbeCases = "";
+    try {
+      process.env.PATH = probeCaseDir;
+      envProbeCases = formatEnvironment(probeCwd, { probes: true });
+    } finally {
+      process.env.PATH = prevPathForJail;
+    }
+    const probeParts = (envProbeCases.split("\n").find((line) => line.startsWith("toolchain:")) ?? "")
+      .slice("toolchain: ".length)
+      .split("; ");
+    const probeByBin = new Map(probeParts.map((part) => {
+      const i = part.indexOf(" ");
+      return i < 0 ? [part, ""] : [part.slice(0, i), part.slice(i + 1)];
+    }));
+    check(
+      "failed probe does not leak error text",
+      !envProbeCases.includes("flag provided but not defined") && probeByBin.has("gcc") && probeByBin.get("gcc") === "",
+    );
+    check("stderr-only javac version is used", probeByBin.get("javac") === "javac 21.0.0-test");
+    check("slow pnpm is still named", probeByBin.has("pnpm") && !String(probeByBin.get("pnpm")).includes("too-late"));
+
+    const linkCwd = mkdtempSync(join(tmpdir(), "agent-core-env-link-cwd-"));
+    leftovers.push(linkCwd);
+    const linkDir = mkdtempSync(join(tmpdir(), "agent-core-env-link-dir-"));
+    leftovers.push(linkDir);
+    mkdirSync(join(linkCwd, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(linkCwd, "node_modules", ".bin", "pnpm"), "#!/bin/sh\necho HACKED-LINK\n", { mode: 0o755 });
+    chmodSync(join(linkCwd, "node_modules", ".bin", "pnpm"), 0o755);
+    symlinkSync(join(linkCwd, "node_modules", ".bin", "pnpm"), join(linkDir, "pnpm"));
+    let envLinkJail = "";
+    try {
+      process.env.PATH = linkDir;
+      envLinkJail = formatEnvironment(linkCwd, { probes: true });
+    } finally {
+      process.env.PATH = prevPathForJail;
+    }
+    check("trusted-path symlink into cwd is not executed", !envLinkJail.includes("HACKED-LINK"));
     
     writeFileSync(join(root, "hit.ts"), "alpha unique-token beta\n");
     const g = await grepFiles(root, { pattern: "unique-token" });
@@ -1828,6 +1902,39 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(join(jsonRoot, 'quot"ed'), "x");
     const listingJson = formatEnvironment(jsonRoot, { probes: false });
     check("listing JSON-encodes special names", listingJson.includes(JSON.stringify('quot"ed')));
+
+    const manifestRoot = mkdtempSync(join(tmpdir(), "agent-core-manifest-"));
+    leftovers.push(manifestRoot);
+    writeFileSync(join(manifestRoot, "package.json"), '{"name":"SHOULD_NOT_LEAK"}\n');
+    writeFileSync(join(manifestRoot, "pnpm-lock.yaml"), "lockfileVersion: SHOULD_NOT_LEAK\n");
+    writeFileSync(join(manifestRoot, "Cargo.toml"), "[package]\nname = \"SHOULD_NOT_LEAK\"\n");
+    writeFileSync(join(manifestRoot, ".gitignore"), "Cargo.toml\nsecret.lock\n");
+    writeFileSync(join(manifestRoot, "secret.lock"), "ignored\n");
+    writeFileSync(join(manifestRoot, "visible.txt"), "ok\n");
+    mkdirSync(join(manifestRoot, "pyproject.toml"));
+    const envMan = formatEnvironment(manifestRoot, { probes: false });
+    const envMan2 = formatEnvironment(manifestRoot, { probes: false });
+    const manLine = envMan.split("\n").find((line) => line.startsWith("manifests:")) ?? "";
+    check("environment manifests two calls equal", envMan === envMan2);
+    check(
+      "environment reports root manifests by name",
+      manLine.includes(JSON.stringify("package.json")) &&
+        manLine.includes(JSON.stringify("pnpm-lock.yaml")) &&
+        manLine.includes(JSON.stringify("Cargo.toml")),
+    );
+    check(
+      "environment omits missing and non-file manifests",
+      !manLine.includes("go.mod") && !manLine.includes("pyproject.toml") && !manLine.includes("Gemfile"),
+    );
+    check("environment does not read manifest bodies", !envMan.includes("SHOULD_NOT_LEAK"));
+    check(
+      "environment listing still omits gitignored names",
+      !envMan.includes("secret.lock") && envMan.includes("visible.txt") && !envMan.split("\n").find((line) => line.startsWith("listing:"))?.includes("Cargo.toml"),
+    );
+    check(
+      "environment manifests keep gitignored root markers",
+      manLine.includes(JSON.stringify("Cargo.toml")),
+    );
     
     const prevPath = process.env.PATH;
     let envMissing = "";
