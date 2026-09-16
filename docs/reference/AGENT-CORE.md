@@ -108,6 +108,10 @@ both couples them badly.
 Rule: reclaim first, summarize only when reclamation cannot keep the window
 under budget. Most sessions should never summarize.
 
+Session Search walks the append-only JSONL (including prune `reproduce:`
+receipts and tool-error text) so a summary is never the only remaining
+record of a tool turn. Sidecars stay off the user-facing search surface.
+
 Verify: count summarizations per run — target near zero on short tasks;
 reclamations may be frequent but must touch only content outside the
 protected window (P3).

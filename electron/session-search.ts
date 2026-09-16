@@ -10,8 +10,8 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
 import { cleanPlanPathToken, looksLikePath } from "./plan-board.ts";
-import { isCoreSessionId, listCurrentSegments, listLogicalSessions } from "../agent-core/session.ts";
-import { errorCode, isErrno } from "../shared/guards.ts";
+import { formatStub, isCoreSessionId, listCurrentSegments, listLogicalSessions } from "../agent-core/session.ts";
+import { errorCode, isErrno, isRecord } from "../shared/guards.ts";
 import type { CanonicalizePath, SessionHit } from "../shared/types.ts";
 
 const MAX_SESSION_SEARCH_FILES = 50;
@@ -44,55 +44,136 @@ function pushToolPaths(block: Record<string, unknown>, paths: string[]): void {
   if (block.input && typeof block.input === "object") stringArgPaths(block.input, paths);
 }
 
-/**
- * Parse one agent session JSONL line. Returns null for non-message
- * records (usage, revisions, thinking-only).
- */
-export function parseSessionMessageLine(line: string): SessionMessageParse | null {
-  if (!line || !line.includes('"message"')) return null;
-  try {
-    const entry = JSON.parse(line) as {
-      type?: string;
-      message?: {
-        role?: string;
-        content?: string | Array<Record<string, unknown>>;
-      };
-    };
-    if (entry.type !== "message" || !entry.message) return null;
-    const role = entry.message.role ?? "message";
-    if (role !== "user" && role !== "assistant") return null;
-    const content = entry.message.content;
-    const texts: string[] = [];
-    const paths: string[] = [];
-    if (typeof content === "string") {
-      texts.push(content);
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (!block || typeof block !== "object") continue;
-        const type = typeof block.type === "string" ? block.type : "";
-        if (type === "thinking" || type === "redacted_thinking" || type === "reasoning") continue;
-        if (type === "text" && typeof block.text === "string") {
-          texts.push(block.text);
-        } else if (type === "tool_use" && typeof block.name === "string") {
-          texts.push(`[${block.name}]`);
-          pushToolPaths(block, paths);
-        } else if (type === "tool_result") {
-          if (typeof block.content === "string") {
-            if (block.content) texts.push(block.content.slice(0, 2000));
-          } else if (Array.isArray(block.content)) {
-            for (const part of block.content) {
-              if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
-                texts.push(((part as { text: string }).text).slice(0, 2000));
-              }
-            }
-          }
-        }
+const TOOL_SEARCH_KEYS = ["command", "pattern", "query", "url", "path"] as const;
+/** Per-field cap so a huge bash command or prune repro cannot explode the walk. */
+const SEARCH_FRAGMENT_CHARS = 2000;
+
+function capFragment(value: string): string {
+  return value.length <= SEARCH_FRAGMENT_CHARS ? value : value.slice(0, SEARCH_FRAGMENT_CHARS);
+}
+
+function nonNegInt(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function toolInputRecord(block: Record<string, unknown>): Record<string, unknown> | null {
+  if (isRecord(block.input)) return block.input;
+  if (isRecord(block.arguments)) return block.arguments;
+  return null;
+}
+
+function pushToolSearchText(block: Record<string, unknown>, texts: string[]): void {
+  const src = toolInputRecord(block);
+  if (!src) return;
+  for (const key of TOOL_SEARCH_KEYS) {
+    const value = src[key];
+    if (typeof value === "string" && value) texts.push(capFragment(value));
+  }
+}
+
+function pushToolResultText(block: Record<string, unknown>, texts: string[]): void {
+  const before = texts.length;
+  if (typeof block.content === "string") {
+    if (block.content) texts.push(capFragment(block.content));
+  } else if (Array.isArray(block.content)) {
+    for (const part of block.content) {
+      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
+        texts.push(capFragment((part as { text: string }).text));
       }
     }
-    if (texts.length === 0) return null;
-    const text = texts.join(" ").replace(/\s+/g, " ").trim();
-    if (!text) return null;
-    return { role, text, paths };
+  }
+  if (typeof block.error === "string" && block.error) texts.push(capFragment(block.error));
+  if (typeof block.repro === "string" && block.repro) texts.push(`reproduce: ${capFragment(block.repro)}`);
+  if (before === texts.length && (block.is_error === true || block.isError === true)) texts.push("is_error");
+}
+
+function joinSearchTexts(texts: string[]): string | null {
+  if (texts.length === 0) return null;
+  const text = texts.join(" ").replace(/\s+/g, " ").trim();
+  return text || null;
+}
+
+function parseMessagePayload(message: {
+  role?: string;
+  content?: string | Array<Record<string, unknown>>;
+}): SessionMessageParse | null {
+  const role = message.role ?? "message";
+  if (role !== "user" && role !== "assistant") return null;
+  const content = message.content;
+  const texts: string[] = [];
+  const paths: string[] = [];
+  if (typeof content === "string") {
+    texts.push(content);
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const type = typeof block.type === "string" ? block.type : "";
+      if (type === "thinking" || type === "redacted_thinking" || type === "reasoning") continue;
+      if (type === "text" && typeof block.text === "string") {
+        texts.push(block.text);
+      } else if (type === "tool_use" && typeof block.name === "string") {
+        texts.push(`[${block.name}]`);
+        pushToolPaths(block, paths);
+        pushToolSearchText(block, texts);
+      } else if (type === "tool_result") {
+        pushToolResultText(block, texts);
+      }
+    }
+  }
+  const text = joinSearchTexts(texts);
+  if (!text) return null;
+  return { role, text, paths };
+}
+
+function parsePruneRevision(entry: Record<string, unknown>): SessionMessageParse | null {
+  const targets = Array.isArray(entry.targets) ? entry.targets : [];
+  const texts: string[] = [];
+  for (const raw of targets) {
+    if (!isRecord(raw)) continue;
+    const recovery = isRecord(raw.recovery) ? raw.recovery : null;
+    const repro =
+      (typeof raw.repro === "string" && raw.repro) ||
+      (typeof recovery?.repro === "string" && recovery.repro) ||
+      "";
+    const tool =
+      (typeof raw.tool === "string" && raw.tool) ||
+      (typeof recovery?.tool === "string" && recovery.tool) ||
+      "tool";
+    const sseq = nonNegInt(raw.sseq);
+    const original = isRecord(raw.original) ? raw.original : null;
+    const chars = nonNegInt(original?.chars);
+    const clippedRepro = repro ? capFragment(repro) : "";
+    if (raw.action === "stub") {
+      texts.push(formatStub({ chars, tool: capFragment(tool), sseq, repro: clippedRepro || undefined }));
+    } else if (clippedRepro) {
+      texts.push(`reproduce: ${clippedRepro}`);
+    }
+  }
+  const text = joinSearchTexts(texts);
+  if (!text) return null;
+  return { role: "reclaim", text, paths: [] };
+}
+
+/**
+ * Parse one agent session JSONL line. Returns null for non-message
+ * records (usage, checkpoints, thinking-only). Prune revisions stay
+ * searchable via stub `reproduce:` text; summarize handoffs parse as
+ * their inner message. Originals remain on the append-only log.
+ */
+export function parseSessionMessageLine(line: string): SessionMessageParse | null {
+  if (!line) return null;
+  if (!line.includes('"message"') && !line.includes('"revision"')) return null;
+  try {
+    const entry = JSON.parse(line) as Record<string, unknown>;
+    if (entry.type === "revision") {
+      if (entry.kind === "prune") return parsePruneRevision(entry);
+      if (entry.kind === "summarize" && isRecord(entry.message)) {
+        return parseMessagePayload(entry.message as { role?: string; content?: string | Array<Record<string, unknown>> });
+      }
+      return null;
+    }
+    if (entry.type !== "message" || !isRecord(entry.message)) return null;
+    return parseMessagePayload(entry.message as { role?: string; content?: string | Array<Record<string, unknown>> });
   } catch {
     return null;
   }

@@ -6,6 +6,7 @@ import {
   MAX_SESSION_SEARCH_QUERY,
   collectSessionSearchFiles,
   mergeSessionFiles,
+  parseSessionMessageLine,
   searchSessionFiles,
   type SessionFileEntry,
 } from "../../../electron/session-search.ts";
@@ -266,6 +267,223 @@ describe("searchSessionFiles walk errors", () => {
       expect(result.error).toMatch(/session listing uncertain/);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("parseSessionMessageLine reclaim and errors (#452)", () => {
+  it("indexes bash commands on tool_use", () => {
+    const line = JSON.stringify({
+      storageSeq: 2,
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "1", name: "bash", input: { command: "pnpm run test:unit" } }],
+      },
+    });
+    const parsed = parseSessionMessageLine(line);
+    expect(parsed?.text).toContain("[bash]");
+    expect(parsed?.text).toContain("pnpm run test:unit");
+  });
+
+  it("indexes tool_result error text and repro after a failed turn", () => {
+    const line = JSON.stringify({
+      storageSeq: 4,
+      type: "message",
+      message: {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "1",
+          is_error: true,
+          content: "ENOENT: no such file unique-error-token",
+          repro: "bash 'ls missing.txt'",
+        }],
+      },
+    });
+    const parsed = parseSessionMessageLine(line);
+    expect(parsed?.text).toContain("unique-error-token");
+    expect(parsed?.text).toContain("reproduce: bash 'ls missing.txt'");
+  });
+
+  it("indexes prune stub reproduce: text so search still finds the command", () => {
+    const line = JSON.stringify({
+      storageSeq: 6,
+      type: "revision",
+      kind: "prune",
+      revisionId: "rev-1",
+      targets: [{
+        sseq: 4,
+        blockIndex: 0,
+        action: "stub",
+        original: { type: "tool_result", chars: 80, bytes: 80, sha256: "abc" },
+        reclaimedTokens: 20,
+        tool: "bash",
+        repro: "bash 'pnpm run test:unit'",
+        recovery: { source: "session-record", tool: "bash", repro: "bash 'pnpm run test:unit'" },
+      }],
+    });
+    const parsed = parseSessionMessageLine(line);
+    expect(parsed?.role).toBe("reclaim");
+    expect(parsed?.text).toContain("reproduce: bash 'pnpm run test:unit'");
+    expect(parsed?.text).toContain("storageSeq 4");
+  });
+
+  it("indexes summarize handoff text without dropping it", () => {
+    const line = JSON.stringify({
+      storageSeq: 8,
+      type: "revision",
+      kind: "summarize",
+      evicted: 2,
+      summarySseq: 8,
+      message: { role: "user", content: "<context-handoff>\nkeep unique-handoff-token\n</context-handoff>" },
+    });
+    const parsed = parseSessionMessageLine(line);
+    expect(parsed?.role).toBe("user");
+    expect(parsed?.text).toContain("unique-handoff-token");
+  });
+
+  it("still parses a user message that mentions revision", () => {
+    const line = JSON.stringify({
+      storageSeq: 1,
+      type: "message",
+      message: { role: "user", content: 'please check the "revision" receipt' },
+    });
+    const parsed = parseSessionMessageLine(line);
+    expect(parsed?.role).toBe("user");
+    expect(parsed?.text).toContain("revision");
+  });
+
+  it("caps a huge tool_use command so the walk stays bounded", () => {
+    const command = `echo ${"a".repeat(5000)}TAIL`;
+    const line = JSON.stringify({
+      storageSeq: 2,
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "1", name: "bash", input: { command } }],
+      },
+    });
+    const parsed = parseSessionMessageLine(line);
+    expect(parsed?.text).toContain("echo ");
+    expect(parsed?.text.includes("TAIL")).toBe(false);
+    expect(parsed?.text.length ?? 0).toBeLessThan(3000);
+  });
+
+  it("indexes is_error when the result body is empty", () => {
+    const line = JSON.stringify({
+      storageSeq: 4,
+      type: "message",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "1", is_error: true, content: "" }],
+      },
+    });
+    const parsed = parseSessionMessageLine(line);
+    expect(parsed?.text).toContain("is_error");
+  });
+
+  it("skips prune drops that have no reproduce command", () => {
+    const line = JSON.stringify({
+      storageSeq: 6,
+      type: "revision",
+      kind: "prune",
+      revisionId: "rev-drop",
+      targets: [{
+        sseq: 2,
+        blockIndex: 0,
+        action: "drop",
+        original: { type: "thinking", chars: 12, bytes: 12, sha256: "abc" },
+        reclaimedTokens: 3,
+        recovery: { source: "session-record", tool: "thinking", repro: null },
+      }],
+    });
+    expect(parseSessionMessageLine(line)).toBeNull();
+  });
+
+  it("ignores malformed prune targets and negative seq fields", () => {
+    const line = JSON.stringify({
+      storageSeq: 6,
+      type: "revision",
+      kind: "prune",
+      revisionId: "rev-1",
+      targets: [
+        null,
+        "nope",
+        {
+          sseq: -4,
+          blockIndex: 0,
+          action: "stub",
+          original: { type: "tool_result", chars: Number.POSITIVE_INFINITY, bytes: 80, sha256: "abc" },
+          reclaimedTokens: 20,
+          tool: "grep",
+          repro: "grep 'needle-token'",
+          recovery: { source: "session-record", tool: "grep", repro: "grep 'needle-token'" },
+        },
+      ],
+    });
+    const parsed = parseSessionMessageLine(line);
+    expect(parsed?.text).toContain("reproduce: grep 'needle-token'");
+    expect(parsed?.text).toContain("storageSeq 0");
+    expect(parsed?.text).toContain("cleared: 0 chars");
+  });
+});
+
+describe("searchSessionFiles reclaim coverage (#452)", () => {
+  function searchOpts(files: SessionFileEntry[], query: string) {
+    return {
+      query,
+      files,
+      projectCwd: "/proj",
+      canonicalize: (p: string) => p,
+      isProjectFile: () => false,
+    };
+  }
+
+  it("hits prune reproduce: lines and tool-error text in one walk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ssr-"));
+    try {
+      const path = join(dir, "session.jsonl");
+      writeFileSync(path, [
+        JSON.stringify({
+          storageSeq: 4,
+          type: "message",
+          message: {
+            role: "user",
+            content: [{
+              type: "tool_result",
+              is_error: true,
+              content: "command failed unique-error-token",
+              repro: "bash 'ls missing.txt'",
+            }],
+          },
+        }),
+        JSON.stringify({
+          storageSeq: 6,
+          type: "revision",
+          kind: "prune",
+          revisionId: "rev-1",
+          targets: [{
+            sseq: 4,
+            blockIndex: 0,
+            action: "stub",
+            original: { type: "tool_result", chars: 40, bytes: 40, sha256: "abc" },
+            reclaimedTokens: 10,
+            tool: "bash",
+            repro: "bash 'pnpm run test:unit'",
+            recovery: { source: "session-record", tool: "bash", repro: "bash 'pnpm run test:unit'" },
+          }],
+        }),
+      ].map((line) => `${line}\n`).join(""));
+      const file: SessionFileEntry = { path, name: "session.jsonl", mtimeMs: 1 };
+      const errorHits = await searchSessionFiles(searchOpts([file], "unique-error-token"));
+      expect(errorHits.hits).toHaveLength(1);
+      expect(errorHits.hits[0]?.text).toContain("unique-error-token");
+      const reproHits = await searchSessionFiles(searchOpts([file], "test:unit"));
+      expect(reproHits.hits.length).toBeGreaterThanOrEqual(1);
+      expect(reproHits.hits.some((hit) => hit.text.includes("reproduce:"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
