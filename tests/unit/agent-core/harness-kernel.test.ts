@@ -370,7 +370,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     leftovers.push(probeCwd);
     writeFileSync(join(probeCaseDir, "gcc"), "#!/bin/sh\necho 'flag provided but not defined: -version' >&2\nexit 2\n", { mode: 0o755 });
     writeFileSync(join(probeCaseDir, "javac"), "#!/bin/sh\necho 'javac 21.0.0-test' >&2\nexit 0\n", { mode: 0o755 });
-    writeFileSync(join(probeCaseDir, "pnpm"), "#!/bin/sh\nsleep 2\necho too-late\n", { mode: 0o755 });
+    writeFileSync(join(probeCaseDir, "pnpm"), "#!/bin/sh\nexec /bin/sleep 30\necho too-late\n", { mode: 0o755 });
     chmodSync(join(probeCaseDir, "gcc"), 0o755);
     chmodSync(join(probeCaseDir, "javac"), 0o755);
     chmodSync(join(probeCaseDir, "pnpm"), 0o755);

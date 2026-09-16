@@ -107,6 +107,7 @@ function probeAbs(absBin: string, argv: string[], remainingMs: number): string |
   if (remainingMs <= 0) return null;
   const result = spawnSync(absBin, argv, {
     timeout: remainingMs,
+    killSignal: "SIGKILL",
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
