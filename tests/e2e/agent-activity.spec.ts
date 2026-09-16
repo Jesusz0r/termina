@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures.ts";
 import type { Page } from "@playwright/test";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { parseSidecarRecord } from "../../electron/sidecar.ts";
 
 /**
@@ -107,5 +107,50 @@ test.describe("agent activity roster and timeline (issue #291)", () => {
     await expect(projectDot).toHaveClass(/idle/);
     await expect(projectDot).not.toHaveClass(/busy/);
     await expect(projectDot).not.toHaveClass(/blocked/);
+  });
+
+  test("named toast names the project and dismisses on jump", async ({ page, runRoot, projectRoot }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    await page.evaluate(() => {
+      Object.defineProperty(document, "hasFocus", { configurable: true, value: () => false });
+    });
+
+    const instanceId = await activeInstanceId(page);
+    const eventsDir = join(runRoot, "events");
+    mkdirSync(eventsDir, { recursive: true });
+    const sidecarFile = join(eventsDir, `${instanceId}.jsonl`);
+    const tabDot = page.locator(".terminal-tab .tab-status").first();
+
+    await appendSidecarRecord(sidecarFile, { t: "agent_start" });
+    await expect(tabDot).toHaveClass(/busy/, { timeout: 15_000 });
+
+    await appendSidecarRecord(sidecarFile, { t: "agent_settled" });
+    const toast = page.getByRole("button", { name: `${basename(projectRoot)} is idle` });
+    await expect(toast).toBeVisible({ timeout: 15_000 });
+    await toast.click();
+    await expect(toast).toHaveCount(0);
+    await expect(page.locator(".terminal-tab.active")).toBeVisible();
+  });
+
+  test("named toast fires when a background project's agent settles", async ({ page, runRoot, projectRoot }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+
+    const instanceId = await activeInstanceId(page);
+    const eventsDir = join(runRoot, "events");
+    mkdirSync(eventsDir, { recursive: true });
+    const sidecarFile = join(eventsDir, `${instanceId}.jsonl`);
+    const other = join(runRoot, "other-project");
+    mkdirSync(other, { recursive: true });
+    writeFileSync(join(other, "readme.txt"), "other\n");
+    await page.evaluate((dir) => window.termina.projectOpenPath(dir), other);
+    const otherTab = page.locator(".project-tab").filter({ hasText: "other-project" });
+    await expect(otherTab).toHaveClass(/active/, { timeout: 15_000 });
+
+    await appendSidecarRecord(sidecarFile, { t: "agent_start" });
+    const backgroundDot = page.locator(".project-tab").filter({ hasText: basename(projectRoot) }).locator(".tab-status");
+    await expect(backgroundDot).toHaveClass(/busy/, { timeout: 15_000 });
+
+    await appendSidecarRecord(sidecarFile, { t: "agent_settled" });
+    await expect(page.getByRole("button", { name: `${basename(projectRoot)} is idle` })).toBeVisible({ timeout: 15_000 });
   });
 });

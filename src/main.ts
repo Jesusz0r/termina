@@ -72,7 +72,12 @@ import {
   worldlineEventBelongsToProject,
 } from "./worldline-project-state";
 import { asKnownState, KNOWN_ACTIVITY_STATES, KNOWN_VERIFY_BADGE_STATES, presentBlockedLabel } from "./known-state";
-import { forgetActivityCue, noteActivityCue } from "./activity-cue";
+import {
+  activityCueCopy,
+  activityCueIsWatching,
+  forgetActivityCue,
+  noteActivityCue,
+} from "./activity-cue";
 import { CHALLENGE_PROFILES, isTuiOwnedShortcut, pathBasename } from "../shared/types";
 import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
@@ -971,6 +976,56 @@ function updateProjectAttention(projectId: string | null): void {
   });
 }
 
+const activityCueToasts = new Map<string, { dismiss: () => void }>();
+
+function forgetPaneActivityCue(terminalId: string): void {
+  forgetActivityCue(terminalId);
+  activityCueToasts.get(terminalId)?.dismiss();
+  activityCueToasts.delete(terminalId);
+}
+
+function revealActivityPane(instanceId: string): void {
+  const pane = panes.get(instanceId);
+  if (!pane) return;
+  layout.revealTerminal();
+  if (pane.projectId) lastActivePane.set(pane.projectId, instanceId);
+  if (pane.projectId && pane.projectId !== activeProjectId) {
+    const targetProject = pane.projectId;
+    void window.termina.projectActivate(targetProject).then(() => {
+      if (activeProjectId !== targetProject) return;
+      if (panes.has(instanceId)) activatePane(instanceId);
+    }).catch((err) => {
+      toast(`could not switch projects: ${(err as Error).message}`, "warning");
+    });
+    return;
+  }
+  activatePane(instanceId);
+}
+
+function announceActivityCue(pane: Pane, kind: "idle" | "blocked"): void {
+  const cwd = (pane.projectId ? projectViews.get(pane.projectId)?.cwd : null) ?? pane.cwd ?? "";
+  let agents = 0;
+  for (const p of panes.values()) {
+    if (p.projectId === pane.projectId && p.type === "agent" && !p.error && !p.exited) agents++;
+  }
+  let terminal: string | undefined;
+  if (agents > 1) {
+    if (pane.dispatchWorker) terminal = "dispatch";
+    else if (pane.worldlineLabel) terminal = pane.worldlineLabel;
+    else terminal = pane.nameEl.textContent?.trim() || undefined;
+  }
+  const targetId = pane.instanceId;
+  activityCueToasts.get(targetId)?.dismiss();
+  activityCueToasts.set(
+    targetId,
+    toast(
+      activityCueCopy({ kind, project: pathBasename(cwd) || "project", terminal }),
+      kind === "blocked" ? "warning" : "info",
+      () => revealActivityPane(targetId),
+    ),
+  );
+}
+
 function activatePane(instanceId: string): void {
   const pane = panes.get(instanceId);
   if (!pane) return;
@@ -1111,7 +1166,7 @@ async function closePane(instanceId: string): Promise<void> {
   const terminalGeneration = pane.generation;
   closingPanes.set(instanceId, { generation: terminalGeneration });
   panes.delete(instanceId);
-  forgetActivityCue(instanceId);
+  forgetPaneActivityCue(instanceId);
   for (const [projectId, activeInstanceId] of lastActivePane) {
     if (activeInstanceId === instanceId) lastActivePane.delete(projectId);
   }
@@ -1158,16 +1213,8 @@ function updatePaneTab(pane: Pane): void {
   const failDot = pane.verifyAttention && pane.verify.state === "fail";
   const timeoutDot = pane.verifyAttention && pane.verify.state === "timeout";
   applyTabActivity(pane.statusEl, presented, { fail: failDot, timeout: timeoutDot });
-  if (!pane.error) {
-    noteActivityCue(
-      pane.instanceId,
-      presented.blocked ? "blocked" : presented.working ? "working" : "idle",
-      { viewing: activeId === pane.instanceId, windowFocused: document.hasFocus() },
-    );
-  }
   updateProjectAttention(pane.projectId);
   applyTypeBadge(pane);
-  // Worldline candidates carry the A/B badge on their tab.
   const wlineEl = pane.tabEl.querySelector(".tab-worldline") as HTMLElement;
   updateWorldlinePaneTab(
     activeProjectId,
@@ -1175,6 +1222,22 @@ function updatePaneTab(pane: Pane): void {
     (instanceId) => worldlinesView.labelOfTerminal(instanceId),
     wlineEl,
   );
+  if (!pane.error) {
+    const sounded = noteActivityCue(
+      pane.instanceId,
+      presented.blocked ? "blocked" : presented.working ? "working" : "idle",
+      {
+        viewing: activityCueIsWatching({
+          paneProjectId: pane.projectId,
+          activeProjectId,
+          activePane: activeId === pane.instanceId,
+          tuiFocused: isCoreTerminalFocused(),
+        }),
+        windowFocused: document.hasFocus(),
+      },
+    );
+    if (sounded && pane.type === "agent") announceActivityCue(pane, sounded);
+  }
 }
 
 function renderChrome(): void {
@@ -2337,7 +2400,7 @@ window.termina.onInstances((list: InstanceSummary[]) => {
   for (const [id, pane] of [...panes.entries()]) {
     if (liveIds.has(id) || !pane.fromRoster) continue;
     panes.delete(id);
-    forgetActivityCue(id);
+    forgetPaneActivityCue(id);
     prunedPane = true;
     for (const [projId, activeInstId] of lastActivePane) {
       if (activeInstId === id) lastActivePane.delete(projId);

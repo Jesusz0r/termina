@@ -186,7 +186,7 @@ document.addEventListener("keydown", trapTab, true);
 let toastContainer: HTMLElement | null = null;
 
 function ensureToastContainer(): HTMLElement {
-  if (!toastContainer) {
+  if (!toastContainer || !toastContainer.isConnected) {
     toastContainer = document.createElement("div");
     toastContainer.className = "toast-container";
     toastContainer.setAttribute("role", "status");
@@ -196,12 +196,31 @@ function ensureToastContainer(): HTMLElement {
   return toastContainer;
 }
 
-export function toast(message: string, type: "info" | "warning" | "error" = "info"): void {
-  const el = document.createElement("div");
+export function toast(
+  message: string,
+  type: "info" | "warning" | "error" = "info",
+  onClick?: () => void,
+): { dismiss: () => void } {
+  const el = document.createElement(onClick ? "button" : "div");
   el.className = `toast toast-${type}`;
   el.textContent = message;
+  let closed = false;
+  const dismiss = (): void => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(timer);
+    el.remove();
+  };
+  if (onClick) {
+    (el as HTMLButtonElement).type = "button";
+    el.addEventListener("click", () => {
+      dismiss();
+      onClick();
+    });
+  }
   ensureToastContainer().appendChild(el);
-  setTimeout(() => el.remove(), 5000);
+  const timer = setTimeout(dismiss, 5000);
+  return { dismiss };
 }
 
 /** Stays until dismiss(). Reuses the toast stack; optional Retry-style action. */

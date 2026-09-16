@@ -3430,6 +3430,22 @@ html[data-theme="light"] #statusbar .muted {
   border-left-color: var(--accent);
 }
 
+button.toast {
+  appearance: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  margin: 0;
+  user-select: none;
+}
+
+button.toast:hover,
+button.toast:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

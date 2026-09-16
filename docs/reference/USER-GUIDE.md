@@ -81,8 +81,11 @@ a tab reactivates that tab instead of duplicating it.
 A status dot on the tab matches the terminals: green while every agent is
 idle, a glowing pulse while one is working, amber glow when one is blocked.
 An unseen verify failure in a background project turns that project's dot
-red instead. Settling or blocking plays a short chime unless you are
-already looking at that terminal.
+red instead. Settling or blocking plays a short chime and a named toast
+(`pi-editor is idle`, or `pi-editor · dispatch needs you` when that project
+has more than one agent) unless that terminal already has keyboard focus
+in the project you are looking at. Click the toast to jump to that project
+and terminal.
 
 ---
 

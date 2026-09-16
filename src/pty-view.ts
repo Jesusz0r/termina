@@ -546,6 +546,8 @@ export class PtyView {
     if (this.disposed || this.visible === visible) return;
     this.visible = visible;
     if (!visible) {
+      const textarea = this.term.textarea;
+      if (textarea && document.activeElement === textarea) textarea.blur();
       if (this.watchdog) clearInterval(this.watchdog);
       this.watchdog = null;
       return;

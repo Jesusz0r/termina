@@ -251,7 +251,12 @@ describe("tab activity dots", () => {
     expect(mainSrc).toContain("applyTabActivity(pane.statusEl, presented, { fail: failDot, timeout: timeoutDot })");
     expect(mainSrc).toContain("updateProjectAttention(pane.projectId)");
     expect(mainSrc).toContain("noteActivityCue(");
-    expect(mainSrc).toContain("viewing: activeId === pane.instanceId");
+    expect(mainSrc).toContain("activityCueIsWatching(");
+    expect(mainSrc).toContain("paneProjectId: pane.projectId");
+    expect(mainSrc).toContain("tuiFocused: isCoreTerminalFocused()");
     expect(mainSrc).toContain("windowFocused: document.hasFocus()");
+    expect(mainSrc).toContain("if (sounded && pane.type === \"agent\") announceActivityCue(pane, sounded)");
+    expect(mainSrc).toContain("() => revealActivityPane(targetId)");
+    expect(mainSrc).toContain("if (activeProjectId !== targetProject) return");
   });
 });

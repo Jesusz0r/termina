@@ -49,12 +49,48 @@ describe("renderer UI hardening batch (refs #204)", () => {
     }
   });
 
+  it("makes an activity cue toast a button that jumps, then dismisses", () => {
+    vi.useFakeTimers();
+    try {
+      const jumps: string[] = [];
+      modals.toast("pi-editor is idle", "info", () => {
+        jumps.push("go");
+      });
+      const el = fake.document.body.querySelectorAll(".toast")[0];
+      expect(el.tagName).toBe("BUTTON");
+      expect(el.type).toBe("button");
+      expect(el.textContent).toBe("pi-editor is idle");
+      el.click();
+      expect(jumps).toEqual(["go"]);
+      expect(fake.document.body.querySelectorAll(".toast")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dismisses a toast once and ignores the timeout after that", () => {
+    vi.useFakeTimers();
+    try {
+      const { dismiss } = modals.toast("pi-editor is idle", "info");
+      dismiss();
+      dismiss();
+      expect(fake.document.body.querySelectorAll(".toast")).toHaveLength(0);
+      vi.advanceTimersByTime(5000);
+      expect(fake.document.body.querySelectorAll(".toast")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("lays the toast container out as a bottom-right column", () => {
     expect(css).toMatch(/\.toast-container\s*\{[^}]*flex-direction:\s*column/);
     expect(css).toMatch(/\.toast-container\s*\{[^}]*bottom:\s*64px/);
     // The slot moved to the container; individual toasts are static children.
     const toastBlock = /\.toast\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
     expect(toastBlock).not.toContain("position: fixed");
+    expect(css).toContain("button.toast");
+    expect(css).toMatch(/button\.toast\s*\{[^}]*cursor:\s*pointer/);
+    expect(css).toMatch(/button\.toast\s*\{[^}]*user-select:\s*none/);
   });
 
   it("builds settings rows with textContent, never innerHTML", () => {
