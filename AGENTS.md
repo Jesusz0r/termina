@@ -85,6 +85,16 @@ Follow the existing owner for the behavior: `agent-core/auth.ts` (auth/provider 
 - Tiered evidence: docs-only = path/command checks; TS-only = typecheck + focused unit; behavior/UI/main/snapshot/core = + build and relevant e2e.
 - Leave build green, remove debug code.
 
+## Harness change isolation
+
+A PR that edits any of these must not also rewrite prompt templates, skill index formatting, host overlay copy, or environment text (`formatEnvironment` in `agent-core/main/env.ts`):
+
+- `FROZEN_IDENTITY` in `agent-core/main/front-matter.ts` (zone 1 cache prefix)
+- `agent-core/stall.ts` (doom-loop / same-target failure stop)
+- settle in `agent-core/main.ts` (`agent_settled`, No Quiet Wins / one-ticket-one-run, `pause_turn` continuation cap)
+
+Do not mix identity wording with stall or settle behavior in the same PR. Before/after for those files uses `scripts/laziness-metrics.ts` and focused stall/settle unit tests (`tests/unit/agent-core/stall-tracker.test.ts`, `tests/unit/agent-core/quiet-wins.test.ts`), not vibes. This is a review convention, not a CI path-guard.
+
 ## Glossary
 
 Run = one agent session (`agent_start` → `agent_settled`). Sidecar = JSONL per terminal in `TERMINA_EVENTS_DIR`. Baseline = file at run start. Snapshot = file at a moment. Dot = timeline point. Worker = one dispatched plan task. Fork point = timeline event + agent session sequence + immutable source state. Worldline = isolated candidate tree + session. Candidate/Reference(A)/Alternative(B)/Challenge/Evidence contract/Write lease/Workspace — see `docs/reference/AGENT-CORE.md`.
