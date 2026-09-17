@@ -1771,7 +1771,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check(
       "frozen identity forbids lazy completion",
       FROZEN_IDENTITY.includes("No silent omissions or placeholders") &&
-        FROZEN_IDENTITY.includes("Fix causes; smallest sufficient change") &&
+        FROZEN_IDENTITY.includes("Fix causes; no patching, smallest sufficient change") &&
         FROZEN_IDENTITY.includes("Remove your unneeded temporary artifacts") &&
         FROZEN_IDENTITY.includes("Never weaken checks to pass"),
     );

@@ -208,7 +208,7 @@ describe("real tool loop regressions", () => {
       expect(results[0]?.content).toBe(results[1]?.content);
       expect(results[3]?.content).toContain("duplicate action");
       expect(results[3]?.is_error).toBe(true);
-      expect(results[4]?.content).toContain("2|x");
+      expect(results[4]?.content).toContain("file.txt lines 1-2\noriginal\nx");
       expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("original\nx");
       expectPaired(result.messages);
     });
