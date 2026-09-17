@@ -18,7 +18,7 @@
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
  * - cwd jail; grep/glob; unique edit; numbered read_file; dir listing; interruptible bash; web_search; skill index; prefix cache_control; traces
- * - last tool_result cache pin (Anthropic); session prompt_cache_key by model family; 429 retry; model-aware effort
+ * - last tool_result cache pin (Anthropic); session prompt_cache_key by model family; 429/network retry; model-aware effort
  * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
 import {
@@ -228,7 +228,7 @@ import {
   type HostContextTrace,
   type TraceCacheDiagnostics,
 } from "./main/cache-diagnostics.ts";
-import { retryAfter } from "./main/retry-after.ts";
+import { formatNetworkError, isRetryableNetworkError, retryAfter, retryNetworkAfter } from "./main/retry-after.ts";
 import {
   SubagentRegistry,
   appendSubagentInboxMessage,
@@ -2540,7 +2540,7 @@ let codexTurnState = "";
 
 type ProviderRetryEvent = {
   status: number;
-  kind: "oauth-refresh" | "retryable-status";
+  kind: "oauth-refresh" | "retryable-status" | "network";
   retryCount: number;
 };
 
@@ -2571,12 +2571,27 @@ async function providerPost(
       headers.accept = "text/event-stream";
     }
     if (stream && protocol === "google-generate") headers.accept = "text/event-stream";
-    const res = await fetch(protocolEndpoint(auth.baseUrl, model, protocol, stream), {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(protocolEndpoint(auth.baseUrl, model, protocol, stream), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (err) {
+      if (signal?.aborted || (err instanceof Error && err.message === "aborted")) throw new Error("aborted");
+      const wait = retryNetworkAfter(err, retries);
+      if (wait != null) {
+        retries++;
+        await onRetry?.({ status: 0, kind: "network", retryCount: retries });
+        // Tests already force HTTP Retry-After to 0; keep network waits off the
+        // spawn clock the same way without changing the production budget.
+        await sleep(process.env.TERMINA_CORE_TEST === "1" ? 0 : wait, signal);
+        continue;
+      }
+      throw isRetryableNetworkError(err) ? new Error(formatNetworkError(err)) : err;
+    }
     if (res.ok && codexAffinity && providerId === "openai-codex") {
       const nextTurnState = res.headers.get("x-codex-turn-state")?.trim();
       if (nextTurnState) codexTurnState = nextTurnState;
@@ -2616,7 +2631,11 @@ async function rotateProviderRetryAttempt(
   cache: TraceCacheDiagnostics | null,
 ): Promise<TraceAttemptState | null> {
   if (!attempt || attempt.written) return attempt;
-  const reason = event.kind === "oauth-refresh" ? "oauth-refresh" : `provider-${event.status}`;
+  const reason = event.kind === "oauth-refresh"
+    ? "oauth-refresh"
+    : event.kind === "network"
+      ? "provider-network"
+      : `provider-${event.status}`;
   const ended = Date.now();
   await writeTraceAttempt(attempt, {
     status: "retrying",
@@ -4408,18 +4427,25 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "overflow-retry-error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt, providerError: retryMessage });
             throw retryErr;
           }
-        } else if (!retriedProviderTermination && !interrupted && isRetriableProviderTermination(providerMessage)) {
-          // Bare provider termination: the stream died before producing a
-          // first token. Retry once with identical bytes, then let the
-          // failure settle with diagnostics on the trace and the terminal.
+        } else if (
+          !retriedProviderTermination &&
+          !interrupted &&
+          (isRetriableProviderTermination(providerMessage) || isRetryableNetworkError(err))
+        ) {
+          // Bare provider termination or a dropped dial: retry once with
+          // identical bytes, then settle with diagnostics. HTTP 429/5xx and
+          // fetch() throws already retried inside providerPost.
+          const networkFailure = isRetryableNetworkError(err);
           retriedProviderTermination = true;
           await writeMainTrace({ status: "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt, providerError: providerMessage });
           if (interrupted) throw err;
-          out(`(provider terminated the stream after ${(failedTurnMs / 1000).toFixed(0)}s with no first token; retrying once)\n`);
+          out(networkFailure
+            ? `(provider request failed (${formatNetworkError(err)}); retrying once)\n`
+            : `(provider terminated the stream after ${(failedTurnMs / 1000).toFixed(0)}s with no first token; retrying once)\n`);
           try {
             result = await callModel(history, activeRequestOverlay, {
               retryOfAttemptId: failedAttempt?.attemptId ?? null,
-              fallbackReason: "provider-terminated",
+              fallbackReason: networkFailure ? "provider-network" : "provider-terminated",
               retryCount: (failedAttempt?.retryCount ?? 0) + 1,
             });
           } catch (retryErr) {
@@ -4428,18 +4454,20 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             const retryTurnMs = Math.max(0, Date.now() - callStarted);
             // The retry can fail differently (abort, HTTP); only claim a
             // double termination when the retry message agrees.
-            terminatedDiagnostics = isRetriableProviderTermination(retryMessage)
-              ? `stream ended twice before first token (${(retryTurnMs / 1000).toFixed(0)}s observed; see trace providerError)`
-              : `stream ended before first token (${(failedTurnMs / 1000).toFixed(0)}s observed; retry failed: ${sanitizeProviderError(retryMessage)?.slice(0, 200) ?? "(unreadable)"}; see trace providerError)`;
+            terminatedDiagnostics = networkFailure
+              ? `provider request failed (${formatNetworkError(err)}); retry failed: ${sanitizeProviderError(retryMessage)?.slice(0, 200) ?? "(unreadable)"}; see trace providerError`
+              : isRetriableProviderTermination(retryMessage)
+                ? `stream ended twice before first token (${(retryTurnMs / 1000).toFixed(0)}s observed; see trace providerError)`
+                : `stream ended before first token (${(failedTurnMs / 1000).toFixed(0)}s observed; retry failed: ${sanitizeProviderError(retryMessage)?.slice(0, 200) ?? "(unreadable)"}; see trace providerError)`;
             await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt, providerError: retryMessage });
-            throw retryErr;
+            throw isRetryableNetworkError(retryErr) ? new Error(formatNetworkError(retryErr)) : retryErr;
           }
         } else {
           if (isRetriableProviderTermination(providerMessage)) {
             terminatedDiagnostics = `stream ended before first token (${(failedTurnMs / 1000).toFixed(0)}s observed; see trace providerError)`;
           }
           await writeMainTrace({ status: streamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt, providerError: providerMessage });
-          throw err;
+          throw isRetryableNetworkError(err) ? new Error(formatNetworkError(err)) : err;
         }
       }
       const admissionError = providerToolAdmissionError(result.blocks);

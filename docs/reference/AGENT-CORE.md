@@ -14,7 +14,7 @@ stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occurrence
 edit (replace_all), interruptible bash, web_search, fetch, skill
 index, prefix `cache_control` on tools and system (`{ type: "ephemeral" }` with no `ttl`; Anthropic default is 5 minutes), last history-block cache pin, GPT-5.6 explicit prompt cache, session `prompt_cache_key` by model family,
-429 retry, model-aware `/effort`, live provider reasoning, request-only working-set overlay,
+429 and network retry, model-aware `/effort`, live provider reasoning, request-only working-set overlay,
 traces, provider auth, live model list, full-screen TUI, Termina sidecar host contract, core worldline session slice,
 selectable bash approval policies, `/permissions`, /clear /compact, -p print, token/cache/context status, stdio MCP). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.

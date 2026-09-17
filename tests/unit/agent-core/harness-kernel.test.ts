@@ -60,7 +60,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const models = await import("../../../agent-core/models.ts");
     const cache = await import("../../../agent-core/cache.ts");
     const anthropicCache = await import("../../../agent-core/main/anthropic-cache.ts");
-    const { retryAfter } = await import("../../../agent-core/main/retry-after.ts");
+    const { retryAfter, retryNetworkAfter, isRetryableNetworkError, formatNetworkError } = await import("../../../agent-core/main/retry-after.ts");
     const trace = await import("../../../agent-core/trace.ts");
     const toolOutput = await import("../../../agent-core/tool-output.ts");
     
@@ -4502,6 +4502,27 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("retryAfter ignores large Retry-After", retryAfter(429, hdr("120"), 0) === 1_000);
     check("retryAfter ignores http-date", retryAfter(429, hdr("Wed, 21 Oct 2015 07:28:00 GMT"), 0) === 1_000);
     check("retryAfter 529 retries", retryAfter(529, hdr(null), 0) === 1_000);
+    const fetchFailed = (code?: string, name = "Error") => {
+      const err = new TypeError("fetch failed");
+      if (code) {
+        const cause = new Error(`connect ${code}`);
+        cause.name = name;
+        (cause as Error & { code: string }).code = code;
+        err.cause = cause;
+      }
+      return err;
+    };
+    const abortErr = Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+    check("network TypeError fetch failed retries", isRetryableNetworkError(fetchFailed()) === true);
+    check("network ECONNRESET retries", isRetryableNetworkError(fetchFailed("ECONNRESET")) === true);
+    check("network abort does not retry", isRetryableNetworkError(abortErr) === false);
+    check("network API errors do not retry", isRetryableNetworkError(new Error("invalid API key")) === false);
+    check("retryNetworkAfter first wait 1s", retryNetworkAfter(fetchFailed("ECONNRESET"), 0) === 1_000);
+    check("retryNetworkAfter second wait 2s", retryNetworkAfter(fetchFailed("ECONNRESET"), 1) === 2_000);
+    check("retryNetworkAfter third is null", retryNetworkAfter(fetchFailed("ECONNRESET"), 2) === null);
+    check("retryNetworkAfter abort is null", retryNetworkAfter(abortErr, 0) === null);
+    check("formatNetworkError prefers errno", formatNetworkError(fetchFailed("ECONNRESET")) === "fetch failed: ECONNRESET");
+    check("formatNetworkError bare fetch failed", formatNetworkError(fetchFailed()) === "fetch failed");
     check("parsePrintPrompt missing is null", parsePrintPrompt(["node", "agent-core.mjs"]) === null);
     check("parsePrintPrompt -p joins the rest", parsePrintPrompt(["node", "x", "-p", "fix", "the", "bug"]) === "fix the bug");
     check("parsePrintPrompt --print empty is empty", parsePrintPrompt(["node", "--print"]) === "");
