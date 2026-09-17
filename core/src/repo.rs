@@ -3,29 +3,18 @@
 use std::fs;
 use std::path::PathBuf;
 
-use git2::{ErrorCode, ObjectFormat, Oid, Repository, RepositoryOpenFlags, StatusOptions};
 use base64::Engine as _;
-use serde_json::{Value, json};
+use git2::{ErrorCode, ObjectFormat, Oid, Repository, RepositoryOpenFlags, StatusOptions};
+use serde_json::{json, Value};
 
-use crate::{
-    GitTreeBudget,
-    PROMOTION_DIRECTORY_MAX_DEPTH,
-    PROMOTION_PATH_MAX_BYTES,
-    READ_BLOB_MAX_BYTES,
-    TreeLookupKind,
-    git_blob_bytes_bounded,
-    git_blob_size_bounded,
-    git_tree_entry_path,
-    git_tree_object_bounded,
-    tree_lookup,
-};
 use crate::util::{
-    normalize_system_alias_path,
-    open_repo,
-    require_utf8_git_path,
-    require_utf8_path_bytes,
-    require_utf8_rel_path,
-    s,
+    missing_path, normalize_system_alias_path, open_repo, require_utf8_git_path,
+    require_utf8_path_bytes, require_utf8_rel_path, s,
+};
+use crate::{
+    git_blob_bytes_bounded, git_blob_size_bounded, git_tree_entry_path, git_tree_object_bounded,
+    tree_lookup, GitTreeBudget, TreeLookupKind, PROMOTION_DIRECTORY_MAX_DEPTH,
+    PROMOTION_PATH_MAX_BYTES, READ_BLOB_MAX_BYTES,
 };
 
 pub(crate) fn op_git_head(req: &Value) -> Result<Value, String> {
@@ -50,13 +39,44 @@ pub(crate) fn op_git_top_level(req: &Value) -> Result<Value, String> {
         .map_err(|err| format!("the Git repository could not be opened: {err}"))?;
     let repo = match Repository::open_ext(&root, RepositoryOpenFlags::empty(), None::<&str>) {
         Ok(repo) => repo,
-        Err(err) if err.code() == ErrorCode::NotFound => return Ok(json!({ "root": null })),
+        Err(err) if err.code() == ErrorCode::NotFound && !git_marker_present(&root)? => {
+            return Ok(json!({ "root": null }));
+        }
         Err(err) => return Err(format!("the Git repository could not be opened: {err}")),
     };
-    let top = repo
-        .workdir()
-        .map(|workdir| fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf()));
-    Ok(json!({ "root": top.map(|path| path.to_string_lossy().into_owned()) }))
+    let top = match repo.workdir() {
+        Some(workdir) => Some(canonical_git_workdir(workdir)?),
+        None if repo.is_bare() => None,
+        None => {
+            return Err("the Git repository has no workdir".to_string());
+        }
+    };
+    Ok(json!({ "root": top }))
+}
+
+fn canonical_git_workdir(workdir: &std::path::Path) -> Result<String, String> {
+    let canonical = fs::canonicalize(workdir)
+        .map_err(|e| format!("the Git workdir could not be canonicalized: {e}"))?;
+    canonical
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| "the Git workdir is not valid UTF-8".to_string())
+}
+
+fn git_marker_present(root: &std::path::Path) -> Result<bool, String> {
+    if git_marker_stat(&root.join(".git"), "Git marker")?.is_some() {
+        return Ok(true);
+    }
+    Ok(git_marker_stat(&root.join("HEAD"), "HEAD")?.is_some()
+        && git_marker_stat(&root.join("objects"), "Git objects")?.is_some())
+}
+
+fn git_marker_stat(path: &std::path::Path, what: &str) -> Result<Option<()>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(Some(())),
+        Err(error) if missing_path(&error) => Ok(None),
+        Err(error) => Err(format!("inspect {what} failed: {error}")),
+    }
 }
 
 pub(crate) fn op_git_common_dir(req: &Value) -> Result<Value, String> {
@@ -192,7 +212,10 @@ fn collect_repo_tree(
     let mut stack: Vec<(Oid, String)> = vec![(tree.id(), prefix.to_string())];
     let mut budget = GitTreeBudget::new();
     while let Some((current_oid, current_prefix)) = stack.pop() {
-        let depth = current_prefix.split('/').filter(|part| !part.is_empty()).count();
+        let depth = current_prefix
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .count();
         if depth > PROMOTION_DIRECTORY_MAX_DEPTH {
             return Err("Git repository tree exceeds its depth bound".to_string());
         }
@@ -262,7 +285,8 @@ pub(crate) fn op_repo_file(req: &Value) -> Result<Value, String> {
     let rel = s(req, "path")?;
     let content = match tree_lookup(&repo, tree.id(), &rel, TreeLookupKind::Blob)? {
         Some((_, oid)) => {
-            let bytes = git_blob_bytes_bounded(&repo, oid, READ_BLOB_MAX_BYTES, &format!("blob {rel}"))?;
+            let bytes =
+                git_blob_bytes_bounded(&repo, oid, READ_BLOB_MAX_BYTES, &format!("blob {rel}"))?;
             Some(base64::engine::general_purpose::STANDARD.encode(bytes))
         }
         None => None,
@@ -290,4 +314,61 @@ pub(crate) fn op_ls_ignored(req: &Value) -> Result<Value, String> {
     }
     paths.sort();
     Ok(json!({ "paths": paths }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_git_workdir, git_marker_present};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn canonical_git_workdir_fails_when_path_is_missing() {
+        let err = canonical_git_workdir(Path::new("/termina-missing-workdir-does-not-exist"))
+            .expect_err("missing workdir must not be forged as a root");
+        assert!(
+            err.contains("the Git workdir could not be canonicalized"),
+            "expected canonicalize error, got {err}"
+        );
+    }
+
+    struct ModeRestore {
+        path: PathBuf,
+        permissions: fs::Permissions,
+    }
+
+    impl Drop for ModeRestore {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.path, self.permissions.clone());
+        }
+    }
+
+    #[test]
+    fn git_marker_inspect_failure_is_an_error() {
+        let path = std::env::temp_dir().join(format!(
+            "termina-git-marker-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(path.join("source")).expect("create source");
+        fs::write(path.join("source").join(".git"), "gitdir: missing\n").expect("write gitfile");
+        let permissions = fs::metadata(&path).expect("stat parent").permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod parent");
+        let restore = ModeRestore {
+            path: path.clone(),
+            permissions,
+        };
+        let err = git_marker_present(&path.join("source"))
+            .expect_err("unreadable Git marker must fail closed");
+        drop(restore);
+        let _ = fs::remove_dir_all(&path);
+        assert!(
+            err.contains("inspect Git marker failed"),
+            "expected inspect error, got {err}"
+        );
+    }
 }

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use common::{CoreProcess, TempFixture};
 
@@ -115,6 +115,58 @@ fn unreadable_git_dir_is_an_error() {
     assert!(
         error.contains("the Git repository could not be opened"),
         "expected distinguishable open error, got {error}"
+    );
+    harness.shutdown();
+}
+
+#[test]
+fn uncanonical_workdir_is_an_error() {
+    let mut harness = TopLevelHarness::new("top-uncanonical-wt");
+    let gitdir = harness.fixture.join("gitdir");
+    let dangling = harness.fixture.join("dangling-work");
+    std::os::unix::fs::symlink("missing-target", &dangling).expect("dangling workdir symlink");
+    let status = Command::new("git")
+        .args(["init", "--bare", "--quiet"])
+        .arg(&gitdir)
+        .envs(git_env(&harness.home, harness.fixture.path()))
+        .status()
+        .expect("git init --bare");
+    assert!(status.success(), "git init --bare failed");
+    let status = Command::new("git")
+        .args(["-C"])
+        .arg(&gitdir)
+        .args(["config", "core.bare", "false"])
+        .envs(git_env(&harness.home, harness.fixture.path()))
+        .status()
+        .expect("git config core.bare");
+    assert!(status.success(), "git config core.bare failed");
+    let status = Command::new("git")
+        .args(["-C"])
+        .arg(&gitdir)
+        .args([
+            "config",
+            "core.worktree",
+            dangling.to_str().expect("dangling path is UTF-8"),
+        ])
+        .envs(git_env(&harness.home, harness.fixture.path()))
+        .status()
+        .expect("git config core.worktree");
+    assert!(status.success(), "git config core.worktree failed");
+    let response = harness.request(&gitdir);
+    assert_eq!(
+        response.get("ok").and_then(Value::as_bool),
+        Some(false),
+        "uncanonical workdir must not be forged as a root: {response}"
+    );
+    let error = response
+        .get("error")
+        .and_then(Value::as_str)
+        .expect("error");
+    assert!(
+        error.contains("the Git workdir could not be canonicalized")
+            || error.contains("the Git repository has no workdir")
+            || error.contains("the Git repository could not be opened"),
+        "expected workdir/open error, got {error}"
     );
     harness.shutdown();
 }

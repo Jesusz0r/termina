@@ -98,7 +98,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       nestedAgentsPointer,
       parseOffset,
       parseLineBound,
-      formatNumberedText,
+      formatReadView,
       listProjectDir,
       editMissDiagnostic,
       readTextView,
@@ -241,13 +241,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(join(root, "bin.dat"), Buffer.from([1, 0, 2, 3]));
     check("NUL in first 4 KB errors", readProjectFile(root, { path: "bin.dat" }).isError === true);
     check("readTextView does not require whole file API", !readTextView(join(root, "ok.txt"), { offset: 0 }).isError);
-    check("formatNumberedText prefixes 1-based lines", formatNumberedText("a\nb\n", 1) === "     1|a\n     2|b");
-    check("formatNumberedText strips CR", formatNumberedText("a\r\nb\r\n", 1) === "     1|a\n     2|b");
-    check("read_file numbers lines", readProjectFile(root, { path: "ok.txt" }).content === "     1|hello");
+    check("formatReadView uses a range header and verbatim body", formatReadView("a\nb\n", 1) === "lines 1-2\na\nb");
+    check("formatReadView strips CR from the copyable body", formatReadView("a\r\nb\r\n", 1) === "lines 1-2\na\nb");
+    check("read_file numbers lines", readProjectFile(root, { path: "ok.txt" }).content === "ok.txt line 1\nhello");
     writeFileSync(join(root, "lines.txt"), "one\ntwo\nthree\nfour\n");
     check(
       "read_file start_line/end_line is inclusive",
-      readProjectFile(root, { path: "lines.txt", start_line: 2, end_line: 3 }).content === "     2|two\n     3|three",
+      readProjectFile(root, { path: "lines.txt", start_line: 2, end_line: 3 }).content === "lines.txt lines 2-3\ntwo\nthree",
     );
     check("read_file start_line past EOF is empty", readProjectFile(root, { path: "lines.txt", start_line: 99 }).content === "");
     check("read_file rejects offset with start_line", readProjectFile(root, { path: "lines.txt", offset: 1, start_line: 1 }).isError === true);
@@ -258,9 +258,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(join(root, "many-lines.txt"), `${manyRows.join("\n")}\n`);
     const manyPage = readProjectFile(root, { path: "many-lines.txt" });
     const manyNext = Number((manyPage.content.match(/start_line (\d+)/) || [])[1]);
-    const manyLast = manyPage.content.split("\n").filter((l) => l.includes("|")).at(-1) ?? "";
+    const manyLast = manyPage.content.split("\n").filter((l) => l.startsWith("row-")).at(-1) ?? "";
     const manyCont = readProjectFile(root, { path: "many-lines.txt", start_line: manyNext });
-    const manyFirst = manyCont.content.split("\n")[0] ?? "";
+    const manyFirst = manyCont.content.split("\n").find((l) => l.startsWith("row-")) ?? "";
     check("read_file line truncation names start_line", Number.isInteger(manyNext) && manyNext > 1);
     check("read_file line continuation does not repeat the last shown line", manyFirst !== manyLast && manyFirst.includes(`row-${String(manyNext).padStart(4, "0")}`));
     writeFileSync(join(root, "huge-line.txt"), "H".repeat(50 * 1024));
@@ -286,7 +286,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const manyHits = editMissDiagnostic(Array(5000).fill("x").join(" "), "x");
     check(
       "editMissDiagnostic does not dump every hit",
-      manyHits.includes("5000 occurrences") && manyHits.includes("(4997 more)") && (manyHits.match(/^  \d+:/gm) || []).length === 3,
+      manyHits.includes("5000 occurrences") && manyHits.includes("(4997 more)") && (manyHits.match(/^line \d+$/gm) || []).length === 3,
     );
     check("fileMentionAt ignores emails", fileMentionAt("hi user@host.com", 16) === null);
     check("fileMentionAt reads a tag after space", fileMentionAt("fix @src/a.ts", 13)?.query === "src/a.ts");
@@ -477,7 +477,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const uniqueMiss = editProjectFile(root, "edit-me.ts", "const", "x");
     check(
       "edit non-unique includes nearby lines",
-      uniqueMiss.content.includes("not unique") && uniqueMiss.content.includes("occurrence") && uniqueMiss.content.includes("  1:"),
+      uniqueMiss.content.includes("not unique") && uniqueMiss.content.includes("occurrence") && uniqueMiss.content.includes("line 1"),
     );
     check("edit empty old_text fails", editProjectFile(root, "edit-me.ts", "", "x").isError === true);
     check("edit outside cwd fails", editProjectFile(root, "/etc/passwd", "root", "x").isError === true);
@@ -1711,7 +1711,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         formatGrepHits("error:codes.ts:1:boom").includes("1 hit"),
     );
     check("grep drops unparseable lines", !formatGrepHits("hit.ts:1:x\nnot-a-row").includes("not-a-row"));
-    check("grep strips CR from ripgrep rows", formatGrepHits("hit.ts:1:x\r").includes("  1:x"));
+    check("grep strips CR from ripgrep rows", formatGrepHits("hit.ts:1:x\r").split("\n").includes("x") && formatGrepHits("hit.ts:1:x\r").includes("line 1"));
     check(
       "grep clips long match lines",
       formatGrepHits(`a.ts:1:${"y".repeat(400)}`).includes("...") &&
@@ -1804,24 +1804,25 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const grepTool = builtinClientTools().find((tool) => tool.name === "grep");
     const editSchema = editTool?.input_schema as { properties?: Record<string, { description?: string }> } | undefined;
     check(
-      "edit tool owns old_text, prefixes, and miss retry",
+      "edit tool owns old_text uniqueness and miss retry",
       typeof editTool?.description === "string" &&
         editTool.description.includes("nearby lines") &&
-        String(editSchema?.properties?.old_text?.description ?? "").includes("N|") &&
-        String(editSchema?.properties?.old_text?.description ?? "").includes("path:line:") &&
-        String(editSchema?.properties?.old_text?.description ?? "").includes("unique"),
+        String(editSchema?.properties?.old_text?.description ?? "").includes("unique") &&
+        !String(editSchema?.properties?.old_text?.description ?? "").includes("N|") &&
+        !String(editSchema?.properties?.old_text?.description ?? "").includes("path:line:"),
     );
     check(
-      "read_file tool owns line-number prefixes",
+      "read_file tool owns the line-range header",
       typeof readTool?.description === "string" &&
-        readTool.description.includes("N|") &&
-        readTool.description.includes("old_text"),
+        readTool.description.includes("line-range header") &&
+        readTool.description.includes("old_text") &&
+        !readTool.description.includes("N|"),
     );
     check(
-      "grep tool owns empty-result retry and path:line: prefix",
+      "grep tool owns empty-result retry",
       typeof grepTool?.description === "string" &&
         grepTool.description.includes("no matches") &&
-        grepTool.description.includes("path:line:"),
+        !grepTool.description.includes("path:line:"),
     );
     check("missing user-global omitted", !childFrozen.system.includes("<user-instructions>"));
     
@@ -5333,7 +5334,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     emptyTui.feed("\x15");
     check("tui leaves bash mode when bang input is cleared", !emptyTui.frame().includes("BASH"));
     emptyTui.setStatus({ permissions: "ask" });
-    check("tui shows permissions in the header", emptyTui.frame().includes(" ask "));
+    check("tui shows permissions in the header", emptyTui.frame().includes("perm ask"));
     emptyTui.setQueued("fix the test");
     check("tui shows a queued prompt", emptyTui.frame().includes("queued fix the test"));
     const escKeep = new tuiMod.AgentTui({

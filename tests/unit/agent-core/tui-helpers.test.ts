@@ -94,5 +94,7 @@ describe("TUI same-file helpers (#352)", () => {
     expect(title).toContain("queued");
     const wide = host.titleLine(120);
     expect(wide).toContain("anthropic/claude · max");
+    expect(title).toBe(title.trimEnd());
+    expect(wide).toBe(wide.trimEnd());
   });
 });

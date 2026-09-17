@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { AgentTui } from "../../../agent-core/tui.ts";
-import { graphemeSafeTail } from "../../../agent-core/tui/layout.ts";
-import { closeSanitize, freshSanitizer } from "../../../agent-core/tui/transcript.ts";
-import { cellWidth, isWideCode } from "../../../agent-core/tui-text.ts";
+import { boxContentRow, clip, graphemeSafeTail, paintBoxContentRow, paintHighlightRow, paintRow, wrapSpans } from "../../../agent-core/tui/layout.ts";
+import { closeSanitize, freshSanitizer, parseMarkdown } from "../../../agent-core/tui/transcript.ts";
+import { cellWidth, isWideCode, wrapText } from "../../../agent-core/tui-text.ts";
 
 function makeTui() {
   const submitted: string[] = [];
@@ -47,16 +47,16 @@ describe("TUI text hardening (#227)", () => {
     expect(isWideCode(0x187ff)).toBe(true);
     expect(isWideCode(0x4e00)).toBe(true);
     expect(isWideCode(0x0041)).toBe(false);
-    expect(cellWidth("中")).toBe(2);
+    expect(cellWidth("\u4e2d")).toBe(2);
   });
 
   it("never splits ZWJ or regional-indicator clusters at a tail cut", () => {
     // Flag split between indicators: the orphaned half is dropped.
-    expect(graphemeSafeTail("012345🇫🇷ab", 4)).toBe("ab");
+    expect(graphemeSafeTail("012345\u{1F1EB}\u{1F1F7}ab", 4)).toBe("ab");
     // ZWJ split: the orphaned join is dropped, the partner kept.
-    expect(graphemeSafeTail("01234👨\u200D👩ab", 5)).toBe("👩ab");
+    expect(graphemeSafeTail("01234\u{1F468}\u200D\u{1F469}ab", 5)).toBe("\u{1F469}ab");
     // Clean boundaries keep whole clusters.
-    expect(graphemeSafeTail("012345🇫🇷", 4)).toBe("🇫🇷");
+    expect(graphemeSafeTail("012345\u{1F1EB}\u{1F1F7}", 4)).toBe("\u{1F1EB}\u{1F1F7}");
     expect(graphemeSafeTail("plain-ascii-tail", 4)).toBe("tail");
   });
 
@@ -126,4 +126,144 @@ describe("TUI app hardening (#227)", () => {
     // Pre-fix this re-parsed ~40M chars; the cached prefix bounds it near the entry size.
     expect(tui.markdownScannedChars - before).toBeLessThan(5 * 1024 * 1024);
   }, 120_000);
+});
+
+describe("TUI content rows do not write copy-padding spaces", () => {
+  it("clips without padding and keeps box content snug", () => {
+    expect(clip("hello", 80)).toBe("hello");
+    expect(clip("hello world", 5)).toBe("hello");
+    expect(boxContentRow("> hi", 20)).toBe("│ > hi │");
+    expect(cellWidth(boxContentRow("> hi", 20))).toBeLessThan(20);
+  });
+
+  it("paints plain rows unpadded and tool rows with EL fill, not spaces", () => {
+    const plain = paintRow([{ text: "ok", style: 0 }], 8, { kind: "plain" } as never, 2);
+    expect(plain).toContain("ok");
+    expect(plain).not.toContain("ok ");
+    const tool = paintRow([{ text: "ls", style: 0 }], 8, { kind: "tool", toolState: "success" } as never, 2);
+    expect(tool).toContain("ls");
+    expect(tool).toContain("\x1b[K");
+    expect(tool).not.toContain("ls ");
+  });
+
+  it("places the composer right border with CHA instead of space fill", () => {
+    const painted = paintBoxContentRow("> hi", 20);
+    expect(painted).toContain("│ > hi");
+    expect(painted).toContain("\x1b[20G│");
+    expect(painted).not.toMatch(/hi +?/);
+  });
+
+  it("fills a highlight row with EL 0 instead of trailing spaces", () => {
+    const painted = paintHighlightRow("title", 20, "\x1b[30;104m");
+    expect(painted).toContain("title\x1b[K");
+    expect(painted).not.toContain("title ");
+  });
+
+  it("keeps a short transcript line short in the frame", () => {
+    const { tui } = makeTui();
+    tui.appendPlain("hello");
+    expect(tui.frame().split("\n")).toContain("hello");
+  });
+});
+
+describe("TUI scroll stays put while the user is reading", () => {
+  const ANCHOR = "KEEP-ME unique-scroll-anchor";
+  const LIVE = "LIVE-MARKER-SHOULD-STAY-OFFSCREEN";
+
+  function scrollProbe(tui: AgentTui): { scroll: number; follow: boolean } {
+    return tui as unknown as { scroll: number; follow: boolean };
+  }
+
+  function fillTranscript(tui: AgentTui): void {
+    tui.appendPlain(`${ANCHOR}\n`);
+    tui.appendAssistant("history-filler-line\n".repeat(80));
+  }
+
+  function pageToAnchor(tui: AgentTui): void {
+    expect(tui.frame()).not.toContain(ANCHOR);
+    let found = false;
+    for (let i = 0; i < 40; i++) {
+      tui.feed("\x1b[5~");
+      if (tui.frame().includes(ANCHOR)) {
+        found = true;
+        break;
+      }
+    }
+    expect(found).toBe(true);
+  }
+
+  it("keeps following live output until the user scrolls", () => {
+    const { tui } = makeTui();
+    tui.appendAssistant("history-filler-line\n".repeat(80));
+    tui.appendAssistant("LIVE-FOLLOW-MARKER\n");
+    expect(tui.frame()).toContain("LIVE-FOLLOW-MARKER");
+    expect(scrollProbe(tui).follow).toBe(true);
+  });
+
+  it("does not drag the view to new output after page-up", () => {
+    const { tui } = makeTui();
+    fillTranscript(tui);
+    pageToAnchor(tui);
+    const probe = scrollProbe(tui);
+    expect(probe.follow).toBe(false);
+    const held = probe.scroll;
+    tui.appendAssistant(`${LIVE}\n`.repeat(20));
+    const frame = tui.frame();
+    expect(frame).toContain(ANCHOR);
+    expect(frame).not.toContain(LIVE);
+    expect(probe.follow).toBe(false);
+    expect(probe.scroll).toBeGreaterThan(held);
+  });
+
+  it("does not drag the view to new output after mouse wheel up", () => {
+    const { tui } = makeTui();
+    fillTranscript(tui);
+    expect(tui.frame()).not.toContain(ANCHOR);
+    for (let i = 0; i < 80; i++) tui.feed("\x1b[<64;1;1M");
+    expect(tui.frame()).toContain(ANCHOR);
+    tui.appendAssistant(`${LIVE}\n`.repeat(20));
+    const frame = tui.frame();
+    expect(frame).toContain(ANCHOR);
+    expect(frame).not.toContain(LIVE);
+    expect(scrollProbe(tui).follow).toBe(false);
+  });
+
+  it("returns to live output with End after scrolling up", () => {
+    const { tui } = makeTui();
+    fillTranscript(tui);
+    tui.feed("\x1b[5~");
+    tui.feed("\x1b[5~");
+    expect(scrollProbe(tui).follow).toBe(false);
+    tui.feed("\x1b[F");
+    expect(scrollProbe(tui).follow).toBe(true);
+    tui.appendAssistant("LIVE-END-MARKER\n");
+    expect(tui.frame()).toContain("LIVE-END-MARKER");
+  });
+
+  it("grows detached scroll by painted markdown rows, not raw wrapText", () => {
+    const cols = 81;
+    const tui = new AgentTui({
+      stdout: { write: () => true, columns: cols, rows: 40, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: () => {},
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    const filler = "history-filler-line\n".repeat(80);
+    const extra = `# ${"h".repeat(80)}\n`;
+    const mdRows = (text: string) => wrapSpans(parseMarkdown(text, { n: 0 }), cols).length;
+    const paintedGrowth = mdRows(filler + extra) - mdRows(filler);
+    const lastLine = "";
+    const rawGrowth = Math.max(0, wrapText(lastLine + extra, cols).length - wrapText(lastLine, cols).length);
+    expect(paintedGrowth).not.toBe(rawGrowth);
+
+    tui.appendPlain(`${ANCHOR}\n`);
+    tui.appendAssistant(filler);
+    pageToAnchor(tui);
+    const probe = scrollProbe(tui);
+    const held = probe.scroll;
+    tui.appendAssistant(extra);
+    expect(tui.frame()).toContain(ANCHOR);
+    expect(probe.scroll - held).toBe(paintedGrowth);
+  });
 });

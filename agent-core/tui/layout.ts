@@ -165,7 +165,10 @@ export function paintRow(frags: StyledSpan[], cols: number, entry: TranscriptEnt
       if (entry.kind === "error") out += "\x1b[31m";
     }
   }
-  if (cells < cols) out += " ".repeat(cols - cells);
+  // Fill the rest of the row with the current background via EL 0 (bce).
+  // Do not write space cells: xterm copy keeps those and they wrap twice
+  // inside the composer (cols-4). Render already CUP+EL-clears each row.
+  if (bg && cells < cols) out += "\x1b[K";
   out += "\x1b[0m";
   return out;
 }
@@ -202,10 +205,8 @@ export function clip(text: string, cols: number): string {
     out += g;
     used += cells;
   });
-  if (used < cols) out += " ".repeat(cols - used);
   return out;
 }
-
 
 export const INPUT_PREFIX = "> ";
 
@@ -222,13 +223,27 @@ export function inputWrapWidth(cols: number): number {
 
 
 export function boxBorderRow(cols: number, left: string, fill: string, right: string): string {
-  return clip(left + fill.repeat(Math.max(0, cols - 2)) + right, cols);
+  return left + fill.repeat(Math.max(0, cols - 2)) + right;
 }
 
 
 export function boxContentRow(content: string, cols: number): string {
   const inner = clip(content, inputWrapWidth(cols));
-  return clip(`│ ${inner} │`, cols);
+  return `│ ${inner} │`;
+}
+
+
+/** Place the right box border at the last column without space-fill. */
+export function paintBoxContentRow(content: string, cols: number, sgr = "", fillBg = false): string {
+  const inner = clip(content, inputWrapWidth(cols));
+  const fill = fillBg ? "\x1b[K" : "";
+  return `${sgr}│ ${inner}${fill}\x1b[${Math.max(1, cols)}G│\x1b[0m`;
+}
+
+
+/** Highlight (title, selected picker) using EL 0 instead of trailing spaces. */
+export function paintHighlightRow(text: string, cols: number, sgr: string): string {
+  return `${sgr}${clip(text, cols)}\x1b[K\x1b[0m`;
 }
 
 

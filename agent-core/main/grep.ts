@@ -225,7 +225,8 @@ export function formatGrepHits(raw: string): string {
     }
     for (let i = 0; i < take; i++) {
       const h = hits[i]!;
-      body.push(`  ${h.line}:${clipGrepText(h.text)}`);
+      body.push(`  line ${h.line}`);
+      body.push(clipGrepText(h.text));
     }
     shownHits += take;
     shownFiles += 1;

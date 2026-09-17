@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use common::{CoreProcess, TempFixture};
 
@@ -200,6 +200,76 @@ fn unsafe_hint_fails_loudly() {
     assert!(
         nested.contains("unsafe capture hint"),
         "nested repository hint must not be skipped: {nested}"
+    );
+    harness.shutdown();
+}
+
+#[test]
+fn unsafe_reconcile_fails_loudly() {
+    let mut harness = CaptureHarness::with_files("inc-unsafe-reconcile", &[("keep.txt", "keep\n")]);
+    let baseline = harness.capture(None);
+    let baseline_commit = state_str(&baseline, "commit");
+    let err = harness
+        .incremental(
+            &baseline_commit,
+            &[],
+            json!([{ "relPath": "../escape", "oid": EMPTY_BLOB }]),
+        )
+        .expect_err("unsafe reconcile must fail closed");
+    assert!(
+        err.contains("unsafe capture hint"),
+        "unsafe reconcile must not be skipped: {err}"
+    );
+    let nested = harness
+        .incremental(
+            &baseline_commit,
+            &[],
+            json!([{ "relPath": ".git/HEAD", "oid": EMPTY_BLOB }]),
+        )
+        .expect_err("nested-repo reconcile must fail closed");
+    assert!(
+        nested.contains("unsafe capture hint"),
+        "nested repository reconcile must not be skipped: {nested}"
+    );
+    harness.shutdown();
+}
+
+#[test]
+fn malformed_reconcile_fails_loudly() {
+    let mut harness = CaptureHarness::with_files("inc-bad-reconcile", &[("keep.txt", "keep\n")]);
+    let baseline = harness.capture(None);
+    let baseline_commit = state_str(&baseline, "commit");
+    let missing_oid = harness
+        .incremental(&baseline_commit, &[], json!([{ "relPath": "../escape" }]))
+        .expect_err("reconcile without oid must fail closed");
+    assert!(
+        missing_oid.contains("relPath is missing") || missing_oid.contains("oid is missing"),
+        "malformed reconcile must not be skipped: {missing_oid}"
+    );
+    let not_array = harness
+        .core
+        .request(
+            "capture-incremental",
+            harness.payload(json!({
+                "parentCommit": baseline_commit,
+                "hints": [],
+                "reconcile": { "relPath": "keep.txt", "oid": EMPTY_BLOB },
+            })),
+            DEADLINE,
+        )
+        .expect("capture-incremental response");
+    assert_eq!(
+        not_array.get("ok").and_then(Value::as_bool),
+        Some(false),
+        "non-array reconcile must fail closed: {not_array}"
+    );
+    let error = not_array
+        .get("error")
+        .and_then(Value::as_str)
+        .expect("error");
+    assert!(
+        error.contains("reconcile must be an array"),
+        "expected array error, got {error}"
     );
     harness.shutdown();
 }

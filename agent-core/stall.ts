@@ -215,8 +215,7 @@ function recoveryGuidance(calls: readonly ToolTurnCall[]): string {
     " Continue the original task after recovery. If recovery is not possible, explain the concrete blocker instead of retrying.";
   if (calls.some((call) => call.name === "edit" && call.isError)) {
     return prefix +
-      "Use read_file on the failed path before another edit. Copy a small, unique old_text from the current file, " +
-      "without the N| line-number prefixes; preserve its whitespace. Do not guess another snippet or overwrite " +
+      "Use read_file on the failed path before another edit. Copy a small, unique old_text from the current file; preserve its whitespace. Do not guess another snippet or overwrite " +
       "the whole file to bypass an edit miss." + suffix;
   }
   if (calls.some((call) =>

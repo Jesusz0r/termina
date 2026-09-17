@@ -1,7 +1,7 @@
 /**
- * File tool implementations: reads (offset/line windows, numbered views),
- * directory listings, atomic writes, unique/fuzzy edits, and `@` tag
- * expansion for prompts. Stateless between calls.
+ * File tool implementations: reads (offset/line windows, range header plus
+ * verbatim body), directory listings, atomic writes, unique/fuzzy edits, and
+ * `@` tag expansion for prompts. Stateless between calls.
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -43,7 +43,6 @@ import {
 /** Tool results below this size are never worth a stub. */
 const READ_CAP_BYTES = 40 * 1024;
 const DIR_LIST_CAP = 200;
-const LINE_NUM_WIDTH = 6;
 const EDIT_MISS_SHOW = 3;
 const EDIT_MISS_LINE_CHARS = 240;
 const READ_SCAN_MS = 2_000;
@@ -74,7 +73,7 @@ export function expandFileTags(cwd: string, prompt: string): string {
       chunks.push(`<file path="${xmlSafe(path)}">\n${xmlSafe(listing.content)}\n</file>`);
       continue;
     }
-    const got = readTextView(confined.abs, { offset: 0 });
+    const got = readTextView(confined.abs, { offset: 0, label: path });
     if (got.isError) continue;
     chunks.push(`<file path="${xmlSafe(path)}">\n${xmlSafe(got.content)}\n</file>`);
   }
@@ -103,17 +102,8 @@ export function parseLineBound(value: unknown, field: string): number | { error:
   return i;
 }
 
-function linePrefix(n: number): string {
-  const s = String(n);
-  return `${s.length >= LINE_NUM_WIDTH ? s : s.padStart(LINE_NUM_WIDTH, " ")}|`;
-}
-
 function stripCarriage(line: string): string {
   return line.endsWith("\r") ? line.slice(0, -1) : line;
-}
-
-function numberLine(n: number, raw: string): string {
-  return `${linePrefix(n)}${stripCarriage(raw)}`;
 }
 
 function splitPageLines(text: string): { parts: string[]; endsWithNl: boolean } {
@@ -123,9 +113,42 @@ function splitPageLines(text: string): { parts: string[]; endsWithNl: boolean } 
   return { parts, endsWithNl };
 }
 
-export function formatNumberedText(text: string, startLine: number): string {
-  if (text === "") return "";
-  return splitPageLines(text).parts.map((line, i) => numberLine(startLine + i, line)).join("\n");
+interface ReadPageEmission {
+  body: string;
+  /** Source bytes covered by the emitted body. */
+  emittedBytes: number;
+  /** Whole source lines emitted. */
+  emittedLines: number;
+  /** Body ends mid-line (the first line alone exceeded the budget). */
+  partial: boolean;
+}
+
+/** Path plus 1-based range; never mixed into the copyable file bytes. */
+export function formatReadRangeHeader(
+  startLine: number,
+  endLine: number,
+  opts?: { label?: string; partial?: boolean },
+): string {
+  const range = opts?.partial
+    ? `line ${startLine} (partial)`
+    : startLine === endLine
+      ? `line ${startLine}`
+      : `lines ${startLine}-${endLine}`;
+  const label = opts?.label?.trim();
+  return label ? `${label} ${range}` : range;
+}
+
+function assembleReadView(startLine: number, page: ReadPageEmission, label?: string): string {
+  if (page.emittedLines === 0 && !page.partial) return "";
+  const endLine = page.emittedLines > 0 ? startLine + page.emittedLines - 1 : startLine;
+  const header = formatReadRangeHeader(startLine, endLine, { label, partial: page.partial });
+  // Keep a trailing newline when the page is empty lines so a `\n`-only file
+  // is not reduced to a header with no body remnant.
+  return `${header}\n${page.body}`;
+}
+
+export function formatReadView(text: string, startLine: number, label?: string): string {
+  return assembleReadView(startLine, emitReadPage(text, Number.MAX_SAFE_INTEGER), label);
 }
 
 function lastNewlineIndex(buf: Buffer): number {
@@ -291,25 +314,21 @@ function maxSameWidth(value: number): number {
   return Number("9".repeat(String(Math.max(0, Math.floor(value))).length));
 }
 
-interface NumberedPageEmission {
-  body: string;
-  /** Source bytes covered by the emitted body. */
-  emittedBytes: number;
-  /** Whole numbered lines emitted. */
-  emittedLines: number;
-  /** Body ends mid-line (the first line alone exceeded the budget). */
-  partial: boolean;
+function headerReserve(label: string | undefined, startLine: number, lineCount: number): number {
+  const endProbe = maxSameWidth(startLine + Math.max(0, lineCount - 1));
+  const partial = formatReadRangeHeader(startLine, endProbe, { label, partial: true });
+  const full = formatReadRangeHeader(startLine, endProbe, { label, partial: false });
+  return Math.max(Buffer.byteLength(partial, "utf8"), Buffer.byteLength(full, "utf8")) + 1;
 }
 
 /**
- * Budget numbered lines (prefixes included) into bodyLimit display bytes,
- * mapping back to the source bytes actually emitted (#156). Whole lines
- * only, except a code-point-safe partial first line when even one line
- * exceeds the budget. The continuation offset derives from this mapping,
- * never from the raw read length, so following it cannot skip displayed
- * or undisplayed source text.
+ * Budget verbatim source lines into bodyLimit display bytes, mapping back
+ * to the source bytes actually emitted (#156). Whole lines only, except a
+ * code-point-safe partial first line when even one line exceeds the budget.
+ * The continuation offset derives from this mapping, never from the raw
+ * read length, so following it cannot skip displayed or undisplayed source.
  */
-export function emitNumberedPage(text: string, startLine: number, bodyLimit: number): NumberedPageEmission {
+export function emitReadPage(text: string, bodyLimit: number): ReadPageEmission {
   const { parts, endsWithNl } = splitPageLines(text);
   if (parts.length === 0 || (parts.length === 1 && parts[0] === "" && !endsWithNl)) {
     return { body: "", emittedBytes: 0, emittedLines: 0, partial: false };
@@ -319,7 +338,7 @@ export function emitNumberedPage(text: string, startLine: number, bodyLimit: num
   let emittedBytes = 0;
   for (let i = 0; i < parts.length; i++) {
     const raw = parts[i]!;
-    const display = numberLine(startLine + i, raw);
+    const display = stripCarriage(raw);
     const entryBytes = Buffer.byteLength(display, "utf8") + (rendered.length > 0 ? 1 : 0);
     if (used + entryBytes > bodyLimit) break;
     used += entryBytes;
@@ -329,11 +348,9 @@ export function emitNumberedPage(text: string, startLine: number, bodyLimit: num
   if (rendered.length > 0) {
     return { body: rendered.join("\n"), emittedBytes, emittedLines: rendered.length, partial: false };
   }
-  const prefix = linePrefix(startLine);
-  const room = Math.max(0, bodyLimit - Buffer.byteLength(prefix, "utf8"));
   const content = Buffer.from(stripCarriage(parts[0]!), "utf8");
-  const keep = completeUtf8Boundary(content.subarray(0, room));
-  const body = prefix + content.subarray(0, keep).toString("utf8");
+  const keep = completeUtf8Boundary(content.subarray(0, Math.max(0, bodyLimit)));
+  const body = content.subarray(0, keep).toString("utf8");
   return { body, emittedBytes: keep, emittedLines: 0, partial: true };
 }
 
@@ -350,7 +367,7 @@ export function emitPlainPage(text: string, bodyLimit: number): PlainPageEmissio
   return { body: buf.subarray(0, keep).toString("utf8"), emittedBytes: keep };
 }
 
-function renderNumberedView(args: {
+function renderReadView(args: {
   text: string;
   from: number;
   until: number;
@@ -358,35 +375,31 @@ function renderNumberedView(args: {
   sourceBoundary: number;
   decodeTruncated: boolean;
   pointerReserve: number;
+  label?: string;
   repro: string;
 }): ToolTextResult {
   const rawComplete = args.from + args.sourceBoundary >= args.until;
-  // Fast path: the whole window fits without a marker; byte shape matches
-  // the pre-budget renderer exactly (plus pointer room for the re-wrap).
-  const full = emitNumberedPage(args.text, args.viewStartLine, READ_CAP_BYTES - args.pointerReserve);
+  const totalLines = splitPageLines(args.text).parts.length;
+  const reservedHeader = headerReserve(args.label, args.viewStartLine, totalLines);
+  const full = emitReadPage(args.text, READ_CAP_BYTES - args.pointerReserve - reservedHeader);
   if (!args.decodeTruncated && rawComplete && !full.partial && full.emittedBytes >= args.sourceBoundary) {
-    return logicalToolText(full.body, {
+    return logicalToolText(assembleReadView(args.viewStartLine, full, args.label), {
       maxBytes: READ_CAP_BYTES,
       state: "complete",
       isError: false,
       repro: args.repro,
     });
   }
-  // Truncated path: probe the marker at worst-case digit width (final values
-  // can only be smaller, so the reserved marker bytes never overflow), then
-  // emit within the remaining budget.
-  const totalLines = splitPageLines(args.text).parts.length;
   const probe = truncationMarker(maxSameWidth(args.until), maxSameWidth(args.viewStartLine + totalLines));
-  const bodyLimit = Math.max(1024, READ_CAP_BYTES - Buffer.byteLength(probe, "utf8") - 1 - args.pointerReserve);
-  const page = emitNumberedPage(args.text, args.viewStartLine, bodyLimit);
+  const bodyLimit = Math.max(1024, READ_CAP_BYTES - Buffer.byteLength(probe, "utf8") - 1 - args.pointerReserve - reservedHeader);
+  const page = emitReadPage(args.text, bodyLimit);
   let nextOffset = args.from + Math.min(page.emittedBytes, args.sourceBoundary);
-  // Undecodable windows emit nothing; skip one byte rather than stalling on
-  // the same offset forever.
   if (nextOffset <= args.from && args.until > args.from) nextOffset = args.from + 1;
   const nextLine = page.emittedLines > 0 ? args.viewStartLine + page.emittedLines : undefined;
+  const view = assembleReadView(args.viewStartLine, page, args.label);
   if (rawComplete && args.decodeTruncated) {
     const marker = truncationMarker(nextOffset);
-    return logicalToolText(page.body, {
+    return logicalToolText(view, {
       maxBytes: READ_CAP_BYTES,
       state: "unreadable",
       isError: true,
@@ -397,7 +410,7 @@ function renderNumberedView(args: {
     });
   }
   const marker = truncationMarker(nextOffset, nextLine);
-  return logicalToolText(page.body, {
+  return logicalToolText(view, {
     maxBytes: READ_CAP_BYTES,
     state: "complete",
     isError: false,
@@ -410,7 +423,7 @@ function renderNumberedView(args: {
 
 export function readTextView(
   abs: string,
-  opts: { offset: number; startLine?: number; endLine?: number; pointerReserve?: number },
+  opts: { offset: number; startLine?: number; endLine?: number; pointerReserve?: number; label?: string },
 ): ToolTextResult {
   const repro = `read_file(${JSON.stringify(abs)})`;
   const fail = (content: string, state: CompletionState = "failed"): ToolTextResult => logicalToolText(content, {
@@ -478,7 +491,7 @@ export function readTextView(
     // point; advancing by `want` would silently skip its remaining bytes.
     const completeBytes = completeUtf8Boundary(view);
     const sourceBoundary = Math.min(safeText.retainedBytes, completeBytes);
-    return renderNumberedView({
+    return renderReadView({
       text: safeText.text,
       from,
       until,
@@ -486,6 +499,7 @@ export function readTextView(
       sourceBoundary,
       decodeTruncated: safeText.truncated,
       pointerReserve: opts.pointerReserve ?? 0,
+      label: opts.label,
       repro,
     });
   } catch (err) {
@@ -565,11 +579,13 @@ export function readProjectFile(
   // reserve its bytes up front so the continuation offset already accounts
   // for the final page shape (#156).
   const pointer = nestedAgentsPointer(cwd, confined.abs);
+  const rel = posixRel(freezeCwd(cwd), confined.abs);
   const got = readTextView(confined.abs, {
     offset: off,
     startLine,
     endLine,
     pointerReserve: pointer ? Buffer.byteLength(pointer, "utf8") + 1 : 0,
+    label: rel,
   });
   if (got.isError) return got;
   if (pointer) {
@@ -601,7 +617,7 @@ export const READ_BATCH_CAP = 10;
 
 /**
  * Batched `read_file`: one bounded result for up to READ_BATCH_CAP files.
- * Composes the single-file reader, so jail confinement, numbering, and
+ * Composes the single-file reader, so jail confinement, the range header, and
  * per-file truncation stay canonical. Sections are whole-file atomic: the
  * result keeps an order-stable prefix that fits READ_CAP_BYTES and names
  * omitted tail files with an explicit re-read hint. Per-file failures render
@@ -746,15 +762,15 @@ export function editMissDiagnostic(body: string, oldText: string): string {
     const nl = body.indexOf("\n", at);
     const line = body.slice(lineStart, nl < 0 ? body.length : nl).replace(/\r$/, "");
     const clipped = line.length > EDIT_MISS_LINE_CHARS ? `${line.slice(0, EDIT_MISS_LINE_CHARS)}...` : line;
-    lines.push(`  ${lineNo}:${clipped}`);
+    lines.push(`line ${lineNo}`);
+    lines.push(clipped);
   }
   if (count > hits.length) lines.push(`  (${count - hits.length} more)`);
   return lines.join("\n");
 }
 
-/** Upstream-style fuzzy fallback (opencode replacers, minimal subset). Exact stays
- * authoritative; these only rescue whitespace/indent/trim drift and refuse
- * disproportionate spans so a wrong block can never apply. */
+/** Exact stays authoritative; these only rescue whitespace/indent/trim drift
+ * and refuse disproportionate spans so a wrong block can never apply. */
 function findFuzzyEditSpan(body: string, oldText: string): { at: number; len: number } | { ambiguous: true } | null {
   // Compare on CRLF-normalized lines but index the original body: raw line
   // starts keep every \r accounted for so the span never shifts the cut.
@@ -772,7 +788,7 @@ function findFuzzyEditSpan(body: string, oldText: string): { at: number; len: nu
   if (findLines.length === 0 || findLines.every((l) => l.trim() === "")) return null;
   const findTrimmed = findLines.map((line) => line.trim());
   const matches: Array<{ at: number; len: number }> = [];
-  // 1. Line-trimmed block match (indent drift, line-number prefix copy errors).
+  // 1. Line-trimmed block match (indent drift).
   for (let i = 0; i <= bodyLines.length - findLines.length; i++) {
     let ok = true;
     for (let j = 0; j < findLines.length; j++) {

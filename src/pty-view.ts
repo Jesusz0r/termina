@@ -5,7 +5,11 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { cssFontFamily, type TerminalPasteResult, type ThemeId } from "../shared/types";
-import { BRACKETED_PASTE_DISABLE_CSI, BRACKETED_PASTE_ENABLE_CSI } from "../shared/terminal-control";
+import {
+  BRACKETED_PASTE_DISABLE_CSI,
+  BRACKETED_PASTE_ENABLE_CSI,
+  normalizeCopiedTerminalText,
+} from "../shared/terminal-control";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { terminalTheme } from "./terminal-themes";
@@ -38,6 +42,10 @@ export class PtyView {
   private dragDepth = 0;
   private readonly onMouseDown = () => this.focus();
   private dropInFlight = false;
+  private pasteInFlight = false;
+  private clipboardTarget: HTMLTextAreaElement | null = null;
+  private readonly onCopy = (event: ClipboardEvent) => this.handleCopy(event);
+  private readonly onPaste = (event: ClipboardEvent) => this.handleNativePaste(event);
   private readonly onDragEnter = (event: DragEvent) => this.handleDragEnter(event);
   private readonly onDragOver = (event: DragEvent) => this.handleDragOver(event);
   private readonly onDragLeave = (event: DragEvent) => this.handleDragLeave(event);
@@ -101,6 +109,9 @@ export class PtyView {
       );
     }
     this.term.open(container);
+    this.clipboardTarget = this.term.textarea ?? null;
+    this.clipboardTarget?.addEventListener("copy", this.onCopy, true);
+    this.clipboardTarget?.addEventListener("paste", this.onPaste, true);
     container.addEventListener("mousedown", this.onMouseDown);
     container.addEventListener("dragenter", this.onDragEnter);
     container.addEventListener("dragover", this.onDragOver);
@@ -251,9 +262,31 @@ export class PtyView {
   }
 
   copySelection(): boolean {
-    if (this.disposed || !this.term.hasSelection()) return false;
-    this.writeClipboard(this.term.getSelection());
+    const text = this.selectionCopyText();
+    if (text === null) return false;
+    this.writeClipboard(text);
     return true;
+  }
+
+  /** Normalize CR/LF from xterm copy. Trailing spaces stay: they are content. */
+  private selectionCopyText(): string | null {
+    if (this.disposed || !this.term.hasSelection()) return null;
+    return normalizeCopiedTerminalText(this.term.getSelection());
+  }
+
+  private handleCopy(event: ClipboardEvent): void {
+    const text = this.selectionCopyText();
+    if (text === null) return;
+    event.clipboardData?.setData("text/plain", text);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    this.writeClipboard(text);
+  }
+
+  private handleNativePaste(event: ClipboardEvent): void {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void this.pasteClipboard();
   }
 
   /** Plain-text scrollback search; decorations use the current theme. */
@@ -306,12 +339,15 @@ export class PtyView {
   }
 
   async pasteClipboard(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || this.pasteInFlight) return;
+    this.pasteInFlight = true;
     try {
       const result = await this.pasteFromHost();
       this.applyPasteResult(result, false);
     } catch {
       // Keep terminal input available when the system clipboard is unavailable.
+    } finally {
+      this.pasteInFlight = false;
     }
   }
 
@@ -577,6 +613,9 @@ export class PtyView {
   dispose(): void {
     this.disposed = true;
     this.clearDropTarget();
+    this.clipboardTarget?.removeEventListener("copy", this.onCopy, true);
+    this.clipboardTarget?.removeEventListener("paste", this.onPaste, true);
+    this.clipboardTarget = null;
     this.container.removeEventListener("mousedown", this.onMouseDown);
     this.container.removeEventListener("dragenter", this.onDragEnter);
     this.container.removeEventListener("dragover", this.onDragOver);

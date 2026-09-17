@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use common::{CoreProcess, TempFixture};
 
@@ -203,6 +203,41 @@ fn store_create_fails_when_stale_ref_cannot_be_deleted() {
     assert!(
         error.contains("delete stale store ref"),
         "expected delete error, got {error}"
+    );
+    harness.shutdown();
+}
+
+#[test]
+fn store_create_fails_when_stale_ref_name_is_not_utf8() {
+    let mut harness = StoreHarness::new("stale-ref-utf8");
+    let store_dir = PathBuf::from(harness.base["storeDir"].as_str().expect("storeDir"));
+    let git_dir = store_dir.join("git");
+    fs::create_dir_all(git_dir.join("refs").join("termina").join("state"))
+        .expect("create stale ref dir");
+    // APFS rejects non-UTF-8 filenames. A packed-refs line can still name a
+    // termina ref with invalid UTF-8 without creating that leaf.
+    let mut packed = b"# pack-refs with: peeled fully-peeled sorted\n".to_vec();
+    packed.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/termina/state/");
+    packed.extend_from_slice(b"dead\xff\n");
+    fs::write(git_dir.join("packed-refs"), packed).expect("write packed-refs");
+    let response = harness
+        .core
+        .request("store-create", harness.payload(json!({})), DEADLINE)
+        .expect("store-create response");
+    assert_eq!(
+        response.get("ok").and_then(Value::as_bool),
+        Some(false),
+        "non-UTF-8 stale ref name must fail closed: {response}"
+    );
+    let error = response
+        .get("error")
+        .and_then(Value::as_str)
+        .expect("error");
+    assert!(
+        error.contains("stale store ref name is not valid UTF-8")
+            || error.contains("stale store ref is unreadable")
+            || error.contains("list stale store refs failed"),
+        "expected unreadable/non-UTF-8 ref error, got {error}"
     );
     harness.shutdown();
 }

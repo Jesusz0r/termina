@@ -31,7 +31,7 @@ function readOptional(path: string): string | null {
 
 /** Zone 1 identity. Do not ask in chat to edit ordinary project files.
  *  Host notes that name a file not to touch (Mine, sibling claims) still bind.
- *  Match text, line prefixes, and tool-specific retry live on the tool
+ *  Match text and tool-specific retry live on the tool
  *  definitions in main.ts. */
 export const FROZEN_IDENTITY = [
   "<agent_core>",

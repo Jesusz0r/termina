@@ -95,7 +95,7 @@ describe("tool-loop recovery policy", () => {
       if (turn === 3) {
         expect(step.recovery).toContain("Recover autonomously");
         expect(step.recovery).toContain("read_file");
-        expect(step.recovery).toContain("N|");
+        expect(step.recovery).not.toContain("N|");
         expect(step.recovery).toContain("Do not guess");
       } else {
         expect(step.recovery).toBeNull();

@@ -4,40 +4,27 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use git2::{IndexEntry, Oid, Repository, StatusOptions};
-use serde_json::{Value, json};
-use crate::{
-    BUDGET_MAX_FILE_BYTES,
-    BUDGET_MAX_NEW_BLOB_BYTES,
-    BUDGET_MAX_PATHS,
-};
-use crate::util::{
-    has_git_segment,
-    is_safe_relative,
-    now_ms,
-    oid_ext,
-    opt_s,
-    require_utf8_git_path,
-    require_utf8_path_bytes,
-    s,
-    stat_at,
-};
-use crate::{
-    FileIdentity,
-    StoreMutationLock,
-    StoreObjectTransaction,
-    ensure_blob_budget,
-    recover_store_transaction,
-    write_blob,
-};
 use crate::test_hooks::pause_at_hook;
+use crate::util::{
+    has_git_segment, is_safe_relative, now_ms, oid_ext, opt_s, require_utf8_git_path,
+    require_utf8_path_bytes, s, stat_at,
+};
+use crate::{
+    ensure_blob_budget, recover_store_transaction, write_blob, FileIdentity, StoreMutationLock,
+    StoreObjectTransaction,
+};
+use crate::{BUDGET_MAX_FILE_BYTES, BUDGET_MAX_NEW_BLOB_BYTES, BUDGET_MAX_PATHS};
+use git2::{IndexEntry, Oid, Repository, StatusOptions};
+use serde_json::{json, Value};
 
-use super::binding::{AnchoredPath, BoundSourceRepository, CaptureRoot, open_store, preload_cached_blobs};
+use super::binding::{
+    open_store, preload_cached_blobs, AnchoredPath, BoundSourceRepository, CaptureRoot,
+};
 use super::hash::{apply_rewrite_hooks, hash_path, rewrite_hooks};
-use super::trees::{FlatEntry, nested_from_flat, write_nested_tree, write_tree_delta};
-use super::walk::{TreeLookupKind, collect_tree_map, resolve_tree, tree_lookup};
-use super::tree_cache::{cache_tree_map, collect_tree_map_cached};
 use super::refs::{commit_tree, fail_before_state_ref, update_state_ref};
+use super::tree_cache::{cache_tree_map, collect_tree_map_cached};
+use super::trees::{nested_from_flat, write_nested_tree, write_tree_delta, FlatEntry};
+use super::walk::{collect_tree_map, resolve_tree, tree_lookup, TreeLookupKind};
 
 /// Enumerate the capture domain: tracked files plus untracked non-ignored
 /// files. Matches `git ls-files -z` plus `ls-files --others
@@ -205,8 +192,8 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
         .transpose()?
         .into_iter()
         .collect();
-    let hooks = rewrite_hooks(req, "/hooks/beforeRead");
-    let cache_hooks = rewrite_hooks(req, "/hooks/afterCache");
+    let hooks = rewrite_hooks(req, "/hooks/beforeRead")?;
+    let cache_hooks = rewrite_hooks(req, "/hooks/afterCache")?;
 
     source.verify(&capture_fs)?;
     let paths_and_index = enumerate_domain(&source.repo, source.capture_prefix.as_deref())?;
@@ -291,7 +278,7 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
                     new_blob_bytes,
                     max_new_blob_bytes,
                 )?;
-                apply_rewrite_hooks(&path, &cache_hooks, None);
+                apply_rewrite_hooks(&path, &cache_hooks, None)?;
                 let (owned_oid, new_bytes) = write_blob(
                     &mut object_transaction,
                     &store,
@@ -411,28 +398,8 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
         .pointer("/budget/maxPaths")
         .and_then(Value::as_u64)
         .unwrap_or(BUDGET_MAX_PATHS as u64) as usize;
-    let hints: Vec<String> = req
-        .get("hints")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let reconcile: Vec<(String, String)> = req
-        .get("reconcile")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| {
-                    let rel = v.get("relPath").and_then(Value::as_str)?;
-                    let oid = v.get("oid").and_then(Value::as_str)?;
-                    Some((rel.to_string(), oid.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let hints = json_string_list(req, "hints")?;
+    let reconcile = json_reconcile_list(req)?;
 
     // The store owns every object and ref. The delta comes from the hints
     // and the reconcile map; no source enumeration is needed.
@@ -442,7 +409,7 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     recover_store_transaction(&store_dir, &store)?;
     let mut object_transaction = StoreObjectTransaction::new(&store_dir, req);
     let capture_fs = CaptureRoot::open(&capture_root)?;
-    let hooks = rewrite_hooks(req, "/hooks/beforeRead");
+    let hooks = rewrite_hooks(req, "/hooks/beforeRead")?;
     let parent_oid = oid_ext(&store, &parent_commit)?;
     let parent_commit_obj = store.find_commit(parent_oid).map_err(|e| e.to_string())?;
     let parent_tree = resolve_tree(&store, parent_oid)?;
@@ -456,15 +423,11 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
         // A nested repository path must never enter the tree: apply-state
         // would write into the target's own Git directory. Unsafe hints
         // are a caller bug — fail loudly instead of skipping the file.
-        if !is_safe_relative(hint) || has_git_segment(hint) {
-            return Err(format!("unsafe capture hint: {hint}"));
-        }
+        require_safe_capture_path(hint)?;
         changed.insert(hint.clone());
     }
     for (rel_path, oid_hex) in &reconcile {
-        if !is_safe_relative(rel_path) || has_git_segment(rel_path) {
-            continue;
-        }
+        require_safe_capture_path(rel_path)?;
         // The watcher precomputed this blob oid from the cached content.
         // A malformed oid is a caller bug: fail loudly instead of silently
         // skipping the safety net. Validate against the store's object
@@ -638,4 +601,50 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
             "ts": now_ms(),
         }
     }))
+}
+
+fn require_safe_capture_path(path: &str) -> Result<(), String> {
+    if !is_safe_relative(path) || has_git_segment(path) {
+        return Err(format!("unsafe capture hint: {path}"));
+    }
+    Ok(())
+}
+
+fn json_string_list(req: &Value, key: &str) -> Result<Vec<String>, String> {
+    let Some(value) = req.get(key) else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("{key} must be an array"))?;
+    let mut out = Vec::with_capacity(array.len());
+    for (i, item) in array.iter().enumerate() {
+        let text = item
+            .as_str()
+            .ok_or_else(|| format!("{key}[{i}] must be a string"))?;
+        out.push(text.to_string());
+    }
+    Ok(out)
+}
+
+fn json_reconcile_list(req: &Value) -> Result<Vec<(String, String)>, String> {
+    let Some(value) = req.get("reconcile") else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| "reconcile must be an array".to_string())?;
+    let mut out = Vec::with_capacity(array.len());
+    for (i, item) in array.iter().enumerate() {
+        let rel = item
+            .get("relPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("reconcile[{i}] relPath is missing"))?;
+        let oid = item
+            .get("oid")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("reconcile[{i}] oid is missing"))?;
+        out.push((rel.to_string(), oid.to_string()));
+    }
+    Ok(out)
 }

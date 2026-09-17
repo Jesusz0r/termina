@@ -233,6 +233,13 @@ describe("agent-core TUI paste batching (#224)", () => {
     tui.feed("\r");
     expect(submitted).toEqual(["a\nb\nc"]);
   });
+
+  it("keeps mid-prompt trailing spaces from paste (submit only trims the whole draft)", () => {
+    const { tui, submitted } = submitTui();
+    tui.feed(`\x1b[200~hello  \nworld  \x1b[201~`);
+    tui.feed("\r");
+    expect(submitted).toEqual(["hello  \nworld"]);
+  });
 });
 
 describe("agent-core TUI truncateMiddle budget (#226)", () => {

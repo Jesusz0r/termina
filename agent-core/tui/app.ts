@@ -5,7 +5,8 @@
  * agent-core/tui.ts (issue #38).
  */
 import { EMPTY_STATE_TEXT, SLASH_COMMANDS, applyFileMention, cellWidth, completeFileMention, completeSlashLine, effortCommandRows, fileMentionAt, formatPickerRow, formatToolSummary, matchingSlashCommands, splitGraphemes, truncateMiddle, wrapText, type SlashCommand } from "../tui-text.ts";
-import { INPUT_PREFIX, boxBorderRow, boxContentRow, clip, displayBudget, inputWrapWidth, layoutHeights, paintRow, sourceTail, tailSpans, wrapInput, wrapSpans } from "./layout.ts";
+import { normalizeCopiedTerminalText } from "../../shared/terminal-control.ts";
+import { INPUT_PREFIX, boxBorderRow, boxContentRow, clip, displayBudget, inputWrapWidth, layoutHeights, paintBoxContentRow, paintHighlightRow, paintRow, sourceTail, tailSpans, wrapInput, wrapSpans } from "./layout.ts";
 import { HANDLE_ERROR, MAX_CSI, MAX_HISTORY, MAX_TRANSCRIPT, MAX_TRANSCRIPT_ENTRIES, SPIN, TRANSCRIPT_TRIM_TARGET, TRUNCATION_MARKER, closeSanitize, entryChars, freshMarkdownBoundary, freshSanitizer, parseMarkdown, sanitizeText, toolStatusLabel, transcriptHandleBrand } from "./transcript.ts";
 import type { StyledSpan, ToolTranscriptState, TranscriptEntry, TranscriptHandle, TuiIO, TuiInput } from "./transcript.ts";
 
@@ -320,9 +321,10 @@ export class AgentTui {
       cache: null,
     });
     this.toolHandles.set(handleId, id);
-    this.transcriptChars += entryChars(this.entries[this.entries.length - 1]!);
+    const created = this.entries[this.entries.length - 1]!;
+    this.transcriptChars += entryChars(created);
     this.evictSettled();
-    if (this.follow) this.scroll = 0;
+    this.detachScroll(this.follow ? 0 : this.paintedRowCount(created, this.size().cols));
     this.schedule();
     return handle;
   }
@@ -339,6 +341,9 @@ export class AgentTui {
       this.appendPlain(HANDLE_ERROR);
       return;
     }
+    const measure = !this.follow;
+    const cols = this.size().cols;
+    const beforeRows = measure ? this.paintedRowCount(entry, cols) : 0;
     this.transcriptChars -= entryChars(entry);
     entry.toolState = state === "success" ? "success" : state === "cancelled" ? "cancelled" : "error";
     entry.settled = true;
@@ -350,7 +355,7 @@ export class AgentTui {
     this.transcriptChars += entryChars(entry);
     this.toolHandles.delete(handleId as number);
     this.evictSettled();
-    if (this.follow) this.scroll = 0;
+    this.detachScroll(measure ? this.paintedRowCount(entry, cols) - beforeRows : 0);
     this.schedule();
   }
 
@@ -402,6 +407,10 @@ export class AgentTui {
     }
     const entry = this.activeEntry;
     if (!entry) return;
+    const hiddenThinking = kind === "thinking" && !this.thinkingVisible;
+    const measure = !this.follow && !hiddenThinking;
+    const cols = this.size().cols;
+    const beforeRows = measure ? this.paintedRowCount(entry, cols) : 0;
     const next = sanitizeText(text, entry.sanitizer);
     entry.sanitizer = next.state;
     const appendAt = entry.text.length;
@@ -412,7 +421,7 @@ export class AgentTui {
     this.transcriptChars += next.text.length;
     this.evictSettled();
     this.truncateActive(entry);
-    if (this.follow) this.scroll = 0;
+    this.detachScroll(measure ? this.paintedRowCount(entry, cols) - beforeRows : 0);
     this.schedule();
   }
 
@@ -439,7 +448,8 @@ export class AgentTui {
     });
     this.transcriptChars += clean.length;
     this.evictSettled();
-    if (this.follow) this.scroll = 0;
+    const added = this.entries[this.entries.length - 1]!;
+    this.detachScroll(this.follow ? 0 : this.paintedRowCount(added, this.size().cols));
     this.schedule();
   }
 
@@ -909,9 +919,13 @@ export class AgentTui {
     const tools = this.visibleFoldableTools();
     if (tools.length === 0) return false;
     const entry = this.scroll > 0 ? tools[0]! : tools[tools.length - 1]!;
+    const measure = !this.follow;
+    const cols = this.size().cols;
+    const beforeRows = measure ? this.paintedRowCount(entry, cols) : 0;
     entry.expanded = !entry.expanded;
     entry.revision += 1;
     entry.cache = null;
+    this.detachScroll(measure ? this.paintedRowCount(entry, cols) - beforeRows : 0);
     this.schedule();
     return true;
   }
@@ -1281,7 +1295,9 @@ export class AgentTui {
    */
   private insertText(text: string, bufferTrimmed: boolean): void {
     const kept: string[] = [];
-    for (const ch of text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")) {
+    // Collapse CR/LF variants from xterm paste. Chrome no longer writes
+    // fill spaces, so trailing spaces in the source stay (they are content).
+    for (const ch of normalizeCopiedTerminalText(text)) {
       if (ch === "\t" || ch === "\n" || ch >= " ") kept.push(ch);
     }
     const before = this.chars.slice(0, this.cursor).join("");
@@ -1519,6 +1535,24 @@ export class AgentTui {
     this.cursor = this.chars.length;
   }
 
+  /**
+   * `scroll` counts wrapped rows hidden below the viewport. Live output
+   * appends at that end: if the user has scrolled up, grow `scroll` by the
+   * new rows so the same transcript stays on screen instead of sliding down.
+   */
+  private detachScroll(addedRows: number): void {
+    if (this.follow) {
+      this.scroll = 0;
+      return;
+    }
+    if (addedRows !== 0) this.scroll = Math.max(0, this.scroll + addedRows);
+  }
+
+  /** Full painted wrap of one entry — same `entrySpans` + `wrapSpans` as render. */
+  private paintedRowCount(entry: TranscriptEntry, cols: number): number {
+    return wrapSpans(this.entrySpans(entry), Math.max(1, cols)).length;
+  }
+
   private scrollLines(lines: number): void {
     const { cols, rows } = this.size();
     const matches = this.matches();
@@ -1589,8 +1623,7 @@ export class AgentTui {
     const visibleModel = truncateMiddle(modelLabel, Math.max(1, cols - fixedCells));
     const leftParts = [`▸ termina`, `${visibleModel}${modelSuffix}`, ...extraParts];
     const leftTitle = leftParts.join(separator);
-    const gap = Math.max(1, cols - cellWidth(leftTitle) - 2);
-    return ` ${leftTitle}${" ".repeat(gap)} `;
+    return ` ${leftTitle}`;
   }
 
   private buildFrame(size: { cols: number; rows: number }): {
@@ -1664,7 +1697,7 @@ export class AgentTui {
     const painted: string[] = [];
     for (let i = 0; i < rows; i++) {
       const raw = lines[i] ?? clip("", cols);
-      if (i === titleRow) painted.push(`\x1b[30;104m${raw}\x1b[0m`);
+      if (i === titleRow) painted.push(paintHighlightRow(raw, cols, "\x1b[30;104m"));
       else if (i === rows - 1 || i === titleRow - 1) {
         painted.push(`\x1b[90m${raw}\x1b[0m`);
       } else if (i === inputTop || i === contentTop + layout.input) {
@@ -1672,14 +1705,12 @@ export class AgentTui {
         painted.push(`\x1b[90m${raw}\x1b[0m`);
       } else if (i >= slashTop && i < slashTop + layout.slash) {
         const si = i - slashTop;
-        painted.push(si === this.slashIndex - slashStart ? `\x1b[30;104m${raw}\x1b[0m` : `\x1b[90m${raw}\x1b[0m`);
-      } else if (i === contentTop && isInputEmpty) {
-        // Dim the placeholder row inside the box.
-        painted.push(`\x1b[90m${raw}\x1b[0m`);
+        painted.push(si === this.slashIndex - slashStart ? paintHighlightRow(raw, cols, "\x1b[30;104m") : `\x1b[90m${raw}\x1b[0m`);
       } else if (i >= contentTop && i < contentTop + layout.input) {
-        // Bang commands are local shell execution, not agent prompts. Give the
-        // whole composer a distinct amber treatment while the command is typed.
-        painted.push(bashInput ? `\x1b[1;38;5;229;48;5;58m${raw}\x1b[0m` : raw);
+        const content = inputShown[i - contentTop] ?? "";
+        if (bashInput) painted.push(paintBoxContentRow(content, cols, "\x1b[1;38;5;229;48;5;58m", true));
+        else if (i === contentTop && isInputEmpty) painted.push(paintBoxContentRow(content, cols, "\x1b[90m"));
+        else painted.push(paintBoxContentRow(content, cols));
       } else if (i < layout.transcript) {
         if (this.entries.length === 0 && !this.busy) painted.push(`\x1b[90m${raw}\x1b[0m`);
         else painted.push(view.painted[i] ?? `\x1b[0m${raw}\x1b[0m`);

@@ -19,3 +19,14 @@ export function parseHideThinking(argv: string[]): boolean {
 export function quoteShellArg(arg: string): string {
   return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
+
+/**
+ * Collapse CR/LF variants from xterm copy/paste to `\n`.
+ *
+ * Trailing spaces are kept: TUI chrome no longer writes fill cells
+ * (`clip` / `paintRow` / `paintBoxContentRow`). Trimming them here would
+ * drop significant whitespace from copied source.
+ */
+export function normalizeCopiedTerminalText(text: string): string {
+  return text.replace(/\r\n|\n\r|\n|\r/g, "\n");
+}

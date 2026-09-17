@@ -10,33 +10,21 @@ use std::sync::atomic::Ordering;
 use git2::{Repository, RepositoryInitOptions};
 use serde_json::{Value, json};
 
-use crate::{
-    STORE_DESTROY_SEQUENCE,
-    open_store,
-    store_lifecycle_at_root,
-    store_node_at,
-    store_node_at_optional,
-    store_node_file,
-    store_node_matches,
-    validate_store_lifecycle,
-};
-use crate::util::{
-    object_format,
-    open_absolute_directory_nofollow,
-    open_at,
-    s,
-};
-use crate::{
-    StoreMutationLock, StoreNodeIdentity,
-    current_store_lifecycle, fresh_store_generation, lifecycle_json, lifecycle_mismatch,
-    recover_store_transaction, write_store_generation,
-};
-use crate::{
-    promotion_directory_is_empty, promotion_rename_noreplace,
-    promotion_rename_unsupported, promotion_unlink_at_field,
-};
 use crate::promotion_remove::promotion_remove_tree_contents;
 use crate::test_hooks::pause_at_hook;
+use crate::util::{object_format, open_absolute_directory_nofollow, open_at, s};
+use crate::{
+    STORE_DESTROY_SEQUENCE, open_store, store_lifecycle_at_root, store_node_at,
+    store_node_at_optional, store_node_file, store_node_matches, validate_store_lifecycle,
+};
+use crate::{
+    StoreMutationLock, StoreNodeIdentity, current_store_lifecycle, fresh_store_generation,
+    lifecycle_json, lifecycle_mismatch, recover_store_transaction, write_store_generation,
+};
+use crate::{
+    promotion_directory_is_empty, promotion_rename_noreplace, promotion_rename_unsupported,
+    promotion_unlink_at_field,
+};
 
 pub(crate) fn op_store_create(req: &Value) -> Result<Value, String> {
     let store_dir = PathBuf::from(s(req, "storeDir")?);
@@ -69,22 +57,13 @@ pub(crate) fn op_store_create(req: &Value) -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     // A new app session has no in-memory run records. Remove refs left by a
     // crashed session before the first capture.
-    let mut stale: Vec<String> = Vec::new();
-    for glob in ["refs/termina/state/*", "refs/termina/merge/*"] {
-        let refs = repo.references_glob(glob).map_err(|e| e.to_string())?;
-        for reference in refs.flatten() {
-            if let Ok(name) = reference.name() {
-                stale.push(name.to_string());
-            }
-        }
-    }
-    for name in stale {
-        if let Ok(reference) = repo.find_reference(&name) {
-            let mut reference = reference;
-            reference
-                .delete()
-                .map_err(|e| format!("delete stale store ref {name} failed: {e}"))?;
-        }
+    for name in stale_termina_ref_names(&repo)? {
+        let mut reference = repo
+            .find_reference(&name)
+            .map_err(|e| format!("stale store ref {name} disappeared before delete: {e}"))?;
+        reference
+            .delete()
+            .map_err(|e| format!("delete stale store ref {name} failed: {e}"))?;
     }
     // Read-only object access to the source repository.
     let alt_dir = git_dir.join("objects").join("info");
@@ -99,6 +78,23 @@ pub(crate) fn op_store_create(req: &Value) -> Result<Value, String> {
     pause_at_hook(req, "pauseAfterStoreGeneration")?;
     let lifecycle = current_store_lifecycle(&store_dir)?;
     Ok(lifecycle_json(&lifecycle))
+}
+
+fn stale_termina_ref_names(repo: &Repository) -> Result<Vec<String>, String> {
+    let mut stale = Vec::new();
+    for glob in ["refs/termina/state/*", "refs/termina/merge/*"] {
+        let refs = repo
+            .references_glob(glob)
+            .map_err(|e| format!("list stale store refs failed: {e}"))?;
+        for reference in refs {
+            let reference = reference.map_err(|e| format!("stale store ref is unreadable: {e}"))?;
+            let name = reference
+                .name()
+                .map_err(|e| format!("stale store ref name is not valid UTF-8: {e}"))?;
+            stale.push(name.to_string());
+        }
+    }
+    Ok(stale)
 }
 
 pub(crate) fn op_store_destroy(req: &Value) -> Result<Value, String> {
@@ -136,8 +132,8 @@ pub(crate) fn op_store_destroy(req: &Value) -> Result<Value, String> {
         .ok_or("snapshot store name is not valid UTF-8")?;
     let parent_file = open_absolute_directory_nofollow(parent, "snapshot store parent")?;
     let parent_node = store_node_file(&parent_file, "snapshot store parent")?;
-    let store_name = CString::new(name)
-        .map_err(|_| "snapshot store name contains NUL".to_string())?;
+    let store_name =
+        CString::new(name).map_err(|_| "snapshot store name contains NUL".to_string())?;
     let store_root = open_at(
         parent_file.as_raw_fd(),
         &store_name,
@@ -168,7 +164,10 @@ pub(crate) fn op_store_destroy(req: &Value) -> Result<Value, String> {
         let current_parent = open_absolute_directory_nofollow(parent, "snapshot store parent")?;
         let current_parent_node = store_node_file(&current_parent, "snapshot store parent")?;
         if !store_node_matches(current_parent_node, parent_node) {
-            return Err("snapshot store parent identity or link count changed; destroy retained".to_string());
+            return Err(
+                "snapshot store parent identity or link count changed; destroy retained"
+                    .to_string(),
+            );
         }
         let public_node = store_node_at(
             current_parent.as_raw_fd(),
@@ -176,7 +175,10 @@ pub(crate) fn op_store_destroy(req: &Value) -> Result<Value, String> {
             "snapshot store public root",
         )?;
         if !store_node_matches(public_node, store_node) {
-            return Err("snapshot store public root identity or link count changed; destroy retained".to_string());
+            return Err(
+                "snapshot store public root identity or link count changed; destroy retained"
+                    .to_string(),
+            );
         }
         let descriptor_lifecycle = store_lifecycle_at_root(&store_root)?;
         if descriptor_lifecycle != lifecycle {
@@ -220,8 +222,8 @@ pub(crate) fn op_store_destroy(req: &Value) -> Result<Value, String> {
             }
         }
     }
-    let quarantine_name = quarantine_name
-        .ok_or("could not allocate a snapshot store destroy quarantine name")?;
+    let quarantine_name =
+        quarantine_name.ok_or("could not allocate a snapshot store destroy quarantine name")?;
     let quarantined_node = store_node_at(
         parent_file.as_raw_fd(),
         &quarantine_name,
@@ -247,14 +249,19 @@ pub(crate) fn op_store_destroy(req: &Value) -> Result<Value, String> {
         let current_parent = open_absolute_directory_nofollow(parent, "snapshot store parent")?;
         let current_parent_node = store_node_file(&current_parent, "snapshot store parent")?;
         if !store_node_matches(current_parent_node, parent_node) {
-            return Err("snapshot store parent changed after destroy claim; store retained".to_string());
+            return Err(
+                "snapshot store parent changed after destroy claim; store retained".to_string(),
+            );
         }
         match store_node_at_optional(
             current_parent.as_raw_fd(),
             &store_name,
             "snapshot store public root",
         )? {
-            Some(_) => Err("snapshot store public root was replaced after destroy claim; store retained".to_string()),
+            Some(_) => Err(
+                "snapshot store public root was replaced after destroy claim; store retained"
+                    .to_string(),
+            ),
             None => Ok(()),
         }
     };

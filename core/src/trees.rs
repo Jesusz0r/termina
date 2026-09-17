@@ -3,33 +3,23 @@
 //! blob reads, unref with unreachable pruning.
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use git2::{Oid, Repository};
 use serde_json::{Value, json};
 
-use crate::{
-    PROMOTION_PATH_MAX_BYTES,
-    READ_BLOB_MAX_BYTES,
-    git_blob_bytes_bounded,
-    open_store,
-};
-use crate::util::{
-    has_git_segment,
-    is_safe_relative,
-    now_ms,
-    oid_ext,
-    s,
-};
-use crate::recover_store_transaction;
-use crate::{StoreMutationLock, StoreObjectTransaction};
-use crate::{
-    materialize_state_bound, nested_from_flat, pause_at_hook, publish_transaction_ref,
-    resolve_tree, state_entries, tree_lookup, write_nested_tree_for_ref, FlatEntry,
-};
-use crate::promote_fs::open_promotion_bound_root;
 use crate::capture::TreeLookupKind;
+use crate::promote_fs::open_promotion_bound_root;
+use crate::recover_store_transaction;
+use crate::util::{has_git_segment, is_safe_relative, now_ms, oid_ext, require_utf8_path_bytes, s};
+use crate::{
+    FlatEntry, materialize_state_bound, nested_from_flat, pause_at_hook, publish_transaction_ref,
+    resolve_tree, state_entries, tree_lookup, write_nested_tree_for_ref,
+};
+use crate::{PROMOTION_PATH_MAX_BYTES, READ_BLOB_MAX_BYTES, git_blob_bytes_bounded, open_store};
+use crate::{StoreMutationLock, StoreObjectTransaction};
 
 /// A burst of unrefs shares one prune: the walk does not rerun inside this
 /// many seconds.
@@ -79,7 +69,7 @@ pub(crate) fn op_merge3(req: &Value) -> Result<Value, String> {
             .or(conflict.their)
             .or(conflict.ancestor)
             .ok_or_else(|| "merge conflict entry has no path".to_string())?;
-        conflicts.push(String::from_utf8_lossy(&entry.path).into_owned());
+        conflicts.push(require_utf8_path_bytes(entry.path, "merge conflict")?);
     }
     if index.has_conflicts() {
         return Ok(json!({ "result": { "ok": false, "tree": null, "conflicts": conflicts } }));
@@ -228,7 +218,8 @@ pub(crate) fn op_read_blob(req: &Value) -> Result<Value, String> {
     let tree = resolve_tree(&store, oid_ext(&store, &state_commit)?)?;
     let content = match tree_lookup(&store, tree, &rel, TreeLookupKind::Blob)? {
         Some((_, oid)) => {
-            let bytes = git_blob_bytes_bounded(&store, oid, READ_BLOB_MAX_BYTES, &format!("blob {rel}"))?;
+            let bytes =
+                git_blob_bytes_bounded(&store, oid, READ_BLOB_MAX_BYTES, &format!("blob {rel}"))?;
             Some(base64::engine::general_purpose::STANDARD.encode(bytes))
         }
         None => None,
@@ -254,29 +245,41 @@ pub(crate) fn op_unref(req: &Value) -> Result<Value, String> {
 }
 
 /// Count the loose objects of the store. Stops at the prune threshold.
-fn loose_object_count(git_dir: &Path) -> u64 {
+/// A listing failure is not "zero objects": unref must not skip prune
+/// because the store looked small.
+fn loose_object_count(git_dir: &Path) -> Result<u64, String> {
     let mut count = 0u64;
     let objects = git_dir.join("objects");
-    let Ok(entries) = fs::read_dir(&objects) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
+    let entries = fs::read_dir(&objects).map_err(|e| format!("count loose objects failed: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("count loose objects failed: {e}"))?;
         if count >= PRUNE_LOOSE_THRESHOLD {
-            return count;
+            return Ok(count);
         }
         let path = entry.path();
         let is_two_hex = path
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.len() == 2);
-        if !path.is_dir() || !is_two_hex {
+        if !is_two_hex {
             continue;
         }
-        if let Ok(inner) = fs::read_dir(&path) {
-            count += inner.flatten().count() as u64;
+        let meta =
+            fs::symlink_metadata(&path).map_err(|e| format!("count loose objects failed: {e}"))?;
+        if !meta.is_dir() {
+            continue;
+        }
+        let inner = fs::read_dir(&path)
+            .map_err(|e| format!("count loose objects failed for {}: {e}", path.display()))?;
+        for file in inner {
+            file.map_err(|e| format!("count loose objects failed for {}: {e}", path.display()))?;
+            count += 1;
+            if count >= PRUNE_LOOSE_THRESHOLD {
+                return Ok(count);
+            }
         }
     }
-    count
+    Ok(count)
 }
 
 /// Collect every object a ref reaches: commits, trees, and blobs. The tree
@@ -332,7 +335,7 @@ fn collect_reachable(repo: &Repository) -> Result<HashSet<Oid>, String> {
 /// threshold. Packed objects stay: the store does not pack its own objects.
 fn prune_unreachable(repo: &Repository) -> Result<(), String> {
     let git_dir = repo.path().to_path_buf();
-    if loose_object_count(&git_dir) < PRUNE_LOOSE_THRESHOLD {
+    if loose_object_count(&git_dir)? < PRUNE_LOOSE_THRESHOLD {
         return Ok(());
     }
     // Throttle: a burst of unrefs must not repeat the full walk. One prune
@@ -341,16 +344,22 @@ fn prune_unreachable(repo: &Repository) -> Result<(), String> {
     let marker = git_dir.join("prune-marker");
     if let Ok(text) = fs::read_to_string(&marker)
         && let Ok(last) = text.trim().parse::<u64>()
-        && now_ms() / 1000 - last < PRUNE_MIN_INTERVAL_SECS
+        && (now_ms() / 1000).saturating_sub(last) < PRUNE_MIN_INTERVAL_SECS
     {
         return Ok(());
     }
     let reachable = collect_reachable(repo)?;
+    delete_unreachable_loose(&git_dir, &reachable)?;
+    fs::write(&marker, format!("{}", now_ms() / 1000))
+        .map_err(|e| format!("write prune marker failed: {e}"))?;
+    Ok(())
+}
+
+fn delete_unreachable_loose(git_dir: &Path, reachable: &HashSet<Oid>) -> Result<(), String> {
     let objects = git_dir.join("objects");
-    let Ok(entries) = fs::read_dir(&objects) else {
-        return Ok(());
-    };
-    for entry in entries.flatten() {
+    let entries = fs::read_dir(&objects).map_err(|e| format!("prune objects walk failed: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("prune objects walk failed: {e}"))?;
         let path = entry.path();
         let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -358,10 +367,16 @@ fn prune_unreachable(repo: &Repository) -> Result<(), String> {
         if dir_name.len() != 2 {
             continue;
         }
-        let Ok(inner) = fs::read_dir(&path) else {
+        let meta =
+            fs::symlink_metadata(&path).map_err(|e| format!("prune objects walk failed: {e}"))?;
+        if !meta.is_dir() {
             continue;
-        };
-        for file in inner.flatten() {
+        }
+        let inner = fs::read_dir(&path)
+            .map_err(|e| format!("prune objects walk failed for {dir_name}: {e}"))?;
+        for file in inner {
+            let file =
+                file.map_err(|e| format!("prune objects walk failed for {dir_name}: {e}"))?;
             let file_path = file.path();
             let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -370,20 +385,31 @@ fn prune_unreachable(repo: &Repository) -> Result<(), String> {
             let Ok(oid) = Oid::from_str(&hex) else {
                 continue; // pack and index files stay
             };
-            if !reachable.contains(&oid) {
-                fs::remove_file(&file_path).ok();
+            if reachable.contains(&oid) {
+                continue;
+            }
+            match fs::remove_file(&file_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("prune unlink failed for {hex}: {error}"));
+                }
             }
         }
     }
-    fs::write(&marker, format!("{}", now_ms() / 1000)).ok();
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::collect_reachable;
+    use super::{
+        collect_reachable, delete_unreachable_loose, loose_object_count, prune_unreachable,
+    };
+    use crate::util::require_utf8_path_bytes;
     use git2::{Repository, Signature};
+    use std::collections::HashSet;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -487,5 +513,79 @@ mod tests {
             err.contains("missing tree"),
             "expected missing-tree prune error, got {err}"
         );
+    }
+
+    struct ModeRestore {
+        path: PathBuf,
+        mode: u32,
+    }
+
+    impl Drop for ModeRestore {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.mode));
+        }
+    }
+
+    fn chmod(path: &std::path::Path, mode: u32) -> ModeRestore {
+        let previous = fs::metadata(path)
+            .expect("stat chmod target")
+            .permissions()
+            .mode();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod");
+        ModeRestore {
+            path: path.to_path_buf(),
+            mode: previous,
+        }
+    }
+
+    #[test]
+    fn loose_object_count_fails_when_objects_cannot_be_listed() {
+        let fixture = RepoFixture::new();
+        let git_dir = fixture.open().path().to_path_buf();
+        let objects = git_dir.join("objects");
+        fs::remove_dir_all(&objects).expect("remove objects");
+        fs::write(&objects, b"not a directory").expect("replace objects with a file");
+        let err = loose_object_count(&git_dir).expect_err("unlistable objects must fail closed");
+        assert!(
+            err.contains("count loose objects failed"),
+            "expected listing error, got {err}"
+        );
+    }
+
+    #[test]
+    fn prune_fails_when_objects_cannot_be_counted() {
+        let fixture = RepoFixture::new();
+        let repo = fixture.open();
+        let objects = repo.path().join("objects");
+        let _restore = chmod(&objects, 0o000);
+        let err = prune_unreachable(&repo).expect_err("unreadable objects must fail unref prune");
+        assert!(
+            err.contains("count loose objects failed"),
+            "expected count error, got {err}"
+        );
+    }
+
+    #[test]
+    fn prune_unlink_failure_fails_closed() {
+        let fixture = RepoFixture::new();
+        let git_dir = fixture.open().path().to_path_buf();
+        let shard = git_dir.join("objects").join("aa");
+        fs::create_dir_all(&shard).expect("create shard");
+        let file = shard.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        fs::write(&file, b"x").expect("write unreachable loose object");
+        let _restore = chmod(&shard, 0o555);
+        let err = delete_unreachable_loose(&git_dir, &HashSet::new())
+            .expect_err("unlink failure must fail closed");
+        assert!(
+            err.contains("prune unlink failed"),
+            "expected unlink error, got {err}"
+        );
+    }
+
+    #[test]
+    fn merge_conflict_path_rejects_non_utf8() {
+        let err = require_utf8_path_bytes(vec![0xff], "merge conflict")
+            .expect_err("lossy conflict paths must not be forged");
+        assert_eq!(err, "a merge conflict path is not valid UTF-8");
     }
 }

@@ -17,7 +17,7 @@
  * - Per-turn usage records with waste attribution and models.dev pricing
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
- * - cwd jail; grep/glob; unique edit; numbered read_file; dir listing; interruptible bash; web_search; skill index; prefix cache_control; traces
+ * - cwd jail; grep/glob; unique edit; ranged read_file; dir listing; interruptible bash; web_search; skill index; prefix cache_control; traces
  * - last tool_result cache pin (Anthropic); session prompt_cache_key by model family; 429/network retry; model-aware effort
  * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
@@ -1764,7 +1764,7 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "read_file",
     description:
-      "Read a text file relative to the working directory. Each line is prefixed with its 1-based line number and a pipe (N|content); those prefixes are display-only — never copy them into edit old_text. Caps near 40 KB of file bytes. Optional start_line and end_line (inclusive). Pass offset (bytes) only to continue a truncated read; do not combine with start_line. A directory path lists that directory. Pass paths (up to 10) to read several files in one bounded 40 KB result; omitted tail files are named — read them explicitly. Use path or paths, not both; offset/start_line/end_line apply to path only.",
+      "Read a text file relative to the working directory. Results start with a path and line-range header, then the file bytes for that range — copy those bytes into edit old_text. Caps near 40 KB of file bytes. Optional start_line and end_line (inclusive). Pass offset (bytes) only to continue a truncated read; do not combine with start_line. A directory path lists that directory. Pass paths (up to 10) to read several files in one bounded 40 KB result; omitted tail files are named — read them explicitly. Use path or paths, not both; offset/start_line/end_line apply to path only.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -1801,7 +1801,7 @@ const TOOLS: Array<Record<string, unknown>> = [
         old_text: {
           type: "string",
           description:
-            "Exact current text to replace, copied from observed file content (complete grep line, working-set overlay, or a prior read). Strip read_file N| prefixes and grep path:line: prefixes; preserve tabs/spaces. Include enough surrounding context for a unique match unless replace_all is true. Empty string is rejected.",
+            "Exact current text to replace, copied from observed file content (complete grep hit, working-set overlay, or a prior read). Preserve tabs/spaces. Include enough surrounding context for a unique match unless replace_all is true. Empty string is rejected.",
         },
         new_text: { type: "string", description: "Replacement text. Preserve the file's indentation and whitespace style." },
         replace_all: { type: "boolean", description: "When true, replace every occurrence of old_text instead of requiring a unique match." },
@@ -1812,7 +1812,7 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "grep",
     description:
-      "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits. An empty result is exactly (no matches); broaden the pattern or try a different path/glob, or list files with glob. Edit from a grep hit only when the shown line is complete and unique; copy the line text after path:line:, never that prefix. Otherwise read.",
+      "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits. An empty result is exactly (no matches); broaden the pattern or try a different path/glob, or list files with glob. Edit from a grep hit only when the shown line is complete and unique; copy the hit text, not the line-number header. Otherwise read.",
     input_schema: {
       type: "object",
       additionalProperties: false,

@@ -47,6 +47,8 @@ When a touched file exceeds 800 lines, assess extraction. Extract cohesive respo
 
 **No overengineering / YAGNI.** Prefer in order: use existing → compose → small change → small helper → new abstraction → new subsystem. Don't add config/options/abstractions for hypothetical needs. `TERMINA_EVENTS_DIR`, `TERMINA_CORE_BIN`, `TERMINA_SKIP_CORE_BUILD`, `CSC_NAME` stay configurable. The smallest correct, boring code wins.
 
+**Fix the root cause, not a patch.** When something is wrong, change the code that produces the wrong behavior. Don't compensate around it (extra guards, retries, filters, wrappers, or UI/copy that hides the bug). A workaround is allowed only when the real producer cannot be changed; say so and keep it at the narrowest boundary.
+
 **Reuse before inventing.** Search first. Reuse if semantics match. Don't duplicate business rules to avoid an abstraction; incidental syntax duplication is okay, duplicated responsibility is not.
 
 **Dependencies must earn their cost:** language → stdlib → Electron/Vite/Monaco/xterm/node-pty → existing deps → Rust core → small local impl → new dep. `@lydell/node-pty` stays external in esbuild. Don't reimplement snapshot/merge in TS.
