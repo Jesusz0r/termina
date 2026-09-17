@@ -17,6 +17,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/resume", hint: "session · replay the stored session" },
   { name: "/clear (new)", hint: "session · start a new empty session", submit: "/clear" },
   { name: "/compact", hint: "session · reclaim and summarize context" },
+  { name: "/plan", hint: "session · write a Plan Board list" },
   { name: "/effort", hint: "model · show or set reasoning effort" },
   { name: "/permissions", hint: "danger · set bash approval policy" },
   { name: "/exit", hint: "danger · quit the engine" },

@@ -52,10 +52,12 @@ import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./ap
 import { installCliCommand, uninstallCliCommand, isCliCommandInstalled, parseTargetCwdFromArgv } from "./cli-install.js";
 import {
   MAX_DISPATCH_WORKERS,
+  dispatchWorkerModel,
   findTaskByText,
   finalizePlanTasks,
   formatDispatchBriefing,
   markPlanProgress,
+  parsePlanModelMarker,
   parsePlanTasks,
   parseScheduleMarker,
   pickDispatchTasks,
@@ -2688,11 +2690,15 @@ class TerminaApp {
         // never survive — dispatched tasks return to pending without claims.
         if (rec.type === "agent") {
           if (rec.plan && rec.plan.length > 0) {
-            inst.plan = rec.plan.map((t) => ({
-              text: t.text,
-              paths: t.paths,
-              state: t.state === "done" ? "done" : "pending",
-            }));
+            inst.plan = rec.plan.map((t) => {
+              const model = parsePlanModelMarker(t.text);
+              return {
+                text: t.text,
+                paths: t.paths,
+                state: t.state === "done" ? "done" : "pending",
+                ...(model ? { model } : {}),
+              };
+            });
             this.sendPlan(inst);
           }
           if (rec.verify) {
@@ -2948,17 +2954,11 @@ class TerminaApp {
       const defaultEffort = this.usableAgentThinking(this.preferences.defaultEffort ?? null);
       if (defaultEffort) env.TERMINA_CORE_EFFORT = defaultEffort;
       else delete env.TERMINA_CORE_EFFORT;
-      const coreModel = this.copiedCoreModel(opts?.fromTerminalId);
-      const resumeModel = this.usableAgentModel(opts?.model);
-      if (coreModel) {
-        const cut = coreModel.indexOf("/");
-        env.TERMINA_CORE_PROVIDER = coreModel.slice(0, cut);
-        env.TERMINA_CORE_MODEL = coreModel.slice(cut + 1);
-      } else if (resumeModel) {
-        // Roster resume: the session's own last model beats the global one.
-        const cut = resumeModel.indexOf("/");
-        env.TERMINA_CORE_PROVIDER = resumeModel.slice(0, cut);
-        env.TERMINA_CORE_MODEL = resumeModel.slice(cut + 1);
+      const pin = this.usableAgentModel(opts?.model) ?? this.copiedCoreModel(opts?.fromTerminalId);
+      if (pin) {
+        const cut = pin.indexOf("/");
+        env.TERMINA_CORE_PROVIDER = pin.slice(0, cut);
+        env.TERMINA_CORE_MODEL = pin.slice(cut + 1);
       } else if (!resuming) {
         // Fresh session without a source tab: reopen on the last-used model.
         // agent-core ignores the pin when that provider is no longer authenticated.
@@ -3767,13 +3767,25 @@ class TerminaApp {
   private async dispatchRun(
     ownerId: string,
     taskText?: string,
+    model?: string,
   ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     const owner = this.runtime.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
+    let ipcModel: string | undefined;
+    if (model !== undefined) {
+      const next = model.trim();
+      if (next && next !== "inherit") {
+        const usable = this.usableAgentModel(next);
+        if (!usable) return { ok: false, error: "model must be provider/id" };
+        ipcModel = usable;
+      } else {
+        ipcModel = "inherit";
+      }
+    }
     const dispatchOwnerId = this.projectOfTerminal(ownerId)?.id;
     if (this.disposed || this.projectIsSwitching(dispatchOwnerId)) return { ok: false, error: "the project is changing" };
     const rendererTarget = this.captureRendererSendTarget();
-    if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — ask the agent for a plan first" };
+    if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — run /plan first" };
     const ownerWs = this.workspaceOfTerminal(owner);
     for (const entry of this.dispatchRuns.values()) {
       if (entry.ownerId === ownerId) continue;
@@ -3831,12 +3843,14 @@ class TerminaApp {
     let dispatched = 0;
     for (const job of jobs) {
       try {
+        const workerModel = dispatchWorkerModel(job.task, ipcModel);
         const worker = await this.createTerminal(undefined, {
           type: "agent",
           engine: "core",
           workspaceId: owner.workspaceId,
           id: job.id,
           fromTerminalId: ownerId,
+          ...(workerModel ? { model: workerModel } : {}),
         });
         this.dispatchWorkers.set(worker.id, job.task.text);
         this.dispatchRuns.set(worker.id, { ownerId, taskText: job.task.text });
@@ -4677,12 +4691,11 @@ class TerminaApp {
         const startWs = this.workspaceOfTerminal(inst);
         if (startWs) this.clearUserEdits(startWs);
         this.clearMailbox(inst.id);
-        // The old run's plan is stale until the new plan message arrives.
-        inst.plan = [];
+        // File-tool progress is per run. The Plan Board stays until a /plan
+        // turn replaces it or /clear drops the session.
         inst.touched = new Set();
         inst.pendingFileTools = new Map();
         inst.toolOutcomes = new Map();
-        this.sendPlan(inst, rendererTarget);
         this.sendTimelinePrefix(inst, rendererTarget);
         // Retain the original baseline of every file already in Change Review.
         // The modified list spans turns, so replacing those baselines here would
@@ -8081,8 +8094,12 @@ class TerminaApp {
     });
 
     // ---- Dispatch ----
-    ipcMain.handle("dispatch:run", (_e, terminalId: string, taskText?: string) =>
-      this.dispatchRun(terminalId, typeof taskText === "string" ? taskText : undefined),
+    ipcMain.handle("dispatch:run", (_e, terminalId: string, taskText?: string, model?: string) =>
+      this.dispatchRun(
+        terminalId,
+        typeof taskText === "string" ? taskText : undefined,
+        typeof model === "string" ? model : undefined,
+      ),
     );
 
     // ---- Session Search ----

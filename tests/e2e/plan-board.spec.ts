@@ -116,6 +116,8 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     await expect(last).toHaveClass(/state-done/);
     await expect(first.locator(".plan-mark")).toHaveText("○");
     await expect(last.locator(".plan-mark")).toHaveText("✓");
+    await expect(first.locator(".plan-model")).toHaveCount(1);
+    await expect(last.locator(".plan-model")).toHaveCount(0);
     // Only the pending row offers the dispatch action.
     await expect(first).toHaveClass(/dispatchable/);
     await expect(last).not.toHaveClass(/dispatchable/);
@@ -130,13 +132,14 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     await expect(tasks.first().locator(".plan-mark")).toHaveText("✓");
     await expect(tasks.last().locator(".plan-text")).toHaveText("Write tests for the add function");
     await expect(tasks.last()).toHaveClass(/dispatchable/);
+    await expect(tasks.last().locator(".plan-model")).toHaveCount(1);
 
     // 3. The task action: dispatching the pending row runs the production
     //    dispatch IPC, and main spawns a worker terminal for the task. (The
     //    preload bridge is immutable from the page, so the outbound call is
     //    asserted by its real effect: the dispatch worker tab.)
     test.setTimeout(180_000);
-    await tasks.last().click();
+    await tasks.last().locator(".plan-text").click();
     const dispatchTab = page.locator(".terminal-tab .tab-name", { hasText: "dispatch" });
     await expect(dispatchTab).toBeVisible({ timeout: 60_000 });
 

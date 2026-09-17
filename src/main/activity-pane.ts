@@ -6,12 +6,13 @@
  */
 import { showConfirm, toast } from "../components/modals";
 import { asKnownState, KNOWN_FILE_STATUSES, KNOWN_PLAN_STATES } from "../known-state";
-import type { ModifiedFile, PlanTask } from "../../shared/types";
+import type { ModifiedFile, PlanTask, RecentModel } from "../../shared/types";
 
 interface ActivityPaneState {
   instanceId: string;
   projectId: string | null;
   workspaceId: string;
+  model?: string | null;
   modified: ModifiedFile[];
   accepted: Map<string, number>;
   reverted: Set<string>;
@@ -45,6 +46,8 @@ interface ActivityPaneBindings<TPane extends ActivityPaneState> {
   onModifiedListChanged(pane: TPane): void;
   onShowWorker(workerId: string): void;
   openReview(pane: TPane, path: string, relPath: string): void;
+  getRecentModels?(): RecentModel[];
+  getLiveModels?(ownerId: string, projectId: string | null): string[];
 }
 
 export function createActivityPane<TPane extends ActivityPaneState>(
@@ -59,6 +62,65 @@ export function createActivityPane<TPane extends ActivityPaneState>(
 } {
   const { elements } = bindings;
   let modifiedRenderedPaneId: string | null = null;
+  const modelOverrides = new Map<string, string>();
+
+  function overrideKey(instanceId: string, taskText: string): string {
+    return `${instanceId}\0${taskText}`;
+  }
+
+  function selectedDispatchModel(pane: TPane, task: PlanTask): string {
+    return modelOverrides.get(overrideKey(pane.instanceId, task.text)) ?? task.model ?? "inherit";
+  }
+
+  function pruneModelOverrides(pane: TPane): void {
+    const prefix = `${pane.instanceId}\0`;
+    const live = new Set(pane.plan.map((task) => overrideKey(pane.instanceId, task.text)));
+    for (const key of [...modelOverrides.keys()]) {
+      if (!key.startsWith(prefix) || live.has(key)) continue;
+      modelOverrides.delete(key);
+    }
+  }
+
+  function appendModelChip(li: HTMLLIElement, pane: TPane, task: PlanTask): void {
+    const select = document.createElement("select");
+    select.className = "plan-model";
+    select.title = "worker model";
+    select.setAttribute("aria-label", "worker model");
+    const inherit = pane.model?.trim() || null;
+    const inheritOpt = document.createElement("option");
+    inheritOpt.value = "inherit";
+    inheritOpt.textContent = inherit ? `Inherit (${inherit})` : "Inherit";
+    select.appendChild(inheritOpt);
+    const seen = new Set<string>(["inherit"]);
+    const addPin = (value: string | null | undefined): void => {
+      const id = value?.trim() ?? "";
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = id;
+      select.appendChild(opt);
+    };
+    addPin(task.model);
+    for (const row of bindings.getRecentModels?.() ?? []) addPin(`${row.provider}/${row.model}`);
+    for (const id of bindings.getLiveModels?.(pane.instanceId, pane.projectId) ?? []) addPin(id);
+    const selected = selectedDispatchModel(pane, task);
+    addPin(selected === "inherit" ? "" : selected);
+    select.value = selected;
+    select.addEventListener("click", (e) => e.stopPropagation());
+    select.addEventListener("mousedown", (e) => e.stopPropagation());
+    select.addEventListener("change", (e) => {
+      e.stopPropagation();
+      modelOverrides.set(overrideKey(pane.instanceId, task.text), select.value.trim() || "inherit");
+    });
+    li.appendChild(select);
+  }
+
+  function dispatchTask(pane: TPane, task: PlanTask): void {
+    void window.termina.dispatchRun(pane.instanceId, task.text, selectedDispatchModel(pane, task)).then((res) => {
+      if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
+    }).catch((err) => toast(`dispatch failed: ${(err as Error).message}`, "warning"));
+  }
 
   /** Plan Board: the current run's tasks with live progress. */
   function renderPlan(pane: TPane, announce = true): void {
@@ -91,6 +153,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
       });
     }
     elements.planCount.textContent = pane.plan.length ? `(${pane.plan.length})` : "";
+    pruneModelOverrides(pane);
     elements.planList.replaceChildren();
     for (const task of pane.plan) {
       const li = document.createElement("li");
@@ -114,16 +177,16 @@ export function createActivityPane<TPane extends ActivityPaneState>(
       if (task.state !== "done") {
         li.classList.add("dispatchable");
         li.title = task.workerId ? "show dispatch worker" : "dispatch this task";
+        if (!task.workerId) appendModelChip(li, pane, task);
         li.addEventListener("click", (e) => {
           e.stopPropagation();
+          if ((e.target as HTMLElement | null)?.closest?.(".plan-model")) return;
           if (task.workerId) {
             bindings.onShowWorker(task.workerId);
             return;
           }
           // Success needs no toast: main re-sends the plan and the row shows the worker.
-          void window.termina.dispatchRun(pane.instanceId, task.text).then((res) => {
-            if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
-          }).catch((err) => toast(`dispatch failed: ${(err as Error).message}`, "warning"));
+          dispatchTask(pane, task);
         });
       }
       elements.planList.appendChild(li);
@@ -280,12 +343,31 @@ export function createActivityPane<TPane extends ActivityPaneState>(
   };
 
   const onDispatch = (): void => {
-    const id = bindings.getActivePaneId();
-    if (!id) return;
-    // Success needs no toast: main re-sends the plan and each row shows its worker.
-    void window.termina.dispatchRun(id).then((res) => {
-      if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
-    }).catch((err) => toast(`dispatch failed: ${(err as Error).message}`, "warning"));
+    const pane = bindings.getActivePane();
+    if (!pane) return;
+    const pending = pane.plan.filter((task) => task.state !== "done" && !task.workerId && task.paths.length > 0);
+    if (pending.length === 0) {
+      void window.termina.dispatchRun(pane.instanceId).then((res) => {
+        if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
+      }).catch((err) => toast(`dispatch failed: ${(err as Error).message}`, "warning"));
+      return;
+    }
+    void (async () => {
+      for (const task of pending) {
+        try {
+          const res = await window.termina.dispatchRun(pane.instanceId, task.text, selectedDispatchModel(pane, task));
+          if (!res.ok) {
+            const err = res.error ?? "dispatch failed";
+            if (err.includes("already dispatched") || err.includes("overlaps")) continue;
+            toast(err, "warning");
+            return;
+          }
+        } catch (err) {
+          toast(`dispatch failed: ${(err as Error).message}`, "warning");
+          return;
+        }
+      }
+    })();
   };
 
   elements.btnClearModified.addEventListener("click", onClearModified);

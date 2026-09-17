@@ -23,6 +23,7 @@ describe("plan board spec shape (refs #147)", () => {
     expect(spec).toContain("state-pending");
     expect(spec).toContain("state-done");
     expect(spec).toContain(".plan-mark");
+    expect(spec).toContain(".plan-model");
     expect(spec).toContain("dispatchable");
     expect(spec).toContain("toHaveCount(3");
     expect(spec).toContain('hasText: "dispatch"');

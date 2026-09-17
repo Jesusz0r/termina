@@ -529,6 +529,16 @@ const activityPane = createActivityPane({
     if (pane.projectId === activeProjectId) syncExplorerChanged();
   },
   onShowWorker: (workerId) => activatePane(workerId),
+  getRecentModels: () => prefs.current.recentModels,
+  getLiveModels: (ownerId, projectId) => {
+    const models: string[] = [];
+    for (const pane of panes.values()) {
+      if (pane.instanceId === ownerId || pane.type !== "agent" || !pane.model) continue;
+      if (projectId && pane.projectId !== projectId) continue;
+      if (!models.includes(pane.model)) models.push(pane.model);
+    }
+    return models;
+  },
   openReview: (pane, path, relPath) => {
     const projectId = pane.projectId;
     const workspaceId = pane.workspaceId;

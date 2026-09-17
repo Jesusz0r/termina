@@ -114,6 +114,7 @@ scope for #331.
 | `agent-core/main/grep.ts` | none |
 | `agent-core/main/history-view.ts` | `tests/unit/agent-core/harness-kernel.test.ts` |
 | `agent-core/main/login-hint.ts` | `tests/unit/agent-core/main-login-hint.test.ts` |
+| `agent-core/main/plan-slash.ts` | `tests/unit/agent-core/plan-slash.test.ts` |
 | `agent-core/main/policy-fetch.ts` | `tests/unit/agent-core/url-policy.test.ts` |
 | `agent-core/main/sidecar.ts` | none |
 | `agent-core/main/skills.ts` | none |

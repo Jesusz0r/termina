@@ -1489,6 +1489,18 @@ body {
   opacity: 0.6;
 }
 
+.plan-model {
+  flex: 0 0 auto;
+  max-width: 28%;
+  margin-left: auto;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
 .plan-meta {
   margin-left: auto;
   font-size: 11px;

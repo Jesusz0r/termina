@@ -137,7 +137,7 @@ describe("mid-teardown creation gates (refs #214)", () => {
     const h = makeHarness({ switching: new Set(["proj-closing"]), activeId: "proj-live" });
     // Empty plan bails after the gate: the gate itself passed.
     const result = await dispatchRun.call(h.app, "term-1");
-    expect(result).toEqual({ ok: false, error: "the plan board is empty — ask the agent for a plan first" });
+    expect(result).toEqual({ ok: false, error: "the plan board is empty — run /plan first" });
   });
 
   it("re-checks the gate after the pick and flush awaits", () => {

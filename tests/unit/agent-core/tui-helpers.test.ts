@@ -32,6 +32,8 @@ describe("TUI same-file helpers (#352)", () => {
     expect(matchingSlashCommands("/mode").map((row) => row.name)).toEqual(["/model", "/models"]);
     expect(matchingSlashCommands("/effor").map((row) => row.name)).toEqual(["/effort"]);
     expect(matchingSlashCommands("/permiss").map((row) => row.name)).toEqual(["/permissions"]);
+    expect(matchingSlashCommands("/p").map((row) => row.name)).toEqual(["/plan", "/permissions"]);
+    expect(matchingSlashCommands("/pla").map((row) => row.name)).toEqual(["/plan"]);
     expect(matchingSlashCommands("/login").every((row) => !row.name.startsWith("/"))).toBe(true);
     expect(matchingSlashCommands("/effort").map((row) => row.name)).toEqual([
       "off",

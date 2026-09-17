@@ -2,8 +2,8 @@
  * Plan Board: what a task is, how it progresses, and which tasks Dispatch
  * may send to workers.
  *
- * The bridge only logs assistant text. This module is the only place that
- * decides whether that text is a plan and how Dispatch claims rows.
+ * A `/plan` turn logs assistant text on the sidecar. This module is the only
+ * place that decides whether that text is a plan and how Dispatch claims rows.
  */
 import { isAbsolute, relative } from "node:path";
 import { PLAN_HEADING_MARKER, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
@@ -23,6 +23,7 @@ export const SCHEDULE_TICK_MS = 60_000;
 
 const SCHEDULE_EVERY = /@every\s+(\d+)\s*([smhd])\b/i;
 const SCHEDULE_AT = /@at\s+(\d{1,2}):(\d{2})\b/;
+const PLAN_MODEL_MARKER = /@model\s+(\S+)/i;
 
 export type ScheduleSpec = { kind: "every"; intervalMs: number } | { kind: "at"; hour: number; minute: number };
 
@@ -50,6 +51,30 @@ export function parseScheduleMarker(text: string): ScheduleSpec | null {
   return null;
 }
 
+/**
+ * A trailing `@model provider/id` marker pins that task's dispatch worker.
+ * First marker wins. Malformed refs are ignored (inherit the owner tab).
+ */
+export function parsePlanModelMarker(text: string): string | null {
+  const match = PLAN_MODEL_MARKER.exec(text);
+  if (!match) return null;
+  const raw = match[1]!.trim();
+  if (raw.length < 3 || raw.length > 256) return null;
+  if (raw.startsWith("/") || raw.endsWith("/")) return null;
+  const cut = raw.indexOf("/");
+  if (cut < 1) return null;
+  if (/[\x00-\x1f]/.test(raw)) return null;
+  return raw;
+}
+
+/** Model pin for a dispatch worker. `inherit` copies the owner tab. */
+export function dispatchWorkerModel(task: PlanTask, ipcModel?: string): string | undefined {
+  const raw = ipcModel?.trim() ?? "";
+  if (raw === "inherit") return undefined;
+  if (raw) return raw;
+  return task.model;
+}
+
 /** Next run after `fromMs` for a schedule (first `@every` fires immediately). */
 export function nextScheduleRun(spec: ScheduleSpec, fromMs: number, first: boolean): number {
   if (spec.kind === "every") return first ? fromMs : fromMs + spec.intervalMs;
@@ -73,12 +98,17 @@ export async function parsePlanTasks(text: string, cwd: string | null, canonical
       continue;
     }
     const line = parsePlanTaskLine(raw);
-    if (!line) break;
+    if (!line) {
+      if (started) break;
+      continue;
+    }
     started = true;
+    const model = parsePlanModelMarker(line.body);
     tasks.push({
       text: line.body,
       paths: await planTaskPaths(line.body, cwd, canonicalize),
       state: line.checked ? "done" : "pending",
+      ...(model ? { model } : {}),
     });
     if (tasks.length >= MAX_PLAN_TASKS) break;
   }
@@ -243,7 +273,9 @@ function parsePlanTaskLine(line: string): { body: string; checked: boolean } | n
 
 async function planTaskPaths(body: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<string[]> {
   const paths: string[] = [];
-  for (const token of body.split(/\s+/)) {
+  const stripped = body.replace(PLAN_MODEL_MARKER, " ");
+  for (const token of stripped.split(/\s+/)) {
+    if (!token || token.startsWith("@model")) continue;
     const clean = await cleanPlanPathToken(token, cwd, canonicalize);
     if (looksLikePath(clean)) paths.push(clean);
   }

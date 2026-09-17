@@ -294,19 +294,27 @@ it cannot restore.
 
 ## 8. Plan Board and Dispatch
 
-When the agent plans multi-step work, the Plan Board (below the timeline)
-shows the task list with live progress: `○` pending, `◐` active, `✓` done.
+When the agent plans multi-step work — type **`/plan`** or **`/plan <request>`**
+in the terminal — the Plan Board (below the timeline) shows the task list
+with live progress: `○` pending, `◐` active, `✓` done. Ordinary replies do
+not fill the board; only a `/plan` turn publishes the list. The list stays
+until the next `/plan` or `/clear`.
 
 ### Dispatching tasks
 
 - **Click any pending task** to send it to a parallel worker — a separate
-  agent that works on the same project simultaneously. A toast confirms the
-  dispatch.
+  agent that works on the same project simultaneously. The row updates with
+  the worker; failures toast.
+- **Pick a worker model** on the row chip. The default is **Inherit** (this
+  tab's current `/model`). Recent models and other live agent tabs are
+  listed too. A task may also name `@model provider/id`; Inherit still wins
+  if you choose it.
 - **Schedule a task** with a trailing `@every 30m` / `@every 2h` / `@at 09:30`
   marker: while its terminal stays open and idle, Termina dispatches it to a
   worker on cadence through the same briefing, settle-note, and auto-verify
-  loop. Intervals below 5 minutes are ignored.
-- **⇉ Dispatch** sends the plan's tasks out.
+  loop. Intervals below 5 minutes are ignored. Scheduled workers inherit
+  this tab's model unless the task has `@model`.
+- **⇉ Dispatch** sends the plan's tasks out, each with its row's model.
 
 Dispatched tasks show their worker and claimed files on the board. Clicking a
 dispatched task jumps to that worker's terminal (tabs are named `dispatch`).

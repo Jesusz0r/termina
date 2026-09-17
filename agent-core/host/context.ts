@@ -6,7 +6,6 @@
  * agent-core/host.ts (issue #38).
  */
 import { errorCode, isErrno, isRecord } from "../../shared/guards.ts";
-import { HAS_PLAN_TASK } from "../../shared/plan-task.ts";
 import { BoundedTextAccumulator, type BoundedText, type BoundedTextMarkerDetails, type CompletionState } from "../tool-output.ts";
 import { createHash, type Hash } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -18,8 +17,6 @@ export const ACK_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CONTEXT_FILES = ["verify", "edits", "mailbox", "project", "diagnostics"] as const;
 
 const PROTECTED_PATHS_BYTES = 64 * 1024;
-
-const PLAN_TEXT_CAP = 4000;
 
 export const HOST_CONTEXT_BYTES = 64 * 1024;
 
@@ -481,19 +478,6 @@ export function visibleAssistantText(blocks: Array<{ type?: string; text?: strin
     if (typeof b.text === "string") parts.push(b.text);
   }
   return parts.join("\n");
-}
-
-
-export function firstPlanText(text: string): string | null {
-  if (!text.trim() || !HAS_PLAN_TASK.test(text)) return null;
-  return text.slice(0, PLAN_TEXT_CAP);
-}
-
-
-export function planTextIfChanged(text: string, lastEmitted: string): string | null {
-  const plan = firstPlanText(text);
-  if (!plan || plan === lastEmitted) return null;
-  return plan;
 }
 
 export const OPEN_NOFOLLOW_READ: number | null = typeof fsConstants.O_NOFOLLOW === "number"

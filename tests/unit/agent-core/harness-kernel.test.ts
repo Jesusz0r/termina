@@ -1125,20 +1125,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check("commit guard sees a replaced terminal identity", closedByIdentity.ok === false && closedByIdentity.error === "terminal closed");
     check(
-      "firstPlanText accepts a checkbox list",
-      host.firstPlanText("intro\n- [ ] edit src/foo.ts\n")?.includes("- [ ] edit src/foo.ts"),
-    );
-    check("firstPlanText ignores prose", host.firstPlanText("hello there") === null);
-    const planA = "- [ ] one.ts\n";
-    check("planTextIfChanged emits first list", host.planTextIfChanged(planA, "") === planA);
-    check("planTextIfChanged silent on identical", host.planTextIfChanged(planA, planA) === null);
-    check("planTextIfChanged emits a changed list", host.planTextIfChanged("- [ ] two.ts\n", planA)?.includes("two.ts"));
-    check(
       "visibleAssistantText skips thinking",
       host.visibleAssistantText([
         { type: "thinking", text: "secret" },
         { type: "text", text: "- [ ] task" },
-      ]) === "- [ ] task" && host.firstPlanText(host.visibleAssistantText([{ type: "thinking", text: "- [ ] nope" }])) === null,
+      ]) === "- [ ] task" && host.visibleAssistantText([{ type: "thinking", text: "- [ ] nope" }]) === "",
     );
     
     check("web_search is Anthropic server tool", WEB_SEARCH_TOOL.type === "web_search_20260209" && WEB_SEARCH_TOOL.name === "web_search");
@@ -3995,6 +3986,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("slash /n offers /clear", matchingSlashCommands("/n").some((c) => c.submit === "/clear"));
     check("slash /clear still matches", matchingSlashCommands("/clear").some((c) => c.submit === "/clear"));
     check("slash /compact is listed", SLASH_COMMANDS.some((c) => c.name === "/compact"));
+    check("slash /plan is listed", SLASH_COMMANDS.some((c) => c.name === "/plan" && c.hint.startsWith("session ·")));
     check("slash /effort is listed", SLASH_COMMANDS.some((c) => c.name === "/effort"));
     check(
       "slash /effort lists the full default range",

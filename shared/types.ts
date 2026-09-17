@@ -102,6 +102,8 @@ export interface PlanTask {
   workerId?: string;
   /** Files this worker claimed. Empty when the task is not dispatched. */
   claimed?: string[];
+  /** Worker model from an `@model provider/id` marker. Omit to inherit the owner tab. */
+  model?: string;
 }
 
 export interface PlanPayload {
@@ -730,8 +732,9 @@ export interface TerminaBridge {
   onPromotionOpened(cb: (e: { terminalId: string }) => void): () => void;
 
   // Dispatch (parallel agents)
-  /** Dispatch plan tasks to parallel workers. Pass task text to send one row. */
-  dispatchRun(terminalId: string, taskText?: string): Promise<{ ok: boolean; error?: string; dispatched?: number }>;
+  /** Dispatch plan tasks to parallel workers. Pass task text to send one row.
+   *  Omit model or pass `inherit` to copy the owner tab's `/model`. */
+  dispatchRun(terminalId: string, taskText?: string, model?: string): Promise<{ ok: boolean; error?: string; dispatched?: number }>;
 
   // Mine (file ownership)
   /** Mark a file as the user's own (the agent is told not to modify it). */

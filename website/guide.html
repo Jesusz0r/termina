@@ -270,8 +270,10 @@
     <section id="plan" class="guide-section">
       <h2>8 · Plan Board and Dispatch</h2>
       <p>
-        When the agent plans multi-step work, the Plan Board (below the timeline) shows the task list with live
-        progress: <code>○</code> pending, <code>◐</code> active, <code>✓</code> done.
+        Type <code>/plan</code> or <code>/plan &lt;request&gt;</code> in the terminal. The Plan Board (below the timeline)
+        shows the task list with live progress: <code>○</code> pending, <code>◐</code> active, <code>✓</code> done.
+        Ordinary replies do not fill the board; only a <code>/plan</code> turn publishes the list.
+        The list stays until the next <code>/plan</code> or <code>/clear</code>.
       </p>
       <p>
         Plans do not need one exact Markdown format. Dash, star, plus, and numbered bullets are recognized;

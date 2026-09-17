@@ -152,7 +152,6 @@ import {
   acknowledgePendingImages,
   claimPendingImages,
   consumeStartupControl,
-  planTextIfChanged,
   loadImageFromRoots,
   pendingImageState,
   persistLoadedImages,
@@ -229,6 +228,7 @@ import {
   type TraceCacheDiagnostics,
 } from "./main/cache-diagnostics.ts";
 import { formatNetworkError, isRetryableNetworkError, retryAfter, retryNetworkAfter } from "./main/retry-after.ts";
+import { planSidecarText, planSlashSubmit } from "./main/plan-slash.ts";
 import {
   SubagentRegistry,
   appendSubagentInboxMessage,
@@ -4137,7 +4137,11 @@ export function droppedRunImageCount(loadedCount: number, extrasCount: number): 
   return Math.max(0, loadedCount + extrasCount - RUN_IMAGE_CAP);
 }
 
-async function runPrompt(prompt: string, extraImages: Array<{ name: string; mediaType: string }> = []): Promise<void> {
+async function runPrompt(
+  prompt: string,
+  extraImages: Array<{ name: string; mediaType: string }> = [],
+  planTurn = false,
+): Promise<void> {
   if (shutdownRequested) return;
   if (modelAvailabilityError) {
     out(`(the run did not start: ${modelAvailabilityError}; choose an available model with /models or /model)\n`);
@@ -4503,7 +4507,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       history.push(assistantMsg);
       syncIndicators();
       const assistantText = visibleAssistantText(result.blocks);
-      const plan = planTextIfChanged(assistantText, lastPlanText);
+      const plan = planTurn ? planSidecarText(assistantText, lastPlanText) : null;
       if (plan) {
         lastPlanText = plan;
         sidecar.logEvent({ t: "plan", text: plan });
@@ -5184,7 +5188,7 @@ function drainQueuedLine(): void {
   const next = queuedLine;
   queuedLine = null;
   surface?.setQueued("");
-  submit(next);
+  dispatchLine(next);
 }
 
 function engineBusy(): boolean {
@@ -5200,7 +5204,7 @@ function queueTypedLine(line: string): void {
   out("(queued — runs after the current task)\n");
 }
 
-function submit(line: string): void {
+function submit(line: string, planTurn = false): void {
   if (resumeBusy || mcpBusy) {
     out("(engine busy)\n");
     return;
@@ -5211,7 +5215,7 @@ function submit(line: string): void {
   }
   // A rejected prompt promise must never kill the engine: the pty would
   // close and the terminal looks like it quit on the user.
-  void runPrompt(line)
+  void runPrompt(line, [], planTurn)
     .catch((err: unknown) => {
       out(`\nengine error: ${(err as Error).message}\n`);
       showPrompt();
@@ -5743,6 +5747,17 @@ function dispatchLine(line: string): void {
     }
     out(effortWanted === requested ? `(effort ${effortWanted})\n` : `(effort ${effortWanted}; ${requested} is unavailable)\n`);
     syncStatus();
+    showPrompt();
+    return;
+  }
+  const planPrompt = planSlashSubmit(line);
+  if (planPrompt !== null) {
+    if (running) {
+      queueTypedLine(line);
+      showPrompt();
+      return;
+    }
+    submit(planPrompt, true);
     showPrompt();
     return;
   }

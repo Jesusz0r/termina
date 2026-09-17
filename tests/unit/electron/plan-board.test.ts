@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   MIN_SCHEDULE_INTERVAL_MS,
+  dispatchWorkerModel,
   nextScheduleRun,
+  parsePlanModelMarker,
   parsePlanTasks,
   parseScheduleMarker,
 } from "../../../electron/plan-board.ts";
@@ -30,6 +32,33 @@ describe("Plan Board Task Parser Contract", () => {
     expect(summaryTasks.length).toBe(0);
   });
 
+  it("ignores a heading-less checkbox list", async () => {
+    const tasks = await parsePlanTasks(
+      "- [ ] edit src/foo.ts\n- [ ] edit src/bar.ts\n",
+      null,
+      (path: string) => path,
+    );
+    expect(tasks).toEqual([]);
+  });
+
+  it("accepts a Plan: heading with a trailing title and prose before tasks", async () => {
+    const tasks = await parsePlanTasks(
+      "Plan: fix auth\n\nHere is the work:\n- [ ] edit src/auth.ts\n- [ ] add src/session.ts\n",
+      null,
+      (path: string) => path,
+    );
+    expect(tasks.map((task) => task.text)).toEqual(["edit src/auth.ts", "add src/session.ts"]);
+  });
+
+  it("does not treat a prose plan sentence as a heading", async () => {
+    const tasks = await parsePlanTasks(
+      "plan for the weekend\n- [ ] edit src/foo.ts\n",
+      null,
+      (path: string) => path,
+    );
+    expect(tasks).toEqual([]);
+  });
+
   it("associates relative paths mentioned in tasks", async () => {
     const tasks = await parsePlanTasks(
       "Plan:\n- [ ] Create src/utils.ts for math helpers\n- [x] Edit greeting.ts to say hello",
@@ -40,6 +69,38 @@ describe("Plan Board Task Parser Contract", () => {
     expect(tasks.length).toBe(2);
     expect(tasks[0].state).toBe("pending");
     expect(tasks[1].state).toBe("done");
+  });
+});
+
+describe("Plan Board model markers", () => {
+  it("parses provider/id and ignores malformed refs", () => {
+    expect(parsePlanModelMarker("fix src/auth.ts @model anthropic/claude-sonnet-4-5")).toBe("anthropic/claude-sonnet-4-5");
+    expect(parsePlanModelMarker("fix src/auth.ts @model openai/gpt-5.4")).toBe("openai/gpt-5.4");
+    expect(parsePlanModelMarker("plain task")).toBeNull();
+    expect(parsePlanModelMarker("fix @model foo")).toBeNull();
+    expect(parsePlanModelMarker("fix @model /openai/gpt")).toBeNull();
+  });
+
+  it("keeps the marker in task text and does not treat the model id as a path", async () => {
+    const tasks = await parsePlanTasks(
+      "Plan:\n- [ ] Create src/utils.ts @model anthropic/claude-sonnet-4-5\n- [ ] Edit greeting.ts",
+      null,
+      (path: string) => path,
+    );
+    expect(tasks).toHaveLength(2);
+    expect(tasks[0]!.text).toContain("@model anthropic/claude-sonnet-4-5");
+    expect(tasks[0]!.model).toBe("anthropic/claude-sonnet-4-5");
+    expect(tasks[0]!.paths).toEqual(["src/utils.ts"]);
+    expect(tasks[1]!.model).toBeUndefined();
+    expect(tasks[1]!.paths).toEqual(["greeting.ts"]);
+  });
+
+  it("lets an inherit IPC pin beat a task @model", () => {
+    const task = { text: "Create src/utils.ts @model anthropic/claude-sonnet-4-5", paths: ["src/utils.ts"], state: "pending" as const, model: "anthropic/claude-sonnet-4-5" };
+    expect(dispatchWorkerModel(task, "inherit")).toBeUndefined();
+    expect(dispatchWorkerModel(task, "openai/gpt-5.4")).toBe("openai/gpt-5.4");
+    expect(dispatchWorkerModel(task)).toBe("anthropic/claude-sonnet-4-5");
+    expect(dispatchWorkerModel({ text: "Edit greeting.ts", paths: ["greeting.ts"], state: "pending" })).toBeUndefined();
   });
 });
 

@@ -11,8 +11,8 @@ work live.
 ```
 ┌──────────────────────────────┬───────────────────────────────┐
 │ agent TUI (real terminal, pty)│  Monaco IDE + file explorer   │
-│  /login /models /effort      │   files auto-open mid-run     │
-│  plan mode, completions…     │   live-synced via fs.watch    │
+│  /login /models /plan /effort │   files auto-open mid-run     │
+│  completions…                 │   live-synced via fs.watch    │
 ├──────────────────────────────┴───────────────────────────────┤
 │ terminal tabs · status bar                                   │
 └──────────────────────────────┴───────────────────────────────┘
@@ -49,7 +49,7 @@ New to Termina? Read **[`docs/reference/USER-GUIDE.md`](docs/reference/USER-GUID
 | Verify & Iterate | `✓ Verify` detects your test script, runs it in a background process, and feeds the result back to the agent on its next turn; cancellable mid-run |
 | Session Timeline | a dot strip of every agent action with on-demand snapshots, replay, and a recorder state (indexing / paused / degraded) |
 | Multi-line input | Cmd/Ctrl/Shift+Enter inserts a newline in the terminal; Option+Enter (macOS) queues a follow-up while an agent runs |
-| Plan Board | the agent's task list with live progress; Dispatch starts parallel workers and shows each assignment (claimed files, settled) on the board. Workers receive a mailbox briefing |
+| Plan Board | type `/plan` for a task list with live progress; Dispatch starts parallel workers and shows each assignment (claimed files, settled) on the board. Workers receive a mailbox briefing |
 | Session Search | full-text over past sessions with click-to-jump (`Cmd/Ctrl+Shift+P`) |
 | Fork Run | fork any completed run into isolated candidates (A = result, B = start + task) |
 | Fork Any Moment | Cmd/Ctrl+Click any timeline dot to fork a candidate at that exact source state |

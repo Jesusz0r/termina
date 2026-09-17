@@ -112,9 +112,25 @@ describe("roster handoff wiring", () => {
       .toBe(true);
   });
 
+  it("keeps the plan board across ordinary agent_start runs", () => {
+    const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+    const start = main.indexOf('case "agent_start":');
+    const end = main.indexOf('case "agent_settled":', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const startBlock = main.slice(start, end);
+    expect(startBlock).not.toContain("inst.plan = []");
+    expect(startBlock).toContain("inst.touched = new Set()");
+    expect(startBlock).not.toContain("this.sendPlan(inst, rendererTarget)");
+  });
+
   it("pins the roster model on the instance and keeps it across restore saves", () => {
     const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
-    expect(main.includes("const resumeModel = this.usableAgentModel(opts?.model);"))
+    expect(main.includes("const pin = this.usableAgentModel(opts?.model) ?? this.copiedCoreModel(opts?.fromTerminalId);"))
+      .toBe(true);
+    expect(main.includes("const workerModel = dispatchWorkerModel(job.task, ipcModel);"))
+      .toBe(true);
+    expect(main.includes("...(workerModel ? { model: workerModel } : {}),"))
       .toBe(true);
     expect(main.includes("const provisional = this.usableAgentModel(`${provider}/${modelName}`);"))
       .toBe(true);

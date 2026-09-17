@@ -132,8 +132,10 @@ describe("dispatch success toasts", () => {
     // The durable surface: the row renders the worker and claimed files.
     expect(plan).toContain("plan-meta");
     expect(plan).toContain("task.workerId");
-    expect(rowDispatch).toContain("dispatchRun(pane.instanceId, task.text)");
-    expect(bulkDispatch).toContain("dispatchRun(id)");
+    expect(rowDispatch).toContain("dispatchTask(pane, task)");
+    expect(rowDispatch).toContain('closest?.(".plan-model")');
+    expect(activityPane).toContain("dispatchRun(pane.instanceId, task.text, selectedDispatchModel(pane, task))");
+    expect(bulkDispatch).toContain("selectedDispatchModel(pane, task)");
     expect(hasInfoToast(rowDispatch)).toBe(false);
     expect(hasInfoToast(bulkDispatch)).toBe(false);
     expect(main).not.toContain("dispatched 1 task to a parallel agent");
@@ -145,7 +147,9 @@ describe("dispatch success toasts", () => {
   it("still toasts dispatch failures", () => {
     const rowDispatch = methodBody(activityPane, 'li.addEventListener("click", (e) => {');
     const bulkDispatch = methodBody(activityPane, "const onDispatch = ");
-    expect(rowDispatch).toContain('toast(res.error ?? "dispatch failed", "warning")');
+    const dispatchTask = methodBody(activityPane, "function dispatchTask(pane: TPane, task: PlanTask): void {");
+    expect(rowDispatch).not.toContain('toast(res.error ?? "dispatch failed", "warning")');
+    expect(dispatchTask).toContain('toast(res.error ?? "dispatch failed", "warning")');
     expect(bulkDispatch).toContain('toast(res.error ?? "dispatch failed", "warning")');
   });
 });
