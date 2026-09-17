@@ -422,10 +422,12 @@ export class PtyView {
       this.reportTerminalError(result.error);
       return;
     }
-    if (result.kind === "text" && result.text) {
-      this.term.paste(result.text);
-    } else if (result.kind === "image") this.sendInput("\x1b[201~");
-    if (result.kind === "image" && result.queued) toast("queued for next prompt", "info");
+    if (result.kind === "text") this.term.paste(result.text);
+    else {
+      if (result.text) this.term.paste(result.text);
+      this.sendInput("\x1b[201~");
+      if (result.queued) toast("queued for next prompt", "info");
+    }
     if (focus) this.focus();
   }
 

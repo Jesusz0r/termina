@@ -81,10 +81,13 @@ import {
   sessionBundleHasContent,
 } from "../agent-core/session.js";
 import {
+  formatAgentDropText,
   isAuthorizedDropSender,
   normalizeDroppedPaths,
+  partitionDroppedPaths,
   quotePosixPaths,
   readDroppedImages,
+  splitImageDropBudget,
   validatePathDropTargets,
 } from "./terminal-drop.js";
 import {
@@ -2044,18 +2047,58 @@ class TerminaApp {
     const normalized = normalizeDroppedPaths(raw);
     if (!normalized.ok) return normalized;
     if (captured.type === "agent") {
-      const eventsDir = this.eventsDirOf(captured);
-      const state = await pendingImageState(eventsDir, captured.id);
-      if (!state.ok) return { ok: false, error: state.error };
-      const remaining = Math.max(0, MAX_PENDING_IMAGES - state.count);
-      const images = await readDroppedImages(normalized.paths, remaining);
-      if (!images.ok) return images;
+      const { images: imagePaths, others } = partitionDroppedPaths(normalized.paths);
+      if (others.length > 0) {
+        const exists = await validatePathDropTargets(others);
+        if (!exists.ok) return exists;
+      }
+      let attached: { count: number } | null = null;
+      let overflow: string[] = imagePaths;
+      if (imagePaths.length > 0) {
+        const eventsDir = this.eventsDirOf(captured);
+        const state = await pendingImageState(eventsDir, captured.id);
+        if (state.ok) {
+          const remaining = Math.max(0, MAX_PENDING_IMAGES - state.count);
+          const split = splitImageDropBudget(imagePaths, remaining);
+          overflow = split.overflow;
+          if (split.toRead.length > 0) {
+            const images = await readDroppedImages(split.toRead, remaining);
+            if (images.ok) {
+              if (this.runtime.get(id) !== captured) return { ok: false, error: "terminal closed" };
+              const queued = await appendPendingImages(eventsDir, captured.id, images.images, {
+                canCommit: () => this.runtime.get(id) === captured,
+              });
+              if (queued.ok) attached = queued;
+              else overflow = imagePaths;
+            } else overflow = imagePaths;
+          }
+        }
+      }
       if (this.runtime.get(id) !== captured) return { ok: false, error: "terminal closed" };
-      const attached = await appendPendingImages(eventsDir, captured.id, images.images, {
-        canCommit: () => this.runtime.get(id) === captured,
-      });
-      if (!attached.ok) return { ok: false, error: attached.error };
-      return { ok: true, kind: "image", count: attached.count, queued: captured.busy };
+      let extra = attached ? overflow : imagePaths;
+      if (extra.length > 0) {
+        const exists = await validatePathDropTargets(extra);
+        if (!exists.ok) {
+          if (!attached && others.length === 0) return exists;
+          extra = [];
+        }
+      }
+      const pathTargets = [...others, ...extra];
+      const text = pathTargets.length > 0
+        ? await formatAgentDropText(pathTargets, captured.cwd, process.platform)
+        : null;
+      if (text && !text.ok && !attached) return text;
+      if (attached) {
+        return {
+          ok: true,
+          kind: "image",
+          count: attached.count,
+          queued: captured.busy,
+          ...(text?.ok ? { text: text.text } : {}),
+        };
+      }
+      if (text?.ok) return { ok: true, kind: "text", text: text.text };
+      return { ok: false, error: "no files" };
     }
     const exists = await validatePathDropTargets(normalized.paths);
     if (!exists.ok) return exists;

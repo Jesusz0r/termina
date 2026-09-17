@@ -3,8 +3,8 @@
  * The renderer never reads these paths.
  */
 import { constants as fsConstants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
-import { isAbsolute, normalize } from "node:path";
+import { lstat, open, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, normalize, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import { MAX_IMAGE_BYTES, MAX_PENDING_IMAGES, type PendingImageMediaType } from "../agent-core/host.ts";
 import { quoteShellArg } from "../shared/terminal-control.ts";
@@ -71,6 +71,94 @@ export function quotePosixPaths(paths: readonly string[], platform: NodeJS.Platf
   return { ok: true, text: paths.map(quoteShellArg).join(" ") };
 }
 
+/** Same extensions `readDroppedImages` will accept (magic bytes still decide). */
+export function isImageDropPath(path: string): boolean {
+  return imageDropKind(path) !== null;
+}
+
+export function partitionDroppedPaths(paths: readonly string[]): { images: string[]; others: string[] } {
+  const images: string[] = [];
+  const others: string[] = [];
+  for (const path of paths) {
+    if (isImageDropPath(path)) images.push(path);
+    else others.push(path);
+  }
+  return { images, others };
+}
+
+/** Attach at most `remaining` image paths; the rest become composer text. */
+export function splitImageDropBudget(
+  imagePaths: readonly string[],
+  remaining: number,
+): { toRead: string[]; overflow: string[] } {
+  const n = Number.isInteger(remaining) && remaining > 0 ? Math.min(remaining, imagePaths.length) : 0;
+  return { toRead: imagePaths.slice(0, n), overflow: imagePaths.slice(n) };
+}
+
+/** `@` tags for in-project files (composer + prompt attach). Quoted abs otherwise. */
+export async function formatAgentDropText(
+  paths: readonly string[],
+  cwd: string,
+  platform: NodeJS.Platform,
+): Promise<{ ok: true; text: string } | DropFailure> {
+  if (platform !== "darwin" && platform !== "linux") return { ok: false, error: "unsupported platform" };
+  if (paths.length === 0) return { ok: false, error: "no files" };
+  const root = await resolveDropPath(cwd);
+  const parts: string[] = [];
+  for (const abs of paths) {
+    const resolved = await resolveDropPath(abs);
+    const rel = relative(root, resolved).replaceAll("\\", "/");
+    // `@` tags cannot contain whitespace or `@` (see fileMentionAt / parseFileTags).
+    if (
+      rel
+      && rel !== "."
+      && rel !== ".."
+      && !rel.startsWith("../")
+      && !isAbsolute(rel)
+      && !rel.includes("://")
+      && /^[^\s@]+$/.test(rel)
+    ) {
+      parts.push(`@${rel}`);
+    } else {
+      parts.push(quoteShellArg(abs));
+    }
+  }
+  // Trailing space closes an `@` mention so the picker does not reopen.
+  return { ok: true, text: `${parts.join(" ")} ` };
+}
+
+async function resolveDropPath(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    // Missing or dangling: walk to the nearest existing ancestor so macOS
+    // `/tmp` vs `/private/tmp` still compares as the same tree (same idea as
+    // confinePath).
+  }
+  const abs = normalize(path);
+  const missing: string[] = [];
+  let cur = abs;
+  for (;;) {
+    const parent = dirname(cur);
+    if (parent === cur) return abs;
+    missing.unshift(basename(cur));
+    try {
+      return join(await realpath(parent), ...missing);
+    } catch {
+      cur = parent;
+    }
+  }
+}
+
+function imageDropKind(path: string): "png" | "jpeg" | "webp" | "gif" | null {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".jpeg") || lower.endsWith(".jpg")) return "jpeg";
+  if (lower.endsWith(".png")) return "png";
+  if (lower.endsWith(".webp")) return "webp";
+  if (lower.endsWith(".gif")) return "gif";
+  return null;
+}
+
 export async function readStableImage(
   handle: Pick<FileHandle, "stat" | "read">,
   expectedSize: number,
@@ -94,16 +182,7 @@ export async function readStableImage(
 }
 
 function mediaTypeFor(name: string, bytes: Buffer): PendingImageMediaType | null {
-  const lower = name.toLowerCase();
-  const ext = lower.endsWith(".jpeg") || lower.endsWith(".jpg")
-    ? "jpeg"
-    : lower.endsWith(".png")
-      ? "png"
-      : lower.endsWith(".webp")
-        ? "webp"
-        : lower.endsWith(".gif")
-          ? "gif"
-          : null;
+  const ext = imageDropKind(name);
   if (!ext) return null;
   if (ext === "png") return bytes.subarray(0, 8).equals(PNG_SIG) ? "image/png" : null;
   if (ext === "jpeg") return bytes.length >= 3 && bytes.subarray(0, 3).equals(JPEG_SIG) ? "image/jpeg" : null;

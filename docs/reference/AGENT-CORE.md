@@ -353,6 +353,11 @@ prompt. On submit the kernel claims that list, copies persisted files into
 the bundle's `current/` directory (`<session-id>-img-N.png`), and only then acknowledges
 the claim. A crash before persistence leaves the claim in place so the
 next prompt recovers the bytes. The prompt payload keeps refs, not bytes.
+Non-image drops on a core terminal insert `@relative/path` into the
+composer (in-project, tag-safe paths) or a POSIX-quoted absolute path,
+and do not submit them. Mixed drops attach the images and paste the
+paths. Image attach is best-effort: a full queue, a corrupt file, or extra
+images past the cap still paste as paths instead of failing the batch.
 Shell terminals do not attach image bytes; a drop inserts
 POSIX-quoted absolute paths through xterm paste and does not submit them.
 

@@ -583,7 +583,7 @@ export interface ProjectListItem {
 
 export type TerminalPasteResult =
   | { ok: true; kind: "text"; text: string }
-  | { ok: true; kind: "image"; count: number; queued: boolean }
+  | { ok: true; kind: "image"; count: number; queued: boolean; text?: string }
   | { ok: false; error: string };
 
 /** Callers of file:search; each owns a cancellation generation in main. */

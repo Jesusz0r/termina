@@ -1,14 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, linkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, linkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  formatAgentDropText,
   isAuthorizedDropSender,
+  isImageDropPath,
   normalizeDroppedPaths,
+  partitionDroppedPaths,
   quotePosixPaths,
   readDroppedImages,
   readStableImage,
+  splitImageDropBudget,
   validatePathDropTargets,
 } from "../../../electron/terminal-drop.ts";
 import { MAX_IMAGE_BYTES } from "../../../agent-core/host.ts";
@@ -99,6 +103,109 @@ describe("Terminal drop unit tests", () => {
     it("rejects unsupported platforms and accepts linux", () => {
       expect(quotePosixPaths([absA], "win32" as any).ok).toBe(false);
       expect(quotePosixPaths([absA], "linux").ok).toBe(true);
+    });
+  });
+
+  describe("partitionDroppedPaths", () => {
+    it("splits image extensions from other paths and keeps order", () => {
+      expect(isImageDropPath(pngPath)).toBe(true);
+      expect(isImageDropPath(jpegPath)).toBe(true);
+      expect(isImageDropPath(absA)).toBe(false);
+      const split = partitionDroppedPaths([absA, pngPath, absB, gifPath, absC]);
+      expect(split.images).toEqual([pngPath, gifPath]);
+      expect(split.others).toEqual([absA, absB, absC]);
+    });
+  });
+
+  describe("splitImageDropBudget", () => {
+    it("keeps overflow for a full queue and for a cap slice", () => {
+      expect(splitImageDropBudget([pngPath, jpegPath, gifPath], 0)).toEqual({
+        toRead: [],
+        overflow: [pngPath, jpegPath, gifPath],
+      });
+      expect(splitImageDropBudget([pngPath, jpegPath, gifPath], 2)).toEqual({
+        toRead: [pngPath, jpegPath],
+        overflow: [gifPath],
+      });
+      expect(splitImageDropBudget([pngPath], 4)).toEqual({ toRead: [pngPath], overflow: [] });
+      expect(splitImageDropBudget([pngPath], -1)).toEqual({ toRead: [], overflow: [pngPath] });
+    });
+  });
+
+  describe("formatAgentDropText", () => {
+    it("inserts @tags for in-project files and quotes the rest", async () => {
+      mkdirSync(join(root, "nested"), { recursive: true });
+      writeFileSync(join(root, "nested", "x.ts"), "x");
+      const tagged = await formatAgentDropText([pngPath, join(root, "nested", "x.ts")], root, "darwin");
+      expect(tagged.ok).toBe(true);
+      if (tagged.ok) {
+        expect(tagged.text).toBe("@pic.png @nested/x.ts ");
+      }
+
+      const mixed = await formatAgentDropText([absA, "/tmp/outside.ts"], root, "darwin");
+      expect(mixed.ok).toBe(true);
+      if (mixed.ok) {
+        expect(mixed.text.startsWith("'")).toBe(true);
+        expect(mixed.text).toContain("/tmp/outside.ts");
+        expect(mixed.text.endsWith(" ")).toBe(true);
+        expect(mixed.text).not.toContain("@a file.txt");
+      }
+    });
+
+    it("tags a missing nested path through a cwd that realpaths elsewhere", async () => {
+      const missing = join(root, "ghost", "y.ts");
+      const tagged = await formatAgentDropText([missing], root, "darwin");
+      expect(tagged.ok).toBe(true);
+      if (tagged.ok) expect(tagged.text).toBe("@ghost/y.ts ");
+    });
+
+    it("quotes names that cannot be @ tags", async () => {
+      const atFile = join(root, "a@b.ts");
+      writeFileSync(atFile, "x");
+      const quoted = await formatAgentDropText([atFile], root, "darwin");
+      expect(quoted.ok).toBe(true);
+      if (quoted.ok) {
+        expect(quoted.text.startsWith("'")).toBe(true);
+        expect(quoted.text).not.toMatch(/^@/);
+        expect(quoted.text).toContain("a@b.ts");
+      }
+    });
+
+    it("does not tag a path that escapes the project", async () => {
+      const escaped = await formatAgentDropText([join(root, "..", "nope.ts")], root, "darwin");
+      expect(escaped.ok).toBe(true);
+      if (escaped.ok) {
+        expect(escaped.text.startsWith("'")).toBe(true);
+        expect(escaped.text).not.toMatch(/^@/);
+      }
+    });
+
+    it.runIf(process.platform !== "win32")("tags through a cwd symlink", async () => {
+      const linkCwd = join(root, "cwd-link");
+      symlinkSync(root, linkCwd);
+      const tagged = await formatAgentDropText([pngPath], linkCwd, "darwin");
+      expect(tagged.ok).toBe(true);
+      if (tagged.ok) expect(tagged.text).toBe("@pic.png ");
+    });
+
+    it("rejects unsupported platforms", async () => {
+      expect((await formatAgentDropText([absA], root, "win32" as any)).ok).toBe(false);
+      expect((await formatAgentDropText([], root, "darwin")).ok).toBe(false);
+    });
+  });
+
+  describe("agent drop wiring", () => {
+    it("partitions agent drops instead of treating every path as an image", () => {
+      const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+      const ptyView = readFileSync(new URL("../../../src/pty-view.ts", import.meta.url), "utf8");
+      const fn = main.slice(main.indexOf("private async dropTerminalFiles"), main.indexOf("private async safeEventsFile"));
+      expect(fn).toContain("partitionDroppedPaths");
+      expect(fn).toContain("splitImageDropBudget");
+      expect(fn).toContain("formatAgentDropText");
+      expect(fn).toContain("if (imagePaths.length > 0)");
+      expect(fn).toContain("if (others.length > 0)");
+      expect(fn).not.toContain("readDroppedImages(normalized.paths");
+      expect(ptyView).toContain("if (result.text) this.term.paste(result.text)");
     });
   });
 

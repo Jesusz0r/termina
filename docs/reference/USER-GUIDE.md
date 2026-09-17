@@ -152,6 +152,10 @@ choice sticks: new tabs reopen on it (clamped to what each model supports). Ctrl
 a newline; Enter submits. Paste keeps newlines. `/help` lists keys.
 Paste a screenshot (Cmd/Ctrl+V) to attach it to the next prompt — up to
 four images, about 4 MB each. The status line shows how many are waiting.
+Drop a non-image project file onto the terminal to insert `@path` in the
+composer. Files outside the project, or names the composer cannot tag
+(spaces, `@`), paste as a quoted path. Extra images past that cap paste as
+paths too.
 
 Multi-line input:
 
