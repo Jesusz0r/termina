@@ -101,6 +101,21 @@ describe("/clear writer-open failure (#222)", () => {
     expect(main.testOnlyResumeState()).toEqual({ historyLength: 0, storageSeq: 0, streamPrepared: true });
   });
 
+  it("keeps bash permission policy across /clear", async () => {
+    const main = await import("../../../agent-core/main.ts");
+    const liveFile = seedBundle("clear-keep-permissions", [{ role: "user", content: "hello" }]);
+    const resumed = await testOnlyResume(main, liveFile);
+    expect(resumed.ok).toBe(true);
+    expect(main.testOnlyResumeState().historyLength).toBe(1);
+    main.testOnlyDispatchLine("/permissions always");
+    expect(main.testOnlyPermissionMode()).toBe("always");
+    withTempHome(() => {
+      main.testOnlyDispatchLine("/clear");
+    });
+    expect(main.testOnlyResumeState()).toMatchObject({ historyLength: 0, streamPrepared: true });
+    expect(main.testOnlyPermissionMode()).toBe("always");
+  });
+
   it("starts the next persist at storageSeq 1 after a live session", async () => {
     const main = await import("../../../agent-core/main.ts");
     const liveFile = seedBundle("clear-live-seq", [

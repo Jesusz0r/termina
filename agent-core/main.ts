@@ -1357,6 +1357,7 @@ export async function fetchUrl(
   }
 }
 
+/** Bash approval policy for this terminal process. `/clear`/`/new` rotate the conversation, not this policy. */
 let permissionMode: PermissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
 let approvalResolve: ((line: string) => void) | null = null;
 let approvalQueue = Promise.resolve();
@@ -1407,7 +1408,7 @@ async function confirmBashNow(command: string): Promise<boolean> {
   surface.setChoices(`Approve bash? ${command.slice(0, 160)}`, [
     { name: "Deny", hint: "reject this command", submit: "/approve deny" },
     { name: "Approve once", hint: "run this command", submit: "/approve once" },
-    { name: "Always approve", hint: "run bash without asking this session", submit: "/approve always" },
+    { name: "Always approve", hint: "run bash without asking this terminal", submit: "/approve always" },
   ]);
   const line = await new Promise<string>((resolve) => {
     approvalResolve = resolve;
@@ -4870,6 +4871,11 @@ export function testOnlyResumeState(): { historyLength: number; storageSeq: numb
   return { historyLength: history.length, storageSeq, streamPrepared };
 }
 
+/** Test seam: bash approval policy that survives /clear on this process. */
+export function testOnlyPermissionMode(): PermissionMode {
+  return permissionMode;
+}
+
 /** Test seam: persist one record against the live writer (covers /clear sequence reset). */
 export function testOnlyPersist(entry: Record<string, unknown> = { type: "checkpoint" }): SessionResult<{ storageSeq: number }> {
   try {
@@ -4879,7 +4885,9 @@ export function testOnlyPersist(entry: Record<string, unknown> = { type: "checkp
   }
 }
 
-/** Live-view reset shared by /clear success and its writer-open failure path. */
+/** Live-view reset shared by /clear success and its writer-open failure path.
+ *  Conversation history, usage, and pending child-approval pickers go;
+ *  permissionMode stays on the terminal. */
 function resetLiveSessionState(): void {
   storageSeq = 0;
   history.length = 0;
@@ -4888,10 +4896,10 @@ function resetLiveSessionState(): void {
   rotateCacheSession();
   sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
   lastUsd = null;
-  permissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
   postRevision = false;
   revisions = 0;
   revisionKinds = [];
+  surface?.setStatus({ permissions: permissionMode });
 }
 
 /** Test seam: fail the next session-writer open (covers /clear recovery). */

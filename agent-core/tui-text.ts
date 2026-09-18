@@ -32,7 +32,7 @@ export function formatToolSummary(name: string, detail: string | undefined, stat
 const PERMISSION_COMMANDS: SlashCommand[] = [
   { name: "Always ask", hint: "ask before every bash command", submit: "/permissions ask" },
   { name: "Ask on dangerous requests", hint: "ask before recognized destructive commands", submit: "/permissions dangerous" },
-  { name: "Always approve", hint: "run bash without asking", submit: "/permissions always" },
+  { name: "Always approve", hint: "run bash without asking this terminal", submit: "/permissions always" },
 ];
 
 const EFFORT_HINTS: Record<string, string> = {
