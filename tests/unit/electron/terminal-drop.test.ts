@@ -206,6 +206,12 @@ describe("Terminal drop unit tests", () => {
       expect(fn).toContain("if (others.length > 0)");
       expect(fn).not.toContain("readDroppedImages(normalized.paths");
       expect(ptyView).toContain("if (result.text) this.term.paste(result.text)");
+      expect(ptyView).toContain("container.addEventListener(\"drop\", this.onDrop, true)");
+      expect(ptyView).toContain("container.addEventListener(\"dragover\", this.onDragOver, true)");
+      expect(ptyView).toContain("this.container.removeEventListener(\"drop\", this.onDrop, true)");
+      expect(ptyView).not.toContain("this.clipboardTarget?.addEventListener(\"drop\"");
+      expect(ptyView).not.toContain("event.stopPropagation();");
+      expect(ptyView).not.toContain("void this.ingestDroppedFiles(files);");
     });
   });
 
