@@ -370,6 +370,11 @@ export function defaultContextWindow(provider: ProviderId, model: string): numbe
   const leaf = modelLeaf(model);
   if (id.includes("haiku")) return 200_000;
   if (provider === "xai" || leaf.startsWith("grok")) return 500_000;
+  // Muse Spark's documented input window is 2^20 on OpenCode Go/Zen and Meta.
+  // https://opencode.ai/docs/go/
+  // https://models.dev/providers/opencode-go
+  // https://openrouter.ai/meta/muse-spark-1.3-contributor
+  if (museSparkReasoningFamily(model)) return 1_048_576;
   // Gemini's documented input window is 2^20, not a round 1M. Non-Gemini
   // ids on the Google provider (Gemma, image tiers) take the floor.
   if (provider === "google") return modelLooksGemini(model) ? 1_048_576 : UNKNOWN_CONTEXT_FLOOR;

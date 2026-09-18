@@ -130,8 +130,11 @@ import { providerToolAdmissionError, toolExecutionWaves, toolInputError } from "
 import {
   HIGH_WATER,
   LOW_WATER,
+  PROTECT_TURNS,
   isContextOverflowMessage,
+  overflowProtectTurns,
   planSummary,
+  restoreHandoffAfterCut,
   serializeForSummary,
   shouldCompactForCacheCost,
   summaryPrompt,
@@ -143,6 +146,7 @@ import {
   formatCatalogLines,
   formatModelBanner,
   catalogProviderId,
+  contextCatalogEntryKey,
   contextCatalogProviderId,
   loadProviderModels,
   parseModelSwitch,
@@ -399,7 +403,7 @@ function contextWindow(): number {
     providerContext: typeof hit?.context === "number" ? hit.context : undefined,
     // The shared models.dev catalog, which covers every route whose endpoint
     // reports no window at all (openai, both relays).
-    catalogContext: contextCatalogMap.get(contextCatalogKey(contextCatalogProviderId(route.provider), route.model)),
+    catalogContext: contextCatalogMap.get(contextCatalogEntryKey(route.provider, route.model)),
     provider: route.provider,
     model: route.model,
   });
@@ -2293,8 +2297,11 @@ async function reclaim(ignoreCooldown = false): Promise<number> {
 }
 
 /** Last resort when reclamation alone cannot fit the window: drop whole old
- *  turns, cutting only at real prompts. Storage keeps every dropped byte. */
-function truncate(): boolean {
+ *  turns, cutting only at real prompts. Storage keeps every dropped byte.
+ *  Continuity is the existing summarize handoff, re-inserted when the cut
+ *  would drop it. protectTurns=1 is overflow-only, and only when that
+ *  handoff already exists. */
+function truncate(protectTurns: number = PROTECT_TURNS): boolean {
   const estimate = totalTokens();
   const effective = Math.max(estimate, lastBilledTokens ?? 0);
   if (effective < usableTokens()) return false;
@@ -2303,13 +2310,25 @@ function truncate(): boolean {
   // total. Without this a billed-high/estimate-low window walks the whole
   // history and drops everything but the tail.
   const scale = estimate > 0 ? effective / estimate : 1;
-  const cut = truncateCut(history, effective, usableTokens(), usableTokens() * LOW_WATER, scale);
+  const cut = truncateCut(history, effective, usableTokens(), usableTokens() * LOW_WATER, scale, protectTurns);
   if (cut <= 0) return false;
-  persist({ type: "revision", kind: "truncate", dropped: cut });
+  const restore = restoreHandoffAfterCut(lastHandoff, history.slice(cut));
+  const sseq = storageSeq + 1;
+  persist({
+    type: "revision",
+    kind: "truncate",
+    dropped: cut,
+    ...(restore ? { summarySseq: sseq, message: { role: "user" as const, content: restore } } : {}),
+  });
   history.splice(0, cut);
+  if (restore) {
+    const m: Message = { role: "user", content: restore, tokens: estimateReclaimTokens(restore), sseq };
+    history.unshift(m);
+  }
   recordRevision("truncate");
   pruneCooldown = null;
   syncIndicators();
+  out(`[context truncated: ${cut} messages dropped]\n`);
   return true;
 }
 
@@ -3818,9 +3837,6 @@ let ratesLoadPromise: Promise<void> | null = null;
  */
 let contextCatalogMap: ReadonlyMap<string, number> = new Map();
 
-function contextCatalogKey(provider: string, model: string): string {
-  return `${provider}\0${model}`;
-}
 
 function catalogKey(provider: string, model: string, role: "main" | "summary"): string {
   return `${provider}\0${model}\0${role}`;
@@ -3922,7 +3938,7 @@ async function loadRates(): Promise<boolean> {
           const context = Number(entry?.limit?.context);
           const window = acceptedContextWindow(context);
           if (window !== undefined) {
-            nextContext.set(contextCatalogKey(providerId, model), window);
+            nextContext.set(contextCatalogEntryKey(providerId, model), window);
           }
         }
       }
@@ -4557,7 +4573,7 @@ async function runPrompt(
           retriedOverflow = true;
           await reclaim(true);
           await summarize(true);
-          truncate();
+          truncate(overflowProtectTurns(lastHandoff));
           try {
             result = await callModel(history, activeRequestOverlay, {
               retryOfAttemptId: failedAttempt?.attemptId ?? null,

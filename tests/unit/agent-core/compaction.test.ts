@@ -7,7 +7,9 @@ import {
   evictionBoundary,
   isUserPrompt,
   messagesForSummary,
+  overflowProtectTurns,
   planSummary,
+  restoreHandoffAfterCut,
   serializeForSummary,
   shouldCompactForCacheCost,
   summaryPrompt,
@@ -104,8 +106,9 @@ describe("compaction planning", () => {
       prompt("two", 500),
     ];
     // total 1700 >= usable 1500; low-water 900 is first reachable past "one"
-    // only when the mixed result is not a cut point.
-    expect(truncateCut(history, 1700, 1500, 900)).toBe(4);
+    // only when the mixed result is not a cut point. protectTurns=1 allows
+    // dropping the first turn while keeping the newest prompt.
+    expect(truncateCut(history, 1700, 1500, 900, 1, 1)).toBe(4);
   });
 
   it("protects recent turns and lands on a prompt boundary", () => {
@@ -132,8 +135,38 @@ describe("compaction planning", () => {
       msg("assistant", "r2", 500),
     ];
     expect(truncateCut(history, 500, 2000, 1000)).toBe(0);
-    expect(truncateCut(history, 2000, 2000, 1000)).toBe(2);
-    expect(truncateCut(history, 2000, 2000, 1000, 2)).toBe(2);
+    expect(truncateCut(history, 2000, 2000, 1000, 1, 1)).toBe(2);
+    expect(truncateCut(history, 2000, 2000, 1000, 2, 1)).toBe(2);
+  });
+
+  it("does not wipe the previous user turn to keep only the newest prompt", () => {
+    const history = [
+      prompt("implement the feature", 500),
+      msg("assistant", "working", 500),
+      ...Array.from({ length: 14 }, () => msg("assistant", "tool", 50)),
+      prompt("what did we just work on?", 50),
+    ];
+    const total = history.reduce((sum, message) => sum + message.tokens, 0);
+    expect(total).toBe(1_750);
+    // Over usable, but the previous turn is still one of the two protected prompts.
+    expect(truncateCut(history, total, 1_500, 900)).toBe(0);
+    // The planner can cut to the current prompt; overflow only asks for that
+    // when a summarize handoff already exists.
+    expect(truncateCut(history, total, 1_500, 900, 1, 1)).toBe(16);
+  });
+
+  it("restores a summarize handoff dropped by the cut, and never invents one", () => {
+    const body = "implement the feature; files: client/scripts/tile_art.gd";
+    const wrapped = `<context-handoff>\n${body}\n</context-handoff>`;
+    const kept = [prompt("what did we just work on?", 50)];
+    expect(restoreHandoffAfterCut(null, kept)).toBeNull();
+    expect(restoreHandoffAfterCut(body, [{ content: wrapped }, ...kept])).toBeNull();
+    expect(restoreHandoffAfterCut(body, kept)).toBe(wrapped);
+  });
+
+  it("only drops to the current prompt on overflow when a handoff exists", () => {
+    expect(overflowProtectTurns(null)).toBe(PROTECT_TURNS);
+    expect(overflowProtectTurns("implement the feature")).toBe(1);
   });
 
   it("dedups the prior handoff and serializes evidence", () => {
@@ -144,9 +177,11 @@ describe("compaction planning", () => {
     const text = serializeForSummary([
       kept,
       msg("assistant", "did it", 10),
+      { role: "assistant", content: [{ type: "thinking", thinking: "1. auth 2. security 3. NPCs" }], tokens: 10 },
       { role: "assistant", content: [{ type: "tool_use", name: "bash", input: { command: "ls" } }], tokens: 10 },
     ]);
     expect(text).toContain("[User]: next");
+    expect(text).toContain("[Assistant reasoning]: 1. auth 2. security 3. NPCs");
     expect(text).toContain("[Assistant tool call]: bash(");
   });
 

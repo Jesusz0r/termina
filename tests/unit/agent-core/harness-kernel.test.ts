@@ -1235,7 +1235,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("plain user prompt stays a string", userPromptContent("visible", []) === "visible");
     const unsignedThinking = projectPersistedForTest([{ role: "assistant", content: [{ type: "thinking", thinking: "abc" }], tokens: 1, sseq: 1 }]);
     const unsignedContent: unknown = unsignedThinking[0]?.content;
-    check("request projection drops unsigned thinking", (typeof unsignedContent === "string" || Array.isArray(unsignedContent)) && unsignedContent.length === 0);
+    check(
+      "request projection keeps unsigned thinking as text",
+      Array.isArray(unsignedContent) &&
+        unsignedContent[0]?.type === "text" &&
+        String((unsignedContent[0] as { text?: unknown }).text ?? "").includes("abc"),
+    );
     const searchReq = projectPersistedForTest([
       {
         role: "assistant",
@@ -1559,6 +1564,26 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     ].join("\n");
     const truncated = replaySessionRecords(truncLines);
     check("truncate replay preserves boundary", truncated.ok && truncated.messages.length === 1 && truncated.messages[0]?.content === "keep");
+    const truncHandoffLines = [
+      JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "drop" } }),
+      JSON.stringify({ storageSeq: 2, type: "message", message: { role: "user", content: "keep" } }),
+      JSON.stringify({
+        storageSeq: 3,
+        type: "revision",
+        kind: "truncate",
+        dropped: 1,
+        summarySseq: 3,
+        message: { role: "user", content: "<context-handoff>\nimplement the feature\n</context-handoff>" },
+      }),
+    ].join("\n");
+    const truncatedHandoff = replaySessionRecords(truncHandoffLines);
+    check(
+      "truncate replay restores a summarize handoff",
+      truncatedHandoff.ok
+        && truncatedHandoff.messages.length === 2
+        && String(truncatedHandoff.messages[0]?.content ?? "").includes("implement the feature")
+        && truncatedHandoff.messages[1]?.content === "keep",
+    );
     
     const sessBundle = join(root, "term-1", "current", "session.jsonl");
     mkdirSync(join(root, "term-1", "current"), { recursive: true, mode: 0o700 });
@@ -4126,6 +4151,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("catalog: copilot resolves context as itself", models.contextCatalogProviderId("github-copilot") === "github-copilot");
     check("catalog: codex resolves context as itself", models.contextCatalogProviderId("openai-codex") === "openai-codex");
     check("catalog: relays share the opencode context list", models.contextCatalogProviderId("opencode-go") === "opencode" && models.contextCatalogProviderId("opencode-zen") === "opencode");
+    check(
+      "catalog: OpenCode context windows store and look up under the same key",
+      models.contextCatalogEntryKey("opencode-go", "muse-spark-1.3-contributor") === "opencode\0muse-spark-1.3-contributor"
+        && models.contextCatalogEntryKey("opencode-go", "muse-spark-1.3-contributor")
+          === models.contextCatalogEntryKey("opencode-zen", "muse-spark-1.3-contributor"),
+    );
     check("catalog: relays keep their own pricing entry", models.catalogProviderId("opencode-go") === "opencode-go");
     check("catalog: plain providers map to themselves", models.contextCatalogProviderId("anthropic") === "anthropic" && models.catalogProviderId("anthropic") === "anthropic");
     // A named family must beat the floor; this is the bug that shipped.
@@ -4137,7 +4168,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
 
     // A relay catalog accepts any id, so an id it did not describe must take the
     // conservative floor instead of the largest window seen anywhere.
-    check("defaultContextWindow relay unknown id takes the floor", defaultContextWindow("opencode-go", "muse-spark-1.3") === 128_000);
+    check("defaultContextWindow muse-spark uses the documented 1M window", defaultContextWindow("opencode-go", "muse-spark-1.3-contributor") === 1_048_576);
+    check("defaultContextWindow relay unknown id takes the floor", defaultContextWindow("opencode-go", "undescribed-model-xyz") === 128_000);
     check("defaultContextWindow openrouter unknown id takes the floor", defaultContextWindow("openrouter", "some-vendor/undescribed") === 128_000);
     check("defaultContextWindow self-described id takes the floor", defaultContextWindow("opencode-zen", "undescribed-model") === 128_000);
     // The invariant the bug violated: an unestablished window must never be

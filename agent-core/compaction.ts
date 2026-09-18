@@ -11,6 +11,7 @@
 interface CompactionBlock {
   type: string;
   text?: unknown;
+  thinking?: unknown;
   name?: unknown;
   input?: unknown;
   content?: unknown;
@@ -117,8 +118,9 @@ export function evictionBoundary(
 /**
  * Last-resort truncation cut: drop whole old turns at real prompts until the
  * total falls clearly below the low-water mark. tokenScale reconciles the
- * byte-heuristic estimate with billed truth (see truncate()). Returns the cut
- * index, or 0 when nothing should be cut.
+ * byte-heuristic estimate with billed truth (see truncate()). protectTurns
+ * keeps the newest user prompts (and the messages after them) in the suffix.
+ * Returns the cut index, or 0 when nothing should be cut.
  */
 export function truncateCut(
   messages: readonly CompactionMessage[],
@@ -126,15 +128,29 @@ export function truncateCut(
   usableTokens: number,
   lowWaterTokens: number,
   tokenScale = 1,
+  protectTurns: number = PROTECT_TURNS,
 ): number {
   if (total < usableTokens) return 0;
+  const keptTurns = Math.max(1, protectTurns);
+  let seen = 0;
+  let protectStart = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (!isUserPrompt(messages[i]!)) continue;
+    seen++;
+    protectStart = i;
+    if (seen >= keptTurns) break;
+  }
   let cut = 0;
   let remaining = total;
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i]!;
-    if (isUserPrompt(m)) cut = i;
+    if (isUserPrompt(m)) {
+      cut = i <= protectStart ? i : protectStart;
+      remaining -= m.tokens * tokenScale;
+      if (remaining < lowWaterTokens || i >= protectStart) break;
+      continue;
+    }
     remaining -= m.tokens * tokenScale;
-    if (i === cut && remaining < lowWaterTokens) break;
   }
   return cut;
 }
@@ -149,15 +165,36 @@ function summaryValue(value: unknown, maxChars: number): string {
   }
 }
 
+function wrappedHandoff(body: string): string {
+  return `<context-handoff>\n${body}\n</context-handoff>`;
+}
+
+/** Overflow may drop back to the current prompt only when a summarize
+ *  handoff already exists to keep continuity. Otherwise keep PROTECT_TURNS. */
+export function overflowProtectTurns(lastHandoffBody: string | null): number {
+  return lastHandoffBody === null ? PROTECT_TURNS : 1;
+}
+
+/** Re-insert the existing summarize handoff after a cut that dropped it.
+ *  Returns null when there was no summary, or when the kept suffix still has
+ *  it. Does not invent an extract of the dropped span. */
+export function restoreHandoffAfterCut(
+  lastHandoffBody: string | null,
+  kept: readonly Pick<CompactionMessage, "content">[],
+): string | null {
+  if (lastHandoffBody === null) return null;
+  const wrapped = wrappedHandoff(lastHandoffBody);
+  if (kept.some((message) => message.content === wrapped)) return null;
+  return wrapped;
+}
+
 /** Remove the previous handoff from the next eviction input. The handoff is
  *  sent once in the explicit `<previous-handoff>` section of the prompt. */
 export function messagesForSummary(
   messages: readonly CompactionMessage[],
   lastHandoffBody: string | null,
 ): CompactionMessage[] {
-  const prior = lastHandoffBody === null
-    ? null
-    : `<context-handoff>\n${lastHandoffBody}\n</context-handoff>`;
+  const prior = lastHandoffBody === null ? null : wrappedHandoff(lastHandoffBody);
   return messages.filter((message) => message.content !== prior);
 }
 
@@ -186,7 +223,10 @@ export function serializeForSummary(messages: readonly CompactionMessage[]): str
     }
     for (const b of m.content) {
       if (b.type === "text") parts.push(`[${role}]: ${String(b.text ?? "").slice(0, 2_000)}`);
-      else if (b.type === "tool_use" || b.type === "server_tool_use") {
+      else if (b.type === "thinking" || b.type === "redacted_thinking") {
+        const text = String(b.thinking ?? "").slice(0, 2_000);
+        if (text) parts.push(`[${role} reasoning]: ${text}`);
+      } else if (b.type === "tool_use" || b.type === "server_tool_use") {
         parts.push(`[${role} tool call]: ${b.name}(${summaryValue(b.input, 300)})`);
       } else if (b.type === "tool_result" && !b.stubbed) {
         parts.push(`[Tool result]: ${summaryValue(b.content, 500)}`);

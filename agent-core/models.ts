@@ -101,6 +101,11 @@ export function contextCatalogProviderId(provider: ProviderId): string {
   return provider;
 }
 
+/** Map key for models.dev context windows. Store and lookup must use this. */
+export function contextCatalogEntryKey(provider: ProviderId, model: string): string {
+  return `${contextCatalogProviderId(provider)}\0${model}`;
+}
+
 export function isChatModel(id: string, provider: ProviderId): boolean {
   const n = id.toLowerCase();
   if (!n || n.length > 200) return false;

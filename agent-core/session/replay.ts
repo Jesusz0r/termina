@@ -257,6 +257,17 @@ export function applySessionRecord(state: ReplayState, rec: unknown): SessionRes
     }
     const removed = state.messages.splice(0, e.dropped);
     for (const m of removed) dropIndexedMessage(state, m);
+    if (e.message) {
+      if (e.summarySseq !== e.storageSeq) {
+        return { ok: false, error: "invalid truncate revision" };
+      }
+      if (e.message.role !== "user" || !isReplayContent(e.message.content)) {
+        return { ok: false, error: "invalid truncate handoff" };
+      }
+      const handoff: ReplayMessage = { role: "user", content: e.message.content, sseq: e.storageSeq };
+      state.messages.unshift(handoff);
+      state.bySeq.set(handoff.sseq, handoff);
+    }
     commitSequence(state, e.storageSeq);
     return { ok: true };
   }
