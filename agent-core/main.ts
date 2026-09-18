@@ -84,6 +84,7 @@ import {
   googleLiveDelta,
   googleResultFromEvents,
   isTruncatedStopReason,
+  ProviderSseError,
   readSseJson,
   responsesBody,
   responsesLiveDelta,
@@ -111,6 +112,7 @@ import {
   type RequestOverlay,
   userPromptContent as projectedUserPromptContent,
 } from "./request-projection.ts";
+import { salvageAssistantBlocks, type SalvageBlock } from "./main/stream-salvage.ts";
 import {
   cacheWriteSupportedFor,
   classifyCacheMiss,
@@ -2698,12 +2700,53 @@ const ANTHROPIC_CITATION_MAX_BYTES = 128 * 1024;
 class ProviderStreamLimitError extends Error {
   readonly traceStatus = "incomplete" as const;
   readonly cache: TraceCacheDiagnostics | null;
+  blocks: Block[] | null;
+  events: Array<Record<string, unknown>> | null;
 
-  constructor(message: string, cache: TraceCacheDiagnostics | null) {
+  constructor(
+    message: string,
+    cache: TraceCacheDiagnostics | null,
+    opts?: { blocks?: Block[] | null; events?: Array<Record<string, unknown>> | null },
+  ) {
     super(`provider output incomplete: ${message}`);
     this.name = "ProviderStreamLimitError";
     this.cache = cache;
+    this.blocks = opts?.blocks ?? null;
+    this.events = opts?.events ?? null;
   }
+}
+
+function sseEventsFromError(error: unknown): Array<Record<string, unknown>> {
+  if (error instanceof ProviderSseError) return error.events;
+  if (error instanceof ProviderStreamLimitError && error.events) return error.events;
+  return [];
+}
+
+function salvageBlocksFromError(error: unknown): Block[] {
+  if (error instanceof ProviderStreamLimitError && error.blocks?.length) return error.blocks;
+  if (error && typeof error === "object" && "blocks" in error) {
+    const blocks = (error as { blocks?: unknown }).blocks;
+    if (Array.isArray(blocks)) return salvageAssistantBlocks(blocks as SalvageBlock[]) as Block[];
+  }
+  return [];
+}
+
+function attachSalvage(error: unknown, blocks: Block[], cache: TraceCacheDiagnostics | null): unknown {
+  const salvaged = salvageAssistantBlocks(blocks as SalvageBlock[]) as Block[];
+  if (error instanceof ProviderStreamLimitError) {
+    if (salvaged.length) error.blocks = salvaged;
+    return error;
+  }
+  const classified = classifyProviderStreamError(error, cache);
+  if (classified) {
+    if (salvaged.length) classified.blocks = salvaged;
+    if (!classified.events?.length) classified.events = sseEventsFromError(error);
+    return classified;
+  }
+  if (salvaged.length && error instanceof Error) {
+    (error as Error & { blocks?: Block[] }).blocks = salvaged;
+  }
+  return error;
 }
 
 function classifyProviderStreamError(
@@ -2716,9 +2759,46 @@ function classifyProviderStreamError(
   if (
     /provider SSE|SSE .*incomplete|incomplete EOF|partial tool JSON|malformed SSE JSON|ended before a terminal|decoded buffer|payload bytes|event count|stream chunk/i.test(message)
   ) {
-    return new ProviderStreamLimitError(message, cache);
+    return new ProviderStreamLimitError(message, cache, { events: sseEventsFromError(error) });
   }
   return null;
+}
+
+/** Persist what the TUI already showed so a later "continue" can see it. */
+function persistFailedStreamTurn(error: unknown): void {
+  if (interrupted) return;
+  const salvaged = salvageAssistantBlocks(salvageBlocksFromError(error) as SalvageBlock[]) as ContentBlock[];
+  if (salvaged.length === 0) return;
+  try {
+    const sseq = persist({ type: "message", message: { role: "assistant", content: salvaged } });
+    history.push({
+      role: "assistant",
+      content: salvaged,
+      tokens: estimateReclaimTokens(salvaged),
+      sseq,
+    });
+    const uses = salvaged.flatMap((block): ToolUse[] => {
+      if (block.type !== "tool_use" || typeof block.id !== "string" || typeof block.name !== "string") return [];
+      const input = block.input && typeof block.input === "object" && !Array.isArray(block.input)
+        ? block.input as ToolUse["input"]
+        : {};
+      return [{ id: block.id, name: block.name, input }];
+    });
+    if (uses.length === 0) {
+      syncIndicators();
+      return;
+    }
+    pushMessage("user", uses.map((use) => {
+      const outcome = done(use, "(provider stream ended before this tool ran)", true);
+      const b = outcome.result as ContentBlock;
+      b.tool = use.name;
+      b.repro = outcome.repro ?? reproFor(use);
+      b.is_error = true;
+      return b;
+    }));
+  } catch {
+    /* The run already failed; keep the original provider error. */
+  }
 }
 
 async function readProviderSseJson(
@@ -3214,6 +3294,27 @@ async function callModel(
     let ttftMs: number | null = null;
     const viaResponses = usesResponsesApi(route.provider, route.model);
     const viaGoogle = proto === "google-generate";
+    const salvageCompatPartial = (error: unknown, events: Array<Record<string, unknown>>): Block[] => {
+      const collected = sseEventsFromError(error);
+      const source = collected.length > 0 ? collected : events;
+      let parsedBlocks: Block[] = [];
+      try {
+        const parsed = viaResponses
+          ? responsesResultFromEvents(source, () => {}, attemptStarted)
+          : viaGoogle
+            ? googleResultFromEvents(source, () => {}, attemptStarted)
+            : completionResultFromEvents(source, () => {}, attemptStarted);
+        parsedBlocks = (parsed.blocks ?? []) as Block[];
+      } catch {
+        parsedBlocks = [];
+      }
+      const salvaged = salvageAssistantBlocks(parsedBlocks as SalvageBlock[]) as Block[];
+      if (streamedText && !salvaged.some((block) => block.type === "text")) {
+        salvaged.unshift({ type: "text", text: streamedText });
+      }
+      return salvaged;
+    };
+    try {
     const events = await readProviderSseJson(res.body, currentAbort?.signal, cacheDiagnostics, (event) => {
       let chunk = "";
       let keepEvent = false;
@@ -3267,7 +3368,7 @@ async function callModel(
       : viaGoogle
         ? googleResultFromEvents(events, () => {}, attemptStarted)
       : completionResultFromEvents(events, () => {}, attemptStarted);
-    if (parsed.error) throw new Error(parsed.error);
+    if (parsed.error) throw attachSalvage(new Error(parsed.error), salvageCompatPartial(null, events), cacheDiagnostics);
     const blocks = parsed.blocks as Block[];
     if (streamedText && !blocks.some((b) => b.type === "text")) {
       const at = blocks.findIndex((b) => b.type !== "thinking");
@@ -3282,6 +3383,10 @@ async function callModel(
       cache: cacheDiagnostics,
       traceAttempt,
     };
+    } catch (error) {
+      if (interrupted) throw error;
+      throw attachSalvage(error, salvageCompatPartial(error, []), cacheDiagnostics);
+    }
   }
 
   const slots: Array<Block | undefined> = [];
@@ -3375,6 +3480,35 @@ async function callModel(
       if (target?.type === "thinking") target.signature = aggregate.accumulator.finish("complete").text;
     }
   };
+  const salvageAnthropicPartial = (): Block[] => {
+    try {
+      finishAggregates();
+    } catch {
+      /* Keep whatever text already landed on slots. */
+    }
+    const candidates: SalvageBlock[] = [];
+    for (const block of compactStreamBlocks(slots)) {
+      if (block.type === "tool_use" || block.type === "server_tool_use") continue;
+      candidates.push(block);
+    }
+    for (const [idx, part] of jsonParts) {
+      const lifecycle = blockLifecycles.get(idx);
+      const target = lifecycle?.block;
+      if (!target || target.type !== "tool_use") continue;
+      try {
+        const parsedPart = part.finish("complete");
+        if (parsedPart.truncated) continue;
+        const input = JSON.parse(parsedPart.text) as unknown;
+        if (!input || typeof input !== "object" || Array.isArray(input)) continue;
+        target.input = input as ToolUse["input"];
+        candidates.push(target);
+      } catch {
+        continue;
+      }
+    }
+    return salvageAssistantBlocks(candidates) as Block[];
+  };
+  try {
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -3609,6 +3743,10 @@ async function callModel(
   }
   if (traceAttempt) traceAttempt.ended = Date.now();
   return { blocks: compactStreamBlocks(slots), usage, ttftMs, stopReason, cache: cacheDiagnostics, traceAttempt };
+  } catch (error) {
+    if (interrupted) throw error;
+    throw attachSalvage(error, salvageAnthropicPartial(), cacheDiagnostics);
+  }
 }
 
 // ---- waste attribution ----
@@ -4671,6 +4809,7 @@ async function runPrompt(
       out("\n");
     }
   } catch (err) {
+    persistFailedStreamTurn(err);
     if (interrupted) {
       taskOutcomeStatus = "interrupted";
       taskFailure = "interrupted";

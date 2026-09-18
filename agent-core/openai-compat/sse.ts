@@ -33,6 +33,17 @@ type SseBufferState = {
 };
 
 
+/** Incomplete or malformed SSE that still carried parsed events. */
+export class ProviderSseError extends Error {
+  readonly events: Array<Record<string, unknown>>;
+
+  constructor(message: string, events: Array<Record<string, unknown>> = []) {
+    super(message);
+    this.name = "ProviderSseError";
+    this.events = events;
+  }
+}
+
 const SSE_ENCODER = new TextEncoder();
 
 
@@ -257,7 +268,7 @@ export async function readSseJson(
         buffer = parsed.buffer;
         bufferBytes = parsed.bytes;
         if (!signal?.aborted && !state.terminalSeen) {
-          throw new Error("provider SSE ended before a terminal event");
+          throw new ProviderSseError("provider SSE ended before a terminal event", state.events);
         }
         break;
       }
@@ -282,6 +293,9 @@ export async function readSseJson(
     } catch {
       /* Preserve the original parser failure if cancellation also fails. */
     }
+    if (error instanceof ProviderSseError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    if (state.events.length > 0) throw new ProviderSseError(message, state.events);
     throw error;
   } finally {
     reader.releaseLock();
