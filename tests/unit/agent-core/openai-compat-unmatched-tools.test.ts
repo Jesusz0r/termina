@@ -70,6 +70,22 @@ describe("openai-compat unmatched tool calls (refs #268)", () => {
     expect(paired[2]).toMatchObject({ role: "tool", tool_call_id: "call_1", content: "ok" });
   });
 
+  it("replays thinking as completions assistant text", () => {
+    const mapped = compat.toCompletionsMessages("sys", [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "1. auth 2. security" },
+          { type: "text", text: "Starting." },
+        ],
+      },
+    ]);
+    expect(mapped[1]).toMatchObject({
+      role: "assistant",
+      content: "1. auth 2. security\nStarting.",
+    });
+  });
+
   it("fails closed on Anthropic server_tool_use without inventing OpenAI output", () => {
     const server = {
       type: "server_tool_use",

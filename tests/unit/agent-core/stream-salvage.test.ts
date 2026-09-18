@@ -12,6 +12,7 @@ describe("failed-stream salvage", () => {
       { type: "tool_use", id: "call-2", name: "bash", input: "not-an-object" },
     ])).toEqual([
       { type: "text", text: "PLAN: edit cache.ts" },
+      { type: "thinking", thinking: "scratch" },
       { type: "tool_use", id: "call-1", name: "read_file", input: { path: "cache.ts" } },
     ]);
   });
@@ -21,5 +22,12 @@ describe("failed-stream salvage", () => {
       { type: "text", text: "" },
       { type: "thinking", thinking: "secret", signature: "sig" },
     ])).toEqual([{ type: "thinking", thinking: "secret", signature: "sig" }]);
+  });
+
+  it("drops empty unsigned thinking", () => {
+    expect(salvageAssistantBlocks([
+      { type: "thinking", thinking: "" },
+      { type: "thinking", thinking: "plan 1, 2, 3" },
+    ])).toEqual([{ type: "thinking", thinking: "plan 1, 2, 3" }]);
   });
 });

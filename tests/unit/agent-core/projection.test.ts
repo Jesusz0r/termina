@@ -169,6 +169,32 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     expect(overlayAt).toBeLessThan(callAt);
   });
 
+  it("keeps unsigned thinking as assistant text so the next turn can see it", () => {
+    const result = projectPersistedMessages({
+      messages: [
+        message("assistant", [
+          { type: "thinking", thinking: "1. auth\n2. security\n3. NPCs" },
+          { type: "text", text: "I'll start with those." },
+        ], 1),
+      ],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.messages[0]?.content).toEqual([
+      { type: "text", text: "1. auth\n2. security\n3. NPCs\n" },
+      { type: "text", text: "I'll start with those." },
+    ]);
+    const signed = projectPersistedMessages({
+      messages: [message("assistant", [{ type: "thinking", thinking: "secret", signature: "sig" }], 2)],
+    });
+    expect(signed.ok).toBe(true);
+    expect(signed.messages[0]?.content).toEqual([{ type: "thinking", thinking: "secret", signature: "sig" }]);
+    const empty = projectPersistedMessages({
+      messages: [message("assistant", [{ type: "thinking", thinking: "" }], 3)],
+    });
+    expect(empty.ok).toBe(true);
+    expect(empty.messages[0]?.content).toEqual([]);
+  });
+
   it("rejects persisted context blocks", () => {
     const persistedContext = "<working-set>\n<read-files>stale.ts</read-files>\n</working-set>";
     const result = projectPersistedMessages({

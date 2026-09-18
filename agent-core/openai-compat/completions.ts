@@ -49,6 +49,14 @@ export function blockText(b: Record<string, unknown>): string {
 }
 
 
+function appendReasoningText(existing: string, next: string): string {
+  if (!next) return existing;
+  const chunk = next.endsWith("\n") ? next : `${next}\n`;
+  if (!existing) return chunk;
+  return existing.endsWith("\n") ? existing + chunk : `${existing}\n${chunk}`;
+}
+
+
 export function toCompletionsMessages(system: string, messages: KernelMessage[]): CompletionMessage[] {
   const out: CompletionMessage[] = [];
   if (system) out.push({ role: "system", content: system });
@@ -70,6 +78,11 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
       let text = "";
       const toolCalls: NonNullable<CompletionMessage["tool_calls"]> = [];
       for (const b of m.content) {
+        if (b.type === "thinking") {
+          const thinking = typeof b.thinking === "string" ? b.thinking : "";
+          if (thinking) text = appendReasoningText(text, thinking);
+          continue;
+        }
         if (b.type === "text") text += blockText(b);
         // Anthropic server tools are not OpenAI function_calls; fail closed.
         // https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools

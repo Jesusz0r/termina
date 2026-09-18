@@ -194,6 +194,16 @@ function providerBlock(block: ProjectionBlock, imageRoots: readonly string[]): R
   return out;
 }
 
+/** Providers reject thinking without a signature. Keep the text so the next
+ *  turn still sees plans that the TUI already showed. */
+function projectContentBlock(block: Record<string, unknown>): Record<string, unknown> | null {
+  if (block.type !== "thinking") return block;
+  if (typeof block.signature === "string" && block.signature) return block;
+  const thinking = typeof block.thinking === "string" ? block.thinking : "";
+  if (!thinking) return null;
+  return { type: "text", text: thinking.endsWith("\n") ? thinking : `${thinking}\n` };
+}
+
 function projectMessages(
   messages: readonly ProjectionMessage[],
   imageRoots: readonly string[],
@@ -201,8 +211,8 @@ function projectMessages(
   return messages.map((message) => {
     if (typeof message.content === "string") return { role: message.role, content: message.content };
     const content = message.content
-      .map((block) => providerBlock(block, imageRoots))
-      .filter((block) => block.type !== "thinking" || typeof block.signature === "string");
+      .map((block) => projectContentBlock(providerBlock(block, imageRoots)))
+      .filter((block): block is Record<string, unknown> => block !== null);
     return { role: message.role, content };
   });
 }

@@ -1,8 +1,9 @@
 /**
  * Salvage a failed provider stream into request-safe history blocks.
  *
- * Incomplete tool JSON and unsigned thinking are dropped so the next prompt
- * can continue without breaking tool pairing or prompt projection.
+ * Incomplete tool JSON is dropped so the next prompt can continue without
+ * breaking tool pairing. Unsigned thinking is kept; request projection turns
+ * it into text so the model still sees the plan the TUI already showed.
  */
 
 export type SalvageBlock = Record<string, unknown> & { type: string };
@@ -22,9 +23,13 @@ export function salvageAssistantBlocks(blocks: readonly SalvageBlock[]): Salvage
       continue;
     }
     if (block.type === "thinking") {
-      if (typeof block.signature !== "string" || !block.signature) continue;
       const thinking = typeof block.thinking === "string" ? block.thinking : "";
-      out.push({ type: "thinking", thinking, signature: block.signature });
+      const signature = typeof block.signature === "string" ? block.signature : "";
+      if (signature) {
+        out.push({ type: "thinking", thinking, signature });
+        continue;
+      }
+      if (thinking) out.push({ type: "thinking", thinking });
       continue;
     }
     if (block.type !== "tool_use") continue;
