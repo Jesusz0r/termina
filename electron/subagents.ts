@@ -12,10 +12,11 @@
  */
 
 import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
+import { sameUserPath } from "./main/project-workspace.js";
 import { coreSessionFile, parseSessionBundlePath, sessionBundleExists } from "../agent-core/session.js";
 import { evictOldest } from "../shared/evict-oldest.js";
 import { subagentViewerId } from "./terminal-runtime.js";
@@ -138,6 +139,8 @@ interface HostRun {
   sessionFile: string | null;
   /** Absolute touched paths from tailed tool events (merge evidence). */
   touched: Set<string>;
+  /** Events dir captured at admission so a vanished parent still gets a result file. */
+  eventsDir: string;
 }
 
 /** Settled-run session bundles available for resume (bounded, same-parent only). */
@@ -230,6 +233,14 @@ export class SubagentHost {
 
   activeCount(): number {
     return this.runs.size;
+  }
+
+  /** True while a live child still addresses this core session bundle. */
+  sessionFileInUse(path: string): boolean {
+    for (const run of this.runs.values()) {
+      if (run.sessionFile && sameUserPath(run.sessionFile, path)) return true;
+    }
+    return false;
   }
 
   /** True while a child stream is tailed (admission for the shared tailer). */
@@ -383,7 +394,10 @@ export class SubagentHost {
     const key = this.runKey(sourceTerminalId, runId);
     if (this.runs.has(key)) return;
     const dir = this.sinks.eventsDirFor(sourceTerminalId);
-    if (!dir) return;
+    if (!dir) {
+      await this.finishFailed(sourceTerminalId, runId, null, "parent events directory is gone");
+      return;
+    }
     let task: SubagentTaskFile;
     try {
       task = mustParseTask(JSON.parse(readFileSync(join(dir, basename(taskFile)), "utf8")));
@@ -512,6 +526,7 @@ export class SubagentHost {
       settled: false,
       sessionFile: null,
       touched: new Set<string>(),
+      eventsDir: dir,
     };
     // Admission sits immediately before insert with no await between:
     // concurrent spawns cannot slip past the same guard. A duplicate
@@ -556,8 +571,7 @@ export class SubagentHost {
   private async startAttempt(run: HostRun): Promise<void> {
     const dir = this.sinks.eventsDirFor(run.parentTerminalId);
     if (!dir) {
-      this.runs.delete(run.key);
-      this.detachParentSession(run);
+      await this.finishFailed(run.parentTerminalId, run.runId, run.task, "parent events directory is gone");
       return;
     }
     this.attachParentSession(run);
@@ -608,7 +622,6 @@ export class SubagentHost {
       try {
         const root = await this.sinks.sessionRootFor(run.task.cwd);
         sessionFile = coreSessionFile(root, sessionId);
-        mkdirSync(dirname(sessionFile), { recursive: true });
       } catch (err) {
         await this.finishFailed(run.parentTerminalId, run.runId, run.task, `subagent session unavailable: ${err instanceof Error ? err.message : String(err)}`);
         return;
@@ -625,10 +638,10 @@ export class SubagentHost {
     delete env.TERMINA_CORE_MODEL;
     delete env.TERMINA_CORE_PROVIDER;
     delete env.TERMINA_CORE_SUMMARY_MODEL;
-    // Inherit the parent's permission mode and nothing more: `always` alone
-    // auto-approves, and only when the parent workspace policy allows it. A
-    // forged task file claiming `always` from an `ask` parent stays denied.
-    // Every other mode fails closed headless (ask denies).
+    // Inherit the parent's permission mode and nothing more: `always` auto-approves
+    // only when the host confirms the parent is live-always (or launched with
+    // TERMINA_CORE_APPROVE=all). A forged task file claiming `always` from an
+    // `ask` parent stays denied. Every other mode fails closed headless.
     if (run.task.permissionMode === "always" && this.sinks.autoApproveAllowedFor(run.parentTerminalId)) {
       env.TERMINA_CORE_APPROVE = "all";
     } else {
@@ -642,7 +655,26 @@ export class SubagentHost {
       // uncancelled with a live parent immediately before spawn — never
       // launch a child for a dead run, and never write a second result.
       if (run.settled || run.stop !== null || this.runs.get(run.key) !== run) return;
-      if (!this.sinks.eventsDirFor(run.parentTerminalId)) return;
+      if (!this.sinks.eventsDirFor(run.parentTerminalId)) {
+        await this.finishFailed(run.parentTerminalId, run.runId, run.task, "parent events directory is gone");
+        return;
+      }
+      // Adopt the stream before spawn so child sidecar cannot land as an
+      // unknown terminal and get dropped.
+      if (!this.streams.has(run.childTid)) {
+        this.streams.set(run.childTid, { key: run.key, booted: false, lastActivityAt: this.now() });
+        try {
+          this.sinks.watchStream(run.childTid);
+        } catch {
+          /* Tailing is liveness only; the piped exit stays authoritative. */
+        }
+      } else {
+        // Retry in the same stream: a new process, so boot state resets but
+        // the tail cursor (owned by the shared tailer) keeps flowing.
+        const stream = this.streams.get(run.childTid)!;
+        stream.booted = false;
+        stream.lastActivityAt = this.now();
+      }
       child = this.launch(process.execPath, [this.sinks.coreBinary(), "--subagent-task", join(dir, run.taskFile)], {
         cwd: run.task.cwd,
         env,
@@ -653,20 +685,6 @@ export class SubagentHost {
     }
     // The task file was consumed at spawn; attempts rebuild from the run.
     run.child = child;
-    if (!this.streams.has(run.childTid)) {
-      this.streams.set(run.childTid, { key: run.key, booted: false, lastActivityAt: this.now() });
-      try {
-        this.sinks.watchStream(run.childTid);
-      } catch {
-        /* Tailing is liveness only; the piped exit stays authoritative. */
-      }
-    } else {
-      // Retry in the same stream: a new process, so boot state resets but
-      // the tail cursor (owned by the shared tailer) keeps flowing.
-      const stream = this.streams.get(run.childTid)!;
-      stream.booted = false;
-      stream.lastActivityAt = this.now();
-    }
     child.stdout.onData((chunk) => {
       const next = appendCapped(run.stdout, chunk, SUBAGENT_STDOUT_CAP_BYTES);
       run.stdout = next.text;
@@ -805,7 +823,7 @@ export class SubagentHost {
     // never launch a second run. A host crash before this leaves an orphan
     // for the startup sweep.
     try {
-      const dir = this.sinks.eventsDirFor(run.parentTerminalId);
+      const dir = this.sinks.eventsDirFor(run.parentTerminalId) ?? run.eventsDir;
       if (dir) rmSync(join(dir, run.taskFile));
     } catch {
       /* Leftovers are startup-sweep evidence. */
@@ -825,7 +843,7 @@ export class SubagentHost {
       touched: [...run.touched],
     });
     while (this.pastTouched.length > MAX_SUBAGENT_PAST_TOUCHED) this.pastTouched.shift();
-    await this.writeResult(run.parentTerminalId, run.runId, outcome, result, flags, error, run.task, [...run.touched], merges);
+    await this.writeResult(run.parentTerminalId, run.runId, outcome, result, flags, error, run.task, [...run.touched], merges, run.eventsDir);
   }
 
   private async writeResult(
@@ -838,8 +856,9 @@ export class SubagentHost {
     task: SubagentTaskFile | null,
     touched: string[] = [],
     merges: Array<{ runId: string; paths: string[] }> = [],
+    eventsDir?: string | null,
   ): Promise<void> {
-    const dir = this.sinks.eventsDirFor(parentTerminalId);
+    const dir = this.sinks.eventsDirFor(parentTerminalId) ?? eventsDir ?? null;
     const name = subagentResultFileName(parentTerminalId, runId);
     const body = JSON.stringify({
       version: 1,

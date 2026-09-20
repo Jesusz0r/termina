@@ -4285,6 +4285,17 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   process.exit(frame.ok ? 0 : 1);
 }
 
+/** Abort before the model loop. Records lastRunOutcome so a headless child
+ *  frames the real error instead of "no settlement". */
+function abortPromptStart(message: string, draft?: string): void {
+  lastRunOutcome = { status: "failure", failure: message };
+  out(`(the run did not start: ${message})\n`);
+  if (draft !== undefined) surface?.setDraft(draft);
+  running = false;
+  currentAbort = null;
+  showPrompt();
+}
+
 /** Images carried into one run: pending claims first, then startup extras. */
 export const RUN_IMAGE_CAP = 4;
 
@@ -4300,9 +4311,7 @@ async function runPrompt(
 ): Promise<void> {
   if (shutdownRequested) return;
   if (modelAvailabilityError) {
-    out(`(the run did not start: ${modelAvailabilityError}; choose an available model with /models or /model)\n`);
-    surface?.setDraft(prompt);
-    showPrompt();
+    abortPromptStart(`${modelAvailabilityError}; choose an available model with /models or /model`, prompt);
     return;
   }
   // The overlay belongs to one logical prompt.  Do not let an earlier
@@ -4315,11 +4324,7 @@ async function runPrompt(
       ensureFreshSession();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      out(`(the run did not start: ${message})\n`);
-      surface?.setDraft(prompt);
-      running = false;
-      currentAbort = null;
-      showPrompt();
+      abortPromptStart(message, prompt);
       return;
     }
   }
@@ -4331,11 +4336,7 @@ async function runPrompt(
     ? await pendingImageState(eventsDir, terminalId)
     : { ok: true as const, count: 0, hasImages: false };
   if (!pendingResult.ok) {
-    out(`(the run did not start: ${pendingResult.error})\n`);
-    surface?.setDraft(prompt);
-    running = false;
-    currentAbort = null;
-    showPrompt();
+    abortPromptStart(pendingResult.error, prompt);
     return;
   }
   const hasImages = pendingResult.hasImages || extraImages.length > 0;
@@ -4344,13 +4345,13 @@ async function runPrompt(
     if (preflight) sidecar.logEvent({ t: "preflight_cancel", requestId: preflight.requestId });
     preflight = null;
   };
-  if (eventsDir && terminalId) {
+  // Headless children share the parent's tree and have no terminal instance.
+  // The host treats their sidecar as liveness-only and never writes preflight
+  // or checkpoint acks, so waiting here used to fail every child as "no settlement".
+  const hostBridge = Boolean(eventsDir && terminalId && !activeSubagent);
+  if (hostBridge && eventsDir && terminalId) {
     if (sidecar.isWriteStopped()) {
-      out("(the run did not start: sidecar admission is paused)\n");
-      surface?.setDraft(prompt);
-      running = false;
-      currentAbort = null;
-      showPrompt();
+      abortPromptStart("sidecar admission is paused", prompt);
       return;
     }
     const requestId = randomUUID();
@@ -4367,11 +4368,7 @@ async function runPrompt(
       // while the tailer may still be holding backpressure for capture.
       if (!ack) sidecar.logEvent({ t: "preflight_cancel", requestId });
       const err = String(ack && typeof ack.error === "string" ? ack.error : "preflight timed out");
-      out(`(the run did not start: ${err})\n`);
-      surface?.setDraft(prompt);
-      running = false;
-      currentAbort = null;
-      showPrompt();
+      abortPromptStart(err, prompt);
       return;
     }
     preflight = { requestId, token: typeof ack.token === "string" ? ack.token : null };
@@ -4382,11 +4379,7 @@ async function runPrompt(
     : { ok: true as const, claim: { claimId: "", images: [] } };
   if (!claimResult.ok) {
     cancelPreflight();
-    out(`(the run did not start: ${claimResult.error})\n`);
-    surface?.setDraft(prompt);
-    running = false;
-    currentAbort = null;
-    showPrompt();
+    abortPromptStart(claimResult.error, prompt);
     void refreshPendingImageCount();
     return;
   }
@@ -4405,11 +4398,7 @@ async function runPrompt(
   const persistedImages = persistLoadedImages(sessionFile, allImages);
   if (!persistedImages.ok) {
     cancelPreflight();
-    out(`(the run did not start: ${persistedImages.error})\n`);
-    surface?.setDraft(prompt);
-    running = false;
-    currentAbort = null;
-    showPrompt();
+    abortPromptStart(persistedImages.error, prompt);
     return;
   }
   const images = persistedImages.images;
@@ -4467,11 +4456,7 @@ async function runPrompt(
   } catch (err) {
     cancelPreflight();
     const message = err instanceof SessionStoreError ? err.message : err instanceof Error ? err.message : String(err);
-    out(`(the run did not start: ${message})\n`);
-    surface?.setDraft(prompt);
-    running = false;
-    currentAbort = null;
-    showPrompt();
+    abortPromptStart(message, prompt);
     return;
   }
   // Build once for this logical prompt. Retries and cache-field fallbacks
@@ -4481,11 +4466,7 @@ async function runPrompt(
   } catch (err) {
     cancelPreflight();
     const message = err instanceof Error ? err.message : String(err);
-    out(`(the run did not start: ${message})\n`);
-    surface?.setDraft(prompt);
-    running = false;
-    currentAbort = null;
-    showPrompt();
+    abortPromptStart(message, prompt);
     return;
   }
   // Rate lookup is optional and bounded. Capture the fully replaced catalog
@@ -4860,7 +4841,7 @@ async function runPrompt(
     error: storageFailure ?? taskFailure,
   });
   lastRunOutcome = { status: taskOutcomeStatus, failure: storageFailure ?? taskFailure };
-  if (!storageFailure && eventsDir && terminalId) {
+  if (!storageFailure && hostBridge && eventsDir && terminalId) {
     const requestId = randomUUID();
     sidecar.logEvent({
       t: "checkpoint_request",

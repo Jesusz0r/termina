@@ -81,9 +81,22 @@ describe("SessionFork Architecture Contracts", () => {
     expect(!/export async function removePiSessionCopy/.test(session)).toBe(true);
     expect(!/copyPiSessionFile|PiSessionCopy/.test(session)).toBe(true);
     expect(/discardEmptyCoreSession/.test(main) && /inspectEmptySessionBundle/.test(worker) && /boundPromotionRemoveTree/.test(worker)).toBe(true);
+    expect(/reclaimUnusedEmptyCoreSessions/.test(main)).toBe(true);
     expect(/MAX_RETAINED_EMPTY_SESSION_BUNDLES/.test(session) && /admitNewEmptySessionBundle/.test(session)).toBe(true);
     expect(!/\bremoveSessionBundle\b/.test(worldlines)).toBe(true);
     expect(!/export async function removeSessionBundle/.test(session)).toBe(true);
+  });
+
+  it("reclaims empty core sessions on tab exit, spawn, and shutdown", () => {
+    const exitHook = methodBody(main, "private async handlePtyExitBeforeRelease(", "private handlePtyExitAfterRelease(");
+    expect(exitHook).toContain("await this.discardCoreSession(inst)");
+    expect(exitHook).not.toMatch(/if \(persistOwner\) \{\s*await this\.discardCoreSession/);
+    const discard = methodBody(main, "private async discardCoreSession(", "private async reclaimUnusedEmptyCoreSessions(");
+    expect(discard).toContain("if (!result.ok) throw new Error(result.error)");
+    expect(main).toContain("await this.reclaimUnusedEmptyCoreSessions(await this.coreProjectSessionDir(sessionCwd))");
+    const dispose = methodBody(main, "async dispose(): Promise<void> {", "focusWindow()");
+    expect(dispose.indexOf("drainTerminals(null)")).toBeGreaterThanOrEqual(0);
+    expect(dispose.indexOf("drainTerminals(null)")).toBeLessThan(dispose.indexOf("this.sessionFork.dispose()"));
   });
 
   it("routes core forks and retained session transactions in finalizeRun", () => {

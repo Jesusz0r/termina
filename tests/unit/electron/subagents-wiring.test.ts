@@ -32,6 +32,13 @@ describe("Subagent Wiring Invariants", () => {
     assert.match(main, /this\.subagents\.noteChildEvent\(terminalId, event\.t/);
   });
 
+  it("headless children skip the interactive host bridge (preflight/checkpoint acks)", () => {
+    assert.match(agentMain, /const hostBridge = Boolean\(eventsDir && terminalId && !activeSubagent\)/);
+    assert.match(agentMain, /if \(hostBridge && eventsDir && terminalId\)/);
+    assert.match(agentMain, /if \(!storageFailure && hostBridge && eventsDir && terminalId\)/);
+    assert.match(agentMain, /function abortPromptStart/);
+  });
+
   it("clear and close terminate owner runs", () => {
     assert.match(main, /this\.subagents\.killOwner\(terminalId, "terminal cleared"\)/);
     assert.match(main, /this\.subagents\.killOwner\(inst\.id, "terminal closed"\)/);
@@ -47,10 +54,15 @@ describe("Subagent Wiring Invariants", () => {
     // cannot rely on it to reap headless children.
     assert.match(dispose, /for \(const id of \[\.\.\.this\.runtime\.keys\(\)\]\) \{\s*this\.subagents\.killOwner\(id, "app shutdown"\);/);
     assert.ok(dispose.indexOf('killOwner(id, "app shutdown")') < dispose.indexOf('inst.pty.killGroup("SIGTERM")'));
+    assert.ok(dispose.indexOf("drainTerminals(null)") < dispose.indexOf("this.sessionFork.dispose()"));
   });
 
   it("startup sweep covers subagent-managed files", () => {
     assert.match(main, /isSubagentManagedFile\(name\)/);
+  });
+
+  it("does not mkdir a session current directory before admission", () => {
+    assert.doesNotMatch(host, /mkdirSync\(dirname\(sessionFile\)/);
   });
 
   it("children never get a pty", () => {
@@ -93,7 +105,10 @@ describe("Subagent Wiring Invariants", () => {
     assert.match(host, /workspaceRootFor\(sourceTerminalId\)/);
     assert.match(host, /outside parent workspace/);
     assert.match(host, /autoApproveAllowedFor\(run\.parentTerminalId\)/);
+    assert.match(host, /parent events directory is gone/);
     assert.match(main, /workspaceRootFor: \(terminalId\)/);
     assert.match(main, /autoApproveAllowedFor: \(terminalId\)/);
+    assert.match(main, /inst\?\.permissionMode === "always"/);
+    assert.match(agentMain, /permissions: permissionMode/);
   });
 });

@@ -77,6 +77,31 @@ describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
     expect(existsSync(join(work, "empty-core-project", "empty-core"))).toBe(false);
   });
 
+  it("discards several unused empty bundles so a later session can be created", async () => {
+    const project = join(work, "orphan-empty-project");
+    mkdirSync(project, { recursive: false, mode: 0o700 });
+    const files: string[] = [];
+    for (let index = 0; index < 3; index++) {
+      const sessionFile = coreSessionFile(project, `orphan-${index}`);
+      const opened = SessionWriter.open(sessionFile, 0);
+      expect(opened.ok).toBe(true);
+      opened.writer.close();
+      files.push(sessionFile);
+    }
+    for (const sessionFile of files) {
+      const result = await client.discardEmptyCoreSession(sessionFile);
+      expect(result.ok && result.removed).toBe(true);
+    }
+    expect(existsSync(join(project, "orphan-0"))).toBe(false);
+    expect(existsSync(join(project, "orphan-1"))).toBe(false);
+    expect(existsSync(join(project, "orphan-2"))).toBe(false);
+    const next = coreSessionFile(project, "next-live");
+    const opened = SessionWriter.open(next, 0);
+    expect(opened.ok).toBe(true);
+    opened.writer.close();
+    expect(existsSync(join(project, "next-live"))).toBe(true);
+  });
+
   it("forks core session bundles and keeps main event loop responsive", async () => {
     const source = coreSessionFile(join(work, "source-project"), "source");
     const opened = SessionWriter.open(source, 0);

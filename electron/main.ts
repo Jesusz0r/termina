@@ -77,6 +77,7 @@ import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../a
 import {
   coreSessionFile as bundleSessionFile,
   isCoreSessionId,
+  MAX_RETAINED_EMPTY_SESSION_BUNDLES,
   parseSessionBundlePath,
   sessionBundleHasContent,
 } from "../agent-core/session.js";
@@ -123,6 +124,7 @@ import {
   nextProjectId,
   pathInside,
   primaryWorkspaceOf,
+  sameUserPath,
   sanitizeSessionDir,
 } from "./main/project-workspace.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
@@ -609,7 +611,11 @@ class TerminaApp {
     },
     baseEnv: () => cleanEnv(),
     coreBinary: () => coreEngineBinary(),
-    sessionRootFor: (cwd) => this.coreProjectSessionDir(cwd),
+    sessionRootFor: async (cwd) => {
+      const dir = await this.coreProjectSessionDir(cwd);
+      await this.reclaimUnusedEmptyCoreSessions(dir);
+      return dir;
+    },
     appendMailboxNote: (terminalId, note) => this.appendMailboxNote(terminalId, note),
     watchStream: (terminalId) => this.runtime.watchSidecar(terminalId),
     releaseStream: (terminalId) => {
@@ -2675,9 +2681,9 @@ class TerminaApp {
   private sessionFileInUse(path: string | null | undefined): boolean {
     if (!path) return false;
     for (const inst of this.runtime.values()) {
-      if (inst.sessionFile === path) return true;
+      if (inst.sessionFile && sameUserPath(inst.sessionFile, path)) return true;
     }
-    return false;
+    return this.subagents.sessionFileInUse(path);
   }
 
   /** Delete an empty agent-core bundle. Keep a bundle with content so
@@ -2687,7 +2693,39 @@ class TerminaApp {
     if (!pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
     // Empty core bundles are reclaimed by the worker's native descriptor/
     // provenance-bound owner.
-    await this.sessionFork.discardEmptyCoreSession(inst.sessionFile);
+    const result = await this.sessionFork.discardEmptyCoreSession(inst.sessionFile);
+    if (!result.ok) throw new Error(result.error);
+  }
+
+  /**
+   * Reclaim unused empty bundles under one project session dir through the
+   * native bound owner. Closed tabs, quit, and subagent children otherwise
+   * leave 0-byte `core-*` trees that block new sessions at 128.
+   */
+  private async reclaimUnusedEmptyCoreSessions(projectDir: string): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(projectDir);
+    } catch {
+      return;
+    }
+    let reclaimed = 0;
+    for (const name of names) {
+      if (reclaimed >= MAX_RETAINED_EMPTY_SESSION_BUNDLES) break;
+      if (!isCoreSessionId(name)) continue;
+      const sessionFile = bundleSessionFile(projectDir, name);
+      if (this.sessionFileInUse(sessionFile)) continue;
+      try {
+        const result = await this.sessionFork.discardEmptyCoreSession(sessionFile);
+        if (!result.ok) {
+          console.warn(`[main] could not reclaim empty core session ${name}: ${result.error}`);
+          continue;
+        }
+        if (result.removed) reclaimed += 1;
+      } catch (error) {
+        console.warn(`[main] could not reclaim empty core session ${name}: ${(error as Error).message}`);
+      }
+    }
   }
 
   private persistLive(project: ProjectState): AgentTerminalInstance[] {
@@ -2986,6 +3024,7 @@ class TerminaApp {
       ];
       if (persist) {
         const sessionCwd = cwd ?? owner?.cwd ?? this.terminalCwd();
+        await this.reclaimUnusedEmptyCoreSessions(await this.coreProjectSessionDir(sessionCwd));
         sessionFile = sessionId && isCoreSessionId(sessionId) ? await this.coreSessionFile(sessionId, sessionCwd) : null;
         if (!sessionFile || this.sessionFileInUse(sessionFile)) {
           sessionId = `core-${randomUUID()}`;
@@ -3127,16 +3166,16 @@ class TerminaApp {
     }
     // Resolve the owner before the map delete. projectOfTerminal reads
     // the terminal map, so a lookup after the delete finds no project.
-    // Snapshot persistOwner here: discard awaits, and a later recompute
-    // could skip the roster save the old path always paired with discard.
+    // Snapshot persistOwner here: a later recompute could skip the roster
+    // save the old path always paired with discard. Empty-bundle reclaim
+    // is independent of that roster write — quit and project switch still
+    // have to free unused sessions.
     const exitOwner = this.projectOfTerminal(inst.id);
     const persistOwner = inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id) ? exitOwner : null;
     this.ptyExitOwners.set(inst, { exitOwner, persistOwner });
-    if (persistOwner) {
-      await this.discardCoreSession(inst).catch((error) => {
-        console.warn(`[main] could not discard exited core session ${inst.id}: ${(error as Error).message}`);
-      });
-    }
+    await this.discardCoreSession(inst).catch((error) => {
+      console.warn(`[main] could not discard exited core session ${inst.id}: ${(error as Error).message}`);
+    });
   }
 
   /** Map/watch/queue/egress already released. */
@@ -8806,24 +8845,18 @@ class TerminaApp {
     await this.sessionRetention.drain();
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainSessionForks() ?? Promise.resolve()));
     // Worldline disposal clears completed runs and therefore may enqueue
-    // retained session-bundle discards. Keep the session worker alive until
-    // those exact cleanup requests have drained; disposing it first would
-    // silently retain every finalized branch at app shutdown.
+    // retained session-bundle discards. Empty live-tab core bundles are
+    // discarded from PTY exit. Keep the session worker alive until those
+    // cleanup requests have drained; disposing it first would silently
+    // retain every finalized branch and every unused empty session at
+    // app shutdown.
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.dispose().catch(() => undefined) ?? Promise.resolve()));
-    await this.sessionFork.dispose();
-    await this.evidenceHomes.dispose();
-    for (const project of this.projects.values()) {
-      project.worldlines = null;
-      for (const ws of project.workspaces.values()) ws.watcher?.stop();
-    }
     for (const inst of this.runtime.values()) {
       if (inst.captureTimer) {
         clearTimeout(inst.captureTimer);
         inst.captureTimer = null;
       }
     }
-    await Promise.all([...this.projects.values()].map((project) => project.storePromise?.catch(() => null) ?? Promise.resolve(null)));
-    disposeWorldlineGitCore();
     // Headless subagents are separate processes: the PTY-exit cascade cannot
     // be relied on during shutdown (native exit delivery is best-effort
     // after forced termination), so terminate every live owner's runs
@@ -8836,6 +8869,14 @@ class TerminaApp {
       inst.pty.kill();
     }
     await this.drainTerminals(null);
+    await this.sessionFork.dispose();
+    await this.evidenceHomes.dispose();
+    for (const project of this.projects.values()) {
+      project.worldlines = null;
+      for (const ws of project.workspaces.values()) ws.watcher?.stop();
+    }
+    await Promise.all([...this.projects.values()].map((project) => project.storePromise?.catch(() => null) ?? Promise.resolve(null)));
+    disposeWorldlineGitCore();
     for (const inst of this.runtime.values()) {
       for (const event of inst.timeline) {
         if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq, this.projectOfTerminal(inst.id));

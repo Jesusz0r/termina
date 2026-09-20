@@ -155,6 +155,15 @@ describe("SubagentHost", () => {
     expect(s.notes[0]!.note).toMatch(/failed/);
   });
 
+  it("fails closed when the parent events directory is gone at admission", async () => {
+    const s = setup({ eventsDirFor: () => null });
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.procs.length).toBe(0);
+    expect(s.readResult().outcome).toBe("failed");
+    expect(`${s.readResult().error ?? ""} ${s.notes[0]?.note ?? ""}`).toMatch(/events directory is gone/);
+  });
+
   it("fails closed on parent mismatch and malformed shapes", async () => {
     const s = setup();
     s.writeTask(validTask({ parentTerminalId: "term-999" }));
@@ -840,10 +849,14 @@ describe("SubagentHost", () => {
     // the headless child is signalled directly, not via any exit cascade.
     expect(s.host.killOwner("term-7", "app shutdown")).toBe(1);
     expect(s.procs[0]!.kills).toEqual(["group:SIGTERM"]);
+    const file = s.launches[0]!.env.TERMINA_CORE_SESSION_FILE;
+    expect(s.host.sessionFileInUse(file!)).toBe(true);
+    expect(s.host.sessionFileInUse("/not/this/session.jsonl")).toBe(false);
     s.procs[0]!.exit(null, "SIGTERM");
     await until(() => existsSync(s.resultFile));
     expect(s.readResult().outcome).toBe("killed");
     expect(s.host.activeCount()).toBe(0);
+    expect(s.host.sessionFileInUse(file!)).toBe(false);
     expect(s.notes).toHaveLength(1);
   });
 });
