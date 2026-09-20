@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   SUBAGENT_STDERR_CAP_BYTES,
   SUBAGENT_STDOUT_CAP_BYTES,
@@ -16,6 +16,14 @@ const roots: string[] = [];
 afterAll(() => {
   for (const r of roots) rmSync(r, { recursive: true, force: true });
 });
+
+/** Fake children never open a SessionWriter. Resume still requires a real
+ *  `current/` directory, so tests that replay a bundle create it here. */
+function materializeLaunchedSession(env: Record<string, string | undefined>): void {
+  const file = env.TERMINA_CORE_SESSION_FILE;
+  if (!file) return;
+  mkdirSync(dirname(file), { recursive: true });
+}
 
 function tmp(): string {
   const dir = mkdtempSync(join(tmpdir(), "subagent-host-"));
@@ -160,8 +168,8 @@ describe("SubagentHost", () => {
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
     expect(s.procs.length).toBe(0);
-    expect(s.readResult().outcome).toBe("failed");
-    expect(`${s.readResult().error ?? ""} ${s.notes[0]?.note ?? ""}`).toMatch(/events directory is gone/);
+    expect(existsSync(s.resultFile)).toBe(false);
+    expect(s.notes[0]?.note ?? "").toMatch(/events directory is gone/);
   });
 
   it("fails closed on parent mismatch and malformed shapes", async () => {
@@ -624,6 +632,7 @@ describe("SubagentHost", () => {
     const s = setup();
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    materializeLaunchedSession(s.launches[0]!.env);
     s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"done"}\n`);
     s.procs[0]!.exit(0);
     await until(() => existsSync(s.resultFile));
@@ -658,6 +667,7 @@ describe("SubagentHost", () => {
     const s = setup();
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    materializeLaunchedSession(s.launches[0]!.env);
     s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"done"}\n`);
     s.procs[0]!.exit(0);
     await until(() => existsSync(s.resultFile));
@@ -685,6 +695,7 @@ describe("SubagentHost", () => {
     const s = setup();
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    materializeLaunchedSession(s.launches[0]!.env);
     s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"done"}\n`);
     s.procs[0]!.exit(0);
     await until(() => existsSync(s.resultFile));
@@ -835,9 +846,10 @@ describe("SubagentHost", () => {
     releaseSetup2(join(gatedDir, "sessions", "late"));
     await spawned;
     expect(gated.procs.length).toBe(0);
-    alive = true;
-    expect(gated.host.kill("term-7", "bg-1", "terminal closed")).toBe(true);
     await until(() => existsSync(join(gatedDir, "subagent-term-7-bg-1.result.json")));
+    expect(JSON.parse(readFileSync(join(gatedDir, "subagent-term-7-bg-1.result.json"), "utf8")).outcome).toBe("failed");
+    alive = true;
+    expect(gated.host.kill("term-7", "bg-1", "terminal closed")).toBe(false);
   });
 
   it("signals live children on shutdown without PTY exit delivery (refs #211)", async () => {
