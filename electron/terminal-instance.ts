@@ -41,6 +41,8 @@ export class AgentTerminalInstance {
   thinkingLevel: string | null = null;
   /** The live usage/cache line of this agent, formatted by agent-core. */
   usage: string | null = null;
+  /** Live bash approval policy. Default ask; updated from sidecar settings. */
+  permissionMode: "always" | "dangerous" | "ask" = "ask";
   shellName?: string;
   /** Absolute shell binary, for roster resume. */
   shellPath?: string;
