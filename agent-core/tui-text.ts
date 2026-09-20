@@ -18,6 +18,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/clear (new)", hint: "session · start a new empty session", submit: "/clear" },
   { name: "/compact", hint: "session · reclaim and summarize context" },
   { name: "/plan", hint: "session · write a Plan Board list" },
+  { name: "/skills", hint: "session · pick a skill to follow" },
   { name: "/effort", hint: "model · show or set reasoning effort" },
   { name: "/permissions", hint: "danger · set bash approval policy" },
   { name: "/exit", hint: "danger · quit the engine" },
@@ -51,6 +52,39 @@ export function effortCommandRows(levels: readonly string[] = Object.keys(EFFORT
     hint: EFFORT_HINTS[level] ?? "use this reasoning effort",
     submit: `/effort ${level}`,
   }));
+}
+
+const SKILL_HINT_CHARS = 56;
+const SKILL_NAME_CONTROL = /[\x00-\x1f\x7f-\x9f]/;
+
+function compactSkillHint(description: string): string {
+  const clean = description.replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  if (cellWidth(clean) <= SKILL_HINT_CHARS) return clean;
+  const budget = Math.max(1, SKILL_HINT_CHARS - 1);
+  let out = "";
+  let used = 0;
+  forEachGrapheme(clean, (g) => {
+    const w = graphemeCells(g, used);
+    if (used + w > budget) return false;
+    out += g;
+    used += w;
+  });
+  return `${out}…`;
+}
+
+export function skillCommandRows(skills: readonly { name: string; description: string }[]): SlashCommand[] {
+  const rows: SlashCommand[] = [];
+  for (const skill of skills) {
+    const name = skill.name.trim();
+    if (!name || SKILL_NAME_CONTROL.test(name)) continue;
+    rows.push({
+      name,
+      hint: compactSkillHint(skill.description),
+      submit: `/skills ${name}`,
+    });
+  }
+  return rows;
 }
 
 function authCommandRows(cmd: "/login" | "/logout"): SlashCommand[] {
@@ -112,6 +146,7 @@ export function matchingSlashCommands(
   commands: SlashCommand[] = SLASH_COMMANDS,
   modelRows: SlashCommand[] = [],
   effortRows: SlashCommand[] = effortCommandRows(),
+  skillRows: SlashCommand[] = [],
 ): SlashCommand[] {
   if (!line.startsWith("/")) return [];
   const space = line.indexOf(" ");
@@ -140,6 +175,15 @@ export function matchingSlashCommands(
     if (space < 0) return effortRows;
     return effortRows.filter((c) => pickerRowMatches(line, c));
   }
+  if (head === "/skills") {
+    const prefix = pickerHead(line, space, commands, ["/skills"]);
+    if (prefix) return prefix;
+    if (skillRows.length === 0) {
+      return space < 0 ? commands.filter((c) => c.name === head) : [];
+    }
+    if (space < 0) return skillRows;
+    return skillRows.filter((c) => pickerRowMatches(line, c));
+  }
   if (head === "/permissions") {
     const prefix = pickerHead(line, space, commands, ["/permissions"]);
     if (prefix) return prefix;
@@ -162,8 +206,9 @@ export function completeSlashLine(
   commands: SlashCommand[] = SLASH_COMMANDS,
   modelRows: SlashCommand[] = [],
   effortRows: SlashCommand[] = effortCommandRows(),
+  skillRows: SlashCommand[] = [],
 ): string {
-  const matches = matchingSlashCommands(line, commands, modelRows, effortRows);
+  const matches = matchingSlashCommands(line, commands, modelRows, effortRows, skillRows);
   if (matches.length === 0) return line;
   if (matches.length === 1) {
     if (matches[0]!.submit) return line;
@@ -319,9 +364,15 @@ export function truncateMiddle(text: string, maxCells: number): string {
 
 export function formatPickerRow(name: string, hint: string, cols: number, selected = false): string {
   const marker = selected ? "▸ " : "  ";
-  const hintPart = hint ? `  ${hint}` : "";
-  const budget = Math.max(8, cols - marker.length - cellWidth(hintPart));
-  return `${marker}${truncateMiddle(name, budget)}${hintPart}`;
+  const inner = Math.max(0, Math.max(1, cols) - cellWidth(marker));
+  if (!hint) return `${marker}${truncateMiddle(name, inner)}`;
+  const sep = "  ";
+  const nameMin = Math.min(cellWidth(name), Math.min(inner, 8));
+  const hintBudget = Math.max(0, inner - nameMin - cellWidth(sep));
+  const hintShown = hintBudget > 0 ? truncateMiddle(hint, hintBudget) : "";
+  const hintPart = hintShown ? `${sep}${hintShown}` : "";
+  const nameBudget = Math.max(0, inner - cellWidth(hintPart));
+  return `${marker}${truncateMiddle(name, nameBudget)}${hintPart}`;
 }
 
 export const EMPTY_STATE_TEXT =

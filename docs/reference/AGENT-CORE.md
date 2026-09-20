@@ -16,7 +16,7 @@ edit (replace_all), interruptible bash, web_search, fetch, skill
 index, prefix `cache_control` on tools and system (`{ type: "ephemeral" }` with no `ttl`; Anthropic default is 5 minutes), last history-block cache pin, GPT-5.6 explicit prompt cache, session `prompt_cache_key` by model family,
 429 and network retry, model-aware `/effort`, live provider reasoning, request-only working-set overlay,
 traces, provider auth, live model list, full-screen TUI, Termina sidecar host contract, core worldline session slice,
-selectable bash approval policies, `/permissions`, /clear /compact, -p print, token/cache/context status, stdio MCP). Zone 1 is identity, environment,
+selectable bash approval policies, `/permissions`, `/skills`, /clear /compact, -p print, token/cache/context status, stdio MCP). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
 Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
 then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
@@ -311,6 +311,8 @@ usage row shows cumulative input/output tokens, cumulative
 cache-read share, estimated current context-window use, and the last priced
 main-model call. Typing `/` lists commands;
 Tab completes; arrows move the highlight. `/help` prints the same list.
+`/skills` lists discovered skills from the frozen index; selecting one
+(or `/skills <name>`) starts a turn that reads that `SKILL.md` with `read_file`.
 `/login` opens a provider picker. OAuth is the provider name (`OpenAI`);
 API key is `OpenAI (key)`. OpenAI OAuth is the ChatGPT Codex subscription;
 OpenAI key is the platform API. `/login [provider] [oauth|key]` and

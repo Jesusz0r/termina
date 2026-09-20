@@ -5,7 +5,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { formatSkillIndex as formatCompactSkillIndex } from "../skill-index.ts";
+import { formatSkillIndex as formatCompactSkillIndex, type SkillIndexSkill } from "../skill-index.ts";
 import { formatEnvironment } from "./env.ts";
 import { freezeCwd, readBoundedRegularFile, underRoot } from "./files.ts";
 import {
@@ -59,7 +59,7 @@ export function buildFrozenSystem(opts: {
   userAgentsPath: string | null;
   userSkillDir: string | null;
   probes?: boolean;
-}): { system: string; allow: Set<string> } {
+}): { system: string; allow: Set<string>; skills: SkillIndexSkill[] } {
   const root = freezeCwd(opts.cwd);
   const skillDirs: string[] = [];
   if (opts.userSkillDir) skillDirs.push(opts.userSkillDir);
@@ -111,17 +111,19 @@ export function buildFrozenSystem(opts: {
   } catch {
     /* omit escaped project instructions */
   }
-  return { system: parts.join("\n\n"), allow };
+  return { system: parts.join("\n\n"), allow, skills: scanned.skills };
 }
 
 interface FrontMatter {
   systemPrompt: () => string;
   readonly allowPaths: Set<string>;
+  readonly skills: readonly SkillIndexSkill[];
 }
 
 export function createFrontMatter(opts: { canonicalCwd: string }): FrontMatter {
   let frozenSystem: string | null = null;
   let allowPaths = new Set<string>();
+  let frozenSkills: readonly SkillIndexSkill[] = [];
   function freezeFrontMatter(): string {
     if (frozenSystem !== null) return frozenSystem;
     const built = buildFrozenSystem({
@@ -131,6 +133,7 @@ export function createFrontMatter(opts: { canonicalCwd: string }): FrontMatter {
       probes: true,
     });
     allowPaths = built.allow;
+    frozenSkills = built.skills;
     frozenSystem = built.system;
     return frozenSystem;
   }
@@ -138,6 +141,10 @@ export function createFrontMatter(opts: { canonicalCwd: string }): FrontMatter {
     systemPrompt: () => freezeFrontMatter(),
     get allowPaths() {
       return allowPaths;
+    },
+    get skills() {
+      freezeFrontMatter();
+      return frozenSkills;
     },
   };
 }

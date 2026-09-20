@@ -4012,6 +4012,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("slash /clear still matches", matchingSlashCommands("/clear").some((c) => c.submit === "/clear"));
     check("slash /compact is listed", SLASH_COMMANDS.some((c) => c.name === "/compact"));
     check("slash /plan is listed", SLASH_COMMANDS.some((c) => c.name === "/plan" && c.hint.startsWith("session ·")));
+    check("slash /skills is listed", SLASH_COMMANDS.some((c) => c.name === "/skills" && c.hint.startsWith("session ·")));
     check("slash /effort is listed", SLASH_COMMANDS.some((c) => c.name === "/effort"));
     check(
       "slash /effort lists the full default range",
@@ -4555,6 +4556,30 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "slash / lists every command",
       matchingSlashCommands("/").map((c) => c.name).join(" ") === SLASH_COMMANDS.map((c) => c.name).join(" "),
     );
+    check("slash /s is skills", matchingSlashCommands("/s").map((c) => c.name).join(" ") === "/skills");
+    check("slash /skills is exact without rows", matchingSlashCommands("/skills").map((c) => c.name).join(" ") === "/skills");
+    check(
+      "slash /skills lists picker rows",
+      matchingSlashCommands("/skills", SLASH_COMMANDS, [], [], [
+        { name: "review", hint: "review the diff", submit: "/skills review" },
+        { name: "qa", hint: "run implementation QA", submit: "/skills qa" },
+      ]).map((c) => c.name).join(" ") === "review qa",
+    );
+    check(
+      "slash /skills q filters qa",
+      matchingSlashCommands("/skills q", SLASH_COMMANDS, [], [], [
+        { name: "review", hint: "review the diff", submit: "/skills review" },
+        { name: "qa", hint: "run implementation QA", submit: "/skills qa" },
+      ])[0]?.submit === "/skills qa",
+    );
+    check(
+      "slash Tab /skills completes to /skills ",
+      completeSlashLine("/skills", SLASH_COMMANDS, [], [], [
+        { name: "review", hint: "review the diff", submit: "/skills review" },
+        { name: "qa", hint: "run implementation QA", submit: "/skills qa" },
+      ]) === "/skills ",
+    );
+    check("slash Tab /s completes to /skills", completeSlashLine("/s") === "/skills");
     check(
       "slash /m is model and models",
       matchingSlashCommands("/m").map((c) => c.name).join(" ") === "/model /models",

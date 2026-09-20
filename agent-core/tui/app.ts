@@ -99,6 +99,7 @@ export class AgentTui {
   private escTimer: ReturnType<typeof setTimeout> | null = null;
   private modelRows: SlashCommand[] = [];
   private effortRows: SlashCommand[] = effortCommandRows();
+  private skillRows: SlashCommand[] = [];
   private choicePrompt = "";
   private choiceRows: SlashCommand[] = [];
   private choiceDraft: { chars: string[]; cursor: number } | null = null;
@@ -206,6 +207,11 @@ export class AgentTui {
 
   setEffortLevels(levels: readonly string[]): void {
     this.effortRows = effortCommandRows(levels);
+    this.schedule();
+  }
+
+  setSkillRows(rows: SlashCommand[]): void {
+    this.skillRows = rows;
     this.schedule();
   }
 
@@ -878,7 +884,7 @@ export class AgentTui {
   private matches(): SlashCommand[] {
     if (this.rawInput || this.search || this.pickerSuppressed) return [];
     if (this.choiceRows.length > 0) return this.choiceRows;
-    const slash = matchingSlashCommands(this.chars.join(""), this.commands, this.modelRows, this.effortRows);
+    const slash = matchingSlashCommands(this.chars.join(""), this.commands, this.modelRows, this.effortRows, this.skillRows);
     if (slash.length > 0) return slash;
     return this.fileRows();
   }
@@ -1007,7 +1013,8 @@ export class AgentTui {
         (line === "/login" ||
           line === "/logout" ||
           line === "/permissions" ||
-          (line === "/models" && this.modelRows.length > 0))
+          (line === "/models" && this.modelRows.length > 0) ||
+          (line === "/skills" && this.skillRows.length > 0))
       ) {
         this.chars = splitGraphemes(line);
         this.cursor = this.chars.length;
@@ -1206,7 +1213,7 @@ export class AgentTui {
           return;
         }
       }
-      const next = completeSlashLine(text, this.commands, this.modelRows, this.effortRows);
+      const next = completeSlashLine(text, this.commands, this.modelRows, this.effortRows, this.skillRows);
       if (next !== text) {
         this.chars = splitGraphemes(next);
         this.cursor = this.chars.length;

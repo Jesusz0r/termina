@@ -235,6 +235,7 @@ import {
 } from "./main/cache-diagnostics.ts";
 import { formatNetworkError, isRetryableNetworkError, retryAfter, retryNetworkAfter } from "./main/retry-after.ts";
 import { planSidecarText, planSlashSubmit } from "./main/plan-slash.ts";
+import { parseSkillCommand, skillSlashSubmit } from "./main/skill-slash.ts";
 import {
   SubagentRegistry,
   appendSubagentInboxMessage,
@@ -316,7 +317,7 @@ import {
 } from "./mcp.ts";
 
 import { AgentTui } from "./tui.ts";
-import { SLASH_COMMANDS, TUI_SHORTCUTS } from "./tui-text.ts";
+import { SLASH_COMMANDS, TUI_SHORTCUTS, skillCommandRows } from "./tui-text.ts";
 import { parseHideThinking } from "../shared/terminal-control.ts";
 
 /** Example starting values from docs/AGENT-CORE.md; never spec constants. */
@@ -5325,6 +5326,17 @@ function printLoginPicker(cmd: "/login" | "/logout"): void {
   for (const i of items) out(`  ${i.label.padEnd(width)}  ${i.hint}  ${i.command}\n`);
 }
 
+function printSkillPicker(): void {
+  const rows = skillCommandRows(frontMatter.skills);
+  if (rows.length === 0) {
+    out("(no skills found)\n");
+    return;
+  }
+  const width = Math.max(...rows.map((r) => r.name.length));
+  out("pick a skill:\n");
+  for (const r of rows) out(r.hint ? `  ${r.name.padEnd(width)}  ${r.hint}\n` : `  ${r.name}\n`);
+}
+
 let running = false;
 let queuedLine: string | null = null;
 let authBusy = false;
@@ -5907,6 +5919,27 @@ function dispatchLine(line: string): void {
     showPrompt();
     return;
   }
+  const skillCmd = parseSkillCommand(line, frontMatter.skills);
+  if (skillCmd) {
+    if ("error" in skillCmd) {
+      out(`(${skillCmd.error})\n`);
+      showPrompt();
+      return;
+    }
+    if ("list" in skillCmd) {
+      printSkillPicker();
+      showPrompt();
+      return;
+    }
+    if (running) {
+      queueTypedLine(line);
+      showPrompt();
+      return;
+    }
+    submit(skillSlashSubmit(skillCmd.skill, skillCmd.request));
+    showPrompt();
+    return;
+  }
   if (line.startsWith("/")) {
     out(`(unknown command: ${line} — type /help)\n`);
     showPrompt();
@@ -6012,6 +6045,7 @@ async function main(): Promise<void> {
     });
     effortWanted = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
     surface.setEffortLevels(supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model), routeReasoningLevels()));
+    surface.setSkillRows(skillCommandRows(frontMatter.skills));
     surface.setStatus({
       model: `${route.provider}/${route.model}`,
       effort: clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),

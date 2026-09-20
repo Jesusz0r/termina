@@ -81,6 +81,7 @@ describe("skill discovery line endings (#153)", () => {
     const built = buildFrozenSystem({ cwd: root, userAgentsPath: null, userSkillDir: null, probes: false });
     expect(built.system).toContain("crlf-skill");
     expect(built.system).not.toContain("crlf-off");
+    expect(built.skills.map((s) => s.name)).toEqual(["crlf-skill"]);
     expect([...built.allow].some((p) => p.endsWith(join("on", "SKILL.md")))).toBe(true);
     expect([...built.allow].some((p) => p.endsWith(join("off", "SKILL.md")))).toBe(false);
   });

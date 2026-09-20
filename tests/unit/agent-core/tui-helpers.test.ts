@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { AgentTui } from "../../../agent-core/tui.ts";
 import { sourceTail } from "../../../agent-core/tui/layout.ts";
 import { TRANSCRIPT_TRIM_TARGET, TRUNCATION_MARKER } from "../../../agent-core/tui/transcript.ts";
-import { matchingSlashCommands, SLASH_COMMANDS } from "../../../agent-core/tui-text.ts";
+import { cellWidth, formatPickerRow, matchingSlashCommands, SLASH_COMMANDS, skillCommandRows } from "../../../agent-core/tui-text.ts";
 
 function makeTui() {
   return new AgentTui({
@@ -17,13 +17,14 @@ function makeTui() {
 }
 
 describe("TUI same-file helpers (#352)", () => {
-  it("keeps pickerHead local and shared by the four picker heads", () => {
+  it("keeps pickerHead local and shared by the picker heads", () => {
     const src = readFileSync(new URL("../../../agent-core/tui-text.ts", import.meta.url), "utf8");
     expect(src).toMatch(/function pickerHead\(/);
     expect(src).not.toMatch(/export function pickerHead/);
     expect(src).toContain('pickerHead(line, space, commands, ["/login", "/logout"])');
     expect(src).toContain('pickerHead(line, space, commands, ["/models", "/model"])');
     expect(src).toContain('pickerHead(line, space, commands, ["/effort"])');
+    expect(src).toContain('pickerHead(line, space, commands, ["/skills"])');
     expect(src).toContain('pickerHead(line, space, commands, ["/permissions"])');
   });
 
@@ -50,6 +51,52 @@ describe("TUI same-file helpers (#352)", () => {
       "/permissions always",
     ]);
     expect(matchingSlashCommands("/models", SLASH_COMMANDS).map((row) => row.name)).toEqual(["/models"]);
+  });
+
+  it("lists skills under /skills and submits the selected name", () => {
+    const rows = skillCommandRows([
+      { name: "review", description: "review the diff" },
+      { name: "qa", description: "run implementation QA" },
+    ]);
+    expect(matchingSlashCommands("/sk").map((row) => row.name)).toEqual(["/skills"]);
+    expect(matchingSlashCommands("/skills").map((row) => row.name)).toEqual(["/skills"]);
+    expect(matchingSlashCommands("/skills", SLASH_COMMANDS, [], [], rows).map((row) => row.name)).toEqual([
+      "review",
+      "qa",
+    ]);
+    expect(matchingSlashCommands("/skills q", SLASH_COMMANDS, [], [], rows).map((row) => row.submit)).toEqual([
+      "/skills qa",
+    ]);
+    const submitted: string[] = [];
+    const tui = new AgentTui({
+      stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: (line) => submitted.push(line),
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    tui.setSkillRows(rows);
+    tui.feed("/sk\r");
+    expect(submitted).toEqual([]);
+    expect(tui.frame()).toContain("review");
+    expect(tui.frame()).toContain("qa");
+    tui.feed("\x1b[B\r");
+    expect(submitted).toEqual(["/skills qa"]);
+  });
+
+  it("skips unusable skill names and keeps picker rows inside the terminal width", () => {
+    expect(
+      skillCommandRows([
+        { name: "ok", description: "ready" },
+        { name: "bad\nname", description: "nope" },
+        { name: "\x07bell", description: "nope" },
+        { name: "  ", description: "nope" },
+      ]).map((row) => row.name),
+    ).toEqual(["ok"]);
+    const longHint = "Use this skill when asked to verify, QA, validate, inspect, or review a very long trigger.";
+    const row = formatPickerRow("implementation-qa", longHint, 40, true);
+    expect(cellWidth(row)).toBeLessThanOrEqual(40);
+    expect(row.startsWith("▸ ")).toBe(true);
   });
 
   it("caps a live stream with sourceTail", () => {

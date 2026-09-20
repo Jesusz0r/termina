@@ -139,7 +139,7 @@ tab strip cycles its tabs.
 ### Talking to the agent
 
 A core tab is a full-screen TUI: `/login`, `/models`, `/clear`, `/compact`,
-`/resume`, `/effort`. Every turn starts with a bounded project snapshot (top
+`/resume`, `/effort`, `/skills`. Every turn starts with a bounded project snapshot (top)
 of the tree first), so the agent is oriented without spending tool calls on
 discovery — file tools always see live state.
 
@@ -148,7 +148,9 @@ Tab completes, Enter inserts the path, Enter again submits. Esc closes the
 picker and keeps what you typed. Ctrl+R searches prompt history. Drag to
 select transcript text; Cmd/Ctrl+C copies. Reasoning starts at medium;
 `/effort` shows the levels available for the current model, and your last
-choice sticks: new tabs reopen on it (clamped to what each model supports). Ctrl+J inserts
+choice sticks: new tabs reopen on it (clamped to what each model supports). Type `/skills`
+to pick a discovered skill (`~/.agents/skills`, then `.agents/skills` in the project);
+selecting one starts a turn that reads that skill and follows it. Ctrl+J inserts
 a newline; Enter submits. Paste keeps newlines. `/help` lists keys.
 Paste a screenshot (Cmd/Ctrl+V) to attach it to the next prompt — up to
 four images, about 4 MB each. The status line shows how many are waiting.
