@@ -295,6 +295,8 @@ function verifyEnv(): Record<string, string | undefined> {
 
 /** Thinking levels the agent accepts. Reject anything else at spawn. */
 const AGENT_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const AGENT_PERMISSION_MODES = new Set(["always", "dangerous", "ask"]);
+type AgentPermissionMode = "always" | "dangerous" | "ask";
 const MAX_AGENT_MODEL_CHARS = 256;
 const MAX_AGENT_USAGE_CHARS = 512;
 
@@ -639,10 +641,12 @@ class TerminaApp {
     // Primary terminals start in `ask` (no TERMINA_CORE_APPROVE bypass at
     // launch); only an explicit host-level opt-in lets a child auto-approve.
     // Worldline candidates never qualify: the host refuses their spawns.
-    autoApproveAllowedFor: (terminalId) =>
-      !this.runtime.hasCandidateSidecar(terminalId)
-      && !this.isWorldlineTerminal(terminalId)
-      && cleanEnv().TERMINA_CORE_APPROVE === "all",
+    autoApproveAllowedFor: (terminalId) => {
+      if (this.runtime.hasCandidateSidecar(terminalId) || this.isWorldlineTerminal(terminalId)) return false;
+      const inst = this.runtime.get(terminalId);
+      if (inst?.permissionMode === "always") return true;
+      return cleanEnv().TERMINA_CORE_APPROVE === "all";
+    },
   });
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
   private appUpdater: AppUpdateController | null = null;
@@ -2797,12 +2801,19 @@ class TerminaApp {
     return next;
   }
 
+  private usableAgentPermission(mode: string | null | undefined): AgentPermissionMode | null {
+    if (typeof mode !== "string") return null;
+    const next = mode.trim().toLowerCase();
+    return AGENT_PERMISSION_MODES.has(next) ? next as AgentPermissionMode : null;
+  }
+
   private applyAgentSettings(
     inst: AgentTerminalInstance,
     model: string | null | undefined,
     thinkingLevel: string | null | undefined,
     usage?: string | null | undefined,
     expected?: PtyRendererSendTarget | null,
+    permissions?: string | null | undefined,
   ): void {
     let changed = false;
     const nextModel = this.usableAgentModel(model);
@@ -2825,6 +2836,11 @@ class TerminaApp {
     const nextUsage = usage === undefined ? null : this.usableAgentUsage(usage);
     if (nextUsage && nextUsage !== inst.usage) {
       inst.usage = nextUsage;
+      changed = true;
+    }
+    const nextPermissions = this.usableAgentPermission(permissions);
+    if (nextPermissions && nextPermissions !== inst.permissionMode) {
+      inst.permissionMode = nextPermissions;
       changed = true;
     }
     if (changed) this.sendAgentStatus(inst, expected);
@@ -4717,10 +4733,10 @@ class TerminaApp {
         break;
       }
       case "agent_settings":
-        this.applyAgentSettings(inst, event.model, event.thinkingLevel, event.usage, rendererTarget);
+        this.applyAgentSettings(inst, event.model, event.thinkingLevel, event.usage, rendererTarget, event.permissions);
         break;
       case "agent_start":
-        this.applyAgentSettings(inst, event.model, event.thinkingLevel, undefined, rendererTarget);
+        this.applyAgentSettings(inst, event.model, event.thinkingLevel, undefined, rendererTarget, event.permissions);
         inst.busy = true;
         // Track busy agents: a second agent starting in the same workspace
         // overlaps this run (marked in coupleRunStart, WORLDLINES §5).

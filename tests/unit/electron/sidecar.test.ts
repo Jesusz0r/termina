@@ -346,6 +346,36 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
       }
     });
 
+    it("parses parent permission mode on agent settings and start", () => {
+      const settings = sidecarEventFromRecord({
+        bridgeId: "core-1",
+        seq: 2,
+        t: "agent_settings",
+        permissions: "always",
+      });
+      expect(settings?.t).toBe("agent_settings");
+      if (settings?.t !== "agent_settings") return;
+      expect(settings.permissions).toBe("always");
+      const start = sidecarEventFromRecord({
+        bridgeId: "core-1",
+        seq: 3,
+        t: "agent_start",
+        permissions: "dangerous",
+      });
+      expect(start?.t).toBe("agent_start");
+      if (start?.t !== "agent_start") return;
+      expect(start.permissions).toBe("dangerous");
+      const forged = sidecarEventFromRecord({
+        bridgeId: "core-1",
+        seq: 4,
+        t: "agent_settings",
+        permissions: "bypass",
+      });
+      expect(forged?.t).toBe("agent_settings");
+      if (forged?.t !== "agent_settings") return;
+      expect(forged.permissions).toBeUndefined();
+    });
+
     it("parses the subagent spawn announcement", () => {
       const event = sidecarEventFromRecord({
         bridgeId: "core-1",

@@ -4189,6 +4189,7 @@ function logSettings(): void {
     model: `${route.provider}/${route.model}`,
     thinkingLevel: clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
     usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats(), route.provider),
+    permissions: permissionMode,
   });
 }
 
@@ -4511,6 +4512,7 @@ async function runPrompt(
     entryId: String(userMsg.sseq),
     parentEntryId: null,
     thinkingLevel: clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
+    permissions: permissionMode,
   });
   let storageFailure: string | null = null;
   let taskFailure: string | null = null;

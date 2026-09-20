@@ -122,6 +122,7 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
         parentEntryId: optionalStringOrNull(rec.parentEntryId),
         model: optionalStringOrNull(rec.model),
         thinkingLevel: optionalStringOrNull(rec.thinkingLevel),
+        permissions: optionalPermissionMode(rec.permissions),
       };
     case "agent_settled":
       return { ...meta, t: "agent_settled", error: optionalStringOrNull(rec.error) };
@@ -132,6 +133,7 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
         model: optionalStringOrNull(rec.model),
         thinkingLevel: optionalStringOrNull(rec.thinkingLevel),
         usage: optionalStringOrNull(rec.usage),
+        permissions: optionalPermissionMode(rec.permissions),
       };
     case "plan":
       return { ...meta, t: "plan", text: optionalString(rec.text) };
@@ -161,6 +163,10 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function optionalPermissionMode(value: unknown): "always" | "dangerous" | "ask" | undefined {
+  return value === "always" || value === "dangerous" || value === "ask" ? value : undefined;
 }
 
 

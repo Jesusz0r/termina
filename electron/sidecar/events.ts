@@ -97,9 +97,10 @@ export type SidecarEvent =
       parentEntryId?: string | null;
       model?: string | null;
       thinkingLevel?: string | null;
+      permissions?: string | null;
     })
   | (SidecarMeta & { t: "agent_settled"; error?: string | null })
-  | (SidecarMeta & { t: "agent_settings"; model?: string | null; thinkingLevel?: string | null; usage?: string | null })
+  | (SidecarMeta & { t: "agent_settings"; model?: string | null; thinkingLevel?: string | null; usage?: string | null; permissions?: string | null })
   | (SidecarMeta & { t: "plan"; text?: string })
   | (SidecarMeta & {
       t: "tool";
