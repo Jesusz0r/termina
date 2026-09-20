@@ -15,10 +15,34 @@ export function nextProjectId(): string {
   return `proj-${++projectSeq}`;
 }
 
+function relativeInside(parent: string, target: string): boolean {
+  const rel = relative(parent, target);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+function foldsPathCase(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "darwin" || platform === "win32";
+}
+
 /** True when `target` resolves inside `parent`. Neither path needs to exist. */
 export function pathInside(parent: string, target: string): boolean {
-  const rel = relative(resolve(parent), resolve(target));
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+  const resolvedParent = resolve(parent);
+  const resolvedTarget = resolve(target);
+  if (relativeInside(resolvedParent, resolvedTarget)) return true;
+  // macOS userData is `Termina` from app.setName but the on-disk folder may
+  // already be `termina`. Node's relative() is case-sensitive, so a roster
+  // path would otherwise look like it escaped the session root and skip discard.
+  if (!foldsPathCase()) return false;
+  return relativeInside(resolvedParent.toLowerCase(), resolvedTarget.toLowerCase());
+}
+
+/** True when two absolute paths name the same location on this volume. */
+export function sameUserPath(left: string, right: string): boolean {
+  if (left === right) return true;
+  const a = resolve(left);
+  const b = resolve(right);
+  if (a === b) return true;
+  return foldsPathCase() && a.toLowerCase() === b.toLowerCase();
 }
 
 /** Sessions directory name for a project path. One sanitizer for picker and install. */
