@@ -275,6 +275,10 @@ footprint, not these numbers.
   launch failures retry (three attempts total). Explicit resume retains the
   prior session. Cancellation escalates from SIGTERM to SIGKILL after five
   seconds; claims remain held until the child has closed.
+- Subagents are a fan-out: a turn that would start the only live child is
+  refused. Issue at least two `spawn_subagent` calls in that turn, or add a
+  sibling while another run is already active. A single subtask stays on the
+  main agent.
 
 Regression coverage: `stall-tracker.test.ts`, `tool-dispatch.test.ts`,
 `main-tool-loop.test.ts`, `provider-tool-args.test.ts`, and

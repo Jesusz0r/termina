@@ -5,8 +5,10 @@ import { join } from "node:path";
 import {
   MAX_SUBAGENT_RUNS,
   MAX_SUBAGENT_RUNS_USER,
+  MIN_SUBAGENT_RUNS,
   SUBAGENT_TOOL_DEFS,
   SubagentRegistry,
+  admitSubagentFanout,
   anchorClaimPath,
   formatSubagentBrief,
   formatSubagentResultFrame,
@@ -53,8 +55,24 @@ describe("subagents Phase 1 registry", () => {
     expect(names).toEqual(["spawn_subagent", "message_subagent"]);
     const spawn = SUBAGENT_TOOL_DEFS[0]!.input_schema as { required: string[] };
     expect(spawn.required).toEqual(["task"]);
+    const description = String(SUBAGENT_TOOL_DEFS[0]!.description);
+    expect(description).toMatch(/mailbox note/i);
+    expect(description).toMatch(/next user turn/i);
+    expect(description).toMatch(/at least two spawn_subagent/i);
+    expect(description).not.toMatch(/tool result when the run settles/i);
     const msg = SUBAGENT_TOOL_DEFS[1]!.input_schema as { required: string[] };
     expect(msg.required).toEqual(["run_id", "text"]);
+  });
+
+  it("refuses a lone spawn when no sibling is already running", () => {
+    expect(MIN_SUBAGENT_RUNS).toBe(2);
+    expect(admitSubagentFanout(0, 0).ok).toBe(true);
+    const lone = admitSubagentFanout(0, 1);
+    expect(lone.ok).toBe(false);
+    if (!lone.ok) expect(lone.error).toMatch(/at least 2/);
+    expect(admitSubagentFanout(0, 2).ok).toBe(true);
+    expect(admitSubagentFanout(1, 1).ok).toBe(true);
+    expect(admitSubagentFanout(3, 1).ok).toBe(true);
   });
 
   it("rejects empty and oversized tasks", async () => {

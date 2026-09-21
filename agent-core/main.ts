@@ -252,6 +252,7 @@ import {
   reconcileSubagentRuns,
   resolveSubagentPermissionMode,
   SUBAGENT_APPROVAL_POLL_MS,
+  admitSubagentFanout,
   subagentApprovalTimeoutMs,
   subagentChildTid,
   subagentDepthFromEnv,
@@ -4714,8 +4715,17 @@ async function runPrompt(
       const outcomes: ToolOutcome[] = [];
       const pendingOutcomes = new Map<number, Promise<ToolOutcome>>();
       const inputErrors = uses.map((use) => toolInputError(use, TOOLS));
+      const waves = toolExecutionWaves(uses);
+      const spawnFanout = admitSubagentFanout(
+        subagentRegistry.activeRuns().length,
+        waves.flat().filter((entry) =>
+          uses[entry.index]!.name === "spawn_subagent"
+          && !inputErrors[entry.index]
+          && entry.duplicateOf === undefined
+        ).length,
+      );
       try {
-      for (const wave of toolExecutionWaves(uses)) {
+      for (const wave of waves) {
         if (interrupted) break;
         const chunk = wave.map((entry) => uses[entry.index]!);
         const handles = chunk.map((use, index) => {
@@ -4738,6 +4748,9 @@ async function runPrompt(
               if (!entry.reuseResult) return done(use, "error: duplicate action in the same batch was not executed again. Inspect the first result before deciding whether another action is needed.", true);
               const original = await pendingOutcomes.get(entry.duplicateOf)!;
               return { ...original, result: { ...original.result, tool_use_id: use.id } };
+            }
+            if (use.name === "spawn_subagent" && !spawnFanout.ok) {
+              return done(use, `error: ${spawnFanout.error}`, true);
             }
             return executeTool(use, isTruncatedStopReason(result.stopReason));
           })();

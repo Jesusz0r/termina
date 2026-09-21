@@ -35,6 +35,8 @@ import {
   type EffortLevel,
 } from "./models/capabilities.ts";
 
+/** A lone child is overhead: fan out at least two, or do the work on the parent. */
+export const MIN_SUBAGENT_RUNS = 2;
 /** Anthropic rule adopted by the plan: at most 4 parallel runs. */
 export const MAX_SUBAGENT_RUNS = 4;
 /** Manual fan-out bound: user explicitly asked for many agents. Still bounded
@@ -133,7 +135,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
   {
     name: "spawn_subagent",
     description:
-      "Spawn one background subagent for an independent subtask of the current task. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately; the final result arrives as a tool result when the run settles. Siblings never share a subtask; pass paths to reserve them. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up. Pass user_requested true only when the user explicitly asked for many/parallel agents in this turn: it bypasses the 4-run auto cap.",
+      "Spawn a background subagent for one independent subtask. Never spawn a single child: issue at least two spawn_subagent calls in the same turn for parallel work; a lone subtask belongs on this agent. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately and does not wait: continue this turn, then stop. When the child settles, the host writes a mailbox note; you see that note only on the next user turn — summarize it then and never poll the finished run. Siblings never share a subtask; pass paths to reserve them. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up. Pass user_requested true only when the user explicitly asked for many/parallel agents in this turn: it bypasses the 4-run auto cap.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -179,6 +181,22 @@ export const WORLDLINE_CANDIDATE_ENV = "TERMINA_WORLDLINE_CANDIDATE";
 /** True when this core runs inside a sandboxed worldline candidate. */
 export function isWorldlineCandidateEnv(env: NodeJS.ProcessEnv = process.env): boolean {
   return env[WORLDLINE_CANDIDATE_ENV] === "1";
+}
+
+/** Refuse a turn that would start the only live child. `batchSpawnCount` is
+ *  distinct executable spawn_subagent calls in this assistant message (invalid
+ *  args and duplicate-action entries do not count). Adding a sibling while
+ *  another run is already active is allowed. */
+export function admitSubagentFanout(
+  activeCount: number,
+  batchSpawnCount: number,
+): { ok: true } | { ok: false; error: string } {
+  if (batchSpawnCount <= 0) return { ok: true };
+  if (activeCount + batchSpawnCount >= MIN_SUBAGENT_RUNS) return { ok: true };
+  return {
+    ok: false,
+    error: `spawn at least ${MIN_SUBAGENT_RUNS} subagents in the same turn for parallel work; a single subtask belongs on the main agent`,
+  };
 }
 
 /** Children never receive `spawn_subagent` (max depth 1); main.ts spreads this into TOOLS. */
@@ -497,10 +515,12 @@ export function readSubagentResultFile(
 }
 
 /**
- * Settle locally active runs whose host result files landed. Runs once per
- * parent turn next to the mailbox read; frees slots and claim holds. The
- * human-readable result arrives via the host mailbox note; this only
- * reconciles registry truth. Consumed result files are deleted best-effort:
+ * Settle locally active runs whose host result files landed. The parent
+ * calls this at turn start, on each model loop, and from the idle approval
+ * poll so slots (and the TUI live-run count) drop when a result file lands
+ * without waiting for the next user turn. The human-readable result arrives
+ * via the host mailbox note; this only reconciles registry truth. Consumed
+ * result files are deleted best-effort:
  * the scanned outcome already lives on the run record, and a crash between
  * settle and delete is harmless (the run is no longer active, so a second
  * read can never re-settle it).
