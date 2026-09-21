@@ -121,12 +121,15 @@ describe("parent mid-stream approval polling", () => {
     return `data: ${JSON.stringify(value)}\n\n`;
   }
 
-  function toolCallBody(id: string, toolName: string, args: string): string {
+  function toolCallsBody(calls: Array<{ id: string; name: string; args: string }>): string {
+    const blocks = calls.flatMap((call, index) => [
+      sseEvent({ type: "content_block_start", index, content_block: { type: "tool_use", id: call.id, name: call.name, input: {} } }),
+      sseEvent({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: call.args } }),
+      sseEvent({ type: "content_block_stop", index }),
+    ]);
     return [
       sseEvent({ type: "message_start", message: { usage: {} } }),
-      sseEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id, name: toolName, input: {} } }),
-      sseEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: args } }),
-      sseEvent({ type: "content_block_stop", index: 0 }),
+      ...blocks,
       sseEvent({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: {} }),
       sseEvent({ type: "message_stop" }),
     ].join("");
@@ -151,7 +154,10 @@ describe("parent mid-stream approval polling", () => {
     const childTid = `sub-${terminalId}-${runId}`;
     const sessionId = `${terminalId}-session`;
     const sessionFile = join(dir, sessionId, "current", "session.jsonl");
-    const spawnBody = toolCallBody("call-1", "spawn_subagent", JSON.stringify({ task: "background job" }));
+    const spawnBody = toolCallsBody([
+      { id: "call-1", name: "spawn_subagent", args: JSON.stringify({ task: "background job" }) },
+      { id: "call-2", name: "spawn_subagent", args: JSON.stringify({ task: "sibling job" }) },
+    ]);
     const doneBody = finalBody("parent done");
     // The second model turn streams slowly: without a mid-stream poller the
     // headless deny would never land before the run settles.

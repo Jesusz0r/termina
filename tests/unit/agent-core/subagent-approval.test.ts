@@ -29,11 +29,18 @@ describe("Subagent Approval Engine Contract", () => {
   }
 
   function toolCallBody(id: string, toolName: string, args: string): string {
+    return toolCallsBody([{ id, name: toolName, args }]);
+  }
+
+  function toolCallsBody(calls: Array<{ id: string; name: string; args: string }>): string {
+    const blocks = calls.flatMap((call, index) => [
+      sseEvent({ type: "content_block_start", index, content_block: { type: "tool_use", id: call.id, name: call.name, input: {} } }),
+      sseEvent({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: call.args } }),
+      sseEvent({ type: "content_block_stop", index }),
+    ]);
     return [
       sseEvent({ type: "message_start", message: { usage: {} } }),
-      sseEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id, name: toolName, input: {} } }),
-      sseEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: args } }),
-      sseEvent({ type: "content_block_stop", index: 0 }),
+      ...blocks,
       sseEvent({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: {} }),
       sseEvent({ type: "message_stop" }),
     ].join("");
@@ -218,10 +225,13 @@ describe("Subagent Approval Engine Contract", () => {
     mkdirSync(dir, { recursive: true });
     const sessionId = "term-brief-session";
     const sessionFile = join(dir, sessionId, "current", "session.jsonl");
-    const spawnBody = (id: string, task: string, paths: string[]) => toolCallBody(id, "spawn_subagent", JSON.stringify({ task, paths }));
+    const spawnBody = (id: string, task: string, paths: string[]) =>
+      ({ id, name: "spawn_subagent", args: JSON.stringify({ task, paths }) });
     const bodies = [
-      spawnBody("call-1", "first job", ["a-claim.ts"]),
-      spawnBody("call-2", "second job", ["b-claim.ts"]),
+      toolCallsBody([
+        spawnBody("call-1", "first job", ["a-claim.ts"]),
+        spawnBody("call-2", "second job", ["b-claim.ts"]),
+      ]),
       finalBody("parent done"),
     ];
     const childScript = `
