@@ -5238,6 +5238,18 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     imgTui.setPendingImageCount(2);
     imgTui.appendPlain("x");
     check("tui status shows pending images", imgTui.frame().includes("2 img"));
+    const subTui = new tuiMod.AgentTui({
+      stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: () => {},
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    subTui.setSubagentCount(2);
+    subTui.appendPlain("x");
+    check("tui status shows live subagents", subTui.frame().includes("2 sub"));
+    subTui.setSubagentCount(0);
+    check("tui status hides subagents when none are live", !subTui.frame().includes("2 sub"));
     const combinedStatusTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -5253,6 +5265,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     };
     combinedStatusTui.setStatus(combinedStatus);
     combinedStatusTui.setPendingImageCount(2);
+    combinedStatusTui.setSubagentCount(2);
     combinedStatusTui.setQueued("queue a late UTF-8 ✅ mutation");
     const combinedStatusHeader = combinedStatusTui.frame().split("\n").at(-1) ?? "";
     check(
@@ -5260,6 +5273,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       combinedStatusHeader.includes("maximum") &&
         combinedStatusHeader.includes("perm ask") &&
         combinedStatusHeader.includes("2 img") &&
+        combinedStatusHeader.includes("2 sub") &&
         combinedStatusHeader.includes("queued") &&
         !combinedStatusHeader.includes("oauth") &&
         tuiText.cellWidth(combinedStatusHeader) <= 80,

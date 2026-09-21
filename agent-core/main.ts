@@ -1459,12 +1459,22 @@ function clearSubagentApprovals(): void {
 
 let subagentApprovalTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Mid-stream poller: a long parent stream must not hold child approvals hostage. */
+/** True while the parent turn is live or a child can still ask for approval. */
+function subagentApprovalsNeedPoll(): boolean {
+  return running || subagentRegistry.activeRuns().length > 0;
+}
+
+/** Mid-stream poller: a long parent stream must not hold child approvals hostage.
+ *  Fire-and-forget children also need this after the parent settles: bash/protected
+ *  asks land while the parent is idle, and a stopped timer used to deny them all.
+ *  The same tick reconciles result files so the title-line count drops without
+ *  waiting for the next user turn. */
 function startSubagentApprovalTimer(): void {
   if (subagentApprovalTimer) return;
   subagentApprovalTimer = setInterval(() => {
-    if (!running) return;
+    if (!subagentApprovalsNeedPoll()) return;
     try {
+      syncSubagentChrome();
       pollSubagentApprovals();
     } catch {
       /* Best-effort: the per-turn poll retries. */
@@ -1475,9 +1485,18 @@ function startSubagentApprovalTimer(): void {
 }
 
 function stopSubagentApprovalTimer(): void {
+  if (subagentApprovalsNeedPoll()) return;
   if (!subagentApprovalTimer) return;
   clearInterval(subagentApprovalTimer);
   subagentApprovalTimer = null;
+}
+
+/** Registry truth plus the TUI live-run count. Reconcile first so finished
+ *  children leave the title as soon as their result files land. */
+function syncSubagentChrome(): void {
+  if (eventsDir && terminalId) reconcileSubagentRuns(eventsDir, terminalId, subagentRegistry);
+  surface?.setSubagentCount(subagentRegistry.activeRuns().length);
+  stopSubagentApprovalTimer();
 }
 
 /**
@@ -1724,9 +1743,13 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
         depth: SUBAGENT_DEPTH,
       },
     });
-    if (!got.ok) return done(use, `error: ${got.error}`, true);
+    if (!got.ok) {
+      syncSubagentChrome();
+      return done(use, `error: ${got.error}`, true);
+    }
     if (interrupted) {
       subagentRegistry.settleRun(got.run.id, "interrupted before host handoff", "failed");
+      syncSubagentChrome();
       return done(use, "(interrupted by user; subagent not started)", true);
     }
     // Hand the validated run to the host: task file first (it lands before
@@ -1742,9 +1765,11 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     const handoff = writeSubagentTaskFile(eventsDir, got.run, { parentTerminalId: terminalId, cwd: canonicalCwd, brief });
     if (!handoff.ok) {
       subagentRegistry.settleRun(got.run.id, `host handoff failed: ${handoff.error}`, "failed");
+      syncSubagentChrome();
       return done(use, `error: ${handoff.error}`, true);
     }
     sidecar.logEvent(subagentSpawnSidecarRecord(got.run.id, handoff.file, got.run.userRequested));
+    syncSubagentChrome();
     return done(use, JSON.stringify({ runId: got.run.id }));
   }
   if (use.name === "message_subagent") {
@@ -4425,8 +4450,8 @@ async function runPrompt(
     ? readContextFilesResult(eventsDir, terminalId, { shouldStop: () => interrupted })
     : null;
   // Free subagent slots whose host result files landed. Display rides the
-  // host mailbox note; this only reconciles registry truth.
-  if (eventsDir && terminalId) reconcileSubagentRuns(eventsDir, terminalId, subagentRegistry);
+  // host mailbox note; this also refreshes the title-line live-run count.
+  syncSubagentChrome();
   const context = contextResult?.text ?? "";
   currentHostContext = contextResult
     ? {
@@ -4517,7 +4542,9 @@ async function runPrompt(
       if (interrupted) break;
       drainSubagentInbox();
       // Child approval requests arrive mid-run; poll every model turn so a
-      // picker (or fast deny) lands within a turn, not a user turn.
+      // picker (or fast deny) lands within a turn, not a user turn. Reconcile
+      // first so a finished child leaves the title before the next model call.
+      syncSubagentChrome();
       pollSubagentApprovals();
       if (!resumePaused) {
         await reclaim();
@@ -4865,8 +4892,9 @@ async function runPrompt(
   // second prompt must not replace `activeTraceTask` while this task's
   // task-settled record is still being written.
   activeRequestOverlay = null;
-  stopSubagentApprovalTimer();
   running = false;
+  syncSubagentChrome();
+  stopSubagentApprovalTimer();
   syncIndicators();
   showPrompt();
 }
@@ -5039,6 +5067,7 @@ function resetLiveSessionState(): void {
   revisions = 0;
   revisionKinds = [];
   surface?.setStatus({ permissions: permissionMode });
+  syncSubagentChrome();
 }
 
 /** Test seam: fail the next session-writer open (covers /clear recovery). */

@@ -37,6 +37,10 @@ describe("Subagent Wiring Invariants", () => {
     assert.match(agentMain, /if \(hostBridge && eventsDir && terminalId\)/);
     assert.match(agentMain, /if \(!storageFailure && hostBridge && eventsDir && terminalId\)/);
     assert.match(agentMain, /function abortPromptStart/);
+    assert.match(agentMain, /function subagentApprovalsNeedPoll/);
+    assert.match(agentMain, /function syncSubagentChrome/);
+    assert.match(agentMain, /surface\?\.setSubagentCount\(subagentRegistry\.activeRuns\(\)\.length\)/);
+    assert.match(agentMain, /syncSubagentChrome\(\);\s*pollSubagentApprovals\(\)/);
   });
 
   it("clear and close terminate owner runs", () => {

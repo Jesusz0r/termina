@@ -128,6 +128,7 @@ describe("TUI same-file helpers (#352)", () => {
     const tui = makeTui();
     tui.setStatus({ model: "anthropic/claude", effort: "max", permissions: "ask" });
     tui.setPendingImageCount(2);
+    tui.setSubagentCount(2);
     tui.setQueued("fix the test");
     const host = tui as unknown as {
       titleLine(cols: number): string;
@@ -140,6 +141,7 @@ describe("TUI same-file helpers (#352)", () => {
     expect(title).toContain(" · max");
     expect(title).toContain("perm ask");
     expect(title).toContain("2 img");
+    expect(title).toContain("2 sub");
     expect(title).toContain("queued");
     const wide = host.titleLine(120);
     expect(wide).toContain("anthropic/claude · max");

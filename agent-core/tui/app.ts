@@ -82,6 +82,7 @@ export class AgentTui {
   private model = "";
   private effort = "off";
   private pendingImageCount = 0;
+  private subagentCount = 0;
   private permissions = "";
   private queued = "";
   private pickerSuppressed = false;
@@ -131,6 +132,13 @@ export class AgentTui {
     const n = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
     if (this.pendingImageCount === n) return;
     this.pendingImageCount = n;
+    this.schedule();
+  }
+
+  setSubagentCount(count: number): void {
+    const n = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+    if (this.subagentCount === n) return;
+    this.subagentCount = n;
     this.schedule();
   }
 
@@ -1605,12 +1613,14 @@ export class AgentTui {
     const spin = this.busy ? SPIN[this.spin]! : "";
     const imageN = this.pendingImageCount;
     const images = imageN > 0 ? `${imageN} img` : "";
+    const subN = this.subagentCount;
+    const subLabel = subN > 0 ? `${subN} sub` : "";
     const permLabel = this.permissions ? `perm ${this.permissions}` : "";
     const modelLabel = this.model ? `${spin ? `${spin} ` : ""}${this.model}` : spin ? `${spin} no model` : "no model";
     let queuedLabel = this.queued ? `queued ${truncateMiddle(this.queued, 18)}` : "";
     // Model and effort are one visual group. Reserve the effort suffix before
     // truncating a long model so narrow terminals never hide the active level.
-    let extraParts = [permLabel, images, queuedLabel].filter(Boolean);
+    let extraParts = [permLabel, images, subLabel, queuedLabel].filter(Boolean);
     const separator = "  ·  ";
     const modelSuffix = ` · ${this.effort}`;
     const fixedTitleCells = (parts: string[]): number =>
@@ -1624,7 +1634,7 @@ export class AgentTui {
     // the summary before it can clip the control.
     if (queuedLabel && fixedCells >= cols) {
       queuedLabel = "queued";
-      extraParts = [permLabel, images, queuedLabel].filter(Boolean);
+      extraParts = [permLabel, images, subLabel, queuedLabel].filter(Boolean);
       fixedCells = fixedTitleCells(extraParts);
     }
     const visibleModel = truncateMiddle(modelLabel, Math.max(1, cols - fixedCells));
