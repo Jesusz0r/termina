@@ -1307,6 +1307,7 @@ async function confirmBashNow(command: string): Promise<boolean> {
   if (line === "/approve always") {
     permissionMode = "always";
     surface?.setStatus({ permissions: permissionMode });
+    logSettings();
     return true;
   }
   return line === "/approve once";
@@ -5751,6 +5752,7 @@ function dispatchLine(line: string): void {
     } else {
       permissionMode = next;
       surface?.setStatus({ permissions: permissionMode });
+      logSettings();
       out(`(permissions ${permissionMode})\n`);
     }
     showPrompt();
