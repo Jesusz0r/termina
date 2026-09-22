@@ -188,6 +188,17 @@ export function restoreHandoffAfterCut(
   return wrapped;
 }
 
+/** True when applying the cut would delete the handoff and write it back. */
+export function cutOnlyRestoresHandoff(
+  messages: readonly Pick<CompactionMessage, "content">[],
+  cut: number,
+  lastHandoffBody: string | null,
+): boolean {
+  if (cut !== 1) return false;
+  const restore = restoreHandoffAfterCut(lastHandoffBody, messages.slice(cut));
+  return restore !== null && messages[0]?.content === restore;
+}
+
 /** Remove the previous handoff from the next eviction input. The handoff is
  *  sent once in the explicit `<previous-handoff>` section of the prompt. */
 export function messagesForSummary(

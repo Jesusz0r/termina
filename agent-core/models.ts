@@ -29,6 +29,8 @@ export type ModelInfo = {
   supportedEndpoints?: string[];
   /** Max completion tokens, from provider-reported metadata (OpenRouter `top_provider`). */
   outputLimit?: number;
+  /** Rejection ceiling when the route accepts more than its operating `context`. */
+  contextCeiling?: number;
   /** Wire reasoning-level values, from provider-reported metadata (Codex `supported_reasoning_levels`). */
   reasoningLevels?: string[];
   /** Raw provider-reported parameter list (OpenRouter `supported_parameters`). */
@@ -124,6 +126,18 @@ function requireAnthropicModelsEnvelope(payload: unknown): Record<string, unknow
   return payload;
 }
 
+/** Codex `context_window` is the operating window. `max_context_window` is only
+ *  a higher ceiling the backend still accepts.
+ *  https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs */
+function codexContext(row: Record<string, unknown>): { window?: number; ceiling?: number } {
+  const base = acceptedContextWindow(row.context_window);
+  const max = acceptedContextWindow(row.max_context_window);
+  return {
+    window: base ?? max,
+    ceiling: base !== undefined && max !== undefined && max > base ? max : undefined,
+  };
+}
+
 function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | null {
   const raw =
     typeof row.id === "string"
@@ -146,9 +160,12 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
           ? row.name
           : undefined;
   const policy = providerDefinition(provider).catalog;
-  const contextRaw = Number(row.context_length ?? row.context_window ?? row.max_input_tokens ?? row.context
-    ?? policy.contextFallback?.(row));
+  const codex = provider === "openai-codex" ? codexContext(row) : null;
+  const genericContext = row.context_length ?? row.context_window ?? row.max_input_tokens ?? row.context
+    ?? policy.contextFallback?.(row);
+  const contextRaw = Number(codex?.window ?? genericContext);
   const context = acceptedContextWindow(contextRaw);
+  const contextCeiling = codex?.ceiling;
   const supportedEndpoints = policy.supportedEndpoints?.(row);
   // Doc-confirmed metadata only: OpenRouter `top_provider.max_completion_tokens`
   // and `supported_parameters` (https://openrouter.ai/docs/guides/overview/models.md);
@@ -175,6 +192,7 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
     id,
     ...(name ? { name } : {}),
     ...(context ? { context } : {}),
+    ...(contextCeiling ? { contextCeiling } : {}),
     ...(supportedEndpoints ? { supportedEndpoints } : {}),
     ...(outputLimit ? { outputLimit } : {}),
     ...(reasoningLevels?.length ? { reasoningLevels } : {}),

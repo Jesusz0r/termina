@@ -7,6 +7,7 @@ import {
   evictionBoundary,
   isUserPrompt,
   messagesForSummary,
+  cutOnlyRestoresHandoff,
   overflowProtectTurns,
   planSummary,
   restoreHandoffAfterCut,
@@ -153,6 +154,25 @@ describe("compaction planning", () => {
     // The planner can cut to the current prompt; overflow only asks for that
     // when a summarize handoff already exists.
     expect(truncateCut(history, total, 1_500, 900, 1, 1)).toBe(16);
+  });
+
+  it("skips a truncation that would only drop and restore the handoff", () => {
+    const body = "task state";
+    const wrapped = `<context-handoff>\n${body}\n</context-handoff>`;
+    const history = [
+      prompt(wrapped, 2_000),
+      prompt("run it in this session", 10),
+      msg("assistant", "tool", 200_000),
+      prompt("audit these changes", 20),
+    ];
+    const cut = truncateCut(history, 400_000, 208_000, 124_800);
+    expect(cut).toBe(1);
+    expect(cutOnlyRestoresHandoff(history, cut, body)).toBe(true);
+    expect(cutOnlyRestoresHandoff(history, 0, body)).toBe(false);
+    expect(cutOnlyRestoresHandoff(history, cut, null)).toBe(false);
+    const wider = truncateCut(history, 400_000, 208_000, 124_800, 1, 1);
+    expect(wider).toBeGreaterThan(1);
+    expect(cutOnlyRestoresHandoff(history, wider, body)).toBe(false);
   });
 
   it("restores a summarize handoff dropped by the cut, and never invents one", () => {

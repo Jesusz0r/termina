@@ -94,6 +94,24 @@ describe("catalog provider policy composition", () => {
     ]);
   });
 
+  it("keeps the Codex operating window and records a higher rejection ceiling", () => {
+    expect(parseModelsPayload({ models: [
+      { slug: "gpt-6-astra", context_window: 272000, max_context_window: 872000 },
+    ] }, "openai-codex")).toEqual([{ id: "gpt-6-astra", context: 272000, contextCeiling: 872000 }]);
+    expect(parseModelsPayload({ models: [
+      { slug: "gpt-6-astra", context_window: 272000 },
+    ] }, "openai-codex")).toEqual([{ id: "gpt-6-astra", context: 272000 }]);
+    expect(parseModelsPayload({ models: [
+      { slug: "gpt-6-astra", context_window: 272000, max_context_window: 272000 },
+    ] }, "openai-codex")).toEqual([{ id: "gpt-6-astra", context: 272000 }]);
+    expect(parseModelsPayload({ models: [
+      { slug: "gpt-6-astra", context_window: 272000, max_context_window: 128000 },
+    ] }, "openai-codex")).toEqual([{ id: "gpt-6-astra", context: 272000 }]);
+    expect(parseModelsPayload({ models: [
+      { slug: "gpt-6-astra", max_context_window: 872000 },
+    ] }, "openai-codex")).toEqual([{ id: "gpt-6-astra", context: 872000 }]);
+  });
+
   it("filters the catalog by query and marks truncated lists explicitly", () => {
     const rows = [
       { provider: "openai", id: "gpt-4o", name: "GPT-4o" },

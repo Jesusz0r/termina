@@ -132,6 +132,7 @@ import {
   LOW_WATER,
   PROTECT_TURNS,
   isContextOverflowMessage,
+  cutOnlyRestoresHandoff,
   overflowProtectTurns,
   planSummary,
   restoreHandoffAfterCut,
@@ -411,11 +412,18 @@ function contextWindow(): number {
   });
 }
 
-function usableTokens(): number {
+function usableTokens(window = contextWindow()): number {
   const thinking = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()) !== "off";
-  const window = contextWindow();
   const reserved = Math.min(outputTokenBudget({ thinking }), Math.max(0, window - 1));
   return Math.max(1, window - reserved);
+}
+
+/** Catalog rejection ceiling, or the operating window when the route has one limit. */
+function contextCeiling(): number {
+  const hit = catalogs.get(route.provider)?.find((m) => m.id === route.model);
+  const ceiling = typeof hit?.contextCeiling === "number" ? hit.contextCeiling : undefined;
+  const window = contextWindow();
+  return ceiling !== undefined && ceiling > window ? ceiling : window;
 }
 
 function protectTokens(): number {
@@ -2338,7 +2346,7 @@ function truncate(protectTurns: number = PROTECT_TURNS): boolean {
   // history and drops everything but the tail.
   const scale = estimate > 0 ? effective / estimate : 1;
   const cut = truncateCut(history, effective, usableTokens(), usableTokens() * LOW_WATER, scale, protectTurns);
-  if (cut <= 0) return false;
+  if (cut <= 0 || cutOnlyRestoresHandoff(history, cut, lastHandoff)) return false;
   const restore = restoreHandoffAfterCut(lastHandoff, history.slice(cut));
   const sseq = storageSeq + 1;
   persist({
@@ -4561,10 +4569,10 @@ async function runPrompt(
           );
         if (shouldCompactForCost) cacheCostCompactionAttempted = true;
         const compactedForCost = shouldCompactForCost ? await summarize() : false;
-        // Reclaim first. Summarize at high water, truncate only when fitting
-        // is required. recordRevision invalidates pressure from the old view.
+        // Reclaim first. Summarize at high water. Truncate only at the
+        // rejection ceiling; a one-window route uses that same budget.
         if (!compactedForCost && effectiveTotalTokens() >= usableTokens() * HIGH_WATER) {
-          if (!await summarize() && effectiveTotalTokens() >= usableTokens()) truncate();
+          if (!await summarize() && effectiveTotalTokens() >= usableTokens(contextCeiling())) truncate();
         }
       }
       resumePaused = false;
