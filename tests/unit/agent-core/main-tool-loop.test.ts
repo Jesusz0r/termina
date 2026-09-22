@@ -72,10 +72,23 @@ async function scenario(toolProgram: string, check: (result: {
   });
   const acked = new Set<string>();
   const ackTimer = setInterval(() => {
-    for (const record of jsonLines(join(events, `${terminalId}.jsonl`))) {
-      if (!["preflight_request", "checkpoint_request"].includes(record.t) || !record.requestId || acked.has(record.requestId)) continue;
-      writeFileSync(join(events, `ack-${terminalId}-${record.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
-      acked.add(record.requestId);
+    try {
+      for (const record of jsonLines(join(events, `${terminalId}.jsonl`))) {
+        if (!["preflight_request", "checkpoint_request"].includes(record.t) || !record.requestId || acked.has(record.requestId)) continue;
+        writeFileSync(join(events, `ack-${terminalId}-${record.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
+        acked.add(record.requestId);
+      }
+      for (const name of readdirSync(events)) {
+        const match = new RegExp(`^subagent-${terminalId}-(bg-\\d+)\\.task\\.json$`).exec(name);
+        if (!match) continue;
+        const resultName = `subagent-${terminalId}-${match[1]}.result.json`;
+        if (existsSync(join(events, resultName))) continue;
+        writeFileSync(join(events, resultName), JSON.stringify({
+          version: 1, runId: match[1], outcome: "settled", result: "done", error: null, flags: [], touched: [], settledAt: 1,
+        }), { mode: 0o600 });
+      }
+    } catch {
+      /* The run may exit mid-scan. */
     }
   }, 10);
   let timedOut = false;

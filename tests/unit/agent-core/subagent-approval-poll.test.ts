@@ -249,6 +249,14 @@ describe("parent mid-stream approval polling", () => {
       const elapsed = Date.now() - requestedAt;
       expect(elapsed).toBeLessThan(slowMs);
       expect(JSON.parse(readFileSync(ackFile, "utf8"))).toMatchObject({ ok: false });
+      for (const id of ["bg-1", "bg-2"]) {
+        const resultName = `subagent-${terminalId}-${id}.result.json`;
+        if (!existsSync(join(dir, resultName))) {
+          writeFileSync(join(dir, resultName), JSON.stringify({
+            version: 1, runId: id, outcome: "settled", result: "done", error: null, flags: [], touched: [], settledAt: 1,
+          }), { mode: 0o600 });
+        }
+      }
       const exit = await exitPromise;
       expect(exit).toBe(0);
     } finally {

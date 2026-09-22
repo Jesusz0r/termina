@@ -279,6 +279,16 @@ describe("Subagent Approval Engine Contract", () => {
             writeFileSync(join(dir, `ack-term-brief-${row.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
           }
         }
+        const runIds = ["bg-1", "bg-2"];
+        if (runIds.every((runId) => existsSync(join(dir, `subagent-term-brief-${runId}.task.json`)))) {
+          for (const runId of runIds) {
+            const resultName = `subagent-term-brief-${runId}.result.json`;
+            if (existsSync(join(dir, resultName))) continue;
+            writeFileSync(join(dir, resultName), JSON.stringify({
+              version: 1, runId, outcome: "settled", result: "done", error: null, flags: [], touched: [], settledAt: 1,
+            }), { mode: 0o600 });
+          }
+        }
       } catch {
         /* Wait for the sidecar. */
       }
