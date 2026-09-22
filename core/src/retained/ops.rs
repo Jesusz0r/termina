@@ -5,33 +5,33 @@ use std::os::fd::AsRawFd;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use crate::util::{
-    missing_path,
-    open_at,
-    s,
-    stat_at,
-};
 use crate::FileIdentity;
 use crate::promote_fs::{
-    PromotionIdentity,
-    issue_promotion_root_capability,
-    open_promotion_absolute_directory,
-    open_promotion_bound_root_values,
-    promotion_component,
-    promotion_directory_capability_result,
-    promotion_directory_identity_matches,
-    promotion_identity_from_value,
-    promotion_mkdir_at,
-    promotion_mode,
-    promotion_private_identity_valid,
-    promotion_test_pause,
+    PromotionIdentity, issue_promotion_root_capability, open_promotion_absolute_directory,
+    open_promotion_bound_root_values, promotion_component, promotion_directory_capability_result,
+    promotion_directory_identity_matches, promotion_identity_from_value, promotion_mkdir_at,
+    promotion_mode, promotion_private_identity_valid, promotion_test_pause,
     stat_promotion_private_at,
 };
+use crate::util::{missing_path, open_at, s, stat_at};
 
-use super::{RETAINED_ROOT_MARKER_MAX_BYTES, RETAINED_ROOT_MAX_SCAN_WORK_BYTES, RETAINED_ROOT_PROVENANCE_MAX_BYTES};
-use super::validate::{RetainedRootScan, promotion_owned_directory, promotion_validate_marker, promotion_validate_retained_directory};
-use super::private_files::{promotion_create_bound_file, promotion_persist_root_provenance, promotion_read_private_bounded_file};
-use super::root_state::{PromotionRootStateKind, promotion_persist_root_state, promotion_read_root_state, promotion_read_root_state_temporary, promotion_replace_root_state, promotion_root_state_content, promotion_root_state_name};
+use super::private_files::{
+    promotion_create_bound_file, promotion_persist_root_provenance,
+    promotion_read_private_bounded_file,
+};
+use super::root_state::{
+    PromotionRootStateKind, promotion_persist_root_state, promotion_read_root_state,
+    promotion_read_root_state_temporary, promotion_replace_root_state,
+    promotion_root_state_content, promotion_root_state_name,
+};
+use super::validate::{
+    RetainedRootScan, promotion_owned_directory, promotion_validate_marker,
+    promotion_validate_retained_directory,
+};
+use super::{
+    RETAINED_ROOT_MARKER_MAX_BYTES, RETAINED_ROOT_MAX_SCAN_WORK_BYTES,
+    RETAINED_ROOT_PROVENANCE_MAX_BYTES,
+};
 
 pub(crate) fn promotion_final_bound_child_check(
     path: &str,
@@ -43,7 +43,11 @@ pub(crate) fn promotion_final_bound_child_check(
     provenance_path: Option<(&str, PromotionIdentity, &CStr, FileIdentity)>,
 ) -> Result<(), String> {
     let parent = open_promotion_absolute_directory(parent_path, "trusted promotion parent final")?;
-    promotion_directory_identity_matches(&parent, parent_identity, "trusted promotion parent final")?;
+    promotion_directory_identity_matches(
+        &parent,
+        parent_identity,
+        "trusted promotion parent final",
+    )?;
     let child = open_at(
         parent.as_raw_fd(),
         name,
@@ -55,16 +59,18 @@ pub(crate) fn promotion_final_bound_child_check(
         let final_marker = stat_promotion_private_at(child.as_raw_fd(), marker_name)
             .map_err(|error| format!("stat retained root marker final path failed: {error}"))?;
         if final_marker.file != marker_identity
-            || !promotion_private_identity_valid(
-                final_marker,
-                None,
-                RETAINED_ROOT_MARKER_MAX_BYTES,
-            )
+            || !promotion_private_identity_valid(final_marker, None, RETAINED_ROOT_MARKER_MAX_BYTES)
         {
             return Err("retained root marker changed during binding".to_string());
         }
     }
-    if let Some((provenance_parent_path, provenance_parent_identity, provenance_name, provenance_identity)) = provenance_path {
+    if let Some((
+        provenance_parent_path,
+        provenance_parent_identity,
+        provenance_name,
+        provenance_identity,
+    )) = provenance_path
+    {
         let provenance_parent = open_promotion_absolute_directory(
             provenance_parent_path,
             "promotion provenance parent final",
@@ -74,8 +80,9 @@ pub(crate) fn promotion_final_bound_child_check(
             provenance_parent_identity,
             "promotion provenance parent final",
         )?;
-        let final_provenance = stat_promotion_private_at(provenance_parent.as_raw_fd(), provenance_name)
-            .map_err(|error| format!("stat promotion provenance final path failed: {error}"))?;
+        let final_provenance =
+            stat_promotion_private_at(provenance_parent.as_raw_fd(), provenance_name)
+                .map_err(|error| format!("stat promotion provenance final path failed: {error}"))?;
         if final_provenance.file != provenance_identity
             || !promotion_private_identity_valid(
                 final_provenance,
@@ -86,7 +93,11 @@ pub(crate) fn promotion_final_bound_child_check(
             return Err("promotion root provenance changed during binding".to_string());
         }
     }
-    let actual_path = format!("{}/{}", parent_path.trim_end_matches('/'), name.to_string_lossy());
+    let actual_path = format!(
+        "{}/{}",
+        parent_path.trim_end_matches('/'),
+        name.to_string_lossy()
+    );
     if actual_path != path {
         return Err("promotion root path changed during binding".to_string());
     }
@@ -99,9 +110,10 @@ pub(crate) fn promotion_final_bound_child_check(
 /// and durably written before any capability is returned.
 pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
     let path = s(req, "path")?;
-    let trusted_parent = req.get("trustedParent").and_then(Value::as_object).ok_or(
-        "promotion directory transaction requires a trusted parent capability",
-    )?;
+    let trusted_parent = req
+        .get("trustedParent")
+        .and_then(Value::as_object)
+        .ok_or("promotion directory transaction requires a trusted parent capability")?;
     let parent_path = trusted_parent
         .get("path")
         .and_then(Value::as_str)
@@ -134,9 +146,13 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
         return Err("trusted promotion parent identity changed".to_string());
     }
     let marker = if let Some(value) = req.get("marker") {
-        let object = value.as_object().ok_or("promotion root marker must be an object")?;
+        let object = value
+            .as_object()
+            .ok_or("promotion root marker must be an object")?;
         let (marker_name, marker_c_name) = promotion_component(
-            object.get("name").ok_or("promotion root marker name is missing")?,
+            object
+                .get("name")
+                .ok_or("promotion root marker name is missing")?,
             "marker.name",
         )?;
         let encoded = object
@@ -145,7 +161,9 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
             .ok_or("promotion root marker content is missing")?;
         let content = base64::engine::general_purpose::STANDARD
             .decode(encoded)
-            .map_err(|error| format!("promotion root marker content is not valid base64: {error}"))?;
+            .map_err(|error| {
+                format!("promotion root marker content is not valid base64: {error}")
+            })?;
         if content.is_empty() || content.len() > RETAINED_ROOT_MARKER_MAX_BYTES {
             return Err("promotion root marker exceeds its bounded metadata size".to_string());
         }
@@ -188,11 +206,8 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
         "provenance.parent",
     )?
     .0;
-    let provenance_parent_actual = promotion_owned_directory(
-        &provenance_parent_file,
-        "provenance parent",
-        false,
-    )?;
+    let provenance_parent_actual =
+        promotion_owned_directory(&provenance_parent_file, "provenance parent", false)?;
     if provenance_parent_actual.dev != provenance_parent_identity.dev
         || provenance_parent_actual.ino != provenance_parent_identity.ino
     {
@@ -206,10 +221,8 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
     let mut existing_state = promotion_read_root_state(&provenance_parent_file, &state_c_name)?;
     let mut state_recovery_from_temporary = false;
     if existing_state.is_none() {
-        existing_state = promotion_read_root_state_temporary(
-            &provenance_parent_file,
-            &state_c_name,
-        )?;
+        existing_state =
+            promotion_read_root_state_temporary(&provenance_parent_file, &state_c_name)?;
         state_recovery_from_temporary = existing_state.is_some();
     }
     if let Some(state) = &existing_state {
@@ -226,18 +239,26 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
         }
         expected = Some(state.root);
         if state.kind == PromotionRootStateKind::Bound {
-            match stat_promotion_private_at(provenance_parent_file.as_raw_fd(), &provenance_c_name) {
+            match stat_promotion_private_at(provenance_parent_file.as_raw_fd(), &provenance_c_name)
+            {
                 Ok(identity)
                     if promotion_private_identity_valid(
                         identity,
                         Some(0o600),
                         RETAINED_ROOT_PROVENANCE_MAX_BYTES,
                     ) => {}
-                Ok(_) => return Err("promotion root provenance is not a bounded private regular file".to_string()),
-                Err(error) if missing_path(&error) => {
-                    return Err("promotion root provenance was deleted after binding".to_string())
+                Ok(_) => {
+                    return Err(
+                        "promotion root provenance is not a bounded private regular file"
+                            .to_string(),
+                    );
                 }
-                Err(error) => return Err(format!("stat promotion root provenance failed: {error}")),
+                Err(error) if missing_path(&error) => {
+                    return Err("promotion root provenance was deleted after binding".to_string());
+                }
+                Err(error) => {
+                    return Err(format!("stat promotion root provenance failed: {error}"));
+                }
             }
         }
     }
@@ -256,7 +277,10 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
                     return Err("promotion root identity mismatch".to_string());
                 }
             } else {
-                return Err("existing promotion directory requires a previously trusted expectedIdentity".to_string());
+                return Err(
+                    "existing promotion directory requires a previously trusted expectedIdentity"
+                        .to_string(),
+                );
             }
             (existing, false)
         }
@@ -264,14 +288,17 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
             if expected.is_some() {
                 return Err(format!("promotion root {name} is missing"));
             }
-            promotion_mkdir_at(parent.as_raw_fd(), &c_name, 0o700)
-                .map_err(|mkdir_error| format!("create promotion root {name} failed: {mkdir_error}"))?;
+            promotion_mkdir_at(parent.as_raw_fd(), &c_name, 0o700).map_err(|mkdir_error| {
+                format!("create promotion root {name} failed: {mkdir_error}")
+            })?;
             let created = open_at(
                 parent.as_raw_fd(),
                 &c_name,
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
-            .map_err(|open_error| format!("open created promotion root {name} failed: {open_error}"))?;
+            .map_err(|open_error| {
+                format!("open created promotion root {name} failed: {open_error}")
+            })?;
             (created, true)
         }
         Err(error) => return Err(format!("open promotion root {name} failed: {error}")),
@@ -315,8 +342,14 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
         let pending_content = promotion_root_state_content(
             PromotionRootStateKind::Pending,
             &path,
-            PromotionIdentity { dev: parent_actual.dev, ino: parent_actual.ino },
-            PromotionIdentity { dev: root_identity.dev, ino: root_identity.ino },
+            PromotionIdentity {
+                dev: parent_actual.dev,
+                ino: parent_actual.ino,
+            },
+            PromotionIdentity {
+                dev: root_identity.dev,
+                ino: root_identity.ino,
+            },
         )?;
         state_identity = Some(promotion_persist_root_state(
             &provenance_parent_file,
@@ -364,7 +397,8 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
             // hook exercises the crash boundary after its atomic publication.
             promotion_test_pause(req, "retained-root-marker-persisted")?;
         }
-        let validated_identity = promotion_validate_marker(&directory, marker_name, content, *mode)?;
+        let validated_identity =
+            promotion_validate_marker(&directory, marker_name, content, *mode)?;
         if let Some(created_identity) = created_identity {
             if created_identity != validated_identity {
                 return Err("retained root marker changed after creation".to_string());
@@ -404,11 +438,17 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
     let bound_state_content = promotion_root_state_content(
         PromotionRootStateKind::Bound,
         &path,
-        PromotionIdentity { dev: parent_actual.dev, ino: parent_actual.ino },
-        PromotionIdentity { dev: root_identity.dev, ino: root_identity.ino },
+        PromotionIdentity {
+            dev: parent_actual.dev,
+            ino: parent_actual.ino,
+        },
+        PromotionIdentity {
+            dev: root_identity.dev,
+            ino: root_identity.ino,
+        },
     )?;
-    let current_state_identity = state_identity
-        .ok_or("promotion root state was not durably initialized")?;
+    let current_state_identity =
+        state_identity.ok_or("promotion root state was not durably initialized")?;
     let final_state_identity = match existing_state.as_ref().map(|state| state.kind) {
         Some(PromotionRootStateKind::Bound) => {
             let (identity, observed) = promotion_read_private_bounded_file(
@@ -432,7 +472,10 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
     };
     promotion_test_pause(req, "retained-root-durable")?;
 
-    let root_identity = PromotionIdentity { dev: root_identity.dev, ino: root_identity.ino };
+    let root_identity = PromotionIdentity {
+        dev: root_identity.dev,
+        ino: root_identity.ino,
+    };
     let marker_final = marker.as_ref().and_then(|(_, marker_name, _, _)| {
         marker_identity.map(|identity| (marker_name.as_c_str(), identity))
     });

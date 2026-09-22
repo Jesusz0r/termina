@@ -134,12 +134,8 @@ impl CoreProcess {
         let request_id = self.next_id();
         let mut req = payload.as_object().cloned().unwrap_or_default();
         req.insert("op".to_string(), Value::String(op.to_string()));
-        req.insert(
-            "requestId".to_string(),
-            Value::String(request_id.clone()),
-        );
-        let wire =
-            serde_json::to_string(&Value::Object(req)).map_err(|e| e.to_string())? + "\n";
+        req.insert("requestId".to_string(), Value::String(request_id.clone()));
+        let wire = serde_json::to_string(&Value::Object(req)).map_err(|e| e.to_string())? + "\n";
         if wire.len() >= 1024 * 1024 {
             return Err("test request exceeds the bounded wire size".to_string());
         }
@@ -172,7 +168,12 @@ impl CoreProcess {
     }
 
     /// Send one request and wait for its response.
-    pub fn request(&mut self, op: &str, payload: Value, timeout: Duration) -> Result<Value, String> {
+    pub fn request(
+        &mut self,
+        op: &str,
+        payload: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let request_id = self.send(op, payload)?;
         self.recv(&request_id, timeout)
     }
@@ -237,8 +238,7 @@ pub fn identity_json(path: &Path) -> Value {
 
 /// Promotion `file` state for a regular file.
 pub fn file_state_json(path: &Path) -> Value {
-    let bytes = fs::read(path)
-        .unwrap_or_else(|e| panic!("read test file {}: {e}", path.display()));
+    let bytes = fs::read(path).unwrap_or_else(|e| panic!("read test file {}: {e}", path.display()));
     let metadata = fs::symlink_metadata(path)
         .unwrap_or_else(|e| panic!("stat test file {}: {e}", path.display()));
     assert!(

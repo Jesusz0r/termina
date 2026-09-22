@@ -538,7 +538,10 @@ mod tests {
         fs::write(&foreign, b"foreign-secret-bytes").unwrap();
         unix_fs::symlink(&foreign, fixture.agent.join("settings.json")).unwrap();
         let linked = op_trust_hashes(&fixture.req()).unwrap();
-        let link_hash = linked["hashes"]["agent/settings.json"].as_str().unwrap().to_string();
+        let link_hash = linked["hashes"]["agent/settings.json"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(link_hash.starts_with(SYMLINK_DIGEST_PREFIX));
 
         fs::remove_file(fixture.agent.join("settings.json")).unwrap();

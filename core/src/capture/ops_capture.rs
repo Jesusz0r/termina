@@ -9,22 +9,26 @@ use crate::util::{
     has_git_segment, is_safe_relative, now_ms, oid_ext, opt_s, require_utf8_git_path,
     require_utf8_path_bytes, s, stat_at,
 };
-use crate::{
-    ensure_blob_budget, recover_store_transaction, write_blob, FileIdentity, StoreMutationLock,
-    StoreObjectTransaction,
-};
 use crate::{BUDGET_MAX_FILE_BYTES, BUDGET_MAX_NEW_BLOB_BYTES, BUDGET_MAX_PATHS};
+use crate::{
+    FileIdentity, StoreMutationLock, StoreObjectTransaction, ensure_blob_budget,
+    recover_store_transaction, write_blob,
+};
 use git2::{IndexEntry, Oid, Repository, StatusOptions};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::binding::{
-    open_store, preload_cached_blobs, AnchoredPath, BoundSourceRepository, CaptureRoot,
+    AnchoredPath, BoundSourceRepository, CaptureRoot, open_store, preload_cached_blobs,
 };
 use super::hash::{apply_rewrite_hooks, hash_path, rewrite_hooks};
+use super::parent_delta::{
+    ParentDelta, publish_parent_delta, remember_dirty_stats, reused_parent_state,
+    try_parent_status_delta, verify_sparse_changes,
+};
 use super::refs::{commit_tree, fail_before_state_ref, update_state_ref};
 use super::tree_cache::{cache_tree_map, collect_tree_map_cached};
-use super::trees::{nested_from_flat, write_nested_tree, write_tree_delta, FlatEntry};
-use super::walk::{collect_tree_map, resolve_tree, tree_lookup, TreeLookupKind};
+use super::trees::{FlatEntry, nested_from_flat, write_nested_tree, write_tree_delta};
+use super::walk::{collect_tree_map, resolve_tree};
 
 /// Enumerate the capture domain: tracked files plus untracked non-ignored
 /// files. Matches `git ls-files -z` plus `ls-files --others
@@ -192,8 +196,41 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
         .transpose()?
         .into_iter()
         .collect();
+    // Run start passes the indexed snapshot as parent. Status names the
+    // delta; the full walk below is the initial index and the rewrite-hook seam.
+    let parent_snapshot = match (parent_oid, parent_commit.as_deref()) {
+        (Some(oid), Some(commit)) => {
+            let tree = resolve_tree(&store, oid)?;
+            Some((
+                commit.to_string(),
+                tree,
+                collect_tree_map_cached(&store, tree)?,
+            ))
+        }
+        _ => None,
+    };
     let hooks = rewrite_hooks(req, "/hooks/beforeRead")?;
     let cache_hooks = rewrite_hooks(req, "/hooks/afterCache")?;
+    if hooks.is_empty() && cache_hooks.is_empty() {
+        if let Some((commit, parent_tree, parent_map)) = &parent_snapshot {
+            return try_parent_status_delta(ParentDelta {
+                req,
+                store_dir: &store_dir,
+                store: &store,
+                source: &source,
+                capture_fs: &capture_fs,
+                head: &head,
+                parent_commit_value: &parent_commit,
+                parent_commit: commit,
+                parent_tree: *parent_tree,
+                parent_map: parent_map.as_ref(),
+                parents: &parent_commits,
+                max_paths,
+                max_file_bytes,
+                max_new_blob_bytes,
+            });
+        }
+    }
 
     source.verify(&capture_fs)?;
     let paths_and_index = enumerate_domain(&source.repo, source.capture_prefix.as_deref())?;
@@ -215,12 +252,12 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
     // loading any source object.  The resulting descriptors are consumed by
     // the working-tree pass below, so a later root/ancestor swap cannot make
     // a Git path set point at different file bytes.
-    let mut resolved_paths: Vec<(String, Option<AnchoredPath>, Option<(u32, Oid)>)> =
+    let mut resolved_paths: Vec<(String, Option<AnchoredPath>, Option<(u32, Oid)>, bool)> =
         Vec::with_capacity(paths.len());
     let mut cached_oids = HashSet::new();
     for rel_path in &paths {
         let Some(path) = capture_fs.resolve(rel_path)? else {
-            resolved_paths.push((rel_path.clone(), None, None));
+            resolved_paths.push((rel_path.clone(), None, None, false));
             continue;
         };
         // The test seam rewrites files mid-read; bypass the stat-cache so
@@ -232,12 +269,49 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
         } else {
             None
         };
-        if let Some((_, oid)) = cached {
-            cached_oids.insert(oid);
+        // After-cache hooks rewrite an approved leaf and then restat it.
+        // They have to see the preloaded blob path, so parent reuse stays
+        // off while any of those hooks are installed.
+        let mut reuse_parent = false;
+        if let Some((mode, oid)) = cached {
+            let matches_parent = cache_hooks.is_empty()
+                && parent_snapshot
+                    .as_ref()
+                    .is_some_and(|(_, _, map)| map.get(rel_path) == Some(&(mode, oid)));
+            if matches_parent {
+                reuse_parent = true;
+            } else {
+                cached_oids.insert(oid);
+            }
         }
-        resolved_paths.push((rel_path.clone(), Some(path), cached));
+        resolved_paths.push((rel_path.clone(), Some(path), cached, reuse_parent));
     }
     source.verify(&capture_fs)?;
+    if let Some((commit, parent_tree, parent_map)) = &parent_snapshot {
+        let full_reuse = resolved_paths.len() == parent_map.len()
+            && resolved_paths
+                .iter()
+                .all(|(_, path, _, reuse)| path.is_some() && *reuse);
+        if full_reuse {
+            for (rel_path, path, _, _) in &resolved_paths {
+                let Some(path) = path.as_ref() else {
+                    return Err("full parent reuse left a capture path unresolved".to_string());
+                };
+                let after = stat_at(path.parent.as_raw_fd(), &path.leaf)
+                    .map_err(|_| format!("file vanished while captured: {rel_path}"))?;
+                if path.identity != after {
+                    return Err(format!("file changed while captured: {rel_path}"));
+                }
+            }
+            source.verify(&capture_fs)?;
+            return Ok(reused_parent_state(
+                commit,
+                *parent_tree,
+                &head,
+                parent_map.len(),
+            ));
+        }
+    }
     let cached_blobs = preload_cached_blobs(&source, &capture_fs, &cached_oids, &store)?;
     source.verify(&capture_fs)?;
 
@@ -248,76 +322,119 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
 
     let mut flat: HashMap<String, FlatEntry> = HashMap::new();
     let mut new_blob_bytes = 0u64;
-    for (rel_path, path, cached) in resolved_paths {
+    let mut dirty_stats: HashMap<String, (FileIdentity, u32, Oid)> = HashMap::new();
+    for (rel_path, path, cached, reuse_parent) in resolved_paths {
         let Some(path) = path else {
             continue;
         };
-        let captured = match cached {
-            Some((mode, oid)) => {
-                let blob = cached_blobs
-                    .get(&oid)
-                    .ok_or_else(|| format!("cached source blob {oid} was not preloaded"))?;
-                let cached_len = u64::try_from(blob.len())
-                    .map_err(|_| format!("cached source blob {oid} size does not fit u64"))?;
-                if cached_len != path.identity.len {
-                    return Err(format!(
-                        "cached source blob {oid} size {cached_len} does not match live/index size {} for {rel_path}",
-                        path.identity.len
-                    ));
+        let identity = path.identity;
+        let hashed = cached.is_none();
+        let captured = if reuse_parent {
+            let Some((mode, oid)) = cached else {
+                return Err(format!(
+                    "parent reuse is missing a stat-cached oid for {rel_path}"
+                ));
+            };
+            let after = stat_at(path.parent.as_raw_fd(), &path.leaf)
+                .map_err(|_| format!("file vanished while captured: {rel_path}"))?;
+            if path.identity != after {
+                return Err(format!("file changed while captured: {rel_path}"));
+            }
+            Some((mode, oid, 0u64))
+        } else {
+            match cached {
+                Some((mode, oid)) => {
+                    let blob = cached_blobs
+                        .get(&oid)
+                        .ok_or_else(|| format!("cached source blob {oid} was not preloaded"))?;
+                    let cached_len = u64::try_from(blob.len())
+                        .map_err(|_| format!("cached source blob {oid} size does not fit u64"))?;
+                    if cached_len != path.identity.len {
+                        return Err(format!(
+                            "cached source blob {oid} size {cached_len} does not match live/index size {} for {rel_path}",
+                            path.identity.len
+                        ));
+                    }
+                    if cached_len > max_file_bytes {
+                        return Err(format!(
+                            "cached source blob {oid} exceeds the {max_file_bytes} file byte budget"
+                        ));
+                    }
+                    ensure_blob_budget(
+                        &object_transaction,
+                        &store,
+                        oid,
+                        cached_len,
+                        new_blob_bytes,
+                        max_new_blob_bytes,
+                    )?;
+                    apply_rewrite_hooks(&path, &cache_hooks, None)?;
+                    let (owned_oid, new_bytes) = write_blob(
+                        &mut object_transaction,
+                        &store,
+                        blob,
+                        new_blob_bytes,
+                        max_new_blob_bytes,
+                        Some(oid),
+                    )?;
+                    if owned_oid != oid {
+                        return Err(format!(
+                            "cached source blob oid mismatch: expected {oid}, wrote {owned_oid}"
+                        ));
+                    }
+                    let after = stat_at(path.parent.as_raw_fd(), &path.leaf)
+                        .map_err(|_| format!("file vanished while captured: {rel_path}"))?;
+                    if path.identity != after {
+                        return Err(format!("file changed while captured: {rel_path}"));
+                    }
+                    Some((mode, owned_oid, new_bytes))
                 }
-                if cached_len > max_file_bytes {
-                    return Err(format!(
-                        "cached source blob {oid} exceeds the {max_file_bytes} file byte budget"
-                    ));
-                }
-                ensure_blob_budget(
-                    &object_transaction,
-                    &store,
-                    oid,
-                    cached_len,
-                    new_blob_bytes,
-                    max_new_blob_bytes,
-                )?;
-                apply_rewrite_hooks(&path, &cache_hooks, None)?;
-                let (owned_oid, new_bytes) = write_blob(
+                None => hash_path(
                     &mut object_transaction,
                     &store,
-                    blob,
+                    &capture_fs,
+                    path,
+                    max_file_bytes,
                     new_blob_bytes,
                     max_new_blob_bytes,
-                    Some(oid),
-                )?;
-                if owned_oid != oid {
-                    return Err(format!(
-                        "cached source blob oid mismatch: expected {oid}, wrote {owned_oid}"
-                    ));
-                }
-                let after = stat_at(path.parent.as_raw_fd(), &path.leaf)
-                    .map_err(|_| format!("file vanished while captured: {rel_path}"))?;
-                if path.identity != after {
-                    return Err(format!("file changed while captured: {rel_path}"));
-                }
-                Some((mode, owned_oid, new_bytes))
+                    &hooks,
+                )?,
             }
-            None => hash_path(
-                &mut object_transaction,
-                &store,
-                &capture_fs,
-                path,
-                max_file_bytes,
-                new_blob_bytes,
-                max_new_blob_bytes,
-                &hooks,
-            )?,
         };
         if let Some((mode, oid, new_bytes)) = captured {
             new_blob_bytes = new_blob_bytes
                 .checked_add(new_bytes)
                 .ok_or("new-blob byte accounting overflow")?;
+            if hashed {
+                dirty_stats.insert(rel_path.clone(), (identity, mode, oid));
+            }
             flat.insert(rel_path, (mode, oid));
         }
     }
     source.verify(&capture_fs)?;
+
+    if let Some((commit, parent_tree, parent_map)) = &parent_snapshot {
+        if &flat == parent_map.as_ref() {
+            remember_dirty_stats(&store_dir, &store, commit, &dirty_stats);
+            return Ok(reused_parent_state(commit, *parent_tree, &head, flat.len()));
+        }
+        let response = publish_parent_delta(
+            req,
+            &mut object_transaction,
+            &store,
+            *parent_tree,
+            parent_map.as_ref(),
+            &flat,
+            &parent_commits,
+            new_blob_bytes,
+            &head,
+            &parent_commit,
+        )?;
+        if let Some(id) = response.pointer("/state/commit").and_then(Value::as_str) {
+            remember_dirty_stats(&store_dir, &store, id, &dirty_stats);
+        }
+        return Ok(response);
+    }
 
     let tree = write_nested_tree(
         &mut object_transaction,
@@ -343,6 +460,7 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
     pause_at_hook(req, "pauseAfterStateRef")?;
     object_transaction.commit()?;
     cache_tree_map(tree, std::sync::Arc::new(flat.clone()));
+    remember_dirty_stats(&store_dir, &store, &commit.to_string(), &dirty_stats);
 
     Ok(json!({
         "state": {
@@ -528,48 +646,7 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
         None => write_nested_tree(&mut object_transaction, &store, &mut HashMap::new())?,
     };
     object_transaction.flush(&store)?;
-    // Verify only the changed paths before publishing the state ref. A full
-    // read-back would walk every entry; untouched paths came from the parent.
-    for (rel_path, (exp_mode, exp_oid)) in &expected {
-        match tree_lookup(&store, tree, rel_path, TreeLookupKind::Blob)? {
-            Some((mode, oid)) if mode == *exp_mode && oid == *exp_oid => {}
-            _ => return Err(format!("tree verification mismatch for {rel_path}")),
-        }
-    }
-    // Verify deletions and type transitions the same sparse way. A deletion
-    // superseded by a descendant addition turned its path into a directory;
-    // every other deletion must leave the path absent as both tree and blob.
-    let mut superseded: HashSet<String> = HashSet::new();
-    for path in changed_entries.keys() {
-        if changed_entries.get(path) == Some(&None) {
-            continue;
-        }
-        let mut rest = path.as_str();
-        while let Some(i) = rest.rfind('/') {
-            rest = &rest[..i];
-            if changed_entries.get(rest) == Some(&None) {
-                superseded.insert(rest.to_string());
-            }
-        }
-    }
-    for (rel_path, entry) in &changed_entries {
-        if entry.is_some() {
-            continue;
-        }
-        if superseded.contains(rel_path) {
-            match tree_lookup(&store, tree, rel_path, TreeLookupKind::Tree)? {
-                Some(_) => {}
-                None => return Err(format!("tree verification mismatch for {rel_path}")),
-            }
-            continue;
-        }
-        if tree_lookup(&store, tree, rel_path, TreeLookupKind::Tree)?.is_some() {
-            return Err(format!("tree verification mismatch for {rel_path}"));
-        }
-        if tree_lookup(&store, tree, rel_path, TreeLookupKind::Blob)?.is_some() {
-            return Err(format!("tree verification mismatch for {rel_path}"));
-        }
-    }
+    verify_sparse_changes(&store, tree, &expected, &changed_entries)?;
     // An unchanged tree must carry the unchanged map. Caching a changed flat
     // map under the parent tree oid would poison later incremental work.
     if tree == parent_tree && flat != *parent_arc {

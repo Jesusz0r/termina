@@ -6,24 +6,16 @@ use std::os::fd::AsRawFd;
 
 use serde_json::Value;
 
-use crate::util::{
-    open_at,
-    open_at_mode,
-};
 use crate::FileIdentity;
 use crate::PROMOTION_COMPONENT_MAX_BYTES;
 use crate::promote_fs::{
-    promotion_private_identity_valid,
-    promotion_rename_noreplace,
-    promotion_set_mode,
-    promotion_test_pause,
-    promotion_write_all,
-    stat_promotion_journal_file,
+    promotion_private_identity_valid, promotion_rename_noreplace, promotion_set_mode,
+    promotion_test_pause, promotion_write_all, stat_promotion_journal_file,
     stat_promotion_private_at,
 };
+use crate::util::{open_at, open_at_mode};
 
 use super::{RETAINED_ROOT_MARKER_MAX_BYTES, RETAINED_ROOT_PROVENANCE_MAX_BYTES};
-
 
 pub(crate) fn promotion_create_bound_file(
     parent: &fs::File,
@@ -168,9 +160,9 @@ pub(crate) fn promotion_publish_private_exclusive(
 
     // A complete final record is authoritative. Do not replace or rewrite
     // it, even when the caller is retrying after a process restart.
-    if let Some(final_identity) = promotion_read_private_bounded_if_present(
-        parent, name, max_bytes, field,
-    )? {
+    if let Some(final_identity) =
+        promotion_read_private_bounded_if_present(parent, name, max_bytes, field)?
+    {
         let final_stat = stat_promotion_private_at(parent.as_raw_fd(), name)
             .map_err(|error| format!("stat {field} failed: {error}"))?;
         if !promotion_private_identity_valid(final_stat, Some(mode), max_bytes)
@@ -197,12 +189,10 @@ pub(crate) fn promotion_publish_private_exclusive(
         Ok(file) => {
             let temporary_identity = stat_promotion_journal_file(&file)
                 .map_err(|error| format!("fstat existing {field} temporary failed: {error}"))?;
-            if !promotion_private_identity_valid(
-                temporary_identity,
-                Some(mode),
-                max_bytes,
-            ) {
-                return Err(format!("{field} temporary is not a bounded private app-owned file"));
+            if !promotion_private_identity_valid(temporary_identity, Some(mode), max_bytes) {
+                return Err(format!(
+                    "{field} temporary is not a bounded private app-owned file"
+                ));
             }
             let (_, observed) = promotion_read_private_bounded_opened(
                 parent,
@@ -221,18 +211,13 @@ pub(crate) fn promotion_publish_private_exclusive(
             let mut file = open_at_mode(
                 parent.as_raw_fd(),
                 &temporary,
-                libc::O_RDWR
-                    | libc::O_CREAT
-                    | libc::O_EXCL
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC,
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 mode as libc::mode_t,
             )
             .map_err(|error| format!("create {field} temporary failed: {error}"))?;
             promotion_write_all(&mut file, content, &format!("{field} temporary"))?;
             promotion_set_mode(&file, mode, &format!("{field} temporary"))?;
-            file
-                .sync_all()
+            file.sync_all()
                 .map_err(|error| format!("sync {field} temporary failed: {error}"))?;
             let temporary_identity = stat_promotion_journal_file(&file)
                 .map_err(|error| format!("fstat {field} temporary failed: {error}"))?;
@@ -267,17 +252,11 @@ pub(crate) fn promotion_publish_private_exclusive(
     {
         return Err(format!("{field} temporary changed before publish"));
     }
-    match promotion_rename_noreplace(
-        parent.as_raw_fd(),
-        &temporary,
-        parent.as_raw_fd(),
-        name,
-    ) {
+    match promotion_rename_noreplace(parent.as_raw_fd(), &temporary, parent.as_raw_fd(), name) {
         Ok(()) => {}
         Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
-            let (identity, observed) = promotion_read_private_bounded_file(
-                parent, name, max_bytes, field,
-            )?;
+            let (identity, observed) =
+                promotion_read_private_bounded_file(parent, name, max_bytes, field)?;
             if observed != content {
                 return Err(format!("{field} identity mismatch after racing publish"));
             }

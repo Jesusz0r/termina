@@ -16,61 +16,64 @@ use std::sync::atomic::AtomicU64;
 
 use serde_json::{Value, json};
 
+mod promote_fs;
 mod store;
 mod store_tx;
-mod promote_fs;
 mod test_hooks;
 use test_hooks::pause_at_hook;
 mod capture;
 use capture::{
-    FlatEntry, GitTreeBudget, TreeLookupKind, exact_ref_target,
-    git_blob_bytes_bounded, git_blob_size_bounded, git_tree_entry_path, git_tree_object_bounded,
-    materialize_state_bound, nested_from_flat, op_apply_state, op_capture, op_capture_incremental,
-    op_template, open_store,
-    publish_transaction_ref, resolve_tree, state_entries, sync_exact_transaction_ref,
-    tree_lookup, validate_transaction_ref, write_nested_tree_for_ref,
+    FlatEntry, GitTreeBudget, TreeLookupKind, exact_ref_target, git_blob_bytes_bounded,
+    git_blob_size_bounded, git_tree_entry_path, git_tree_object_bounded, materialize_state_bound,
+    nested_from_flat, op_apply_state, op_capture, op_capture_incremental, op_template, open_store,
+    publish_transaction_ref, resolve_tree, state_entries, sync_exact_transaction_ref, tree_lookup,
+    validate_transaction_ref, write_nested_tree_for_ref,
 };
 mod copy;
 mod promotion_files;
-use promotion_files::{
-    op_promotion_bound_copy_file, op_promotion_bound_copy_tree, op_promotion_bound_create_directory,
-    op_promotion_bound_create_symlink, op_promotion_bound_ensure_directory,
-    op_promotion_bound_install_directory, op_promotion_bound_list_directories,
-    op_promotion_bound_list_entries, op_promotion_bound_open_directory,
-    op_promotion_bound_prepare_directory, op_promotion_bound_read_file,
-    op_promotion_bound_read_journal, op_promotion_bound_write_file, promotion_rename_unsupported,
-};
 use crate::promote_fs::{
     promotion_directory_is_empty, promotion_rename_noreplace, promotion_unlink_at_field,
+};
+use promotion_files::{
+    op_promotion_bound_copy_file, op_promotion_bound_copy_tree,
+    op_promotion_bound_create_directory, op_promotion_bound_create_symlink,
+    op_promotion_bound_ensure_directory, op_promotion_bound_install_directory,
+    op_promotion_bound_list_directories, op_promotion_bound_list_entries,
+    op_promotion_bound_open_directory, op_promotion_bound_prepare_directory,
+    op_promotion_bound_read_file, op_promotion_bound_read_journal, op_promotion_bound_write_file,
+    promotion_rename_unsupported,
 };
 mod promotion_remove;
 use promotion_remove::{op_promotion_bound_remove_tree, op_promotion_bound_transition};
 mod retained;
-mod util;
 mod store_ops;
+mod util;
 use store_ops::{op_store_create, op_store_destroy};
 mod preflight;
 use preflight::op_preflight;
 mod trees;
-use trees::{op_diff_tree, op_materialize, op_merge3, op_read_blob, op_symlink_target, op_tree_paths, op_unref};
+use trees::{
+    op_diff_tree, op_materialize, op_merge3, op_read_blob, op_symlink_target, op_tree_paths,
+    op_unref,
+};
 mod trust;
 use store::{
-    FileIdentity, StoreNodeIdentity,
-    bind_store_result, current_store_lifecycle, ensure_real_directory,
-    fresh_store_generation, lifecycle_json, lifecycle_mismatch,
-    store_lifecycle_at_root, store_node_at, store_node_at_optional,
-    store_node_file, store_node_matches, sync_directory_nofollow,
-    validate_store_lifecycle, write_store_generation,
+    FileIdentity, StoreNodeIdentity, bind_store_result, current_store_lifecycle,
+    ensure_real_directory, fresh_store_generation, lifecycle_json, lifecycle_mismatch,
+    store_lifecycle_at_root, store_node_at, store_node_at_optional, store_node_file,
+    store_node_matches, sync_directory_nofollow, validate_store_lifecycle, write_store_generation,
 };
 use store_tx::{
-    StoreMutationLock, StoreObjectTransaction, ensure_blob_budget,
-    recover_store_transaction, write_blob, write_transaction_object,
-    write_transaction_object_with_oid,
+    StoreMutationLock, StoreObjectTransaction, ensure_blob_budget, recover_store_transaction,
+    write_blob, write_transaction_object, write_transaction_object_with_oid,
 };
 use trust::op_trust_hashes;
 
 mod repo;
-use repo::{op_git_common_dir, op_git_head, op_git_object_format, op_git_top_level, op_ls_ignored, op_ls_tracked, op_repo_diff, op_repo_file, op_repo_status, op_repo_tree};
+use repo::{
+    op_git_common_dir, op_git_head, op_git_object_format, op_git_top_level, op_ls_ignored,
+    op_ls_tracked, op_repo_diff, op_repo_file, op_repo_status, op_repo_tree,
+};
 
 /// The default capture budgets (WORLDLINES section 9).
 pub(crate) const BUDGET_MAX_PATHS: usize = 100_000;
@@ -126,22 +129,15 @@ pub(crate) const BLOB_COMPRESSION: flate2::Compression = flate2::Compression::fa
 pub(crate) static PROMOTION_CLEANUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static STORE_DESTROY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-
-
 // ---------------------------------------------------------- trust hash ----
-
 
 // ---------------------------------------------------------- store create ----
 
-
 // ------------------------------------------------------------ preflight ----
-
 
 // --------------------------------------------------------------- merge3 ----
 
-
 // ---------------------------------------------------------- source queries ----
-
 
 // ------------------------------------------------------------ dispatch -----
 

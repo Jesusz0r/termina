@@ -2,21 +2,13 @@
 use std::collections::HashMap;
 use std::io::Read;
 
-use git2::{ObjectFormat, Oid, Repository};
+use crate::util::{has_git_segment, is_safe_relative, oid_ext};
 use crate::{
-    BUDGET_MAX_FILE_BYTES,
-    BUDGET_MAX_PATHS,
-    PROMOTION_COMPONENT_MAX_BYTES,
-    PROMOTION_COPY_TREE_MAX_BYTES,
-    PROMOTION_DIRECTORY_MAX_DEPTH,
-    PROMOTION_DIRECTORY_MAX_NAME_BYTES,
-    PROMOTION_PATH_MAX_BYTES,
+    BUDGET_MAX_FILE_BYTES, BUDGET_MAX_PATHS, PROMOTION_COMPONENT_MAX_BYTES,
+    PROMOTION_COPY_TREE_MAX_BYTES, PROMOTION_DIRECTORY_MAX_DEPTH,
+    PROMOTION_DIRECTORY_MAX_NAME_BYTES, PROMOTION_PATH_MAX_BYTES,
 };
-use crate::util::{
-    has_git_segment,
-    is_safe_relative,
-    oid_ext,
-};
+use git2::{ObjectFormat, Oid, Repository};
 
 use super::trees::FlatEntry;
 
@@ -32,7 +24,11 @@ pub(crate) struct GitTreeBudget {
 
 impl GitTreeBudget {
     pub(crate) fn new() -> Self {
-        Self { entries: 0, bytes: 0, work_bytes: 0 }
+        Self {
+            entries: 0,
+            bytes: 0,
+            work_bytes: 0,
+        }
     }
 
     pub(crate) fn charge_entry(&mut self) -> Result<(), String> {
@@ -76,7 +72,9 @@ pub(crate) fn git_tree_object_bounded<'repo>(
     tree_oid: Oid,
     budget: &mut GitTreeBudget,
 ) -> Result<git2::Tree<'repo>, String> {
-    let odb = repo.odb().map_err(|error| format!("open Git object database failed: {error}"))?;
+    let odb = repo
+        .odb()
+        .map_err(|error| format!("open Git object database failed: {error}"))?;
     let (size, kind) = odb
         .read_header(tree_oid)
         .map_err(|error| format!("read Git tree header failed: {error}"))?;
@@ -112,7 +110,9 @@ pub(crate) fn git_blob_size_bounded(
     max_bytes: u64,
     field: &str,
 ) -> Result<u64, String> {
-    let odb = repo.odb().map_err(|error| format!("open Git object database failed: {error}"))?;
+    let odb = repo
+        .odb()
+        .map_err(|error| format!("open Git object database failed: {error}"))?;
     let (size, kind) = odb
         .read_header(oid)
         .map_err(|error| format!("read {field} header failed: {error}"))?;
@@ -147,9 +147,10 @@ pub(crate) fn git_blob_bytes_bounded(
         if stream_kind != git2::ObjectType::Blob || u64::try_from(stream_size).ok() != Some(size) {
             return Err(format!("{field} changed its bounded ODB header"));
         }
-        let mut bytes = Vec::with_capacity(usize::try_from(size).map_err(|_| {
-            format!("{field} size does not fit the native allocation budget")
-        })?);
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(size)
+                .map_err(|_| format!("{field} size does not fit the native allocation budget"))?,
+        );
         let mut chunk = [0u8; 64 * 1024];
         loop {
             let read = reader
@@ -162,7 +163,9 @@ pub(crate) fn git_blob_bytes_bounded(
                 .len()
                 .checked_add(read)
                 .ok_or_else(|| format!("{field} byte accounting overflow"))?;
-            if u64::try_from(next).map_err(|_| format!("{field} size does not fit u64"))? > max_bytes {
+            if u64::try_from(next).map_err(|_| format!("{field} size does not fit u64"))?
+                > max_bytes
+            {
                 return Err(format!("{field} exceeds its {max_bytes}-byte bound"));
             }
             bytes.extend_from_slice(&chunk[..read]);
@@ -219,7 +222,8 @@ pub(crate) fn collect_tree_map(
 ) -> Result<HashMap<String, FlatEntry>, String> {
     let mut out = HashMap::new();
     let mut budget = GitTreeBudget::new();
-    let mut stack: Vec<(Oid, String, usize)> = Vec::with_capacity(PROMOTION_DIRECTORY_MAX_DEPTH + 1);
+    let mut stack: Vec<(Oid, String, usize)> =
+        Vec::with_capacity(PROMOTION_DIRECTORY_MAX_DEPTH + 1);
     stack.push((tree_oid, String::new(), 0));
     while let Some((current_oid, current_prefix, depth)) = stack.pop() {
         let tree = git_tree_object_bounded(repo, current_oid, &mut budget)?;
@@ -253,11 +257,20 @@ pub(crate) fn collect_tree_map(
                         0o120000 => PROMOTION_PATH_MAX_BYTES as u64,
                         _ => return Err(format!("Git state entry {path} has an unsupported mode")),
                     };
-                    let size = git_blob_size_bounded(repo, entry.id(), max_blob, &format!("Git state blob {path}"))?;
+                    let size = git_blob_size_bounded(
+                        repo,
+                        entry.id(),
+                        max_blob,
+                        &format!("Git state blob {path}"),
+                    )?;
                     budget.charge_bytes(size)?;
                     out.insert(path, (mode, entry.id()));
                 }
-                _ => return Err(format!("Git state entry {path} has an unsupported object type")),
+                _ => {
+                    return Err(format!(
+                        "Git state entry {path} has an unsupported object type"
+                    ));
+                }
             }
         }
     }
@@ -328,9 +341,8 @@ pub(crate) fn tree_lookup(
         {
             return Err("Git tree lookup contains an invalid path component".to_string());
         }
-        budget.charge_work(
-            u64::try_from(part.len()).map_err(|_| "Git tree lookup work overflow")?,
-        )?;
+        budget
+            .charge_work(u64::try_from(part.len()).map_err(|_| "Git tree lookup work overflow")?)?;
         let found = match current.get_name(part) {
             Some(entry) => (entry.id(), entry.filemode() as u32, entry.kind()),
             None => return Ok(None),
@@ -342,9 +354,7 @@ pub(crate) fn tree_lookup(
             };
             if found.2 != Some(expected_kind) {
                 return match leaf_kind {
-                    TreeLookupKind::Blob => {
-                        Err("Git tree lookup leaf is not a blob".to_string())
-                    }
+                    TreeLookupKind::Blob => Err("Git tree lookup leaf is not a blob".to_string()),
                     TreeLookupKind::Tree => Ok(None),
                 };
             }

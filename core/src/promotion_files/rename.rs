@@ -1,13 +1,16 @@
 //! Promotion rename helpers: same-namespace checks, exchange, and results.
 use std::ffi::CStr;
-use std::io::self;
+use std::io;
 use std::os::fd::RawFd;
 
 use serde_json::{Value, json};
 
 use crate::store::FileIdentity;
 
-pub(crate) fn promotion_cleanup_same_namespace_identity(actual: FileIdentity, expected: FileIdentity) -> bool {
+pub(crate) fn promotion_cleanup_same_namespace_identity(
+    actual: FileIdentity,
+    expected: FileIdentity,
+) -> bool {
     actual.dev == expected.dev
         && actual.ino == expected.ino
         && actual.file_type() == expected.file_type()

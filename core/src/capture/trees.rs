@@ -1,13 +1,9 @@
 //! Nested-tree assembly, delta writes, and flat/nested conversions.
 use std::collections::{HashMap, HashSet};
 
-use git2::{Oid, Repository};
 use crate::util::object_oid;
-use crate::{
-    StoreObjectTransaction,
-    write_transaction_object,
-    write_transaction_object_with_oid,
-};
+use crate::{StoreObjectTransaction, write_transaction_object, write_transaction_object_with_oid};
+use git2::{Oid, Repository};
 
 use super::walk::{TreeLookupKind, tree_lookup};
 
@@ -329,7 +325,9 @@ fn tree_object_content(entries: &[TreeEntry]) -> Vec<u8> {
     content
 }
 
-pub(crate) fn nested_from_flat(flat: &HashMap<String, FlatEntry>) -> Result<HashMap<String, Node>, String> {
+pub(crate) fn nested_from_flat(
+    flat: &HashMap<String, FlatEntry>,
+) -> Result<HashMap<String, Node>, String> {
     let mut nested = HashMap::new();
     for (path, (mode, oid)) in flat {
         insert_node(&mut nested, path, *oid, *mode)?;

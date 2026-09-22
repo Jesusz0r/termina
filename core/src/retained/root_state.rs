@@ -6,26 +6,21 @@ use std::os::fd::AsRawFd;
 
 use serde_json::{Value, json};
 
-use crate::util::{
-    open_at,
-    open_at_mode,
-};
 use crate::FileIdentity;
 use crate::PROMOTION_COMPONENT_MAX_BYTES;
 use crate::promote_fs::{
-    PromotionIdentity,
-    promotion_absolute_path,
-    promotion_identity_from_value,
-    promotion_private_identity_valid,
-    promotion_set_mode,
-    promotion_test_pause,
-    promotion_write_all,
-    stat_promotion_journal_file,
-    stat_promotion_private_at,
+    PromotionIdentity, promotion_absolute_path, promotion_identity_from_value,
+    promotion_private_identity_valid, promotion_set_mode, promotion_test_pause,
+    promotion_write_all, stat_promotion_journal_file, stat_promotion_private_at,
 };
+use crate::util::{open_at, open_at_mode};
 
 use super::RETAINED_ROOT_PROVENANCE_MAX_BYTES;
-use super::private_files::{promotion_private_temporary_name, promotion_publish_private_exclusive, promotion_read_private_bounded_file, promotion_read_private_bounded_if_present, promotion_read_private_bounded_opened};
+use super::private_files::{
+    promotion_private_temporary_name, promotion_publish_private_exclusive,
+    promotion_read_private_bounded_file, promotion_read_private_bounded_if_present,
+    promotion_read_private_bounded_opened,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PromotionRootStateKind {
@@ -42,7 +37,9 @@ pub(crate) struct PromotionRootState {
     pub(crate) identity: FileIdentity,
 }
 
-pub(crate) fn promotion_root_state_name(provenance_name: &str) -> Result<(String, CString), String> {
+pub(crate) fn promotion_root_state_name(
+    provenance_name: &str,
+) -> Result<(String, CString), String> {
     let name = format!("{provenance_name}.state");
     if name.len() > PROMOTION_COMPONENT_MAX_BYTES {
         return Err("promotion root state name is too long".to_string());
@@ -107,7 +104,13 @@ pub(crate) fn promotion_parse_root_state(
             .ok_or_else(|| format!("{field}.root is missing"))?,
         &format!("{field}.root"),
     )?;
-    Ok(PromotionRootState { kind, path: path.to_string(), parent, root, identity })
+    Ok(PromotionRootState {
+        kind,
+        path: path.to_string(),
+        parent,
+        root,
+        identity,
+    })
 }
 
 pub(crate) fn promotion_read_root_state(
@@ -119,7 +122,8 @@ pub(crate) fn promotion_read_root_state(
         name,
         RETAINED_ROOT_PROVENANCE_MAX_BYTES,
         "promotion root state",
-    )? else {
+    )?
+    else {
         return Ok(None);
     };
     Ok(Some(promotion_parse_root_state(
@@ -144,14 +148,11 @@ pub(crate) fn promotion_read_root_state_temporary(
         &temporary,
         RETAINED_ROOT_PROVENANCE_MAX_BYTES,
         "promotion root state temporary",
-    )? else {
+    )?
+    else {
         return Ok(None);
     };
-    let state = promotion_parse_root_state(
-        &bytes,
-        "promotion root state temporary",
-        identity,
-    )?;
+    let state = promotion_parse_root_state(&bytes, "promotion root state temporary", identity)?;
     if state.kind != PromotionRootStateKind::Pending {
         return Err("promotion root state temporary is not pending".to_string());
     }
@@ -203,7 +204,11 @@ pub(crate) fn promotion_replace_root_state(
         .map_err(|error| format!("stat promotion root state failed: {error}"))?;
     if current_identity != expected_identity
         || current_stat.file != current_identity
-        || !promotion_private_identity_valid(current_stat, Some(0o600), RETAINED_ROOT_PROVENANCE_MAX_BYTES)
+        || !promotion_private_identity_valid(
+            current_stat,
+            Some(0o600),
+            RETAINED_ROOT_PROVENANCE_MAX_BYTES,
+        )
     {
         return Err("promotion root state identity changed before commit".to_string());
     }
@@ -227,14 +232,18 @@ pub(crate) fn promotion_replace_root_state(
         libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
     ) {
         Ok(file) => {
-            let temporary_identity = stat_promotion_journal_file(&file)
-                .map_err(|error| format!("fstat existing promotion root state temporary failed: {error}"))?;
+            let temporary_identity = stat_promotion_journal_file(&file).map_err(|error| {
+                format!("fstat existing promotion root state temporary failed: {error}")
+            })?;
             if !promotion_private_identity_valid(
                 temporary_identity,
                 Some(0o600),
                 RETAINED_ROOT_PROVENANCE_MAX_BYTES,
             ) {
-                return Err("promotion root state temporary is not a bounded private app-owned file".to_string());
+                return Err(
+                    "promotion root state temporary is not a bounded private app-owned file"
+                        .to_string(),
+                );
             }
             let (_, observed) = promotion_read_private_bounded_opened(
                 parent,
@@ -260,8 +269,7 @@ pub(crate) fn promotion_replace_root_state(
             .map_err(|error| format!("create promotion root state temporary failed: {error}"))?;
             promotion_write_all(&mut file, content, "promotion root state temporary")?;
             promotion_set_mode(&file, 0o600, "promotion root state temporary")?;
-            file
-                .sync_all()
+            file.sync_all()
                 .map_err(|error| format!("sync promotion root state temporary failed: {error}"))?;
             let temporary_identity = stat_promotion_journal_file(&file)
                 .map_err(|error| format!("fstat promotion root state temporary failed: {error}"))?;
@@ -279,7 +287,11 @@ pub(crate) fn promotion_replace_root_state(
             }
             file
         }
-        Err(error) => return Err(format!("open promotion root state temporary failed: {error}")),
+        Err(error) => {
+            return Err(format!(
+                "open promotion root state temporary failed: {error}"
+            ));
+        }
     };
 
     // A descriptor-relative rename replaces the old state atomically and
@@ -321,8 +333,17 @@ pub(crate) fn promotion_replace_root_state(
         return Err("promotion root state changed before commit".to_string());
     }
     unsafe {
-        if libc::renameat(parent.as_raw_fd(), temporary.as_ptr(), parent.as_raw_fd(), name.as_ptr()) == -1 {
-            return Err(format!("replace promotion root state failed: {}", io::Error::last_os_error()));
+        if libc::renameat(
+            parent.as_raw_fd(),
+            temporary.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        ) == -1
+        {
+            return Err(format!(
+                "replace promotion root state failed: {}",
+                io::Error::last_os_error()
+            ));
         }
     }
     parent
@@ -344,9 +365,9 @@ pub(crate) fn promotion_replace_root_state(
     let (identity, observed) = promotion_read_private_bounded_opened(
         parent,
         name,
-        temporary_file.try_clone().map_err(|error| {
-            format!("clone promotion root state after commit failed: {error}")
-        })?,
+        temporary_file
+            .try_clone()
+            .map_err(|error| format!("clone promotion root state after commit failed: {error}"))?,
         RETAINED_ROOT_PROVENANCE_MAX_BYTES,
         "promotion root state",
     )?;

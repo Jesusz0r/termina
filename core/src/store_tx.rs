@@ -18,14 +18,15 @@ use git2::{Oid, Repository};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{BLOB_COMPRESSION, exact_ref_target, sync_exact_transaction_ref, validate_transaction_ref};
 use crate::util::{loose_path, object_oid, oid_ext};
+use crate::{
+    BLOB_COMPRESSION, exact_ref_target, sync_exact_transaction_ref, validate_transaction_ref,
+};
 
 use super::store::{
     durable_write, ensure_real_directory, read_regular_file_nofollow, same_regular_file,
     sync_directory, sync_directory_nofollow,
 };
-
 
 pub(crate) const STORE_TRANSACTION_VERSION: u32 = 1;
 pub(crate) const STORE_TRANSACTION_FILE: &str = "termina-object-transaction.json";
@@ -664,7 +665,6 @@ pub(crate) fn write_transaction_object_with_oid(
     let new_bytes = u64::try_from(content.len()).map_err(|_| "object length does not fit u64")?;
     Ok((oid, new_bytes))
 }
-
 
 pub(crate) fn transaction_file(store_dir: &Path) -> PathBuf {
     store_dir.join(STORE_TRANSACTION_FILE)

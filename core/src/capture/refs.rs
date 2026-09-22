@@ -3,18 +3,13 @@ use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
-use git2::{Oid, Repository, Signature};
-use serde_json::Value;
-use crate::util::{
-    object_oid,
-    oid_ext,
-};
+use crate::util::{object_oid, oid_ext};
 use crate::{
-    StoreObjectTransaction,
-    ensure_real_directory,
-    sync_directory_nofollow,
+    StoreObjectTransaction, ensure_real_directory, sync_directory_nofollow,
     write_transaction_object_with_oid,
 };
+use git2::{Oid, Repository, Signature};
+use serde_json::Value;
 
 /// Create the synthetic state commit.
 pub(crate) fn commit_tree(
@@ -34,7 +29,8 @@ pub(crate) fn commit_tree(
         .commit_create_buffer(&signature, &signature, message, &tree_obj, &parent_refs)
         .map_err(|e| format!("commit buffer failed: {e}"))?;
     let oid = object_oid(repo, "commit", content.as_ref());
-    let written = write_transaction_object_with_oid(transaction, repo, "commit", content.as_ref(), oid)?.0;
+    let written =
+        write_transaction_object_with_oid(transaction, repo, "commit", content.as_ref(), oid)?.0;
     if written != oid {
         return Err("state commit oid changed while staged".to_string());
     }
@@ -94,7 +90,11 @@ pub(crate) fn prepare_transaction_ref_path(
 /// Make an exact loose transaction ref and every ancestor directory durable,
 /// then reread the direct target. Visibility before this barrier is not a
 /// committed publication.
-pub(crate) fn sync_exact_transaction_ref(repo: &Repository, name: &str, target: Oid) -> Result<u64, String> {
+pub(crate) fn sync_exact_transaction_ref(
+    repo: &Repository,
+    name: &str,
+    target: Oid,
+) -> Result<u64, String> {
     let ref_path = prepare_transaction_ref_path(repo, name, target)?;
     if exact_ref_target(repo, name) != Some(target) {
         return Err(format!(

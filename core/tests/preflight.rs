@@ -18,7 +18,10 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 fn git_env(home: &Path, tmp: &Path) -> Vec<(String, String)> {
     vec![
-        ("PATH".to_string(), "/usr/bin:/bin:/usr/sbin:/sbin".to_string()),
+        (
+            "PATH".to_string(),
+            "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+        ),
         ("HOME".to_string(), home.to_str().unwrap().to_string()),
         ("TMPDIR".to_string(), tmp.to_str().unwrap().to_string()),
         ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
@@ -149,7 +152,10 @@ fn transform_gitattributes_fails_preflight() {
 fn missing_gitattributes_is_absence_not_unreadable() {
     let mut harness = PreflightHarness::with_files(
         "pf-attr-missing",
-        &[(".gitattributes", "# no transforms\n"), ("keep.txt", "keep\n")],
+        &[
+            (".gitattributes", "# no transforms\n"),
+            ("keep.txt", "keep\n"),
+        ],
     );
     fs::remove_file(harness.source.join(".gitattributes")).expect("delete attributes");
     let (ok, reasons) = harness.run();
@@ -215,7 +221,10 @@ fn unreadable_user_gitconfig_fails_closed() {
     .expect("write user gitconfig");
     chmod_unreadable(&global);
     let (ok, reasons) = harness.run();
-    assert!(!ok, "unreadable user gitconfig must fail closed: {reasons:?}");
+    assert!(
+        !ok,
+        "unreadable user gitconfig must fail closed: {reasons:?}"
+    );
     assert!(
         reasons
             .iter()
@@ -227,7 +236,8 @@ fn unreadable_user_gitconfig_fails_closed() {
 
 #[test]
 fn unreadable_git_config_fails_closed() {
-    let mut harness = PreflightHarness::with_files("pf-config-unreadable", &[("keep.txt", "keep\n")]);
+    let mut harness =
+        PreflightHarness::with_files("pf-config-unreadable", &[("keep.txt", "keep\n")]);
     // A config entry whose name is not valid UTF-8 cannot be classified as
     // "setting absent". Skipping it (the old fail-open) would hide a driver.
     let config_path = harness.source.join(".git").join("config");

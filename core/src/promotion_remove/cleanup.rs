@@ -7,32 +7,19 @@ use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
-use crate::{
-    PROMOTION_CLEANUP_SEQUENCE,
-    PROMOTION_DIRECTORY_MAX_DEPTH,
-    PROMOTION_DIRECTORY_MAX_ENTRIES,
-    PROMOTION_DIRECTORY_MAX_NAME_BYTES,
-    PROMOTION_QUARANTINE_MAX_BYTES,
-    PROMOTION_QUARANTINE_MAX_CONTAINERS,
-    PROMOTION_QUARANTINE_MAX_ENTRIES,
-    PROMOTION_QUARANTINE_PREFIX,
-};
-use crate::util::{
-    missing_path,
-    open_at,
-    stat_at,
-    stat_file,
-};
-use crate::store::FileIdentity;
-use crate::promotion_files::promotion_cleanup_same_namespace_identity;
-use crate::util::read_link_at;
 use crate::promote_fs::{
-    PromotionDirectoryStream,
-    promotion_add_work,
-    promotion_child_relative,
-    promotion_mkdir_at,
-    promotion_path_work_bytes,
-    promotion_test_pause,
+    PromotionDirectoryStream, promotion_add_work, promotion_child_relative, promotion_mkdir_at,
+    promotion_path_work_bytes, promotion_test_pause,
+};
+use crate::promotion_files::promotion_cleanup_same_namespace_identity;
+use crate::store::FileIdentity;
+use crate::util::read_link_at;
+use crate::util::{missing_path, open_at, stat_at, stat_file};
+use crate::{
+    PROMOTION_CLEANUP_SEQUENCE, PROMOTION_DIRECTORY_MAX_DEPTH, PROMOTION_DIRECTORY_MAX_ENTRIES,
+    PROMOTION_DIRECTORY_MAX_NAME_BYTES, PROMOTION_QUARANTINE_MAX_BYTES,
+    PROMOTION_QUARANTINE_MAX_CONTAINERS, PROMOTION_QUARANTINE_MAX_ENTRIES,
+    PROMOTION_QUARANTINE_PREFIX,
 };
 
 #[derive(Clone, Copy)]
@@ -113,7 +100,11 @@ fn promotion_cleanup_tree_counts(
             stack.pop();
             continue;
         };
-        let current_relative = stack.last().expect("cleanup tree scan frame exists").2.clone();
+        let current_relative = stack
+            .last()
+            .expect("cleanup tree scan frame exists")
+            .2
+            .clone();
         let path_work = promotion_path_work_bytes(&current_relative, &name)?;
         promotion_add_work(
             &mut work_bytes,
@@ -122,7 +113,11 @@ fn promotion_cleanup_tree_counts(
             kind.work_label(),
         )?;
         let child_relative = promotion_child_relative(&current_relative, &name)?;
-        let directory = stack.last().expect("cleanup tree scan frame exists").0.as_raw_fd();
+        let directory = stack
+            .last()
+            .expect("cleanup tree scan frame exists")
+            .0
+            .as_raw_fd();
         let identity = match stat_at(directory, &c_name) {
             Ok(identity) => identity,
             Err(error) if kind.skip_missing() && missing_path(&error) => continue,
@@ -216,7 +211,10 @@ fn promotion_cleanup_tree_counts(
                 format!("open {} {child_relative} failed: {error}", kind.directory())
             })?;
             let opened_identity = stat_file(&child).map_err(|error| {
-                format!("fstat {} {child_relative} failed: {error}", kind.directory())
+                format!(
+                    "fstat {} {child_relative} failed: {error}",
+                    kind.directory()
+                )
             })?;
             if !promotion_cleanup_same_namespace_identity(opened_identity, identity) {
                 return Err(format!(
@@ -248,8 +246,8 @@ pub(crate) fn validate_promotion_cleanup_tree(
     if !root.is_dir() || root.is_symlink() {
         return Err(format!("cleanup tree {relative} is not a real directory"));
     }
-    let mut work_bytes = u64::try_from(relative.len())
-        .map_err(|_| "cleanup tree work accounting overflow")?;
+    let mut work_bytes =
+        u64::try_from(relative.len()).map_err(|_| "cleanup tree work accounting overflow")?;
     promotion_add_work(
         &mut work_bytes,
         std::mem::size_of::<FileIdentity>() as u64,
@@ -311,7 +309,9 @@ pub(crate) struct PromotionQuarantineUsage {
     reusable: Option<(fs::File, CString)>,
 }
 
-pub(crate) fn promotion_quarantine_usage(grandparent: &fs::File) -> Result<PromotionQuarantineUsage, String> {
+pub(crate) fn promotion_quarantine_usage(
+    grandparent: &fs::File,
+) -> Result<PromotionQuarantineUsage, String> {
     let mut containers = 0usize;
     let mut entries = 0usize;
     let mut bytes = 0u64;

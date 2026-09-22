@@ -3,29 +3,17 @@ use std::os::fd::AsRawFd;
 
 use serde_json::Value;
 
-use crate::promotion_files::{
-    promotion_rename_exchange,
-    promotion_rename_unsupported,
-    promotion_transition_result,
-};
 use crate::promote_fs::{
-    observe_promotion_leaf,
-    open_promotion_bound_root,
-    open_promotion_bound_root_values,
-    open_promotion_parent,
-    parse_promotion_expected,
-    parse_promotion_expected_destination,
-    promotion_components,
-    promotion_components_value,
-    promotion_directory_identity_matches,
-    promotion_expected_matches,
-    promotion_expected_state_description,
-    promotion_identity_from_value,
-    promotion_name,
-    promotion_rename_noreplace,
+    observe_promotion_leaf, open_promotion_bound_root, open_promotion_bound_root_values,
+    open_promotion_parent, parse_promotion_expected, parse_promotion_expected_destination,
+    promotion_components, promotion_components_value, promotion_directory_identity_matches,
+    promotion_expected_matches, promotion_expected_state_description,
+    promotion_identity_from_value, promotion_name, promotion_rename_noreplace,
     promotion_test_pause,
 };
-
+use crate::promotion_files::{
+    promotion_rename_exchange, promotion_rename_unsupported, promotion_transition_result,
+};
 
 pub(crate) fn op_promotion_bound_transition(req: &Value) -> Result<Value, String> {
     let (primary, _primary_identity, _primary_capability) = open_promotion_bound_root(

@@ -202,8 +202,10 @@ mod pause_at_hook_tests {
 
     impl Fixture {
         fn named(name: &str) -> Self {
-            let path =
-                std::env::temp_dir().join(format!("termina-capture-hook-{}-{name}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "termina-capture-hook-{}-{name}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).expect("hook test fixture directory");
             Self(path)
         }
@@ -262,6 +264,9 @@ mod pause_at_hook_tests {
             "releasePath": release.to_str().expect("temp hook path is UTF-8"),
         } } });
         assert!(pause_at_hook(&req, "probe").is_ok());
-        assert_eq!(fs::read(ready).expect("hook test ready marker read"), b"ready");
+        assert_eq!(
+            fs::read(ready).expect("hook test ready marker read"),
+            b"ready"
+        );
     }
 }

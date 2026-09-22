@@ -3,18 +3,16 @@ use std::ffi::CStr;
 use std::fs;
 use std::os::fd::AsRawFd;
 
-
-use crate::util::{
-    open_at,
-    stat_at_owned,
-    stat_file,
-    stat_file_owned,
-};
 use crate::FileIdentity;
 use crate::promote_fs::PromotionDirectoryStream;
+use crate::util::{open_at, stat_at_owned, stat_file, stat_file_owned};
 
-use super::{RETAINED_ROOT_MARKER_MAX_BYTES, RETAINED_ROOT_MAX_ENTRIES, RETAINED_ROOT_MAX_SCAN_BYTES, RETAINED_ROOT_MAX_SCAN_DEPTH, RETAINED_ROOT_MAX_SCAN_ENTRIES, RETAINED_ROOT_MAX_SCAN_WORK_BYTES};
 use super::private_files::promotion_read_private_bounded_file;
+use super::{
+    RETAINED_ROOT_MARKER_MAX_BYTES, RETAINED_ROOT_MAX_ENTRIES, RETAINED_ROOT_MAX_SCAN_BYTES,
+    RETAINED_ROOT_MAX_SCAN_DEPTH, RETAINED_ROOT_MAX_SCAN_ENTRIES,
+    RETAINED_ROOT_MAX_SCAN_WORK_BYTES,
+};
 
 /// Validate a directory opened through a trusted descriptor.  The retained
 /// root uses the private variant; generic promotion roots only require the
@@ -24,13 +22,15 @@ pub(crate) fn promotion_owned_directory(
     field: &str,
     require_private: bool,
 ) -> Result<FileIdentity, String> {
-    let (identity, uid) =
-        stat_file_owned(directory).map_err(|error| format!("fstat promotion {field} failed: {error}"))?;
+    let (identity, uid) = stat_file_owned(directory)
+        .map_err(|error| format!("fstat promotion {field} failed: {error}"))?;
     if !identity.is_dir() {
         return Err(format!("promotion {field} is not a directory"));
     }
     if uid != unsafe { libc::geteuid() as u64 } {
-        return Err(format!("promotion {field} is not owned by the current user"));
+        return Err(format!(
+            "promotion {field} is not owned by the current user"
+        ));
     }
     if require_private && identity.mode & 0o077 != 0 {
         return Err(format!("promotion {field} is not private"));
@@ -70,8 +70,7 @@ pub(crate) fn retained_root_metadata(name: &str) -> bool {
         || name == ".termina-retained-session-root.tmp"
         || name == ".termina-retained-session-admission.lock"
         || name == ".termina-retained-session-usage.json"
-        || (name.starts_with(".termina-retained-session-usage.json.tmp-")
-            && name.len() <= 256)
+        || (name.starts_with(".termina-retained-session-usage.json.tmp-") && name.len() <= 256)
 }
 
 pub(crate) fn retained_root_top_level_name(name: &str) -> Result<bool, String> {
@@ -81,7 +80,9 @@ pub(crate) fn retained_root_top_level_name(name: &str) -> Result<bool, String> {
     if retained_root_hex_staging(name) || retained_root_claim(name) || retained_root_safe_id(name) {
         return Ok(true);
     }
-    Err(format!("retained session root contains an unexpected entry: {name}"))
+    Err(format!(
+        "retained session root contains an unexpected entry: {name}"
+    ))
 }
 
 pub(crate) struct RetainedRootScan {
@@ -169,10 +170,14 @@ pub(crate) fn promotion_validate_retained_directory(
         let (identity, uid) = stat_at_owned(directory_fd, &c_name)
             .map_err(|error| format!("stat retained root entry {name} failed: {error}"))?;
         if uid != unsafe { libc::geteuid() as u64 } || identity.mode & 0o077 != 0 {
-            return Err(format!("retained root entry {name} is not a private app-owned entry"));
+            return Err(format!(
+                "retained root entry {name} is not a private app-owned entry"
+            ));
         }
         if identity.is_symlink() || (!identity.is_dir() && !identity.is_file()) {
-            return Err(format!("retained root entry {name} has an unsupported file type"));
+            return Err(format!(
+                "retained root entry {name} has an unsupported file type"
+            ));
         }
         if identity.is_file() {
             scan.bytes = scan
@@ -192,7 +197,9 @@ pub(crate) fn promotion_validate_retained_directory(
                 .map_err(|error| format!("fstat retained root file {name} failed: {error}"))?
                 != identity
             {
-                return Err(format!("retained root file {name} changed while validating"));
+                return Err(format!(
+                    "retained root file {name} changed while validating"
+                ));
             }
             continue;
         }
@@ -209,7 +216,9 @@ pub(crate) fn promotion_validate_retained_directory(
             .map_err(|error| format!("fstat retained root directory {name} failed: {error}"))?
             != identity
         {
-            return Err(format!("retained root directory {name} changed while validating"));
+            return Err(format!(
+                "retained root directory {name} changed while validating"
+            ));
         }
         if stack.len() >= RETAINED_ROOT_MAX_SCAN_DEPTH + 1 {
             return Err("retained root exceeds its depth bound".to_string());

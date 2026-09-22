@@ -3,21 +3,11 @@ use std::ffi::{CStr, CString};
 use std::io::Read;
 use std::os::fd::RawFd;
 
-use sha2::{Digest, Sha256};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-use crate::{
-    BUDGET_MAX_FILE_BYTES,
-    PROMOTION_COMPONENT_MAX_BYTES,
-    PROMOTION_PATH_MAX_BYTES,
-};
-use crate::util::{
-    missing_path,
-    open_at,
-    read_link_at,
-    stat_at,
-    stat_file,
-};
+use crate::util::{missing_path, open_at, read_link_at, stat_at, stat_file};
+use crate::{BUDGET_MAX_FILE_BYTES, PROMOTION_COMPONENT_MAX_BYTES, PROMOTION_PATH_MAX_BYTES};
 
 use super::capability::PromotionIdentity;
 
@@ -58,7 +48,10 @@ pub(crate) struct PromotionObservedLeaf {
     pub(crate) state: PromotionObservedState,
 }
 
-pub(crate) fn promotion_identity_from_value(value: &Value, field: &str) -> Result<PromotionIdentity, String> {
+pub(crate) fn promotion_identity_from_value(
+    value: &Value,
+    field: &str,
+) -> Result<PromotionIdentity, String> {
     let object = value
         .as_object()
         .ok_or_else(|| format!("{field} must be an object"))?;
@@ -98,7 +91,11 @@ pub(crate) fn promotion_component(value: &Value, field: &str) -> Result<(String,
     Ok((value.to_string(), cstring))
 }
 
-pub(crate) fn promotion_name(value: &Value, field: &str, prefix: &str) -> Result<(String, CString), String> {
+pub(crate) fn promotion_name(
+    value: &Value,
+    field: &str,
+    prefix: &str,
+) -> Result<(String, CString), String> {
     let (value, cstring) = promotion_component(value, field)?;
     if !value.starts_with(prefix) || !value.ends_with(".tmp") {
         return Err(format!("invalid promotion {field}"));
@@ -142,7 +139,10 @@ pub(crate) fn promotion_size(value: &Value, field: &str) -> Result<u64, String> 
         .map_err(|_| format!("{field} does not fit u64"))
 }
 
-pub(crate) fn parse_promotion_expected(value: &Value, field: &str) -> Result<PromotionExpectedLeaf, String> {
+pub(crate) fn parse_promotion_expected(
+    value: &Value,
+    field: &str,
+) -> Result<PromotionExpectedLeaf, String> {
     let object = value
         .as_object()
         .ok_or_else(|| format!("{field} must be an object"))?;
@@ -275,7 +275,9 @@ pub(crate) fn promotion_expected_matches(
     }
 }
 
-pub(crate) fn promotion_expected_state_description(expected: &PromotionExpectedLeaf) -> &'static str {
+pub(crate) fn promotion_expected_state_description(
+    expected: &PromotionExpectedLeaf,
+) -> &'static str {
     match expected.state {
         PromotionExpectedState::File { .. } => "file",
         PromotionExpectedState::Symlink { .. } => "symlink",

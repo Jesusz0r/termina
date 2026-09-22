@@ -8,7 +8,7 @@ use git2::{Oid, Repository};
 use serde_json::Value;
 
 use crate::util::{open_at, read_link_at, stat_at, stat_file};
-use crate::{write_blob, StoreObjectTransaction};
+use crate::{StoreObjectTransaction, write_blob};
 
 use super::binding::{AnchoredPath, CaptureRoot};
 

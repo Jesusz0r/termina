@@ -7,23 +7,21 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::{
-    PROMOTION_COMPONENT_ARRAY_MAX_ENTRIES,
-    PROMOTION_COMPONENT_ARRAY_MAX_NAME_BYTES,
-};
-use crate::util::{
-    missing_path,
-    open_absolute_directory_nofollow,
-    open_at,
-    opt_s,
-    s,
-};
+use crate::util::{missing_path, open_absolute_directory_nofollow, open_at, opt_s, s};
+use crate::{PROMOTION_COMPONENT_ARRAY_MAX_ENTRIES, PROMOTION_COMPONENT_ARRAY_MAX_NAME_BYTES};
 
-use super::capability::{PromotionIdentity, issue_promotion_root_capability, promotion_root_capabilities};
-use super::expected::{promotion_absolute_path, promotion_component, promotion_identity_from_value};
+use super::capability::{
+    PromotionIdentity, issue_promotion_root_capability, promotion_root_capabilities,
+};
+use super::expected::{
+    promotion_absolute_path, promotion_component, promotion_identity_from_value,
+};
 use super::io::{promotion_directory_identity_matches, promotion_mkdir_at};
 
-pub(crate) fn open_promotion_absolute_directory(path: &str, field: &str) -> Result<fs::File, String> {
+pub(crate) fn open_promotion_absolute_directory(
+    path: &str,
+    field: &str,
+) -> Result<fs::File, String> {
     promotion_absolute_path(path, field)?;
     open_absolute_directory_nofollow(Path::new(path), field)
 }
@@ -135,7 +133,10 @@ pub(crate) fn open_promotion_bound_root_values(
     Ok((directory, expected, token))
 }
 
-pub(crate) fn promotion_path_with_components(root: &str, components: &[(String, CString)]) -> String {
+pub(crate) fn promotion_path_with_components(
+    root: &str,
+    components: &[(String, CString)],
+) -> String {
     let mut path = root.trim_end_matches('/').to_string();
     for (name, _) in components {
         path.push('/');
@@ -148,7 +149,10 @@ pub(crate) fn promotion_path_with_components(root: &str, components: &[(String, 
     }
 }
 
-pub(crate) fn promotion_components_value(value: &Value, key: &str) -> Result<Vec<(String, CString)>, String> {
+pub(crate) fn promotion_components_value(
+    value: &Value,
+    key: &str,
+) -> Result<Vec<(String, CString)>, String> {
     let values = value
         .as_array()
         .ok_or_else(|| format!("{key} must be an array"))?;
@@ -190,7 +194,10 @@ pub(crate) fn promotion_identity_chain_from_value(
     Ok(identities)
 }
 
-pub(crate) fn promotion_components_for(req: &Value, key: &str) -> Result<Vec<(String, CString)>, String> {
+pub(crate) fn promotion_components_for(
+    req: &Value,
+    key: &str,
+) -> Result<Vec<(String, CString)>, String> {
     promotion_components_value(
         req.get(key).ok_or_else(|| format!("missing field {key}"))?,
         key,
@@ -348,13 +355,9 @@ mod open_or_create_promotion_parent_tests {
         let components = [component("a"), component("b"), component("c")];
         assert!(!fixture.path.join("a").exists());
 
-        let created = open_or_create_promotion_parent(
-            &fixture.root,
-            &components,
-            "nested parent",
-            0o700,
-        )
-        .expect("create three previously missing nested directories");
+        let created =
+            open_or_create_promotion_parent(&fixture.root, &components, "nested parent", 0o700)
+                .expect("create three previously missing nested directories");
 
         assert!(fixture.path.join("a").is_dir());
         assert!(fixture.path.join("a").join("b").is_dir());
@@ -372,13 +375,9 @@ mod open_or_create_promotion_parent_tests {
         assert_eq!(created_identity.dev, path_identity.dev);
         assert_eq!(created_identity.ino, path_identity.ino);
 
-        let reopened = open_or_create_promotion_parent(
-            &fixture.root,
-            &components,
-            "nested parent",
-            0o700,
-        )
-        .expect("reopen existing nested directories without creating extras");
+        let reopened =
+            open_or_create_promotion_parent(&fixture.root, &components, "nested parent", 0o700)
+                .expect("reopen existing nested directories without creating extras");
         let reopened_identity = stat_file(&reopened).expect("stat reopened nested parent");
         assert_eq!(created_identity.dev, reopened_identity.dev);
         assert_eq!(created_identity.ino, reopened_identity.ino);

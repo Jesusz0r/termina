@@ -13,8 +13,8 @@ use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
-use crate::store::FileIdentity;
 use crate::PROMOTION_PATH_MAX_BYTES;
+use crate::store::FileIdentity;
 
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()

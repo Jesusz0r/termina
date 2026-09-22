@@ -3,35 +3,18 @@ use std::os::fd::AsRawFd;
 
 use serde_json::{Value, json};
 
-use crate::{
-    PROMOTION_DIRECTORY_MAX_NAME_BYTES,
-    PROMOTION_RECOVERY_ROOT_MAX_ENTRIES,
-};
-use crate::util::{
-    missing_path,
-    open_at,
-    s,
-    stat_at,
-    stat_file,
-};
-use crate::store::FileIdentity;
-use crate::retained::op_promotion_bound_root_transaction;
 use crate::promote_fs::{
-    PromotionDirectoryStream,
-    PromotionIdentity,
-    issue_promotion_root_capability,
-    open_promotion_bound_root,
-    open_promotion_bound_root_values,
-    promotion_component,
-    promotion_components_value,
-    promotion_directory_capability_result,
-    promotion_directory_identity_matches,
-    promotion_identity_chain_from_value,
-    promotion_identity_from_value,
-    promotion_mkdir_at,
-    promotion_path_with_components,
+    PromotionDirectoryStream, PromotionIdentity, issue_promotion_root_capability,
+    open_promotion_bound_root, open_promotion_bound_root_values, promotion_component,
+    promotion_components_value, promotion_directory_capability_result,
+    promotion_directory_identity_matches, promotion_identity_chain_from_value,
+    promotion_identity_from_value, promotion_mkdir_at, promotion_path_with_components,
     promotion_test_pause,
 };
+use crate::retained::op_promotion_bound_root_transaction;
+use crate::store::FileIdentity;
+use crate::util::{missing_path, open_at, s, stat_at, stat_file};
+use crate::{PROMOTION_DIRECTORY_MAX_NAME_BYTES, PROMOTION_RECOVERY_ROOT_MAX_ENTRIES};
 
 /// Bind an existing absolute directory without a TypeScript pathname
 /// preflight.  The descriptor opened here is the source of the returned
@@ -334,8 +317,7 @@ pub(crate) fn op_promotion_bound_ensure_directory(req: &Value) -> Result<Value, 
     for field in object.keys() {
         if !matches!(
             field.as_str(),
-            "op"
-                | "requestId"
+            "op" | "requestId"
                 | "path"
                 | "expectedIdentity"
                 | "capability"

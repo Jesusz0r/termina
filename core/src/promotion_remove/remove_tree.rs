@@ -1,37 +1,28 @@
 //! Promotion remove-tree op: validated moves into quarantine.
 use std::ffi::CString;
 use std::os::fd::AsRawFd;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
 use crate::PROMOTION_CLEANUP_SEQUENCE;
-use crate::util::{
-    open_at,
-    s,
-    stat_at,
-    stat_file,
+use crate::promote_fs::{
+    open_promotion_absolute_directory, open_promotion_bound_root, open_promotion_parent,
+    promotion_components_for, promotion_directory_identity_matches, promotion_identity_from_value,
+    promotion_rename_noreplace, promotion_test_pause,
+};
+use crate::promotion_files::{
+    promotion_cleanup_same_namespace_identity, promotion_rename_unsupported,
 };
 use crate::store::FileIdentity;
-use crate::promotion_files::{
-    promotion_cleanup_same_namespace_identity,
-    promotion_rename_unsupported,
-};
 use crate::util::read_link_at;
-use crate::promote_fs::{
-    open_promotion_absolute_directory,
-    open_promotion_bound_root,
-    open_promotion_parent,
-    promotion_components_for,
-    promotion_directory_identity_matches,
-    promotion_identity_from_value,
-    promotion_rename_noreplace,
-    promotion_test_pause,
+use crate::util::{open_at, s, stat_at, stat_file};
+
+use super::cleanup::{
+    create_promotion_quarantine_container, promotion_quarantine_usage,
+    validate_promotion_cleanup_tree,
 };
-
-use super::cleanup::{create_promotion_quarantine_container, promotion_quarantine_usage, validate_promotion_cleanup_tree};
-
 
 pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, String> {
     let (root, root_identity, _capability) =
@@ -69,8 +60,9 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
         )
     };
     let child_identity = match &child {
-        Some(child) => stat_file(child)
-            .map_err(|error| format!("fstat cleanup root failed: {error}"))?,
+        Some(child) => {
+            stat_file(child).map_err(|error| format!("fstat cleanup root failed: {error}"))?
+        }
         None => observed_child,
     };
     if (!child_identity.is_dir() && !child_identity.is_file() && !child_identity.is_symlink())
@@ -124,10 +116,16 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
             return Err("cleanup root changed; evidence retained".to_string());
         }
         // Invariant: promotion_components_for rejects empty arrays.
-        let work = u64::try_from(components.last().expect("non-empty cleanup components").0.len())
-            .map_err(|_| "cleanup root work accounting overflow")?
-            .checked_add(std::mem::size_of::<FileIdentity>() as u64)
-            .ok_or("cleanup root work accounting overflow")?;
+        let work = u64::try_from(
+            components
+                .last()
+                .expect("non-empty cleanup components")
+                .0
+                .len(),
+        )
+        .map_err(|_| "cleanup root work accounting overflow")?
+        .checked_add(std::mem::size_of::<FileIdentity>() as u64)
+        .ok_or("cleanup root work accounting overflow")?;
         let bytes = if child_identity.is_symlink() {
             u64::try_from(
                 read_link_at(parent.as_raw_fd(), leaf)
@@ -144,13 +142,12 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
     // stable grandparent descriptor lock.  Keep that reservation alive until
     // the descriptor-bound no-replace rename and final validation complete;
     // any failed move drops the lock without deleting retained evidence.
-    let reservation =
-        create_promotion_quarantine_container(
-            &parent,
-            expected_entries,
-            expected_bytes,
-            expected_work_bytes,
-        )?;
+    let reservation = create_promotion_quarantine_container(
+        &parent,
+        expected_entries,
+        expected_bytes,
+        expected_work_bytes,
+    )?;
     let quarantine_root = &reservation.quarantine_root;
     // Revalidate the incoming object after admission has serialized against
     // other quarantine movers. If a writer changed the tree while the first
@@ -178,10 +175,16 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
             );
         }
         // Invariant: promotion_components_for rejects empty arrays.
-        let work = u64::try_from(components.last().expect("non-empty cleanup components").0.len())
-            .map_err(|_| "cleanup root work accounting overflow")?
-            .checked_add(std::mem::size_of::<FileIdentity>() as u64)
-            .ok_or("cleanup root work accounting overflow")?;
+        let work = u64::try_from(
+            components
+                .last()
+                .expect("non-empty cleanup components")
+                .0
+                .len(),
+        )
+        .map_err(|_| "cleanup root work accounting overflow")?
+        .checked_add(std::mem::size_of::<FileIdentity>() as u64)
+        .ok_or("cleanup root work accounting overflow")?;
         let bytes = if child_identity.is_symlink() {
             u64::try_from(
                 read_link_at(parent.as_raw_fd(), leaf)

@@ -108,8 +108,7 @@ fn fifo_swap_after_observation_is_rejected_and_core_stays_usable() {
     let expected_healthy = expected_file_json(&healthy);
 
     let mut core = CoreProcess::spawn(&home, fixture.path());
-    let (hook, ready, release) =
-        hook_payload("promotion-copy-source-observed", &hooks_dir, "fifo");
+    let (hook, ready, release) = hook_payload("promotion-copy-source-observed", &hooks_dir, "fifo");
     let payload = copy_payload(
         &source_root,
         "victim.txt",

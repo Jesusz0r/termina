@@ -6,30 +6,14 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::util::{
+    has_git_segment, is_safe_relative, missing_path, normalize_system_alias_path, object_format,
+    object_oid, open_absolute_directory_nofollow, open_at, open_relative_directory, open_repo, s,
+    same_directory_identity, stat_at, stat_file,
+};
+use crate::{FileIdentity, current_store_lifecycle, lifecycle_mismatch, validate_store_lifecycle};
 use git2::{ObjectFormat, Oid, Repository};
 use serde_json::Value;
-use crate::util::{
-    has_git_segment,
-    is_safe_relative,
-    missing_path,
-    normalize_system_alias_path,
-    object_format,
-    object_oid,
-    open_at,
-    open_absolute_directory_nofollow,
-    open_relative_directory,
-    open_repo,
-    s,
-    same_directory_identity,
-    stat_at,
-    stat_file,
-};
-use crate::{
-    FileIdentity,
-    current_store_lifecycle,
-    lifecycle_mismatch,
-    validate_store_lifecycle,
-};
 
 use crate::test_hooks::pause_at_hook;
 

@@ -1,9 +1,9 @@
 //! Retained promotion roots: validation, markers, provenance, root
 //! state, and the root-transaction op.
-mod validate;
+mod ops;
 mod private_files;
 mod root_state;
-mod ops;
+mod validate;
 
 pub(crate) const RETAINED_ROOT_MAX_ENTRIES: usize = 128 * 4;
 pub(crate) const RETAINED_ROOT_MAX_SCAN_ENTRIES: usize = 250_000;

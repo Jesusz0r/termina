@@ -5,16 +5,16 @@ use std::path::PathBuf;
 
 use base64::Engine as _;
 use git2::{ErrorCode, ObjectFormat, Oid, Repository, RepositoryOpenFlags, StatusOptions};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::util::{
     missing_path, normalize_system_alias_path, open_repo, require_utf8_git_path,
     require_utf8_path_bytes, require_utf8_rel_path, s,
 };
 use crate::{
-    git_blob_bytes_bounded, git_blob_size_bounded, git_tree_entry_path, git_tree_object_bounded,
-    tree_lookup, GitTreeBudget, TreeLookupKind, PROMOTION_DIRECTORY_MAX_DEPTH,
-    PROMOTION_PATH_MAX_BYTES, READ_BLOB_MAX_BYTES,
+    GitTreeBudget, PROMOTION_DIRECTORY_MAX_DEPTH, PROMOTION_PATH_MAX_BYTES, READ_BLOB_MAX_BYTES,
+    TreeLookupKind, git_blob_bytes_bounded, git_blob_size_bounded, git_tree_entry_path,
+    git_tree_object_bounded, tree_lookup,
 };
 
 pub(crate) fn op_git_head(req: &Value) -> Result<Value, String> {

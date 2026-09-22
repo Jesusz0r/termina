@@ -2,8 +2,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use git2::{Oid, Repository};
 use crate::TREE_MAP_CACHE_SIZE;
+use git2::{Oid, Repository};
 
 use super::trees::FlatEntry;
 use super::walk::collect_tree_map;

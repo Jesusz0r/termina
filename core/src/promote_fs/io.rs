@@ -6,12 +6,9 @@ use std::os::fd::{AsRawFd, RawFd};
 
 use serde_json::Value;
 
-use crate::{
-    PROMOTION_COMPONENT_MAX_BYTES,
-    PROMOTION_PATH_MAX_BYTES,
-};
-use crate::util::stat_file;
 use crate::FileIdentity;
+use crate::util::stat_file;
+use crate::{PROMOTION_COMPONENT_MAX_BYTES, PROMOTION_PATH_MAX_BYTES};
 
 use super::capability::PromotionIdentity;
 use super::expected::promotion_absolute_path;
@@ -189,7 +186,11 @@ pub(crate) fn promotion_add_work(
     Ok(())
 }
 
-pub(crate) fn promotion_write_all(file: &mut fs::File, bytes: &[u8], field: &str) -> Result<(), String> {
+pub(crate) fn promotion_write_all(
+    file: &mut fs::File,
+    bytes: &[u8],
+    field: &str,
+) -> Result<(), String> {
     file.write_all(bytes)
         .map_err(|error| format!("write promotion {field} failed: {error}"))?;
     file.sync_all()
@@ -241,7 +242,9 @@ pub(crate) fn promotion_directory_identity_matches(
     Ok(())
 }
 
-pub(crate) fn stat_promotion_journal_file(file: &fs::File) -> io::Result<PromotionJournalFileIdentity> {
+pub(crate) fn stat_promotion_journal_file(
+    file: &fs::File,
+) -> io::Result<PromotionJournalFileIdentity> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     let rc = unsafe { libc::fstat(file.as_raw_fd(), st.as_mut_ptr()) };
     if rc == -1 {
@@ -256,7 +259,10 @@ pub(crate) fn stat_promotion_journal_file(file: &fs::File) -> io::Result<Promoti
     }
 }
 
-pub(crate) fn stat_promotion_private_at(parent: RawFd, name: &CStr) -> io::Result<PromotionJournalFileIdentity> {
+pub(crate) fn stat_promotion_private_at(
+    parent: RawFd,
+    name: &CStr,
+) -> io::Result<PromotionJournalFileIdentity> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     let rc = unsafe {
         libc::fstatat(
@@ -364,7 +370,11 @@ pub(crate) fn promotion_rename_noreplace(
 /// Optional Unix permission bits. An absent field uses `default`. A present
 /// value must be an integer in `0..=0o777`; any other JSON type or out-of-range
 /// integer fails closed before callers mutate the filesystem.
-pub(crate) fn promotion_mode(value: Option<&Value>, field: &str, default: u32) -> Result<u32, String> {
+pub(crate) fn promotion_mode(
+    value: Option<&Value>,
+    field: &str,
+    default: u32,
+) -> Result<u32, String> {
     let Some(value) = value else {
         return Ok(default);
     };
@@ -387,7 +397,7 @@ pub(crate) struct PromotionJournalFileIdentity {
 #[cfg(test)]
 mod promotion_mode_tests {
     use super::promotion_mode;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[test]
     fn distinguishes_absence_from_invalid_present() {
@@ -396,9 +406,19 @@ mod promotion_mode_tests {
             ("zero", Some(json!(0)), 0o600, Ok(0)),
             ("0o600", Some(json!(0o600)), 0o644, Ok(0o600)),
             ("0o777", Some(json!(0o777)), 0o600, Ok(0o777)),
-            ("above 0o777", Some(json!(0o1000)), 0o600, Err("mode is invalid")),
+            (
+                "above 0o777",
+                Some(json!(0o1000)),
+                0o600,
+                Err("mode is invalid"),
+            ),
             ("negative", Some(json!(-1)), 0o600, Err("mode is invalid")),
-            ("fractional", Some(json!(1.5)), 0o600, Err("mode is invalid")),
+            (
+                "fractional",
+                Some(json!(1.5)),
+                0o600,
+                Err("mode is invalid"),
+            ),
             ("string", Some(json!("600")), 0o600, Err("mode is invalid")),
             ("bool", Some(json!(true)), 0o600, Err("mode is invalid")),
             ("null", Some(Value::Null), 0o600, Err("mode is invalid")),

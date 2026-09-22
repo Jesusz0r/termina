@@ -4,47 +4,27 @@ use std::ffi::{CStr, CString};
 use std::fs;
 use std::os::fd::{AsRawFd, RawFd};
 
-use git2::{Oid, Repository};
-use serde_json::Value;
-use crate::{
-    BUDGET_MAX_FILE_BYTES,
-    PROMOTION_COMPONENT_MAX_BYTES,
-    PROMOTION_DIRECTORY_MAX_DEPTH,
-    PROMOTION_DIRECTORY_MAX_ENTRIES,
-    PROMOTION_DIRECTORY_MAX_NAME_BYTES,
-    PROMOTION_PATH_MAX_BYTES,
-    PROMOTION_QUARANTINE_MAX_BYTES,
-    PROMOTION_QUARANTINE_MAX_ENTRIES,
-};
-use crate::util::{
-    has_git_segment,
-    is_safe_relative,
-    missing_path,
-    open_at,
-    open_at_mode,
-    read_link_at,
-    stat_at,
-    stat_file,
-};
 use crate::FileIdentity;
 use crate::promote_fs::{
-    PromotionDirectoryStream,
-    PromotionIdentity,
-    open_or_create_promotion_parent,
-    promotion_add_work,
-    promotion_bound_path_matches,
-    promotion_child_relative,
-    promotion_component,
-    promotion_directory_identity_matches,
-    promotion_path_work_bytes,
-    promotion_set_mode,
-    promotion_symlink_at,
-    promotion_test_pause,
-    promotion_unlink_at_field,
+    PromotionDirectoryStream, PromotionIdentity, open_or_create_promotion_parent,
+    promotion_add_work, promotion_bound_path_matches, promotion_child_relative,
+    promotion_component, promotion_directory_identity_matches, promotion_path_work_bytes,
+    promotion_set_mode, promotion_symlink_at, promotion_test_pause, promotion_unlink_at_field,
     promotion_write_all,
 };
 use crate::promotion_files::promotion_cleanup_same_namespace_identity;
 use crate::promotion_remove::promotion_remove_tree_contents;
+use crate::util::{
+    has_git_segment, is_safe_relative, missing_path, open_at, open_at_mode, read_link_at, stat_at,
+    stat_file,
+};
+use crate::{
+    BUDGET_MAX_FILE_BYTES, PROMOTION_COMPONENT_MAX_BYTES, PROMOTION_DIRECTORY_MAX_DEPTH,
+    PROMOTION_DIRECTORY_MAX_ENTRIES, PROMOTION_DIRECTORY_MAX_NAME_BYTES, PROMOTION_PATH_MAX_BYTES,
+    PROMOTION_QUARANTINE_MAX_BYTES, PROMOTION_QUARANTINE_MAX_ENTRIES,
+};
+use git2::{Oid, Repository};
+use serde_json::Value;
 
 use super::walk::{git_blob_bytes_bounded, state_entries};
 
@@ -66,7 +46,11 @@ fn desired_directories(desired: &HashSet<String>) -> Result<HashSet<String>, Str
             if parts.peek().is_none() {
                 break;
             }
-            if part.is_empty() || part == "." || part == ".." || part.len() > PROMOTION_COMPONENT_MAX_BYTES {
+            if part.is_empty()
+                || part == "."
+                || part == ".."
+                || part.len() > PROMOTION_COMPONENT_MAX_BYTES
+            {
                 return Err(format!("invalid materialize path component in {path}"));
             }
             if current.is_empty() {
@@ -76,7 +60,9 @@ fn desired_directories(desired: &HashSet<String>) -> Result<HashSet<String>, Str
                 current.push_str(part);
             }
             if current.len() > PROMOTION_PATH_MAX_BYTES {
-                return Err("materialize directory path exceeds its bounded path budget".to_string());
+                return Err(
+                    "materialize directory path exceeds its bounded path budget".to_string()
+                );
             }
             work_bytes = work_bytes
                 .checked_add(current.len() as u64)
@@ -172,7 +158,9 @@ fn promotion_remove_stale_paths(
     }
     let mut stack = Vec::with_capacity(PROMOTION_DIRECTORY_MAX_DEPTH);
     stack.push(StaleFrame {
-        directory: directory.try_clone().map_err(|error| format!("clone promotion directory failed: {error}"))?,
+        directory: directory
+            .try_clone()
+            .map_err(|error| format!("clone promotion directory failed: {error}"))?,
         stream: PromotionDirectoryStream::open(directory.as_raw_fd())?,
         relative: relative.to_string(),
     });
@@ -199,7 +187,11 @@ fn promotion_remove_stale_paths(
         };
         // Bounded relative path (PROMOTION_PATH_MAX_BYTES). Clone keeps this
         // frame's walk identity while later last()/push() reborrow the stack.
-        let current_relative = stack.last().expect("stale-path frame exists").relative.clone();
+        let current_relative = stack
+            .last()
+            .expect("stale-path frame exists")
+            .relative
+            .clone();
         if current_relative.is_empty() && preserve.contains(&name) {
             continue;
         }
@@ -217,7 +209,11 @@ fn promotion_remove_stale_paths(
             "promotion stale-path scan",
         )?;
         let child_relative = promotion_child_relative(&current_relative, &name)?;
-        let directory_fd = stack.last().expect("stale-path frame exists").directory.as_raw_fd();
+        let directory_fd = stack
+            .last()
+            .expect("stale-path frame exists")
+            .directory
+            .as_raw_fd();
         let identity = match stat_at(directory_fd, &c_name) {
             Ok(identity) => identity,
             Err(error) if missing_path(&error) => continue,
@@ -232,7 +228,9 @@ fn promotion_remove_stale_paths(
         } else if identity.is_symlink() {
             u64::try_from(
                 read_link_at(directory_fd, &c_name)
-                    .map_err(|error| format!("read promotion stale symlink {child_relative} failed: {error}"))?
+                    .map_err(|error| {
+                        format!("read promotion stale symlink {child_relative} failed: {error}")
+                    })?
                     .len(),
             )
             .map_err(|_| "promotion stale symlink byte accounting overflow")?
@@ -276,13 +274,7 @@ fn promotion_remove_stale_paths(
             });
         } else if !desired.contains(&child_relative) || !identity.is_dir() || identity.is_symlink()
         {
-            promotion_remove_tree_entry(
-                directory_fd,
-                &c_name,
-                identity,
-                req,
-                &child_relative,
-            )?;
+            promotion_remove_tree_entry(directory_fd, &c_name, identity, req, &child_relative)?;
         }
     }
     Ok(())
@@ -300,11 +292,15 @@ fn promotion_write_entry(
         return Err(format!("unsafe promotion materialize path: {rel_path}"));
     }
     if rel_path.len() > PROMOTION_PATH_MAX_BYTES {
-        return Err(format!("promotion materialize path exceeds its bounded path budget: {rel_path}"));
+        return Err(format!(
+            "promotion materialize path exceeds its bounded path budget: {rel_path}"
+        ));
     }
     let component_count = rel_path.split('/').count();
     if component_count > PROMOTION_DIRECTORY_MAX_DEPTH {
-        return Err(format!("promotion materialize path exceeds its depth bound: {rel_path}"));
+        return Err(format!(
+            "promotion materialize path exceeds its depth bound: {rel_path}"
+        ));
     }
     let mut names = Vec::with_capacity(component_count);
     for (index, name) in rel_path.split('/').enumerate() {

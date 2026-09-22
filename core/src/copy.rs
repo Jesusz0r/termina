@@ -7,17 +7,6 @@ use std::os::fd::AsRawFd;
 
 use serde_json::{Value, json};
 
-use crate::{
-    PROMOTION_DIRECTORY_MAX_DEPTH,
-    PROMOTION_PATH_MAX_BYTES,
-};
-use crate::util::{
-    missing_path,
-    open_at,
-    open_at_mode,
-    stat_at,
-    stat_file,
-};
 use crate::FileIdentity;
 use crate::promote_fs::{
     PromotionDirectoryStream, PromotionIdentity, PromotionObservedLeaf, PromotionObservedState,
@@ -25,6 +14,8 @@ use crate::promote_fs::{
     promotion_path_work_bytes, promotion_set_mode, promotion_symlink_at,
 };
 use crate::util::read_link_at;
+use crate::util::{missing_path, open_at, open_at_mode, stat_at, stat_file};
+use crate::{PROMOTION_DIRECTORY_MAX_DEPTH, PROMOTION_PATH_MAX_BYTES};
 
 /// Copy the contents of one identity-bound directory into another.  Every
 /// source and destination component is opened relative to a descriptor and
@@ -98,8 +89,12 @@ pub(crate) fn promotion_copy_tree_contents(
     let stream = PromotionDirectoryStream::open(source.as_raw_fd())?;
     let mut stack = Vec::with_capacity(PROMOTION_DIRECTORY_MAX_DEPTH);
     stack.push(PromotionCopyFrame {
-        source: source.try_clone().map_err(|error| format!("clone promotion tree source failed: {error}"))?,
-        destination: destination.try_clone().map_err(|error| format!("clone promotion tree destination failed: {error}"))?,
+        source: source
+            .try_clone()
+            .map_err(|error| format!("clone promotion tree source failed: {error}"))?,
+        destination: destination
+            .try_clone()
+            .map_err(|error| format!("clone promotion tree destination failed: {error}"))?,
         stream,
         relative: relative.to_string(),
         parent_name: None,
@@ -126,25 +121,44 @@ pub(crate) fn promotion_copy_tree_contents(
                     &frame.relative,
                 )?;
                 frame.destination.sync_all().map_err(|error| {
-                    format!("sync promotion tree directory {} failed: {error}", frame.relative)
+                    format!(
+                        "sync promotion tree directory {} failed: {error}",
+                        frame.relative
+                    )
                 })?;
                 let source_after = stat_file(&frame.source).map_err(|error| {
-                    format!("fstat promotion tree source {} failed: {error}", frame.relative)
+                    format!(
+                        "fstat promotion tree source {} failed: {error}",
+                        frame.relative
+                    )
                 })?;
                 let destination_after = stat_file(&frame.destination).map_err(|error| {
-                    format!("fstat promotion tree destination {} failed: {error}", frame.relative)
+                    format!(
+                        "fstat promotion tree destination {} failed: {error}",
+                        frame.relative
+                    )
                 })?;
-                let destination_path = stat_at(parent.destination.as_raw_fd(), parent_name).map_err(|error| {
-                    format!("stat promotion tree destination {} failed: {error}", frame.relative)
-                })?;
+                let destination_path = stat_at(parent.destination.as_raw_fd(), parent_name)
+                    .map_err(|error| {
+                        format!(
+                            "stat promotion tree destination {} failed: {error}",
+                            frame.relative
+                        )
+                    })?;
                 if source_after != source_identity
                     || destination_after != destination_path
                     || !destination_after.is_dir()
                 {
-                    return Err(format!("promotion tree {} changed during copy", frame.relative));
+                    return Err(format!(
+                        "promotion tree {} changed during copy",
+                        frame.relative
+                    ));
                 }
                 parent.destination.sync_all().map_err(|error| {
-                    format!("sync promotion tree parent for {} failed: {error}", frame.relative)
+                    format!(
+                        "sync promotion tree parent for {} failed: {error}",
+                        frame.relative
+                    )
                 })?;
             }
             continue;
@@ -230,7 +244,9 @@ pub(crate) fn promotion_copy_tree_contents(
                 format!("read promotion tree symlink {child_relative} failed: {error}")
             })?;
             if target.len() > PROMOTION_PATH_MAX_BYTES {
-                return Err(format!("promotion tree symlink {child_relative} is too long"));
+                return Err(format!(
+                    "promotion tree symlink {child_relative} is too long"
+                ));
             }
             budget.charge_bytes(
                 u64::try_from(target.len())
@@ -254,11 +270,20 @@ pub(crate) fn promotion_copy_tree_contents(
                 || source_after != source_identity
                 || target_after != target
             {
-                return Err(format!("promotion tree symlink {child_relative} changed during copy"));
+                return Err(format!(
+                    "promotion tree symlink {child_relative} changed during copy"
+                ));
             }
-            stack.last().expect("promotion copy frame exists").destination.sync_all().map_err(|error| {
-                format!("sync promotion tree symlink parent for {child_relative} failed: {error}")
-            })?;
+            stack
+                .last()
+                .expect("promotion copy frame exists")
+                .destination
+                .sync_all()
+                .map_err(|error| {
+                    format!(
+                        "sync promotion tree symlink parent for {child_relative} failed: {error}"
+                    )
+                })?;
             continue;
         }
         let mut source_file = open_at(
@@ -306,7 +331,11 @@ pub(crate) fn promotion_copy_tree_contents(
             }
             destination_file
                 .write_all(&chunk[..read as usize])
-                .map_err(|error| format!("write promotion tree destination file {child_relative} failed: {error}"))?;
+                .map_err(|error| {
+                    format!(
+                        "write promotion tree destination file {child_relative} failed: {error}"
+                    )
+                })?;
             copied = copied
                 .checked_add(read)
                 .ok_or("promotion tree copy byte accounting overflow")?;
@@ -319,7 +348,11 @@ pub(crate) fn promotion_copy_tree_contents(
                 "promotion tree source file {child_relative} changed while reading"
             ));
         }
-        promotion_set_mode(&destination_file, source_identity.mode & 0o777, &child_relative)?;
+        promotion_set_mode(
+            &destination_file,
+            source_identity.mode & 0o777,
+            &child_relative,
+        )?;
         destination_file.sync_all().map_err(|error| {
             format!("sync promotion tree destination file {child_relative} failed: {error}")
         })?;
@@ -340,13 +373,17 @@ pub(crate) fn promotion_copy_tree_contents(
         if copied != source_identity.len {
             return Err("promotion tree source file changed its length during copy".to_string());
         }
-        stack.last().expect("promotion copy frame exists").destination.sync_all().map_err(|error| {
-            format!("sync promotion tree parent for {child_relative} failed: {error}")
-        })?;
+        stack
+            .last()
+            .expect("promotion copy frame exists")
+            .destination
+            .sync_all()
+            .map_err(|error| {
+                format!("sync promotion tree parent for {child_relative} failed: {error}")
+            })?;
     }
     Ok(())
 }
-
 
 pub(crate) fn promotion_leaf_result(observed: &PromotionObservedLeaf) -> Value {
     let state = match &observed.state {
@@ -369,7 +406,6 @@ pub(crate) fn promotion_leaf_result(observed: &PromotionObservedLeaf) -> Value {
         "state": state,
     })
 }
-
 
 pub(crate) fn promotion_expected_directory(
     value: &Value,

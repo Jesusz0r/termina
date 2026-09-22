@@ -11,7 +11,6 @@ use serde_json::{Value, json};
 
 use crate::util::{open_at, s, stat_file};
 
-
 pub(crate) const STORE_GENERATION_FILE: &str = "termina-store-generation";
 pub(crate) const STORE_GENERATION_HEX_BYTES: usize = 64;
 
@@ -53,7 +52,11 @@ pub(crate) struct StoreNodeIdentity {
     pub(crate) links: u64,
 }
 
-pub(crate) fn store_node_from_stat(identity: FileIdentity, links: u64, label: &str) -> Result<StoreNodeIdentity, String> {
+pub(crate) fn store_node_from_stat(
+    identity: FileIdentity,
+    links: u64,
+    label: &str,
+) -> Result<StoreNodeIdentity, String> {
     if !identity.is_dir() {
         return Err(format!("{label} is not a real directory"));
     }
@@ -67,7 +70,11 @@ pub(crate) fn store_node_from_stat(identity: FileIdentity, links: u64, label: &s
     })
 }
 
-pub(crate) fn store_node_at(parent: RawFd, name: &CStr, label: &str) -> Result<StoreNodeIdentity, String> {
+pub(crate) fn store_node_at(
+    parent: RawFd,
+    name: &CStr,
+    label: &str,
+) -> Result<StoreNodeIdentity, String> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     let rc = unsafe {
         libc::fstatat(
@@ -106,9 +113,7 @@ pub(crate) fn store_node_at_optional(
         if error.kind() == io::ErrorKind::NotFound {
             return Ok(None);
         }
-        return Err(format!(
-            "inspect {label} failed: {error}"
-        ));
+        return Err(format!("inspect {label} failed: {error}"));
     }
     let st = unsafe { st.assume_init() };
     Ok(Some(store_node_from_stat(
@@ -201,7 +206,8 @@ pub(crate) fn store_directory_from_parent(
 /// replacement ancestor or child pathname after the root was validated.
 pub(crate) fn store_lifecycle_at_root(root: &fs::File) -> Result<StoreLifecycle, String> {
     let generation = read_store_generation_at(root)?;
-    let (git, git_identity) = store_directory_from_parent(root, "git", "snapshot store Git directory")?;
+    let (git, git_identity) =
+        store_directory_from_parent(root, "git", "snapshot store Git directory")?;
     let (objects, objects_identity) =
         store_directory_from_parent(&git, "objects", "snapshot store object database")?;
     let (_, objects_info_identity) =
@@ -275,8 +281,8 @@ pub(crate) fn read_store_generation_file(file: &mut fs::File) -> Result<String, 
 
 pub(crate) fn read_store_generation_at(root: &fs::File) -> Result<String, String> {
     // Invariant: STORE_GENERATION_FILE is a compile-time literal (no NUL).
-    let name = CString::new(STORE_GENERATION_FILE)
-        .expect("snapshot store generation name has no NUL");
+    let name =
+        CString::new(STORE_GENERATION_FILE).expect("snapshot store generation name has no NUL");
     let mut file = open_at(
         root.as_raw_fd(),
         &name,
@@ -408,7 +414,10 @@ pub(crate) fn lifecycle_mismatch(expected: &StoreLifecycle, observed: &StoreLife
 /// Validate the request against the store currently at the pathname.  This
 /// must run after a contended mutation lock is acquired: that is the point at
 /// which a destroy/recreate ABA can have replaced the pathname.
-pub(crate) fn validate_store_lifecycle(store_dir: &Path, req: &Value) -> Result<StoreLifecycle, String> {
+pub(crate) fn validate_store_lifecycle(
+    store_dir: &Path,
+    req: &Value,
+) -> Result<StoreLifecycle, String> {
     let expected = requested_store_lifecycle(req)?;
     let observed = current_store_lifecycle(store_dir)?;
     if observed != expected {
@@ -440,7 +449,10 @@ pub(crate) fn write_store_generation(store_dir: &Path, generation: &str) -> Resu
     durable_write(&store_generation_path(store_dir), generation.as_bytes())
 }
 
-pub(crate) fn insert_lifecycle_fields(target: &mut serde_json::Map<String, Value>, lifecycle: &StoreLifecycle) {
+pub(crate) fn insert_lifecycle_fields(
+    target: &mut serde_json::Map<String, Value>,
+    lifecycle: &StoreLifecycle,
+) {
     if let Value::Object(fields) = lifecycle_json(lifecycle) {
         for (key, value) in fields {
             target.insert(key, value);
@@ -547,7 +559,6 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
     result
 }
-
 
 pub(crate) fn read_regular_file_nofollow(path: &Path) -> Result<Vec<u8>, String> {
     let mut file = fs::OpenOptions::new()

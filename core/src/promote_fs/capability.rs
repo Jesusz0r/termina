@@ -1,7 +1,7 @@
 //! Promotion identities and the bound-root capability registry.
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::{Value, json};
 
@@ -23,11 +23,13 @@ pub(crate) struct PromotionRootCapability {
 }
 
 pub(crate) const MAX_PROMOTION_ROOT_CAPABILITIES: usize = 4_096;
-pub(crate) static PROMOTION_ROOT_CAPABILITIES: OnceLock<Mutex<HashMap<String, PromotionRootCapability>>> =
-    OnceLock::new();
+pub(crate) static PROMOTION_ROOT_CAPABILITIES: OnceLock<
+    Mutex<HashMap<String, PromotionRootCapability>>,
+> = OnceLock::new();
 pub(crate) static PROMOTION_ROOT_CAPABILITY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn promotion_root_capabilities() -> &'static Mutex<HashMap<String, PromotionRootCapability>> {
+pub(crate) fn promotion_root_capabilities()
+-> &'static Mutex<HashMap<String, PromotionRootCapability>> {
     PROMOTION_ROOT_CAPABILITIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -61,7 +63,10 @@ pub(crate) fn issue_promotion_root_capability(
     Ok(token)
 }
 
-pub(crate) fn promotion_directory_capability_result(identity: PromotionIdentity, capability: &str) -> Value {
+pub(crate) fn promotion_directory_capability_result(
+    identity: PromotionIdentity,
+    capability: &str,
+) -> Value {
     json!({
         "identity": {
             "dev": identity.dev.to_string(),
@@ -102,14 +107,10 @@ mod promotion_root_capability_tests {
                 .expect("reused test capability resolves"),
             active
         );
-        assert!(issue_promotion_root_capability(
-            "/overflow",
-            PromotionIdentity {
-                dev: 2,
-                ino: 1,
-            },
-        )
-        .is_err());
+        assert!(
+            issue_promotion_root_capability("/overflow", PromotionIdentity { dev: 2, ino: 1 },)
+                .is_err()
+        );
         assert_eq!(
             promotion_root_capabilities()
                 .lock()

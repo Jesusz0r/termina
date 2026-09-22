@@ -7,21 +7,13 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 use crate::PROMOTION_JOURNAL_MAX_BYTES;
-use crate::util::{
-    open_at,
-    stat_at,
-};
 use crate::promote_fs::{
-    open_promotion_bound_root,
-    open_promotion_parent,
-    promotion_component,
-    promotion_components_for,
-    promotion_directory_identity_matches,
-    promotion_identity_from_value,
-    promotion_test_pause,
-    stat_promotion_journal_file,
+    open_promotion_bound_root, open_promotion_parent, promotion_component,
+    promotion_components_for, promotion_directory_identity_matches, promotion_identity_from_value,
+    promotion_test_pause, stat_promotion_journal_file,
 };
 use crate::retained::promotion_read_private_bounded_opened;
+use crate::util::{open_at, stat_at};
 
 pub(crate) fn op_promotion_bound_read_journal(req: &Value) -> Result<Value, String> {
     let (root, _root_identity, _capability) = open_promotion_bound_root(

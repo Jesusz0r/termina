@@ -20,7 +20,10 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 fn git_env(home: &Path, tmp: &Path) -> Vec<(String, String)> {
     vec![
-        ("PATH".to_string(), "/usr/bin:/bin:/usr/sbin:/sbin".to_string()),
+        (
+            "PATH".to_string(),
+            "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+        ),
         ("HOME".to_string(), home.to_str().unwrap().to_string()),
         ("TMPDIR".to_string(), tmp.to_str().unwrap().to_string()),
         ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
@@ -270,13 +273,14 @@ fn deep_deletion_incremental_matches_full_and_survives_restart() {
             .request_ok(op, Value::Object(merged), DEADLINE)
             .unwrap_or_else(|e| panic!("restarted {op} failed: {e}"))
     };
-    let restarted_paths: HashSet<String> = request("tree-paths", json!({ "stateId": incremental_commit }))
-        .get("paths")
-        .and_then(Value::as_array)
-        .expect("paths array")
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
+    let restarted_paths: HashSet<String> =
+        request("tree-paths", json!({ "stateId": incremental_commit }))
+            .get("paths")
+            .and_then(Value::as_array)
+            .expect("paths array")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
     assert_eq!(restarted_paths, incremental_paths);
     assert!(!restarted_paths.contains("a/b/deleted.txt"));
     restarted.shutdown();
@@ -379,10 +383,7 @@ fn file_directory_transitions_match_full() {
     // Directory -> file: the new file hint plus the removed children.
     fs::remove_dir_all(harness.source.join("dir")).expect("remove flipped dir");
     fs::write(harness.source.join("dir"), "now-file\n").expect("write flipped file");
-    let dir_to_file = harness.incremental(
-        &file_to_dir_commit,
-        &["dir", "dir/a.txt", "dir/b.txt"],
-    );
+    let dir_to_file = harness.incremental(&file_to_dir_commit, &["dir", "dir/a.txt", "dir/b.txt"]);
     let dir_to_file_commit = state_str(&dir_to_file, "commit");
     let dir_to_file_tree = state_str(&dir_to_file, "tree");
     let dir_to_file_paths = harness.paths(&dir_to_file_commit);

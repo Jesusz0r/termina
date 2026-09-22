@@ -1,11 +1,18 @@
 //! Descriptor-bound promotion filesystem primitives: identities,
 //! capabilities, expected/observed states, components, bound roots, the
 //! bound cwd guard, directory streams, and raw at(2) mutation helpers.
+mod bound;
 mod capability;
 mod expected;
-mod bound;
 mod io;
 
+pub(crate) use bound::{
+    PromotionCwd, open_or_create_promotion_parent, open_promotion_absolute_directory,
+    open_promotion_bound_root, open_promotion_bound_root_values, open_promotion_parent,
+    promotion_bound_path_matches, promotion_components, promotion_components_for,
+    promotion_components_value, promotion_identity_chain_from_value,
+    promotion_path_with_components,
+};
 pub(crate) use capability::{
     PromotionIdentity, issue_promotion_root_capability, promotion_directory_capability_result,
 };
@@ -15,13 +22,6 @@ pub(crate) use expected::{
     promotion_absolute_path, promotion_component, promotion_expected_matches,
     promotion_expected_state_description, promotion_identity_from_value, promotion_name,
     promotion_sha256_hex,
-};
-pub(crate) use bound::{
-    PromotionCwd, open_or_create_promotion_parent, open_promotion_absolute_directory,
-    open_promotion_bound_root, open_promotion_bound_root_values, open_promotion_parent,
-    promotion_bound_path_matches, promotion_components, promotion_components_for,
-    promotion_components_value, promotion_identity_chain_from_value,
-    promotion_path_with_components,
 };
 pub(crate) use io::{
     PromotionDirectoryStream, promotion_add_work, promotion_child_relative,

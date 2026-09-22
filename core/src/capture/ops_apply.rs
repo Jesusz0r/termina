@@ -5,32 +5,21 @@ use std::fs;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
-use git2::{IndexAddOption, IndexEntry, Oid, Repository, Signature};
-use serde_json::{Value, json};
-use crate::util::{
-    open_at_mode,
-    open_repo,
-    s,
-    stat_at,
-    stat_file,
-};
 use crate::promote_fs::{
-    PromotionCwd,
-    open_or_create_promotion_parent,
-    open_promotion_bound_root,
-    promotion_bound_path_matches,
-    promotion_directory_is_empty,
-    promotion_set_mode,
-    promotion_test_pause,
-    promotion_write_all,
+    PromotionCwd, open_or_create_promotion_parent, open_promotion_bound_root,
+    promotion_bound_path_matches, promotion_directory_is_empty, promotion_set_mode,
+    promotion_test_pause, promotion_write_all,
 };
 use crate::promotion_files::promotion_cleanup_same_namespace_identity;
+use crate::util::{open_at_mode, open_repo, s, stat_at, stat_file};
 use git2::{ErrorCode, RepositoryInitOptions};
+use git2::{IndexAddOption, IndexEntry, Oid, Repository, Signature};
+use serde_json::{Value, json};
 
 use super::binding::open_store;
+use super::materialize::materialize_state_bound;
 use super::trees::FlatEntry;
 use super::walk::state_entries;
-use super::materialize::materialize_state_bound;
 
 /// Commit the staged index when it differs from HEAD. Returns the commit
 /// oid when a commit was written.

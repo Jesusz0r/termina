@@ -5,49 +5,19 @@ use std::os::fd::AsRawFd;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use crate::{
-    PROMOTION_PATH_MAX_BYTES,
-    PROMOTION_JOURNAL_MAX_BYTES,
-};
-use crate::util::{
-    missing_path,
-    open_at,
-    open_at_mode,
-    s,
-    stat_at,
-    stat_file,
+use crate::copy::{promotion_expected_directory, promotion_leaf_result};
+use crate::promote_fs::{
+    PromotionExpectedLeaf, PromotionIdentity, PromotionObservedLeaf, PromotionObservedState,
+    issue_promotion_root_capability, observe_promotion_leaf, open_or_create_promotion_parent,
+    open_promotion_bound_root, open_promotion_parent, parse_promotion_expected_destination,
+    promotion_bound_path_matches, promotion_components_for, promotion_directory_identity_matches,
+    promotion_expected_matches, promotion_identity_from_value, promotion_mkdir_at, promotion_mode,
+    promotion_path_with_components, promotion_rename_noreplace, promotion_set_mode,
+    promotion_sha256_hex, promotion_symlink_at, promotion_test_pause, promotion_write_all,
 };
 use crate::util::read_link_at;
-use crate::copy::{
-    promotion_expected_directory,
-    promotion_leaf_result,
-};
-use crate::promote_fs::{
-    PromotionIdentity,
-    PromotionObservedLeaf,
-    PromotionExpectedLeaf,
-    PromotionObservedState,
-    issue_promotion_root_capability,
-    observe_promotion_leaf,
-    open_or_create_promotion_parent,
-    open_promotion_bound_root,
-    open_promotion_parent,
-    parse_promotion_expected_destination,
-    promotion_bound_path_matches,
-    promotion_components_for,
-    promotion_directory_identity_matches,
-    promotion_expected_matches,
-    promotion_identity_from_value,
-    promotion_mkdir_at,
-    promotion_mode,
-    promotion_path_with_components,
-    promotion_rename_noreplace,
-    promotion_set_mode,
-    promotion_sha256_hex,
-    promotion_symlink_at,
-    promotion_test_pause,
-    promotion_write_all,
-};
+use crate::util::{missing_path, open_at, open_at_mode, s, stat_at, stat_file};
+use crate::{PROMOTION_JOURNAL_MAX_BYTES, PROMOTION_PATH_MAX_BYTES};
 
 use super::rename::promotion_rename_unsupported;
 
@@ -191,7 +161,8 @@ pub(crate) fn op_promotion_bound_write_file(req: &Value) -> Result<Value, String
     )?;
     promotion_directory_identity_matches(&parent, parent_identity, "write parent")?;
     promotion_test_pause(req, "promotion-write-parent-open")?;
-    let parent_path = promotion_path_with_components(&root_path, &components[..components.len() - 1]);
+    let parent_path =
+        promotion_path_with_components(&root_path, &components[..components.len() - 1]);
     promotion_bound_path_matches(&root_path, root_identity, "write root")?;
     promotion_bound_path_matches(&parent_path, parent_identity, "write parent")?;
     // Invariant: promotion_components_for rejects empty arrays.
@@ -238,7 +209,9 @@ pub(crate) fn op_promotion_bound_write_file(req: &Value) -> Result<Value, String
     let path_before_write = stat_at(parent.as_raw_fd(), leaf)
         .map_err(|error| format!("stat promotion file before writing failed: {error}"))?;
     if path_before_write != opened {
-        return Err("promotion write destination changed before writing; evidence retained".to_string());
+        return Err(
+            "promotion write destination changed before writing; evidence retained".to_string(),
+        );
     }
     if let Some(expected) = &expected {
         if opened.dev != expected.identity.dev || opened.ino != expected.identity.ino {
