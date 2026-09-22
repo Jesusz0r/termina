@@ -8,7 +8,7 @@ import { describe, it } from "vitest";
 process.env.TERMINA_CORE_TEST = "1";
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -127,6 +127,16 @@ describe("Agent Core Main Stage 3 Contracts", () => {
       setTimeout(() => { stopBash = true; }, 20);
       const stoppedBashResult = await stoppedBash;
       assert.equal(stoppedBashResult.state, "interrupted");
+
+      const bgStarted = Date.now();
+      const bg = await main.runBash(
+        "(sleep 0.35; printf done > bg.txt) & printf started",
+        { cwd: root, timeoutMs: 5_000 },
+      );
+      assert.equal(bg.state, "complete");
+      assert.match(bg.content, /started/);
+      assert.equal(readFileSync(join(root, "bg.txt"), "utf8"), "done");
+      assert.ok(Date.now() - bgStarted >= 300, "bash waits for the background process group");
     
       assert.equal("planPruneStubs" in main, false);
       assert.equal("tokenEstimate" in main, false);
