@@ -171,7 +171,6 @@ import {
 } from "./host.ts";
 import {
   BoundedTextAccumulator,
-  boundedToolResult,
   logicalToolText,
   readBoundedResponseBody,
   utf8TextPrefix,
