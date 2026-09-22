@@ -647,9 +647,10 @@ class TerminaApp {
       const ws = this.workspaceOfTerminal(inst);
       return { root: ws?.root ?? inst.cwd, cwd: inst.cwd };
     },
-    // Primary terminals start in `ask` (no TERMINA_CORE_APPROVE bypass at
-    // launch); only an explicit host-level opt-in lets a child auto-approve.
-    // Worldline candidates never qualify: the host refuses their spawns.
+    // Primary terminals start in `ask`. Child `always` requires the parent's
+    // live policy (sidecar agent_start / agent_settings), not a forged task
+    // file. Host-env TERMINA_CORE_APPROVE=all remains an explicit launch
+    // opt-in. Worldline candidates never qualify: the host refuses their spawns.
     autoApproveAllowedFor: (terminalId) => {
       if (this.runtime.hasCandidateSidecar(terminalId) || this.isWorldlineTerminal(terminalId)) return false;
       const inst = this.runtime.get(terminalId);
