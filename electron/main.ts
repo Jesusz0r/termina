@@ -7,6 +7,8 @@
  * state) to sidecar files we tail — that powers auto-open of files
  * mid-run and the modified-files panel.
  */
+// First import: installs on evaluation, before any other module can stat into asar.
+import "./asar-stats-deprecation.ts";
 import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu, nativeTheme } from "electron";
 
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
