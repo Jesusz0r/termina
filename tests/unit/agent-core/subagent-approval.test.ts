@@ -64,6 +64,8 @@ describe("Subagent Approval Engine Contract", () => {
     answerApproval: boolean;
     approvalTimeoutMs: number;
     inbox?: string[];
+    /** Written by the child during its first model call, after the turn-start drain. */
+    lateInbox?: string;
     setup?: (dir: string) => void;
   }): Promise<{ exit: number | null; output: string; dir: string }> {
     const dir = join(root, opts.name);
@@ -101,13 +103,25 @@ describe("Subagent Approval Engine Contract", () => {
     );
     const toolBody = toolCallBody("call-1", opts.toolName, JSON.stringify(opts.toolArgs));
     const doneBody = finalBody("child done");
+    const lateInbox = opts.lateInbox ?? "";
+    const firstBody = lateInbox ? finalBody("early answer") : toolBody;
+    const restBody = lateInbox ? finalBody("followed parent") : doneBody;
+    const subagentsUrl = new URL("../../../agent-core/subagents.ts", import.meta.url).href;
+    const lateWrite = lateInbox
+      ? `if (globalThis.__calls === 1) {
+          const { appendSubagentInboxMessage } = await import(${JSON.stringify(subagentsUrl)});
+          const wrote = appendSubagentInboxMessage(${JSON.stringify(dir)}, "term-rt", "bg-1", ${JSON.stringify(lateInbox)});
+          if (!wrote.ok) throw new Error(wrote.error);
+        }`
+      : "";
     const childScript = `
       globalThis.fetch = async (input) => {
         if (String(input) === "https://models.dev/api.json") {
           return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
         }
         globalThis.__calls = (globalThis.__calls ?? 0) + 1;
-        const text = globalThis.__calls === 1 ? ${JSON.stringify(toolBody)} : ${JSON.stringify(doneBody)};
+        ${lateWrite}
+        const text = globalThis.__calls === 1 ? ${JSON.stringify(firstBody)} : ${JSON.stringify(restBody)};
         return new Response(text, { status: 200, headers: { "content-type": "text/event-stream" } });
       };
       process.argv = [process.execPath, ${JSON.stringify(mainTs)}, "--subagent-task", ${JSON.stringify(taskPath)}];
@@ -201,6 +215,24 @@ describe("Subagent Approval Engine Contract", () => {
     const sessionFile = join(r.dir, "sub-term-rt-bg-1-session", "current", "session.jsonl");
     expect(existsSync(sessionFile)).toBe(true);
     expect(readFileSync(sessionFile, "utf8")).toContain("Parent message (seq 1): steer left");
+  });
+
+  it("reads a parent message that arrives during the final generation", async () => {
+    const r = await runChild({
+      name: "rt-late-inbox",
+      toolName: "bash",
+      toolArgs: { command: "true" },
+      answerApproval: false,
+      approvalTimeoutMs: 4000,
+      lateInbox: "change course now",
+    });
+    expect(r.exit).toBe(0);
+    expect(r.output).toContain('"result":"followed parent"');
+    const { readSubagentOutbox } = await import("../../../agent-core/subagents.ts");
+    const outbox = readSubagentOutbox(r.dir, "term-rt", "bg-1");
+    expect(outbox?.messages.map((m) => m.text)).toEqual(["early answer", "followed parent"]);
+    const sessionFile = join(r.dir, "sub-term-rt-bg-1-session", "current", "session.jsonl");
+    expect(readFileSync(sessionFile, "utf8")).toContain("Parent message (seq 1): change course now");
   });
 
   it("denies by default when no ack arrives", async () => {
