@@ -110,6 +110,7 @@ import {
 } from "./agent-activity.js";
 import { PathLookup } from "./path-lookup.js";
 import { attachAppWindowSecurity, attachMacTitlebarReclaim, appWindowOptions } from "./window-chrome.js";
+import { nativeImageLooksUnpainted, nativeImageSolidHex, cssHexEquals } from "./paint-watchdog.js";
 import {
   isChallengeProfile,
   isFlushResult,
@@ -897,10 +898,26 @@ class TerminaApp {
     electronIpcMain.handle(channel, (event, ...args) => {
       const capability = args.pop();
       if (!this.isTrustedRenderer(event, capability)) {
+        // A reload/crash fence drops in-flight invokes from the outgoing
+        // document. That is expected; throwing becomes a main-process error
+        // for terminals:resize during the paint-watchdog reload.
+        if (this.isStaleRendererDocument(capability)) return;
         throw new Error("unauthorized renderer");
       }
       return listener(event, ...args);
     });
+  }
+
+  /** True when the invoke is from a replaced or still-loading document. */
+  private isStaleRendererDocument(value: unknown): boolean {
+    if (this.rendererAwaitingNewFrame || this.rendererLoadPending) return true;
+    const capability = parseRendererCapability(value);
+    const current = this.currentPtyLifecycle();
+    if (!capability || !current) return false;
+    return capability.windowGeneration !== current.windowGeneration
+      || capability.rendererGeneration !== current.rendererGeneration
+      || capability.loadGeneration !== current.loadGeneration
+      || capability.nonce !== current.nonce;
   }
 
   /** Issue the current document capability only to its exact main frame. */
@@ -8959,22 +8976,18 @@ class TerminaApp {
           console.warn("[main] paint watchdog: capture returned an empty image");
           return;
         }
-        let uniform = false;
-        // Downscale before sampling: a full-window bitmap is megabytes; a
-        // 64x40 sample (2560 pixels) carries the same uniform-vs-content
-        // signal for a fraction of the allocation cost.
-        const small = img.resize({ width: 64, height: 40 });
-        const { width: w, height: h } = small.getSize();
-        if (w > 0 && h > 0) {
-          const bitmap = small.toBitmap();
-          const first = bitmap.readUInt32LE(0);
-          let same = 0;
-          for (let off = 0; off < bitmap.length; off += 4) {
-            if (bitmap.readUInt32LE(off) === first) same++;
-          }
-          uniform = same / (bitmap.length / 4) > 0.98;
+        // Native window fill before hydration is not a frozen compositor.
+        if (!this.rendererReady) return;
+        // Hardware-acceleration is off: capturePage often returns the
+        // BrowserWindow backgroundColor as a solid bitmap. That is not a
+        // blank renderer once pty:ready has fired.
+        const solid = nativeImageSolidHex(img);
+        if (solid && cssHexEquals(solid, win.getBackgroundColor())) {
+          blankCount = 0;
+          healthy = true;
+          return;
         }
-        if (uniform) {
+        if (nativeImageLooksUnpainted(img)) {
           blankCount++;
           if (blankCount >= 4) {
             console.warn("[main] paint watchdog: window not painting — reloading");

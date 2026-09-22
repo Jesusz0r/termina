@@ -183,6 +183,7 @@ scope for #331.
 | `electron/evidence-home.ts` | `tests/unit/electron/evidence-home-copy.test.ts` |
 | `electron/evidence.ts` | `tests/unit/electron/evidence-dependencies.test.ts` |
 | `electron/main.ts` | `tests/unit/electron/main-hardening-batch.test.ts` |
+| `electron/paint-watchdog.ts` | `tests/unit/electron/paint-watchdog.test.ts` |
 | `electron/path-lookup.ts` | none |
 | `electron/plan-board.ts` | `tests/unit/electron/plan-board.test.ts` |
 | `electron/preferences.ts` | `tests/unit/preferences.test.ts` |

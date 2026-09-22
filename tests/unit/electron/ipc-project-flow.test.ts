@@ -58,6 +58,9 @@ check("all invoke handlers route through the capability wrapper", (main.match(/i
   && (main.match(/electronIpcMain\.handle\(/g) ?? []).length === 1
   && main.includes("const capability = args.pop()")
   && main.includes("if (!this.isTrustedRenderer(event, capability))"));
+check("stale document invokes fail closed without throwing", main.includes("if (this.isStaleRendererDocument(capability)) return")
+  && main.includes("private isStaleRendererDocument(")
+  && main.includes("throw new Error(\"unauthorized renderer\")"));
 check("sender WebContents and main-frame identity are checked", main.includes("event.sender !== win.webContents")
   && main.includes("frame.processId === mainFrame.processId")
   && main.includes("frame.routingId === mainFrame.routingId"));
@@ -301,7 +304,7 @@ check("project close and quit share the unsaved-buffer gate", main.includes("asy
   && main.includes("flushDirtyModels(dispatchWriter, ownerWs.id")
   && main.includes("const flush = await this.flushDirtyModels(leaseRequester, ws.id"));
 
-assert.equal(checks.length, 27);
+assert.equal(checks.length, 28);
 
   });
 });

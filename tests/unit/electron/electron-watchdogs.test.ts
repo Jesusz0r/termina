@@ -91,6 +91,16 @@ describe("paint watchdog (refs #252)", () => {
     expect(returnAt).toBeGreaterThan(catchAt);
     expect(blankAt).toBeGreaterThan(returnAt);
   });
+
+  it("does not bilinear-downscale a dark UI into a false blank, and ignores native fill", () => {
+    const method = extractMethod(main, "private startPaintWatchdog(");
+    expect(method).toContain("nativeImageLooksUnpainted");
+    expect(method).toContain("nativeImageSolidHex");
+    expect(method).toContain("this.rendererReady");
+    expect(method).toContain("getBackgroundColor");
+    expect(method).not.toContain("img.resize");
+    expect(method).not.toContain("0.98");
+  });
 });
 
 describe("timeline content ready path (refs #253)", () => {
