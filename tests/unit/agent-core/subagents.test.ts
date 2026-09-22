@@ -743,6 +743,7 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(isSubagentManagedFile("sub-term-7-bg-1.jsonl")).toBe(true);
     expect(isSubagentManagedFile("subagent-term-7-bg-1.approval-appr-abc123.json")).toBe(true);
     expect(isSubagentManagedFile("subagent-term-7-bg-1.inbox.json")).toBe(true);
+    expect(isSubagentManagedFile("subagent-term-7-bg-1.outbox.json")).toBe(true);
     expect(isSubagentManagedFile("ack-sub-term-7-bg-1-appr-abc123.json")).toBe(true);
     expect(isSubagentManagedFile(".cursor-sub-term-7-bg-1.json")).toBe(true);
     expect(isSubagentManagedFile(".sub-term-7-bg-1.jsonl.sealed-abc")).toBe(true);

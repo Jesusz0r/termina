@@ -135,7 +135,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
   {
     name: "spawn_subagent",
     description:
-      "Spawn a background subagent for one independent subtask. Never spawn a single child: issue at least two spawn_subagent calls in the same turn for parallel work; a lone subtask belongs on this agent. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately and does not wait: continue this turn, then stop. When the child settles, the host writes a mailbox note; you see that note only on the next user turn — summarize it then and never poll the finished run. Siblings never share a subtask; pass paths to reserve them. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up. Pass user_requested true only when the user explicitly asked for many/parallel agents in this turn: it bypasses the 4-run auto cap.",
+      "Spawn a background subagent for one independent subtask. Never spawn a single child: issue at least two spawn_subagent calls in the same turn for parallel work; a lone subtask belongs on this agent. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately. This run stays open while children are active. Each finished child turn arrives here as a user message; use message_subagent to redirect a live run. When the child settles, the host writes a mailbox note you see on the next user turn. Summarize that result then and never poll the finished run. Siblings never share a subtask; pass paths to reserve them. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up. Pass user_requested true only when the user explicitly asked for many/parallel agents in this turn: it bypasses the 4-run auto cap.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -923,7 +923,7 @@ export function isSubagentManagedFile(name: string): boolean {
     /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(task|result)\.json(\..*)?$/.test(name)
   ) return true;
   if (
-    /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(approval-[A-Za-z0-9_-]{1,64}\.json|inbox\.json)(\..*)?$/.test(name)
+    /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(approval-[A-Za-z0-9_-]{1,64}\.json|inbox\.json|outbox\.json)(\..*)?$/.test(name)
   ) return true;
   if (/^ack-sub-[A-Za-z0-9_-]{1,64}-bg-\d{1,10}-appr-[A-Za-z0-9_-]{1,64}\.json(\..*)?$/.test(name)) return true;
   const stream = name.startsWith(".") ? name.slice(1) : name;
@@ -945,10 +945,13 @@ export {
   SUBAGENT_APPROVAL_POLL_MS,
   SUBAGENT_APPROVAL_TIMEOUT_MS,
   appendSubagentInboxMessage,
+  appendSubagentOutboxMessage,
   clearSubagentApprovalFiles,
   parseSubagentApprovalName,
   readSubagentApprovalRequest,
   readSubagentInbox,
+  readSubagentOutbox,
+  takeSubagentOutboxLines,
   subagentApprovalRequestName,
   subagentApprovalTimeoutMs,
   subagentInboxFileName,

@@ -7,7 +7,9 @@
  * choice picker (Deny / Approve once — never Always) and writes the ack.
  * No ack, a stale request, or no parent surface all mean deny.
  * Parent-to-child messages ride a per-run inbox file the child drains on
- * every model turn.
+ * every model turn, and again before settling a turn that used no tools.
+ * Child-to-parent turns ride a per-run outbox file. The parent drains it
+ * inside the live run and stays open while children are active.
  *
  * Owns its own atomic JSON writer so approval/inbox files never share a
  * write path with task/result handoffs. Public symbols are re-exported
@@ -227,4 +229,100 @@ export function readSubagentInbox(
     messages.push({ seq: e.seq, text: e.text, at: typeof e.at === "number" ? e.at : 0 });
   }
   return { version: 1, runId, messages };
+}
+
+export function subagentOutboxFileName(parentTerminalId: string, runId: string): string | null {
+  if (!TERMINAL_RE.test(parentTerminalId) || !RUN_RE.test(runId)) return null;
+  return `subagent-${parentTerminalId}-${runId}.outbox.json`;
+}
+
+/** Append one finished child turn. The parent drains this file while its run is live. */
+export function appendSubagentOutboxMessage(
+  eventsDir: string,
+  parentTerminalId: string,
+  runId: string,
+  text: string,
+): { ok: true; seq: number } | { ok: false; error: string } {
+  const name = subagentOutboxFileName(parentTerminalId, runId);
+  if (!name || !eventsDir) return { ok: false, error: "bad subagent outbox identity" };
+  const clean = text.trim();
+  if (!clean) return { ok: false, error: "empty message" };
+  if (clean.length > MAX_SUBAGENT_MESSAGE_CHARS) {
+    return { ok: false, error: `message exceeds ${MAX_SUBAGENT_MESSAGE_CHARS} chars` };
+  }
+  let messages: SubagentInboxMessage[] = [];
+  try {
+    const existing = readSubagentOutbox(eventsDir, parentTerminalId, runId);
+    if (existing) messages = existing.messages;
+  } catch {
+    messages = [];
+  }
+  const seq = (messages.at(-1)?.seq ?? 0) + 1;
+  messages.push({ seq, text: clean, at: Date.now() });
+  while (messages.length > MAX_SUBAGENT_INBOX_MSGS) messages.shift();
+  const ok = atomicWriteJsonSync(eventsDir, name, JSON.stringify({ version: 1, runId, messages }));
+  return ok ? { ok: true, seq } : { ok: false, error: "outbox write failed" };
+}
+
+export function readSubagentOutbox(
+  eventsDir: string,
+  parentTerminalId: string,
+  runId: string,
+): { version: 1; runId: string; messages: SubagentInboxMessage[] } | null {
+  const name = subagentOutboxFileName(parentTerminalId, runId);
+  if (!name || !eventsDir) return null;
+  const bounded = readBoundedRegularFile(join(eventsDir, name), MAX_SUBAGENT_FILE_BYTES);
+  if ("error" in bounded || bounded.truncated) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(bounded.text);
+  } catch {
+    return null;
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const r = v as Record<string, unknown>;
+  if (r.version !== 1 || r.runId !== runId || !Array.isArray(r.messages)) return null;
+  const messages: SubagentInboxMessage[] = [];
+  for (const m of r.messages) {
+    if (!m || typeof m !== "object" || Array.isArray(m)) return null;
+    const e = m as Record<string, unknown>;
+    if (typeof e.seq !== "number" || !Number.isInteger(e.seq) || typeof e.text !== "string") return null;
+    messages.push({ seq: e.seq, text: e.text, at: typeof e.at === "number" ? e.at : 0 });
+  }
+  return { version: 1, runId, messages };
+}
+
+/** Fresh child turns for this parent, oldest run id first. `seen` advances past them. */
+export function takeSubagentOutboxLines(
+  eventsDir: string,
+  parentTerminalId: string,
+  seen: Map<string, number>,
+): string[] {
+  if (!eventsDir || !TERMINAL_RE.test(parentTerminalId)) return [];
+  let names: string[];
+  try {
+    names = readdirSync(eventsDir);
+  } catch {
+    return [];
+  }
+  const prefix = `subagent-${parentTerminalId}-`;
+  const suffix = ".outbox.json";
+  const runIds: string[] = [];
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith(suffix)) continue;
+    const runId = name.slice(prefix.length, name.length - suffix.length);
+    if (RUN_RE.test(runId)) runIds.push(runId);
+  }
+  runIds.sort();
+  const lines: string[] = [];
+  for (const runId of runIds) {
+    const box = readSubagentOutbox(eventsDir, parentTerminalId, runId);
+    if (!box) continue;
+    const cursor = seen.get(runId) ?? 0;
+    const fresh = box.messages.filter((m) => m.seq > cursor);
+    if (fresh.length === 0) continue;
+    seen.set(runId, fresh[fresh.length - 1]!.seq);
+    for (const m of fresh) lines.push(`Subagent ${runId} (seq ${m.seq}): ${m.text}`);
+  }
+  return lines;
 }

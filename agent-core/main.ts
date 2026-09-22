@@ -240,7 +240,9 @@ import { planSidecarText, planSlashSubmit } from "./main/plan-slash.ts";
 import { parseSkillCommand, skillSlashSubmit } from "./main/skill-slash.ts";
 import {
   SubagentRegistry,
+  MAX_SUBAGENT_MESSAGE_CHARS,
   appendSubagentInboxMessage,
+  appendSubagentOutboxMessage,
   clearSubagentApprovalFiles,
   formatSubagentBrief,
   formatSubagentResultFrame,
@@ -251,6 +253,7 @@ import {
   parseSubagentTaskFile,
   readSubagentApprovalRequest,
   readSubagentInbox,
+  takeSubagentOutboxLines,
   reconcileSubagentRuns,
   resolveSubagentPermissionMode,
   SUBAGENT_APPROVAL_POLL_MS,
@@ -1485,18 +1488,54 @@ function pollSubagentApprovals(): void {
  * Child side of parent messaging (Phase 3): inject newly arrived parent
  * inbox entries as one user turn per model turn. Retried attempts may
  * re-inject older entries; entries carry sequence numbers so repeats are
- * recognizable.
+ * recognizable. Returns whether a message was injected.
  */
-function drainSubagentInbox(): void {
+function drainSubagentInbox(): boolean {
   const run = activeSubagent;
-  if (!run || !eventsDir) return;
+  if (!run || !eventsDir) return false;
   const inbox = readSubagentInbox(eventsDir, run.task.parentTerminalId, run.task.runId);
-  if (!inbox) return;
+  if (!inbox) return false;
   const fresh = inbox.messages.filter((m) => m.seq > run.inboxSeq);
-  if (fresh.length === 0) return;
+  if (fresh.length === 0) return false;
   run.inboxSeq = fresh[fresh.length - 1]!.seq;
   const lines = fresh.map((m) => `Parent message (seq ${m.seq}): ${m.text}`);
   pushMessage("user", [{ type: "text", text: lines.join("\n") }]);
+  return true;
+}
+
+/** Child → parent after a finished model turn. Same events-dir file the parent drains live. */
+const subagentOutboxSeen = new Map<string, number>();
+
+function reportSubagentTurn(text: string, tools: string[]): void {
+  const run = activeSubagent;
+  if (!run || !eventsDir) return;
+  const parts = [text.trim()];
+  if (tools.length > 0) parts.push(`Tools: ${tools.join(", ")}`);
+  let body = parts.filter(Boolean).join("\n");
+  if (!body) return;
+  if (body.length > MAX_SUBAGENT_MESSAGE_CHARS) body = body.slice(0, MAX_SUBAGENT_MESSAGE_CHARS);
+  appendSubagentOutboxMessage(eventsDir, run.task.parentTerminalId, run.task.runId, body);
+}
+
+function drainSubagentOutbox(): boolean {
+  if (activeSubagent || !eventsDir || !terminalId) return false;
+  const lines = takeSubagentOutboxLines(eventsDir, terminalId, subagentOutboxSeen);
+  if (lines.length === 0) return false;
+  pushMessage("user", [{ type: "text", text: lines.join("\n") }]);
+  return true;
+}
+
+/** Parent stays in this run until live children settle. A child turn continues the model. */
+async function waitForSubagentTurns(): Promise<boolean> {
+  if (activeSubagent) return false;
+  while (!interrupted) {
+    syncSubagentChrome();
+    pollSubagentApprovals();
+    if (drainSubagentOutbox()) return true;
+    if (subagentRegistry.activeRuns().length === 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, SUBAGENT_APPROVAL_POLL_MS));
+  }
+  return false;
 }
 
 async function confirmBash(command: string): Promise<boolean> {
@@ -4421,6 +4460,7 @@ async function runPrompt(
     while (true) {
       if (interrupted) break;
       drainSubagentInbox();
+      drainSubagentOutbox();
       // Child approval requests arrive mid-run; poll every model turn so a
       // picker (or fast deny) lands within a turn, not a user turn. Reconcile
       // first so a finished child leaves the title before the next model call.
@@ -4587,6 +4627,11 @@ async function runPrompt(
           resumePaused = true;
           continue;
         }
+        if (!interrupted) reportSubagentTurn(assistantText, []);
+        // message_subagent already reported delivery. A note that landed
+        // during this generation is still unread; settling here would drop it.
+        if (!interrupted && drainSubagentInbox()) continue;
+        if (!interrupted && await waitForSubagentTurns()) continue;
         break;
       }
       // Client tools are progress: only a consecutive pause streak is a wedge.
@@ -4725,6 +4770,7 @@ async function runPrompt(
         out(`\n(${taskFailure})\n`);
         break;
       }
+      if (!interrupted) reportSubagentTurn(assistantText, uses.map((use) => use.name));
       out("\n");
     }
   } catch (err) {

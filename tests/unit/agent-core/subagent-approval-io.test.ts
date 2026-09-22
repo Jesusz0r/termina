@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendSubagentInboxMessage,
+  appendSubagentOutboxMessage,
   clearSubagentApprovalFiles,
   parseSubagentApprovalName,
   readSubagentApprovalRequest,
   readSubagentInbox,
+  readSubagentOutbox,
   subagentApprovalRequestName,
+  takeSubagentOutboxLines,
   subagentApprovalTimeoutMs,
   subagentInboxFileName,
   writeSubagentAckFile,
@@ -99,6 +102,24 @@ describe("subagent approval + inbox I/O", () => {
     expect(readSubagentInbox(dir, "term-7", "bg-404")).toBeNull();
     for (let i = 0; i < MAX_SUBAGENT_INBOX_MSGS + 10; i++) appendSubagentInboxMessage(dir, "term-7", "bg-1", `m${i}`);
     expect(readSubagentInbox(dir, "term-7", "bg-1")?.messages.length).toBe(MAX_SUBAGENT_INBOX_MSGS);
+  });
+
+  it("gives the parent each new child turn once", () => {
+    const dir = mkdtempSync(join(tmpdir(), "subagent-outbox-"));
+    roots.push(dir);
+    expect(appendSubagentOutboxMessage(dir, "term-7", "bg-2", "second run").ok).toBe(true);
+    expect(appendSubagentOutboxMessage(dir, "term-7", "bg-1", "first").ok).toBe(true);
+    expect(appendSubagentOutboxMessage(dir, "term-7", "bg-1", "first again").ok).toBe(true);
+    const seen = new Map<string, number>();
+    expect(takeSubagentOutboxLines(dir, "term-7", seen)).toEqual([
+      "Subagent bg-1 (seq 1): first",
+      "Subagent bg-1 (seq 2): first again",
+      "Subagent bg-2 (seq 1): second run",
+    ]);
+    expect(appendSubagentOutboxMessage(dir, "term-7", "bg-1", "later").ok).toBe(true);
+    expect(takeSubagentOutboxLines(dir, "term-7", seen)).toEqual(["Subagent bg-1 (seq 3): later"]);
+    expect(takeSubagentOutboxLines(dir, "term-7", seen)).toEqual([]);
+    expect(readSubagentOutbox(dir, "term-9", "bg-1")).toBeNull();
   });
 
   it("caps approval and inbox reads before parsing (#222)", () => {
