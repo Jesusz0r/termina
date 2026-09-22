@@ -107,6 +107,7 @@ scope for #331.
 | `agent-core/host/image-store.ts` | none |
 | `agent-core/host/images.ts` | none |
 | `agent-core/main.ts` | `tests/unit/agent-core/main-anthropic-stream.test.ts` |
+| `agent-core/main/bash.ts` | `tests/unit/agent-core/bash.test.ts` |
 | `agent-core/main/env.ts` | none |
 | `agent-core/main/file-ops.ts` | none |
 | `agent-core/main/files.ts` | none |

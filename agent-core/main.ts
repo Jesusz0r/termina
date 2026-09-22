@@ -40,7 +40,6 @@ import { gpt56ReasoningContext, gpt5TextVerbosity } from "./models/families/open
 import { modelLeaf } from "./models/families/identity.ts";
 import { claudeThinkingApi } from "./models/families/anthropic.ts";
 import { consumeAgentSessionEnvironment } from "../shared/agent-environment.ts";
-import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -187,7 +186,9 @@ import {
   readBoundedRegularFile,
   shellQuote,
 } from "./main/files.ts";
-import { isDirectRunFrom, trustedPath } from "./main/env.ts";
+import { runBash } from "./main/bash.ts";
+export { runBash };
+import { isDirectRunFrom } from "./main/env.ts";
 import { DNS_LOOKUP_ABORTED, DNS_LOOKUP_TIMED_OUT, dnsAbortError, outboundUrlError, resolvedHostError } from "./main/url.ts";
 import { policyRequest } from "./main/policy-fetch.ts";
 import { grepFiles } from "./main/grep.ts";
@@ -429,8 +430,6 @@ function contextCeiling(): number {
 function protectTokens(): number {
   return Math.min(PROTECT_MAX, Math.max(PROTECT_MIN, Math.floor(usableTokens() * 0.25)));
 }
-const BASH_CAP_BYTES = 20 * 1024;
-const BASH_TIMEOUT_MS = 60_000;
 const NOISE_FLOOR_TOKENS = 1_024;
 const FETCH_TIMEOUT_MS = 15_000;
 const FETCH_CAP_BYTES = 20 * 1024;
@@ -1086,134 +1085,6 @@ function persist(entry: Record<string, unknown>): number {
   if (!result.ok) throw new SessionStoreError(result.error);
   storageSeq = sseq;
   return sseq;
-}
-
-export function runBash(
-  command: string,
-  opts: { cwd: string; timeoutMs?: number; shouldStop?: () => boolean },
-): Promise<ToolTextResult> {
-  const timeoutMs = opts.timeoutMs ?? BASH_TIMEOUT_MS;
-  const repro = `bash ${shellQuote(command)}`;
-  const continuation = `Re-run the command with a narrower output or redirect noisy streams: ${repro}`;
-  return new Promise((resolve) => {
-    let child: ReturnType<typeof spawn>;
-    try {
-      const env: Record<string, string> = {};
-      for (const [key, value] of Object.entries(process.env)) {
-        if (value !== undefined) env[key] = value;
-      }
-      env.PATH = trustedPath(process.env.PATH, opts.cwd);
-      child = spawn("/bin/bash", ["-c", command], {
-        cwd: opts.cwd,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-        env,
-      });
-    } catch (err) {
-      resolve(logicalToolText(`error: ${(err as Error).message}`, {
-        maxBytes: BASH_CAP_BYTES,
-        state: "failed",
-        isError: true,
-        repro,
-      }));
-      return;
-    }
-    const pid = child.pid;
-    const stdout = new BoundedTextAccumulator({ maxBytes: BASH_CAP_BYTES, direction: "tail", marker: "" });
-    const stderr = new BoundedTextAccumulator({ maxBytes: BASH_CAP_BYTES, direction: "tail", marker: "" });
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
-    let settled = false;
-    let timedOut = false;
-    let interruptedByUser = false;
-    let stopCallbackFailed = false;
-    let spawnFailed = false;
-    const shouldStop = (): boolean => {
-      try {
-        return opts.shouldStop?.() === true;
-      } catch {
-        stopCallbackFailed = true;
-        return true;
-      }
-    };
-    const killGroup = (): void => {
-      if (process.platform !== "win32" && typeof pid === "number" && pid > 0) {
-        try {
-          process.kill(-pid, "SIGKILL");
-          return;
-        } catch {
-          /* fall through to the child handle */
-        }
-      }
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-    };
-    const finish = (status: { code?: number | null; signal?: string | null; failed: boolean }): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      clearInterval(poll);
-      const state: CompletionState = timedOut
-        ? "timeout"
-        : stopCallbackFailed
-          ? "failed"
-          : interruptedByUser
-          ? "interrupted"
-          : spawnFailed
-            ? "failed"
-            : status.failed
-              ? "failed"
-              : "complete";
-      const stdoutResult = stdout.finish(state);
-      const stderrResult = stderr.finish(state);
-      const parts = [stdoutResult.text, stderrResult.text];
-      const tag = typeof status.code === "number" ? String(status.code) : status.signal ?? "error";
-      let body = `${parts.filter(Boolean).join("\n") || "(no output)"}\n[exit ${tag}]`;
-      const outputTruncated = stdoutResult.truncated || stderrResult.truncated;
-      if (outputTruncated || state !== "complete") body += `\n${continuation}`;
-      const rendered = boundedToolResult(body, {
-        maxBytes: BASH_CAP_BYTES,
-        direction: "tail",
-        marker: "",
-        state,
-        isError: state !== "complete" || status.failed,
-      });
-      resolve(Object.freeze({
-        ...rendered,
-        truncated: rendered.truncated || outputTruncated,
-        continuation: outputTruncated || state !== "complete" ? continuation : null,
-        repro,
-        stdout: stdoutResult,
-        stderr: stderrResult,
-        exitCode: typeof status.code === "number" ? status.code : null,
-        signal: status.signal ?? null,
-      }));
-    };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killGroup();
-    }, timeoutMs);
-    const poll = setInterval(() => {
-      if (shouldStop()) {
-        interruptedByUser = true;
-        killGroup();
-      }
-    }, 50);
-    if (shouldStop()) {
-      interruptedByUser = true;
-      killGroup();
-    }
-    child.on("error", (e) => {
-      spawnFailed = true;
-      finish({ signal: e.message, failed: true });
-    });
-    child.on("close", (code, signal) => {
-      finish({ code, signal, failed: !(code === 0 && !signal) });
-    });
-  });
 }
 
 export function fetchUrlError(url: string): string | null {
@@ -1879,7 +1750,7 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "bash",
     description:
-      "Run one bash command in the working directory. 60 s timeout. Combined output caps near 20 KB and always ends with [exit N]. Use grep or glob for file search; do not call rg.",
+      "Run one bash command in the working directory. 10 min timeout. Waits for background jobs and the process group (`&` does not return early). Combined output caps near 20 KB and always ends with [exit N]. Use grep or glob for file search; do not call rg.",
     input_schema: { type: "object", additionalProperties: false, properties: { command: { type: "string" } }, required: ["command"] },
   },
   {

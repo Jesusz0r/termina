@@ -28,7 +28,7 @@ One responsibility → one owner. Reuse, extend, or replace — never add a para
 - `shared/grep-pattern.ts` — only grep-pattern validator (agent-core + main). `electron/content-search.ts` owns project content search; `electron/quick-open.ts` owns file-name search.
 - `src/theme-tokens.gen.ts` is generated from `src/styles.css` by `scripts/theme-tokens.ts` (runs in `scripts/build.ts`); never hand-edit the generated file.
 - `electron/sidecar.ts` owns sidecar parse/tail. Only writers: `agent-core/host.ts` + `logEvent` in `agent-core/main/sidecar.ts`.
-- `agent-core/main/` owns agent file/grep/env/tool-format/skill/front-matter/history/sidecar pure helpers; the tool surface stays in `agent-core/main.ts`.
+- `agent-core/main/` owns agent file/grep/env/bash/tool-format/skill/front-matter/history/sidecar helpers; the tool surface stays in `agent-core/main.ts`. `agent-core/main/bash.ts` owns interruptible bash (job wait, process-group wait, tree kill).
 - `electron/session-search.ts` owns Session Search walk (file coverage via `collectSessionSearchFiles`). `electron/sandbox.ts` owns sandbox profiles.
 - `electron/diagnostics.ts`, `electron/schedule.ts`, `electron/roster-store.ts`, `electron/terminal-instance.ts`, `electron/path-lookup.ts`, `electron/verify-detect.ts`, `electron/evidence-home.ts` own their slice behind host seams; `electron/worldlines/bootstrap.ts` owns fork preflight/capture/read paths.
 - `electron/terminal-runtime.ts` — only in-process terminal lifecycle (instance map, PTY spawn/exit, egress ledger, primary events dir + tailer, roster file store, sidecar watch/queue, generation fence, viewer registry); viewers subscribe, none own the session. Main owns orchestration and IPC validation. `stopWatching` is destroy-only.

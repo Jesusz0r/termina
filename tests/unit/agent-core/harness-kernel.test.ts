@@ -613,6 +613,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const killedGot = await killed;
     check("bash interrupt returns quickly", Date.now() - t0 < 3000);
     check("bash interrupt is an error", killedGot.isError === true);
+    const bgStarted = Date.now();
+    const bg = await runBash("(sleep 0.35; printf done > bg.txt) & printf started", { cwd: root, timeoutMs: 5_000 });
+    check("bash waits for a background process group", Date.now() - bgStarted >= 300 && bg.state === "complete" && readFileSync(join(root, "bg.txt"), "utf8") === "done");
     
     const hostDir = mkdtempSync(join(tmpdir(), "agent-core-host-"));
     leftovers.push(hostDir);
