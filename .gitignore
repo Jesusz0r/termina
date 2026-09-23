@@ -1,4 +1,5 @@
 node_modules/
+.pnpm-store/
 # npm is not the package manager; never track its lockfile.
 package-lock.json
 dist-electron/
