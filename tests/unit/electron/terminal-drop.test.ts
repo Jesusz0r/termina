@@ -198,6 +198,7 @@ describe("Terminal drop unit tests", () => {
     it("partitions agent drops instead of treating every path as an image", () => {
       const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
       const ptyView = readFileSync(new URL("../../../src/pty-view.ts", import.meta.url), "utf8");
+      const zone = readFileSync(new URL("../../../src/main/terminal-drop-zone.ts", import.meta.url), "utf8");
       const fn = main.slice(main.indexOf("private async dropTerminalFiles"), main.indexOf("private async safeEventsFile"));
       expect(fn).toContain("partitionDroppedPaths");
       expect(fn).toContain("splitImageDropBudget");
@@ -206,12 +207,11 @@ describe("Terminal drop unit tests", () => {
       expect(fn).toContain("if (others.length > 0)");
       expect(fn).not.toContain("readDroppedImages(normalized.paths");
       expect(ptyView).toContain("if (result.text) this.term.paste(result.text)");
-      expect(ptyView).toContain("container.addEventListener(\"drop\", this.onDrop, true)");
-      expect(ptyView).toContain("container.addEventListener(\"dragover\", this.onDragOver, true)");
-      expect(ptyView).toContain("this.container.removeEventListener(\"drop\", this.onDrop, true)");
-      expect(ptyView).not.toContain("this.clipboardTarget?.addEventListener(\"drop\"");
-      expect(ptyView).not.toContain("event.stopPropagation();");
-      expect(ptyView).not.toContain("void this.ingestDroppedFiles(files);");
+      // One drop owner for the terminal column; panes no longer listen.
+      expect(ptyView).not.toContain("addEventListener(\"drop\"");
+      expect(zone).toContain("zone.addEventListener(\"drop\", onDrop, true)");
+      expect(zone).toContain("zone.addEventListener(\"dragover\", onDragOver, true)");
+      expect(zone).not.toContain("stopPropagation");
     });
   });
 

@@ -42,6 +42,7 @@ import { createActivityPane } from "./main/activity-pane";
 import { createPreferences, applyEditorPreferences, applyReviewPreferences } from "./main/preferences";
 import { createLayout } from "./main/layout";
 import { createTerminalFind } from "./main/terminal-find";
+import { createTerminalDropZone } from "./main/terminal-drop-zone";
 import { SessionSearch } from "./session-search";
 import { QuickOpen } from "./quick-open";
 import { ActivityTabs } from "./activity-tabs";
@@ -1925,6 +1926,21 @@ commands.register("open-settings", () => prefs.openSettings());
 
 window.termina.onMenuCommand((cmd) => {
   commands.execute(cmd.command);
+});
+
+// OS file drops anywhere on the terminal column: a tab takes them for its
+// own terminal (and comes to the front), anywhere else the active one.
+createTerminalDropZone({
+  zones: [document.getElementById("terminal-tabs")!, termContainer],
+  highlight: termContainer,
+  canDrop: () => activeId !== null && panes.has(activeId),
+  dropFiles: (files, target) => {
+    const tabEl = target instanceof Element ? target.closest(".terminal-tab") : null;
+    const tabPane = tabEl ? [...panes.values()].find((p) => p.tabEl === tabEl) : undefined;
+    if (tabPane && tabPane.instanceId !== activeId) activatePane(tabPane.instanceId);
+    const pane = tabPane ?? (activeId ? panes.get(activeId) : undefined);
+    if (pane) void pane.view.dropFiles(files);
+  },
 });
 
 // drag to reorder terminal tabs

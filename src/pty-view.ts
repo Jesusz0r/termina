@@ -39,21 +39,12 @@ export class PtyView {
   private wheelDelta = 0;
   private wheelTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly container: HTMLElement;
-  private dragDepth = 0;
   private readonly onMouseDown = () => this.focus();
   private dropInFlight = false;
   private pasteInFlight = false;
   private clipboardTarget: HTMLTextAreaElement | null = null;
   private readonly onCopy = (event: ClipboardEvent) => this.handleCopy(event);
   private readonly onPaste = (event: ClipboardEvent) => this.handleNativePaste(event);
-  private readonly onDragEnter = (event: DragEvent) => this.handleDragEnter(event);
-  private readonly onDragOver = (event: DragEvent) => this.handleDragOver(event);
-  private readonly onDragLeave = (event: DragEvent) => this.handleDragLeave(event);
-  private readonly onDrop = (event: DragEvent) => {
-    void this.handleDrop(event);
-  };
-  private readonly onDragEnd = () => this.clearDropTarget();
-  private readonly onWindowBlur = () => this.clearDropTarget();
 
   constructor(
     container: HTMLElement,
@@ -113,15 +104,6 @@ export class PtyView {
     this.clipboardTarget?.addEventListener("copy", this.onCopy, true);
     this.clipboardTarget?.addEventListener("paste", this.onPaste, true);
     container.addEventListener("mousedown", this.onMouseDown);
-    // Capture so the pane owns drops whose hit target is the helper textarea
-    // (it sits on the composer caret). preventDefault here cancels that
-    // control's pathless file-paste default and keeps filesystem paths.
-    container.addEventListener("dragenter", this.onDragEnter, true);
-    container.addEventListener("dragover", this.onDragOver, true);
-    container.addEventListener("dragleave", this.onDragLeave, true);
-    container.addEventListener("drop", this.onDrop, true);
-    container.addEventListener("dragend", this.onDragEnd);
-    window.addEventListener("blur", this.onWindowBlur);
     this.term.attachCustomKeyEventHandler((event) => this.handleKey(event));
     this.term.attachCustomWheelEventHandler((event) => this.handleWheel(event));
 
@@ -354,66 +336,8 @@ export class PtyView {
     }
   }
 
-  private isFileDrag(event: DragEvent): boolean {
-    const transfer = event.dataTransfer;
-    if (!transfer) return false;
-    const types = transfer.types ? Array.from(transfer.types) : [];
-    if (types.includes("Files") || (transfer.files?.length ?? 0) > 0) return true;
-    // Chromium can omit "Files" until drop. An empty type list still needs
-    // preventDefault on dragover or the drop is never delivered.
-    return event.type !== "drop" && types.length === 0;
-  }
-
-  private filesFromEvent(event: DragEvent): File[] {
-    return this.filesFromDataTransfer(event.dataTransfer);
-  }
-
-  private filesFromDataTransfer(data: DataTransfer | null): File[] {
-    if (!data) return [];
-    const listed = Array.from(data.files ?? []);
-    if (listed.length > 0) return listed;
-    const items = data.items;
-    if (!items) return [];
-    const files: File[] = [];
-    for (let i = 0; i < items.length; i++) {
-      const file = items[i]?.getAsFile();
-      if (file) files.push(file);
-    }
-    return files;
-  }
-
-  private handleDragEnter(event: DragEvent): void {
-    if (this.disposed || !this.isFileDrag(event)) return;
-    event.preventDefault();
-    this.dragDepth += 1;
-    this.container.classList.add("term-drop-target");
-  }
-
-  private handleDragOver(event: DragEvent): void {
-    if (this.disposed || !this.isFileDrag(event)) return;
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-  }
-
-  private handleDragLeave(event: DragEvent): void {
-    if (this.disposed || !this.isFileDrag(event)) return;
-    this.dragDepth = Math.max(0, this.dragDepth - 1);
-    if (this.dragDepth === 0) this.container.classList.remove("term-drop-target");
-  }
-
-  private clearDropTarget(): void {
-    this.dragDepth = 0;
-    this.container.classList.remove("term-drop-target");
-  }
-
-  private async handleDrop(event: DragEvent): Promise<void> {
-    if (this.disposed || !this.isFileDrag(event)) return;
-    event.preventDefault();
-    this.clearDropTarget();
-    await this.ingestDroppedFiles(this.filesFromEvent(event));
-  }
-
-  private async ingestDroppedFiles(files: File[]): Promise<void> {
+  /** Hand OS-dropped files to the host; the terminal drop zone routes here. */
+  async dropFiles(files: File[]): Promise<void> {
     if (this.disposed || this.dropInFlight) return;
     if (files.length === 0) {
       this.reportTerminalError("no files");
@@ -628,17 +552,10 @@ export class PtyView {
 
   dispose(): void {
     this.disposed = true;
-    this.clearDropTarget();
     this.clipboardTarget?.removeEventListener("copy", this.onCopy, true);
     this.clipboardTarget?.removeEventListener("paste", this.onPaste, true);
     this.clipboardTarget = null;
     this.container.removeEventListener("mousedown", this.onMouseDown);
-    this.container.removeEventListener("dragenter", this.onDragEnter, true);
-    this.container.removeEventListener("dragover", this.onDragOver, true);
-    this.container.removeEventListener("dragleave", this.onDragLeave, true);
-    this.container.removeEventListener("drop", this.onDrop, true);
-    this.container.removeEventListener("dragend", this.onDragEnd);
-    window.removeEventListener("blur", this.onWindowBlur);
     this.visible = false;
     if (this.watchdog) clearInterval(this.watchdog);
     this.watchdog = null;
