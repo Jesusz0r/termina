@@ -74,7 +74,7 @@ describe("done() tool outcomes (#373)", () => {
 
   it("MCP executeTool branch uses done() instead of a ToolOutcome literal", () => {
     const main = readFileSync(new URL("../../../agent-core/main.ts", import.meta.url), "utf8");
-    const start = main.indexOf("if (mcpSession?.tools.some");
+    const start = main.indexOf('if (mcpSession && use.name === "call_mcp_tool")');
     const end = main.indexOf("const TOOLS:");
     expect(start).toBeGreaterThan(0);
     expect(end).toBeGreaterThan(start);
