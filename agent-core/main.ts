@@ -5278,8 +5278,8 @@ async function runBangCommand(command: string): Promise<void> {
     ensureFreshSession();
     pushMessage("user", bangCommandContext(command, got.content));
   } finally {
-    stopSubagentApprovalTimer();
     running = false;
+    stopSubagentApprovalTimer();
     interrupted = false;
     showPrompt();
     drainQueuedLine();
