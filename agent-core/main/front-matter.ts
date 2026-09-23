@@ -59,7 +59,7 @@ export function buildFrozenSystem(opts: {
   userAgentsPath: string | null;
   userSkillDir: string | null;
   probes?: boolean;
-}): { system: string; allow: Set<string>; skills: SkillIndexSkill[] } {
+}): { system: string; allow: Set<string>; skills: SkillIndexSkill[]; sectionBytes: Record<string, number> } {
   const root = freezeCwd(opts.cwd);
   const skillDirs: string[] = [];
   if (opts.userSkillDir) skillDirs.push(opts.userSkillDir);
@@ -80,10 +80,16 @@ export function buildFrozenSystem(opts: {
       /* missing or unreadable */
     }
   }
-  const parts = [
-    FROZEN_IDENTITY,
-    formatEnvironment(root, { probes: opts.probes !== false }),
-  ];
+  const parts: string[] = [];
+  // Count at the assembly boundary; parsing the final prompt would mistake
+  // tag-like text inside user/project instructions for harness sections.
+  const sectionBytes: Record<string, number> = {};
+  const append = (name: string, text: string): void => {
+    parts.push(text);
+    sectionBytes[name] = Buffer.byteLength(text, "utf8");
+  };
+  append("identity", FROZEN_IDENTITY);
+  append("environment", formatEnvironment(root, { probes: opts.probes !== false }));
   if (opts.userAgentsPath) {
     const userMd = readOptional(opts.userAgentsPath);
     if (userMd !== null) {
@@ -93,7 +99,7 @@ export function buildFrozenSystem(opts: {
       } catch {
         /* keep unresolved path */
       }
-      parts.push(formatUserInstructions(userMd, abs));
+      append("userInstructions", formatUserInstructions(userMd, abs));
     }
   }
   const skillXml = formatCompactSkillIndex(scanned.skills, {
@@ -101,17 +107,18 @@ export function buildFrozenSystem(opts: {
     capBytes: SKILL_XML_CAP,
     capped: scanned.capped,
   });
-  if (skillXml) parts.push(skillXml);
+  if (skillXml) append("skillIndex", skillXml);
   const projPath = join(root, "AGENTS.md");
   try {
     if (existsSync(projPath) && underRoot(realpathSync(projPath), root)) {
       const proj = readOptional(projPath);
-      if (proj !== null) parts.push(formatProjectInstructions(proj));
+      if (proj !== null) append("projectInstructions", formatProjectInstructions(proj));
     }
   } catch {
     /* omit escaped project instructions */
   }
-  return { system: parts.join("\n\n"), allow, skills: scanned.skills };
+  sectionBytes.separators = Math.max(0, parts.length - 1) * 2;
+  return { system: parts.join("\n\n"), allow, skills: scanned.skills, sectionBytes };
 }
 
 interface FrontMatter {

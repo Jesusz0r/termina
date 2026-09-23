@@ -17,7 +17,7 @@ function jsonLines(path: string): Row[] {
  * belongs to this fixture, including HOME, authentication, events and traces. */
 async function scenario(toolProgram: string, check: (result: {
   root: string; output: string; messages: Row[]; requests: Row[]; traces: Row[]; events: Row[];
-}) => void, timeoutMs = 40_000, extraFiles: Record<string, string> = {}, textProgram = 'return "finished";'): Promise<void> {
+}) => void, timeoutMs = 40_000, extraFiles: Record<string, string> = {}, textProgram = 'return "finished";', setup?: (ctx: { project: string; home: string }) => void): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "termina-tool-loop-"));
   const project = join(root, "project");
   const home = join(root, "home");
@@ -26,6 +26,7 @@ async function scenario(toolProgram: string, check: (result: {
   writeFileSync(join(project, "file.txt"), "original\n");
   for (const [name, content] of Object.entries(extraFiles)) writeFileSync(join(project, name), content);
   const terminalId = "term-tool-loop";
+  setup?.({ project, home });
   const sessionId = "core-tool-loop";
   const sessionFile = join(events, sessionId, "current", "session.jsonl");
   const requestsFile = join(root, "requests.jsonl");
@@ -126,6 +127,53 @@ function expectPaired(messages: Row[]): void {
 }
 
 describe("real tool loop regressions", () => {
+  it("discovers MCP schemas on demand and executes through a stable provider tool surface", async () => {
+    await scenario(`
+      if (turn === 1) return [{ name: "search_mcp_tools", input: { query: "fixture_echo" } }];
+      if (turn === 2) return [{ name: "call_mcp_tool", input: { name: "mcp_fixture_echo", arguments: { value: "hello" } } }];
+      if (turn === 3) return [
+        { name: "call_mcp_tool", input: { name: "mcp_fixture_echo", arguments: [] } },
+        { name: "call_mcp_tool", input: { name: "mcp_fixture_missing", arguments: {} } },
+        { name: "mcp_fixture_echo", input: { value: "must not execute" } }
+      ];
+      return [];`, (result) => {
+      expect(result.requests).toHaveLength(4);
+      const prefix = JSON.stringify(result.requests[0].tools);
+      expect(prefix, result.output).toContain("search_mcp_tools");
+      expect(prefix).not.toContain("fixture-only schema description");
+      expect(JSON.stringify(result.requests[0])).not.toContain("fixture-only schema description");
+      expect(JSON.stringify(result.requests[1])).toContain("fixture-only schema description");
+      for (const request of result.requests) expect(JSON.stringify(request.tools)).toBe(prefix);
+      const results = toolResults(result.messages);
+      expect(JSON.parse(results[0].content).tools[0].input_schema.required).toEqual(["value"]);
+      expect(results[1].content).toContain('MCP executed {"name":"echo","arguments":{"value":"hello"}}');
+      expect(results[2].is_error).toBe(true);
+      expect(results[2].content).toContain("invalid tool arguments");
+      expect(results[3].content).toContain("unknown tool");
+      expect(results[4].content).toContain("unknown tool");
+      expectPaired(result.messages);
+    }, 40_000, {
+      "mcp-server.mjs": `
+        import { createInterface } from "node:readline";
+        createInterface({ input: process.stdin }).on("line", (line) => {
+          const request = JSON.parse(line);
+          if (request.id === undefined) return;
+          const result = request.method === "initialize"
+            ? { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "fixture", version: "1" } }
+            : request.method === "tools/list" ? { tools: [{ name: "echo", description: "fixture-only schema description", inputSchema: {
+              type: "object", properties: { value: { type: "string" } }, required: ["value"],
+            } }] }
+            : { content: [{ type: "text", text: "MCP executed " + JSON.stringify(request.params) }] };
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+        });
+      `,
+    }, 'return "finished";', ({ home, project }) => {
+      const dir = join(home, ".termina", "agent");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: [join(project, "mcp-server.mjs")] } } }));
+    });
+  });
+
   it("does not attribute ordinary tool-history growth as a prefix flip", async () => {
     await scenario('return turn < 3 ? [{ name: "read_file", input: { path: "file.txt", start_line: turn } }] : [];', (result) => {
       const attempts = result.traces.filter((row) => row.recordType === "attempt" && row.status === "ok")

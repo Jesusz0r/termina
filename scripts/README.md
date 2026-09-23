@@ -6,6 +6,7 @@ Build, dev, and diagnostic entry points. Run with `node --experimental-strip-typ
 - `dev.ts` — development launcher. `build-core.ts` — Rust core build. `prepare-resources.ts` — packaged-app resources.
 - `theme-tokens.ts` — parses the theme blocks out of `src/styles.css` into `src/theme-tokens.gen.ts`, the module the terminal and Monaco palettes import. Runs on every build; `tests/unit/scripts/theme-tokens.test.ts` fails when the checked-in output goes stale. Never hand-edit the `.gen.ts` file.
 - `spike.ts` — bundles one file from `scripts/spikes/` and runs it under plain Node (`pnpm run spike -- <name>`).
+- `prefix-measure.ts [project-root]` — read-only system-section byte counts plus synthetic deferred-MCP and cross-prompt overlay measurements. No provider calls, token estimates, or instruction text in its output. See `docs/reference/AGENT-CORE.md` for the baseline and limitations.
 
 ## Release-gate spikes (kept)
 

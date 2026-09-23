@@ -3545,19 +3545,19 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check("jailMcpCwd rejects a parent path", mcp.jailMcpCwd("/proj", "..") === null);
     check("jailMcpCwd allows a subdir", mcp.jailMcpCwd("/proj", "tools") === join("/proj", "tools"));
-    const mcpMerged = mcp.mergeClientTools(
+    const mcpMerged = mcp.mcpClientTools(
       [{ name: "bash", description: "bash", input_schema: { type: "object" } }],
-      [{ name: "mcp_x_echo", description: "echo", input_schema: { type: "object" } }],
+      mcp.selectMcpTools([{ name: "echo", original: "echo", server: "x", description: "echo", input_schema: { type: "object" } }]),
     );
     const mcpPrefix = buildCachedPrefix("sys", mcpMerged);
     check(
-      "MCP tools sit in the cached client list",
-      mcpPrefix.tools.some((t) => t.name === "mcp_x_echo") && mcpPrefix.tools.at(-1)?.name === "mcp_x_echo" && mcpPrefix.tools.at(-1)?.cache_control?.type === "ephemeral",
+      "MCP discovery sits in the cached client list, not server schemas",
+      !mcpPrefix.tools.some((t) => t.name === "mcp_x_echo") && mcpPrefix.tools.at(-1)?.name === "call_mcp_tool" && mcpPrefix.tools.at(-1)?.cache_control?.type === "ephemeral",
     );
     const mcpRequested = requestTools(mcpPrefix.tools, "anthropic");
     check(
       "web_search stays last and uncached after MCP tools",
-      mcpRequested.at(-1)?.name === "web_search" && mcpRequested.at(-1)?.cache_control === undefined && mcpRequested.at(-2)?.name === "mcp_x_echo",
+      mcpRequested.at(-1)?.name === "web_search" && mcpRequested.at(-1)?.cache_control === undefined && mcpRequested.at(-2)?.name === "call_mcp_tool",
     );
     const mcpDir = mkdtempSync(join(tmpdir(), "agent-core-mcp-"));
     leftovers.push(mcpDir);

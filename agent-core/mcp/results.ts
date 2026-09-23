@@ -34,7 +34,7 @@ export function createMcpContinuation(server: string, tool: string): McpContinua
   return Object.freeze({
     server: safeServer,
     tool: safeTool,
-    guidance: `Call MCP tool ${JSON.stringify(safeTool)} on server ${JSON.stringify(safeServer)} again to retrieve the complete output; arguments are intentionally omitted.`,
+    guidance: `Use call_mcp_tool with name ${JSON.stringify(safeTool)} (server ${JSON.stringify(safeServer)}) again to retrieve the complete output; arguments are intentionally omitted.`,
   });
 }
 

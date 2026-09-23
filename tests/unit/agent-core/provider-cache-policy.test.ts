@@ -3,11 +3,10 @@ import { describe, it } from "vitest";
  * Provider/cache contract tests for the token-efficiency roadmap.
  *
  * This file is intentionally independent from the broad agent-core harness so
- * provider usage and fallback failures stay easy to diagnose. It is expected
- * to be RED until the roadmap's nullable accounting and effective-policy work
- * lands.
+ * provider usage and fallback failures stay easy to diagnose. Collected
+ * assertion failures are thrown to Vitest, never just logged.
  *
- *   node --experimental-strip-types --no-warnings scripts/agent-core-provider-cache-test.mjs
+ *   npm run test:unit -- tests/unit/agent-core/provider-cache-policy.test.ts
  */
 process.env.TERMINA_CORE_TEST = "1";
 
@@ -648,7 +647,8 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.deepEqual(xai.prompt_cache_options, { mode: "explicit" });
       const xaiInput = responsesInputItems(xai);
       assert.equal(xaiInput[0]?.content?.[0]?.prompt_cache_breakpoint?.mode, "explicit");
-      assert.equal(xaiInput[1]?.content?.[0]?.prompt_cache_breakpoint, undefined);
+      // explicitCacheSkipTail: false is caller-supplied above: mark both texts.
+      assert.equal(xaiInput[1]?.content?.[0]?.prompt_cache_breakpoint?.mode, "explicit");
       assert.equal(xaiInput[0]?.content?.[0]?.cache_control, undefined);
 
       const xaiKeyOnly = compat.responsesBody(
@@ -800,10 +800,11 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         { role: "user", content: [{ type: "text", text: "old reusable text" }] },
       ];
       for (let i = 0; i < 10; i++) {
-        control.push({ role: "assistant", content: [{ type: "text", text: `note-${i}` }] });
+        control.push({ role: "assistant", content: [{ type: "tool_use", id: `control-${i}`, name: "bash", input: {} }] });
         control.push({ role: "assistant", content: [{ type: "thinking", thinking: `thought-${i}` }] });
       }
-      // Twenty alternating positions with no runs still exhaust the budget.
+      // Twenty uncacheable alternating positions exhaust the budget. Text here
+      // would itself be eligible and would not test reaching the older text.
       assert.equal(allCacheMarkers(anthropicCache.stampHistoryCache(control)).length, 0);
     });
     
@@ -914,10 +915,11 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
     });
     
     if (failures.length > 0) {
-      console.error(`\n${failures.length} provider/cache test(s) failed as expected for RED phase.`);
-      process.exitCode = 1;
-    } else {
-      console.log("\nprovider/cache tests passed");
+      throw new AggregateError(
+        failures.map(({ name, error }) => new Error(name, { cause: error })),
+        `${failures.length} provider/cache assertions failed: ${failures.map(({ name }) => name).join("; ")}`,
+      );
     }
+    console.log("\nprovider/cache tests passed");
   }, 60_000);
 });

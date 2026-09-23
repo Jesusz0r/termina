@@ -252,9 +252,8 @@ function providerMcpToolBytes(tool: McpClientTool): number {
 }
 
 
-// Keep the complete capped discovery frozen for a session. A deferred MCP
-// catalog would need a provider-facing search protocol and a new-session/cache
-// boundary in main; tools/list is the canonical discovery surface today.
+// Freeze the capped server catalog for a session. discovery.ts exposes schemas
+// on demand; selection does not add these definitions to the provider prefix.
 export function selectMcpTools(
   discovered: McpClientTool[],
   kernelNames: ReadonlySet<string> = KERNEL_TOOL_NAMES,
@@ -291,13 +290,4 @@ export function selectMcpTools(
 
 export function mcpToolDefs(tools: McpClientTool[]): Array<Record<string, unknown>> {
   return tools.map(providerMcpToolDef);
-}
-
-
-/** Join kernel tools and MCP tools. Last client tool keeps cache_control. */
-export function mergeClientTools(
-  kernel: Array<Record<string, unknown>>,
-  mcp: Array<Record<string, unknown>>,
-): Array<Record<string, unknown>> {
-  return [...kernel, ...mcp];
 }

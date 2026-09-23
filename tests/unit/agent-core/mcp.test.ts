@@ -8,7 +8,6 @@ const {
   MAX_MCP_TOOL_BYTES,
   MAX_MCP_TOOLS,
   createMcpContinuation,
-  mcpToolDefs,
   normalizeMcpCallResult,
   normalizeMcpDiscovery,
   selectMcpTools,
@@ -174,17 +173,17 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
         tool({ server: "b-server", original: "echo" }),
         tool({ server: "a-server", original: "run" }),
       ];
-      const defs = mcpToolDefs(selectMcpTools(discovered));
-      const merged = mcp.mergeClientTools(kernel, defs);
+      const catalog = selectMcpTools(discovered);
+      const merged = mcp.mcpClientTools(kernel, catalog);
       const names = merged.map((row: any) => row.name);
-      // Kernel tools first, MCP tail in canonical server order.
+      // Kernel tools first, a constant discovery surface instead of server schemas.
       expect(names.slice(0, 2)).toEqual(["read_file", "edit"]);
-      expect(names.slice(2)).toEqual(["mcp_a-server_run", "mcp_b-server_echo"]);
+      expect(names.slice(2)).toEqual(["search_mcp_tools", "call_mcp_tool"]);
       const before = JSON.stringify(merged);
       // Late discovery churn must not leak into the already-merged request tools.
       discovered.reverse();
       (discovered[0] as any).original = "late-mutation";
-      expect(JSON.stringify(mcp.mergeClientTools(kernel, defs))).toBe(before);
+      expect(JSON.stringify(mcp.mcpClientTools(kernel, catalog))).toBe(before);
     });
 
     it("skips malformed MCP schemas and reports a diagnostic", () => {
@@ -294,7 +293,7 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
       expect(result.continuation?.tool).toBe("mcp_tool_name");
       expect(result.continuation?.guidance ?? "").toMatch(/again/i);
       expect(result.continuation?.guidance ?? "").not.toMatch(/secret|password|token/i);
-      expect(result.content).toMatch(/call MCP tool/i);
+      expect(result.content).toMatch(/call_mcp_tool/);
       expect(result.content).toMatch(/mcp_tool_name/);
     });
 

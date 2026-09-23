@@ -314,8 +314,9 @@ import {
 import {
   jailMcpCwd,
   loadMcpConfigs,
-  mergeClientTools,
-  mcpToolDefs,
+  callDiscoveredMcpTool,
+  mcpClientTools,
+  searchMcpTools,
   startMcp,
   userMcpPath,
   type McpSession,
@@ -1705,8 +1706,12 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     }
     return done(use, JSON.stringify({ ok: true }));
   }
-  if (mcpSession?.tools.some((t) => t.name === use.name)) {
-    const got = await mcpSession.call(use.name, use.input, { shouldStop: () => interrupted });
+  if (mcpSession && use.name === "search_mcp_tools") {
+    const result = searchMcpTools(mcpSession.tools, use.input);
+    return done(use, result, result.startsWith("error:"));
+  }
+  if (mcpSession && use.name === "call_mcp_tool") {
+    const got = await callDiscoveredMcpTool(mcpSession, use.input, { shouldStop: () => interrupted });
     return done(use, got);
   }
   return done(use, `error: unknown tool ${use.name}`, true);
@@ -1841,7 +1846,7 @@ async function connectMcp(): Promise<void> {
       return;
     }
     mcpSession = session;
-    clientTools = mergeClientTools(TOOLS, mcpToolDefs(session.tools));
+    clientTools = mcpClientTools(TOOLS, session.tools);
     syncIndicators();
     for (const note of session.notes) out(`(${note})\n`);
   } catch (error) {
@@ -4638,7 +4643,7 @@ async function runPrompt(
       pauseTurnContinuations = 0;
       const outcomes: ToolOutcome[] = [];
       const pendingOutcomes = new Map<number, Promise<ToolOutcome>>();
-      const inputErrors = uses.map((use) => toolInputError(use, TOOLS));
+      const inputErrors = uses.map((use) => toolInputError(use, clientTools));
       const waves = toolExecutionWaves(uses);
       const spawnFanout = admitSubagentFanout(
         subagentRegistry.activeRuns().length,

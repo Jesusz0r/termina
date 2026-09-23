@@ -61,8 +61,11 @@ Rules:
   from byte zero.
 - Corrections are new messages, never edits of old ones. A request may stamp
   `cache_control` on a copy of the last stable history block. That copy is not
-  stored. The request suffix after that breakpoint (file inventories and host
-  context) may be rebuilt every call. It is not stored in the session log.
+  stored. The working-set overlay is a separate user message prepended before
+  persisted history, built once per logical prompt and reused on its tool turns
+  and retries. It is not stored in the session log. A changed overlay on the
+  next prompt breaks input-prefix equality before that persisted history,
+  although the system and tool prefix can remain unchanged.
   Do not send top-level automatic `cache_control`: that pins the suffix.
   Anthropic markers are `{ type: "ephemeral" }` with no `ttl`, so the
   cache uses the 5-minute default
@@ -74,8 +77,9 @@ Rules:
   only copy of history forfeits every guarantee below — forks, audits,
   recovery — so it is not an optimization, it is data loss.
 
-Verify: replay two adjacent requests and diff — everything before the last
-user turn must be identical bytes.
+Verify: replay adjacent requests within one logical prompt and revision and
+diff the stable prefix. Across logical prompts, compare the overlay separately;
+unchanged persisted history alone does not prove a reusable wire prefix.
 
 Context water marks use `ceil(stringLength / 3)` as a conservative estimate.
 This is not a tokenizer. The prune planner uses `ceil(chars / 4)` only to
@@ -91,6 +95,38 @@ re-open a finished answer for verification or review. Stall detection stops
 unproductive loops. Five consecutive server-tool `pause_turn` continuations
 still stop a wedged provider stream; a client tool turn resets that streak.
 A natural final answer ends the run.
+
+### Measuring prefix composition
+
+Run `node --experimental-strip-types --no-warnings scripts/prefix-measure.ts .`.
+This read-only report counts UTF-8 bytes at the canonical front-matter assembly
+boundary; it does not print instruction text or contact a provider. It includes
+user/project instructions and skill indexes when present. Environment toolchain
+probes are disabled for this report, so its system total is not an exact live
+request size.
+
+The same command serializes a labeled synthetic 32-tool MCP catalog and a
+16-message history through the existing Responses mapper. It compares eager
+schema bytes against deferred discovery, then tests unchanged versus changed
+working-set overlays. Whole matching input items are counted, not provider
+cache hits, billable tokens, or partial-item matches.
+
+Observed on 2026-09-23 in this working tree:
+
+- System: 21,732 bytes — identity 2,841; environment 456; skill index 4,451;
+  project instructions 13,978; separators 6. No user instructions were included.
+- Synthetic MCP contribution: 35,981 serialized tool bytes eager versus 995
+  deferred; first schema search result 1,132 bytes. Built-ins are excluded.
+- Synthetic next prompt with the same overlay: 17 complete matching input items
+  (34,051 serialized item bytes). With the changed overlay: zero complete
+  matching input items, while instructions and tools remain identical.
+
+These are structural measurements, not an end-to-end savings claim. Discovery
+adds model turns and history content. Keep prompt wording and overlay placement
+unchanged until representative provider traces and quality checks justify a
+change; moving the overlay to the tail can damage reuse on every tool turn.
+Existing `scripts/trace-baseline.ts` and the opt-in live cache probe provide the
+next measurement layer. Provider-measured savings remain unknown here.
 
 ## P2 — Separate reclamation from summarization
 
@@ -376,8 +412,17 @@ pending tool widgets are not restored from session JSONL.
 MCP is a stdio client, not a plugin surface. Servers come from the user-owned
 `~/.termina/agent/mcp.json`. The kernel does not execute project-owned MCP
 configuration. It spawns user servers at process start, lists tools once,
-prefixes names `mcp_<server>_<tool>`, and freezes that list in zone 1.
-`/clear` reconnects. The same client also speaks Streamable HTTP and SSE
+prefixes names `mcp_<server>_<tool>`, and freezes a bounded server catalog
+(32 tools, 64 KiB of definitions) for that session. Server schemas are not
+sent in the provider tool prefix. When a catalog is available, the prefix
+contains only `search_mcp_tools` and `call_mcp_tool` alongside the built-ins.
+Search returns up to two complete schemas per page; an empty query browses,
+and `next_offset` continues with the same query. Calls pass the discovered
+name and argument object through the existing MCP transport. Discovery never
+changes the tool prefix: schemas enter ordinary conversation history only
+when requested. This saves initial context but adds discovery turns; it does
+not imply a measured reduction in provider-billed tokens.
+`/clear` reconnects and is the boundary for catalog changes. The same client also speaks Streamable HTTP and SSE
 when `mcp.json` lists a `url` (`type: "http"` or `"sse"`, https only).
 A marketplace, hot-reload, MCP OAuth, and project-owned MCP config stay
 out.
