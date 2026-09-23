@@ -78,6 +78,7 @@ async function scenario(toolProgram: string, check: (result: {
         writeFileSync(join(events, `ack-${terminalId}-${record.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
         acked.add(record.requestId);
       }
+      // The parent run stays open until the host settles children. This harness is the host.
       for (const name of readdirSync(events)) {
         const match = new RegExp(`^subagent-${terminalId}-(bg-\\d+)\\.task\\.json$`).exec(name);
         if (!match) continue;
