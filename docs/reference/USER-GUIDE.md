@@ -153,7 +153,8 @@ to pick a discovered skill (`~/.agents/skills`, then `.agents/skills` in the pro
 selecting one starts a turn that reads that skill and follows it. Ctrl+J inserts
 a newline; Enter submits. Paste keeps newlines. `/help` lists keys.
 Paste a screenshot (Cmd/Ctrl+V) to attach it to the next prompt — up to
-four images, about 4 MB each. The status line shows how many are waiting.
+four images, about 4 MB each. The composer keeps that count above whatever
+you have already typed, and the status line shows it too.
 Drop files anywhere on the terminal: onto a tab for that terminal, anywhere
 else for the active one. Dropped images attach like pasted screenshots, and a
 non-image project file inserts `@path` in the composer. Files outside the

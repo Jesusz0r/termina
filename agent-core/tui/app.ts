@@ -300,8 +300,7 @@ export class AgentTui {
       return;
     }
     const { cols, rows } = this.size();
-    const inputLines = this.composerInput(cols).wrapped.length;
-    const layout = layoutHeights(rows, Math.max(1, inputLines), this.matches().length);
+    const layout = this.composerLayout(cols, rows, this.matches().length);
     const anchor = this.topVisibleEntryId(cols, layout.transcript, this.scroll);
     this.thinkingVisible = visible;
     const next = anchor === null ? null : this.nearestVisibleEntryId(anchor);
@@ -897,6 +896,13 @@ export class AgentTui {
     return this.fileRows();
   }
 
+  /** Draft rows plus one reserved image row. The image row is not shrinkable. */
+  private composerLayout(cols: number, rows: number, slashCount: number): ReturnType<typeof layoutHeights> {
+    const draft = Math.max(1, this.composerInput(cols).wrapped.length || 1);
+    const reserved = this.pendingImageCount > 0 ? 1 : 0;
+    return layoutHeights(rows, draft + reserved, slashCount, 1 + reserved);
+  }
+
   /** Composer box content during a picker: the question shows while idle,
    *  typed-ahead input replaces it while typing so the box stays one row
    *  and short terminals keep the choice rows visible. */
@@ -914,8 +920,7 @@ export class AgentTui {
 
   private visibleFoldableTools(): TranscriptEntry[] {
     const { cols, rows } = this.size();
-    const inputLines = this.composerInput(cols).wrapped.length;
-    const layout = layoutHeights(rows, Math.max(1, inputLines), this.matches().length);
+    const layout = this.composerLayout(cols, rows, this.matches().length);
     const ids = this.visibleSlice(cols, layout.transcript, this.scroll).ids;
     const tools: TranscriptEntry[] = [];
     const seen = new Set<number>();
@@ -1571,8 +1576,7 @@ export class AgentTui {
   private scrollLines(lines: number): void {
     const { cols, rows } = this.size();
     const matches = this.matches();
-    const inputLines = Math.max(1, this.composerInput(cols).wrapped.length || 1);
-    const layout = layoutHeights(rows, inputLines, matches.length);
+    const layout = this.composerLayout(cols, rows, matches.length);
     const extra = Math.max(1, Math.abs(lines));
     const wrapped = this.visibleTranscript(cols, layout.transcript + this.scroll + extra + 2, 0);
     const maxScroll = Math.max(0, wrapped.length - layout.transcript);
@@ -1584,8 +1588,7 @@ export class AgentTui {
   private scrollPages(pages: number): void {
     const { cols, rows } = this.size();
     const matches = this.matches();
-    const inputLines = Math.max(1, this.composerInput(cols).wrapped.length || 1);
-    const layout = layoutHeights(rows, inputLines, matches.length);
+    const layout = this.composerLayout(cols, rows, matches.length);
     const page = Math.max(1, layout.transcript - 1);
     this.scrollLines(pages * page);
   }
@@ -1653,7 +1656,10 @@ export class AgentTui {
     const matches = this.matches();
     if (this.slashIndex >= matches.length) this.slashIndex = Math.max(0, matches.length - 1);
     const { wrapped: inputWrapped, pos } = this.composerInput(cols);
-    const layout = layoutHeights(rows, Math.max(1, inputWrapped.length), matches.length);
+    const attachLabel = this.pendingImageCount > 0 ? `${this.pendingImageCount} img` : "";
+    const layout = this.composerLayout(cols, rows, matches.length);
+    const showAttach = attachLabel !== "" && layout.input > 1;
+    const draftBudget = showAttach ? layout.input - 1 : layout.input;
     const slashStart = Math.max(
       0,
       Math.min(this.slashIndex - layout.slash + 1, Math.max(0, matches.length - layout.slash)),
@@ -1685,11 +1691,12 @@ export class AgentTui {
     const inputTop = layout.transcript;
     // Keep the cursor row visible: when the draft wraps taller than the box,
     // show the window ending at the cursor row instead of the head.
-    const endRow = Math.min(displayWrapped.length, Math.max(displayPos.row + 1, layout.input));
-    const startRow = Math.max(0, endRow - layout.input);
+    const endRow = Math.min(displayWrapped.length, Math.max(displayPos.row + 1, draftBudget));
+    const startRow = Math.max(0, endRow - draftBudget);
     const inputShown = displayWrapped.slice(startRow, endRow);
     lines.push(boxBorderRow(cols, "┌", "─", "┐"));
-    for (let i = 0; i < layout.input; i++) lines.push(boxContentRow(inputShown[i] ?? "", cols));
+    if (showAttach) lines.push(boxContentRow(attachLabel, cols));
+    for (let i = 0; i < draftBudget; i++) lines.push(boxContentRow(inputShown[i] ?? "", cols));
     lines.push(boxBorderRow(cols, "└", "─", "┘"));
     for (let i = 0; i < layout.slash; i++) {
       const c = shownSlash[i];
@@ -1702,12 +1709,14 @@ export class AgentTui {
     if (lines.length > rows) lines.length = rows;
 
     const contentTop = inputTop + 1;
+    // The image row is pinned above the draft so a typed note cannot scroll it away.
+    const draftOrigin = contentTop + (showAttach ? 1 : 0);
     // Content sits inside "│ ": cursor columns shift two cells right, rows
     // one row down. Placeholder caret stays right after "> ". cursorRow is a
     // 1-based terminal row within the visible composer window.
     const cursorRow = isInputEmpty
-      ? Math.min(rows, Math.max(1, contentTop + 1))
-      : Math.min(rows, Math.max(1, contentTop + (displayPos.row - startRow) + 1));
+      ? Math.min(rows, Math.max(1, draftOrigin + 1))
+      : Math.min(rows, Math.max(1, draftOrigin + (displayPos.row - startRow) + 1));
     const cursorCol = isInputEmpty ? 5 : Math.min(cols, Math.max(1, displayPos.col + 3));
     const slashTop = contentTop + layout.input + 1;
     const titleRow = lines.length - layout.header;
@@ -1724,10 +1733,14 @@ export class AgentTui {
         const si = i - slashTop;
         painted.push(si === this.slashIndex - slashStart ? paintHighlightRow(raw, cols, "\x1b[30;104m") : `\x1b[90m${raw}\x1b[0m`);
       } else if (i >= contentTop && i < contentTop + layout.input) {
-        const content = inputShown[i - contentTop] ?? "";
-        if (bashInput) painted.push(paintBoxContentRow(content, cols, "\x1b[1;38;5;229;48;5;58m", true));
-        else if (i === contentTop && isInputEmpty) painted.push(paintBoxContentRow(content, cols, "\x1b[90m"));
-        else painted.push(paintBoxContentRow(content, cols));
+        if (showAttach && i === contentTop) {
+          painted.push(paintBoxContentRow(attachLabel, cols, "\x1b[36m"));
+        } else {
+          const content = inputShown[i - draftOrigin] ?? "";
+          if (bashInput) painted.push(paintBoxContentRow(content, cols, "\x1b[1;38;5;229;48;5;58m", true));
+          else if (i === draftOrigin && isInputEmpty) painted.push(paintBoxContentRow(content, cols, "\x1b[90m"));
+          else painted.push(paintBoxContentRow(content, cols));
+        }
       } else if (i < layout.transcript) {
         if (this.entries.length === 0 && !this.busy) painted.push(`\x1b[90m${raw}\x1b[0m`);
         else painted.push(view.painted[i] ?? `\x1b[0m${raw}\x1b[0m`);

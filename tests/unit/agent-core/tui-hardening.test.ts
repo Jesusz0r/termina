@@ -132,7 +132,7 @@ describe("TUI content rows do not write copy-padding spaces", () => {
   it("clips without padding and keeps box content snug", () => {
     expect(clip("hello", 80)).toBe("hello");
     expect(clip("hello world", 5)).toBe("hello");
-    expect(boxContentRow("> hi", 20)).toBe("│ > hi │");
+    expect(boxContentRow("> hi", 20)).toBe("\u2502 > hi \u2502");
     expect(cellWidth(boxContentRow("> hi", 20))).toBeLessThan(20);
   });
 
@@ -148,8 +148,8 @@ describe("TUI content rows do not write copy-padding spaces", () => {
 
   it("places the composer right border with CHA instead of space fill", () => {
     const painted = paintBoxContentRow("> hi", 20);
-    expect(painted).toContain("│ > hi");
-    expect(painted).toContain("\x1b[20G│");
+    expect(painted).toContain("\u2502 > hi");
+    expect(painted).toContain("\x1b[20G\u2502");
     expect(painted).not.toMatch(/hi +?/);
   });
 
@@ -265,5 +265,44 @@ describe("TUI scroll stays put while the user is reading", () => {
     tui.appendAssistant(extra);
     expect(tui.frame()).toContain(ANCHOR);
     expect(probe.scroll - held).toBe(paintedGrowth);
+  });
+
+  it("keeps a screenshot in the box when the typed note fills it", () => {
+    const tui = new AgentTui({
+      stdout: { write: () => true, columns: 40, rows: 8, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: () => {},
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    tui.setDraft("evidence note\n".repeat(12));
+    tui.setPendingImageCount(1);
+    const lines = tui.frame().split("\n");
+    const draftLine = lines.findIndex((line) => line.includes("evidence note"));
+    const imgLine = lines.findIndex((line) => line.includes("1 img") && !line.includes("termina"));
+    expect(imgLine).toBeGreaterThan(-1);
+    expect(draftLine).toBeGreaterThan(imgLine);
+  });
+
+  it("keeps a dropped file visible when the draft already fills the box", () => {
+    const tui = new AgentTui({
+      stdout: { write: () => true, columns: 24, rows: 10, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: () => {},
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    tui.setDraft("typed note that already fills the composer before the drop");
+    tui.feed("\x1b[200~@evidence.md \x1b[201~");
+    expect(tui.frame()).toContain("@evidence.md");
+  });
+
+  it("inserts a dropped file into an existing draft", () => {
+    const { tui } = makeTui();
+    tui.setDraft("see this");
+    tui.feed("\x1b[200~@notes.md \x1b[201~");
+    const frame = tui.frame();
+    expect(frame).toContain("see this");
+    expect(frame).toContain("@notes.md");
   });
 });

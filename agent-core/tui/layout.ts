@@ -178,18 +178,20 @@ export function layoutHeights(
   rows: number,
   inputLines: number,
   slashCount: number,
+  minInput = 1,
 ): { header: number; transcript: number; input: number; slash: number } {
   // The header is a single title row; usage lives in the sidecar feed.
   const header = 1;
   const sep = 1;
   const minTranscript = 1;
+  const inputFloor = Math.max(1, minInput);
   let slash = Math.max(0, slashCount);
-  let input = Math.max(1, inputLines);
+  let input = Math.max(inputFloor, inputLines);
   const budget = Math.max(4, rows);
   // The composer box adds a top and bottom border around the input rows.
   const chrome = BOX_CHROME_ROWS;
   while (header + sep + minTranscript + input + slash + chrome > budget && slash > 0) slash--;
-  while (header + sep + minTranscript + input + slash + chrome > budget && input > 1) input--;
+  while (header + sep + minTranscript + input + slash + chrome > budget && input > inputFloor) input--;
   const used = header + sep + input + slash + chrome;
   return { header, transcript: Math.max(minTranscript, budget - used), input, slash };
 }
