@@ -11,9 +11,9 @@ use crate::promote_fs::{
     promotion_test_pause, promotion_write_all,
 };
 use crate::promotion_files::promotion_cleanup_same_namespace_identity;
-use crate::util::{open_at_mode, open_repo, s, stat_at, stat_file};
-use git2::{ErrorCode, RepositoryInitOptions};
-use git2::{IndexAddOption, IndexEntry, Oid, Repository, Signature};
+use crate::util::{open_at_mode, s, stat_at, stat_file};
+use git2::{ErrorCode, RepositoryInitOptions, RepositoryOpenFlags};
+use git2::{Oid, Repository, Signature};
 use serde_json::{Value, json};
 
 use super::binding::open_store;
@@ -67,30 +67,15 @@ fn commit_index_if_changed(repo: &Repository, message: &str) -> Result<Option<Oi
     Ok(Some(oid))
 }
 
-/// Stage the working tree, then drop entries not in the state. Mirrors
-/// `git add -A -- . :(exclude)<runtime>`.
+/// Stage exactly the materialized snapshot. An explicit path is staged even
+/// when ignored; preserved runtime paths and deleted entries remain excluded.
 fn stage_workdir(repo: &Repository, state_flat: &HashMap<String, FlatEntry>) -> Result<(), String> {
     let mut index = repo.index().map_err(|e| e.to_string())?;
-    index
-        .add_all(&[] as &[&str], IndexAddOption::DEFAULT, None)
-        .map_err(|e| format!("git add failed: {e}"))?;
-    // Drop every staged entry the state does not contain. The preserved
-    // runtime paths stay on disk and stay untracked; entries deleted from
-    // disk drop out of the index here too (the stage step cannot remove
-    // them by itself).
-    let mut kept: Vec<IndexEntry> = Vec::new();
-    for entry in index.iter() {
-        let path = String::from_utf8(entry.path.clone())
-            .map_err(|_| "a staged path is not valid UTF-8".to_string())?;
-        if state_flat.contains_key(&path) {
-            kept.push(entry);
-        }
-    }
     index.clear().map_err(|e| e.to_string())?;
-    for entry in kept {
+    for path in state_flat.keys() {
         index
-            .add(&entry)
-            .map_err(|e| format!("index rebuild failed: {e}"))?;
+            .add_path(Path::new(path))
+            .map_err(|e| format!("stage snapshot path {path} failed: {e}"))?;
     }
     index.write().map_err(|e| e.to_string())
 }
@@ -172,7 +157,11 @@ pub(crate) fn op_apply_state(req: &Value) -> Result<Value, String> {
         )?;
 
         promotion_test_pause(req, "promotion-apply-state-repo-open")?;
-        let candidate = open_repo(Path::new("."))?;
+        // The cwd is held by the target descriptor. Do not resolve the public
+        // pathname again or search ancestors for a different repository.
+        let candidate =
+            Repository::open_ext(Path::new("."), RepositoryOpenFlags::NO_SEARCH, None::<&str>)
+                .map_err(|error| format!("open apply-state repository failed: {error}"))?;
         stage_workdir(&candidate, &flat)?;
         commit_index_if_changed(&candidate, "termina state")?;
         promotion_bound_path_matches(&target_path, target_identity, "apply-state target")?;
@@ -251,11 +240,7 @@ pub(crate) fn op_template(req: &Value) -> Result<Value, String> {
             req,
         )?;
 
-        let mut index = template.index().map_err(|e| e.to_string())?;
-        index
-            .add_all(&[] as &[&str], IndexAddOption::DEFAULT, None)
-            .map_err(|e| format!("git add failed: {e}"))?;
-        index.write().map_err(|e| e.to_string())?;
+        stage_workdir(&template, &state_entries(&store, &state_commit)?)?;
         let commit = commit_index_if_changed(&template, "termina base")?
             .ok_or("template commit was not written")?;
 
