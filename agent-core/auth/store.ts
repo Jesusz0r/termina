@@ -406,6 +406,8 @@ export function modifyProvider(
   opts?: AuthWriteOpts,
 ): { discardedCorrupt: boolean } {
   return withLock((binding) => {
+    // Mutations must compare against disk, even if another writer preserved mtime.
+    cached = null;
     const got = readAuth();
     let discardedCorrupt = false;
     if (!got.ok && got.reason === "corrupt") {

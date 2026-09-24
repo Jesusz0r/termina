@@ -4,6 +4,7 @@
  * Owns token parsing/persistence, refresh flights, PKCE exchanges, and
  * device-code polling. Split from agent-core/auth.ts (issue #38).
  */
+import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "../../shared/guards.ts";
 import { COPILOT_HEADERS } from "./providers/github-copilot.ts";
 import { providerDefinition } from "./providers/index.ts";
@@ -68,10 +69,15 @@ export function persistOauth(
   providerId: ProviderId,
   parsed: { access: string; refresh: string; expires: number },
   extra: Record<string, unknown> = {},
-  opts?: AuthWriteOpts,
+  opts?: AuthWriteOpts & { expectedCredential?: Record<string, unknown> },
 ): { ok: true } | { ok: false; error: string } {
   try {
     modifyProvider(providerId, (current) => {
+      // Refresh may finish after another terminal logs out or changes accounts.
+      // Compare under the store lock; initial login remains unconditional.
+      if (opts?.expectedCredential && !isDeepStrictEqual(current, opts.expectedCredential)) {
+        throw new Error("auth refresh superseded by a credential change");
+      }
       const cur = isRecord(current) ? current : {};
       const accountId =
         providerId === "openai-codex"
@@ -165,7 +171,7 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
       return { ok: false, error: "auth expired — run /login" };
     }
     if (!parsed.ok) return { ok: false, error: `auth refresh returned an invalid token response: ${parsed.error}` };
-    const stored = persistOauth(providerId, parsed, extra);
+    const stored = persistOauth(providerId, parsed, extra, { expectedCredential: entry });
     if (!stored.ok) return { ok: false, error: `auth refresh persist failed: ${stored.error}` };
     return { ok: true };
   } catch (error) {
