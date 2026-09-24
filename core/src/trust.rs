@@ -24,6 +24,9 @@ struct TrustBudget {
     max_files: usize,
     max_bytes: u64,
     max_file_bytes: u64,
+    max_entries: usize,
+    max_work_bytes: usize,
+    max_depth: usize,
 }
 
 impl TrustBudget {
@@ -32,7 +35,52 @@ impl TrustBudget {
             max_files: TRUST_MAX_FILES,
             max_bytes: TRUST_MAX_BYTES,
             max_file_bytes: TRUST_MAX_FILE_BYTES,
+            max_entries: 20_000,
+            max_work_bytes: 4 * 1024 * 1024,
+            max_depth: 64,
         }
+    }
+}
+
+#[derive(Default)]
+struct TrustUsage {
+    files: usize,
+    bytes: u64,
+    entries: usize,
+    work_bytes: usize,
+}
+
+impl TrustUsage {
+    fn charge_entry(
+        &mut self,
+        prefix: &str,
+        name: &str,
+        budget: &TrustBudget,
+    ) -> Result<(), String> {
+        self.entries = self
+            .entries
+            .checked_add(1)
+            .ok_or("trust entry accounting overflow")?;
+        if self.entries > budget.max_entries {
+            return Err(format!(
+                "trust hash walk exceeded its entry budget: {prefix}"
+            ));
+        }
+        let work = prefix
+            .len()
+            .checked_add(name.len())
+            .and_then(|bytes| bytes.checked_add(1 + std::mem::size_of::<String>()))
+            .ok_or("trust work accounting overflow")?;
+        self.work_bytes = self
+            .work_bytes
+            .checked_add(work)
+            .ok_or("trust work accounting overflow")?;
+        if self.work_bytes > budget.max_work_bytes {
+            return Err(format!(
+                "trust hash walk exceeded its work budget: {prefix}"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -55,8 +103,7 @@ fn collect_trust_hashes(
     budget: &TrustBudget,
 ) -> Result<serde_json::Map<String, Value>, String> {
     let mut out = serde_json::Map::new();
-    let mut files = 0usize;
-    let mut bytes = 0u64;
+    let mut usage = TrustUsage::default();
 
     for name in [
         "settings.json",
@@ -75,32 +122,24 @@ fn collect_trust_hashes(
             Err(error) => return Err(format!("stat trust path {key} failed: {error}")),
         };
         if metadata.file_type().is_symlink() {
-            record_hash(
-                &mut out,
-                hash_symlink(&full, &key, &mut files, &mut bytes, budget)?,
-            );
+            record_hash(&mut out, hash_symlink(&full, &key, &mut usage, budget)?);
         } else if metadata.file_type().is_dir() {
-            walk_hashes(&full, &key, &mut out, &mut files, &mut bytes, budget)?;
+            walk_hashes(&full, &key, &mut out, &mut usage, budget, 0)?;
         } else if metadata.file_type().is_file() {
-            record_hash(
-                &mut out,
-                hash_file(&full, &key, &mut files, &mut bytes, budget)?,
-            );
+            record_hash(&mut out, hash_file(&full, &key, &mut usage, budget)?);
         } else {
             return Err(format!("trust path {key} has an unsupported file type"));
         }
     }
     if let Some(root) = project_root {
-        for rel in [".agents/skills"] {
-            walk_hashes(
-                &root.join(rel),
-                &format!("project/{rel}"),
-                &mut out,
-                &mut files,
-                &mut bytes,
-                budget,
-            )?;
-        }
+        walk_hashes(
+            &root.join(".agents/skills"),
+            "project/.agents/skills",
+            &mut out,
+            &mut usage,
+            budget,
+            0,
+        )?;
     }
     Ok(out)
 }
@@ -109,17 +148,20 @@ fn walk_hashes(
     abs_root: &Path,
     prefix: &str,
     out: &mut serde_json::Map<String, Value>,
-    files: &mut usize,
-    bytes: &mut u64,
+    usage: &mut TrustUsage,
     budget: &TrustBudget,
+    depth: usize,
 ) -> Result<(), String> {
+    if depth > budget.max_depth {
+        return Err(format!("trust hash walk exceeds its depth bound: {prefix}"));
+    }
     let metadata = match fs::symlink_metadata(abs_root) {
         Ok(metadata) => metadata,
         Err(error) if missing_path(&error) => return Ok(()),
         Err(error) => return Err(format!("stat trust path {prefix} failed: {error}")),
     };
     if metadata.file_type().is_symlink() {
-        record_hash(out, hash_symlink(abs_root, prefix, files, bytes, budget)?);
+        record_hash(out, hash_symlink(abs_root, prefix, usage, budget)?);
         return Ok(());
     }
     if !metadata.file_type().is_dir() {
@@ -136,6 +178,9 @@ fn walk_hashes(
             .file_name()
             .into_string()
             .map_err(|_| format!("trust path {prefix} contains a non-UTF-8 name"))?;
+        // Charge while enumerating, before retaining or sorting the name.
+        // Directories and empty files consume work just like content leaves.
+        usage.charge_entry(prefix, &name, budget)?;
         names.push(name);
     }
     names.sort_unstable();
@@ -151,11 +196,11 @@ fn walk_hashes(
             Err(error) => return Err(format!("stat trust path {key} failed: {error}")),
         };
         if metadata.file_type().is_symlink() {
-            record_hash(out, hash_symlink(&full, &key, files, bytes, budget)?);
+            record_hash(out, hash_symlink(&full, &key, usage, budget)?);
         } else if metadata.file_type().is_dir() {
-            walk_hashes(&full, &key, out, files, bytes, budget)?;
+            walk_hashes(&full, &key, out, usage, budget, depth + 1)?;
         } else if metadata.file_type().is_file() {
-            record_hash(out, hash_file(&full, &key, files, bytes, budget)?);
+            record_hash(out, hash_file(&full, &key, usage, budget)?);
         } else {
             return Err(format!("trust path {key} has an unsupported file type"));
         }
@@ -170,17 +215,17 @@ fn record_hash(out: &mut serde_json::Map<String, Value>, hashed: (String, String
 fn charge_budget(
     key: &str,
     len: u64,
-    files: &mut usize,
-    bytes: &mut u64,
+    usage: &mut TrustUsage,
     budget: &TrustBudget,
 ) -> Result<(), String> {
-    if *files >= budget.max_files {
+    if usage.files >= budget.max_files {
         return Err(format!("trust hash walk exceeded its file budget: {key}"));
     }
     if len > budget.max_file_bytes {
         return Err(format!("trust file {key} exceeds the per-file byte budget"));
     }
-    if bytes
+    if usage
+        .bytes
         .checked_add(len)
         .map(|total| total > budget.max_bytes)
         .unwrap_or(true)
@@ -193,8 +238,7 @@ fn charge_budget(
 fn hash_symlink(
     path: &Path,
     key: &str,
-    files: &mut usize,
-    bytes: &mut u64,
+    usage: &mut TrustUsage,
     budget: &TrustBudget,
 ) -> Result<(String, String), String> {
     let target = fs::read_link(path)
@@ -203,9 +247,9 @@ fn hash_symlink(
     content.extend_from_slice(target.as_os_str().as_bytes());
     let len = u64::try_from(content.len())
         .map_err(|_| format!("trust symlink {key} length does not fit u64"))?;
-    charge_budget(key, len, files, bytes, budget)?;
-    *files += 1;
-    *bytes += len;
+    charge_budget(key, len, usage, budget)?;
+    usage.files += 1;
+    usage.bytes += len;
     Ok((
         key.to_string(),
         format!("{SYMLINK_DIGEST_PREFIX}{}", hex_sha256(&content)),
@@ -215,11 +259,10 @@ fn hash_symlink(
 fn hash_file(
     path: &Path,
     key: &str,
-    files: &mut usize,
-    bytes: &mut u64,
+    usage: &mut TrustUsage,
     budget: &TrustBudget,
 ) -> Result<(String, String), String> {
-    if *files >= budget.max_files {
+    if usage.files >= budget.max_files {
         return Err(format!("trust hash walk exceeded its file budget: {key}"));
     }
 
@@ -230,7 +273,7 @@ fn hash_file(
     {
         Ok(file) => file,
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
-            return hash_symlink(path, key, files, bytes, budget);
+            return hash_symlink(path, key, usage, budget);
         }
         Err(error) => return Err(format!("open trust file {key} failed: {error}")),
     };
@@ -250,10 +293,10 @@ fn hash_file(
         .map_err(|error| format!("read trust file {key} failed: {error}"))?;
     let read_len = u64::try_from(content.len())
         .map_err(|_| format!("trust file {key} length does not fit u64"))?;
-    charge_budget(key, read_len, files, bytes, budget)?;
+    charge_budget(key, read_len, usage, budget)?;
 
-    *files += 1;
-    *bytes += read_len;
+    usage.files += 1;
+    usage.bytes += read_len;
     Ok((key.to_string(), hex_sha256(&content)))
 }
 
@@ -385,6 +428,7 @@ mod tests {
                 max_files: 2,
                 max_bytes: TRUST_MAX_BYTES,
                 max_file_bytes: TRUST_MAX_FILE_BYTES,
+                ..TrustBudget::production()
             },
         )
         .unwrap_err();
@@ -410,6 +454,7 @@ mod tests {
                 max_files: TRUST_MAX_FILES,
                 max_bytes: 8,
                 max_file_bytes: TRUST_MAX_FILE_BYTES,
+                ..TrustBudget::production()
             },
         )
         .unwrap_err();
@@ -433,8 +478,7 @@ mod tests {
         }
         let budget = TrustBudget {
             max_files: 3,
-            max_bytes: TRUST_MAX_BYTES,
-            max_file_bytes: TRUST_MAX_FILE_BYTES,
+            ..TrustBudget::production()
         };
         let first =
             collect_trust_hashes(&fixture.agent, Some(&fixture.project), &budget).unwrap_err();
@@ -442,6 +486,71 @@ mod tests {
             collect_trust_hashes(&fixture.agent, Some(&fixture.project), &budget).unwrap_err();
         assert_eq!(first, second);
         assert!(first.contains("file budget"), "got {first}");
+    }
+
+    #[test]
+    fn empty_directories_consume_the_entry_budget() {
+        let fixture = Fixture::new();
+        let skills = fixture.agent.join("skills");
+        fs::create_dir(&skills).unwrap();
+        for name in ["a", "b", "c"] {
+            fs::create_dir(skills.join(name)).unwrap();
+        }
+        let budget = TrustBudget {
+            max_entries: 2,
+            ..TrustBudget::production()
+        };
+        let error = collect_trust_hashes(&fixture.agent, None, &budget).unwrap_err();
+        assert!(error.contains("entry budget"), "{error}");
+        let exact = TrustBudget {
+            max_entries: 3,
+            ..TrustBudget::production()
+        };
+        assert!(
+            collect_trust_hashes(&fixture.agent, None, &exact)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn enumeration_work_is_bounded_before_hashing() {
+        let fixture = Fixture::new();
+        let skills = fixture.agent.join("skills");
+        fs::create_dir(&skills).unwrap();
+        fs::write(skills.join("long-filename-with-no-content"), b"").unwrap();
+        let budget = TrustBudget {
+            max_work_bytes: 8,
+            max_files: 0,
+            ..TrustBudget::production()
+        };
+        let error = collect_trust_hashes(&fixture.agent, None, &budget).unwrap_err();
+        assert!(
+            error.contains("work budget"),
+            "must reject during enumeration, not hashing: {error}"
+        );
+    }
+
+    #[test]
+    fn directory_only_depth_is_bounded() {
+        let fixture = Fixture::new();
+        let skills = fixture.agent.join("skills");
+        fs::create_dir_all(skills.join("a/b/c")).unwrap();
+        let budget = TrustBudget {
+            max_depth: 2,
+            ..TrustBudget::production()
+        };
+        let error = collect_trust_hashes(&fixture.agent, None, &budget).unwrap_err();
+        assert!(error.contains("depth bound"), "{error}");
+        let exact = TrustBudget {
+            max_depth: 3,
+            ..TrustBudget::production()
+        };
+        assert!(
+            collect_trust_hashes(&fixture.agent, None, &exact)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -582,8 +691,7 @@ mod tests {
         let error = hash_symlink(
             &fixture.agent.join("settings.json"),
             "agent/settings.json",
-            &mut 0,
-            &mut 0,
+            &mut TrustUsage::default(),
             &TrustBudget::production(),
         )
         .unwrap_err();
