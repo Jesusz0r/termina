@@ -252,11 +252,7 @@ pub(crate) fn op_promotion_bound_transition(req: &Value) -> Result<Value, String
                     promotion_expected_matches(&expected_source, Some(observed))
                 });
             let source_is_expected = match &expected_destination {
-                None => post_source
-                    .as_ref()
-                    .ok()
-                    .and_then(|observed| observed.as_ref())
-                    .is_none(),
+                None => matches!(&post_source, Ok(None)),
                 Some(expected) => post_source
                     .as_ref()
                     .ok()
@@ -400,11 +396,7 @@ pub(crate) fn op_promotion_bound_transition(req: &Value) -> Result<Value, String
             let post_destination = observe_promotion_leaf(parent.as_raw_fd(), destination);
             let post_retained = observe_promotion_leaf(retained_parent.as_raw_fd(), &retained);
             let mut post_error = None;
-            if post_destination
-                .as_ref()
-                .ok()
-                .and_then(|observed| observed.as_ref())
-                .is_some()
+            if !matches!(&post_destination, Ok(None))
                 || !post_retained
                     .as_ref()
                     .ok()
