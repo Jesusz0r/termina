@@ -47,6 +47,10 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
     // fstatat and the final descriptor-relative rename instead.
     let observed_child = stat_at(parent.as_raw_fd(), leaf)
         .map_err(|error| format!("stat cleanup root failed: {error}"))?;
+    if !observed_child.is_dir() && !observed_child.is_file() && !observed_child.is_symlink() {
+        return Err("cleanup root has an unsupported file type".to_string());
+    }
+    promotion_test_pause(req, "promotion-cleanup-root-observed")?;
     let child = if observed_child.is_symlink() {
         None
     } else {
@@ -54,7 +58,7 @@ pub(crate) fn op_promotion_bound_remove_tree(req: &Value) -> Result<Value, Strin
             open_at(
                 parent.as_raw_fd(),
                 leaf,
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
             )
             .map_err(|error| format!("open cleanup root failed: {error}"))?,
         )

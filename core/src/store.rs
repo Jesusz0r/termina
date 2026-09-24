@@ -246,7 +246,7 @@ pub(crate) fn read_store_generation(store_dir: &Path) -> Result<String, String> 
     let path = store_generation_path(store_dir);
     let mut file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(&path)
         .map_err(|error| format!("read snapshot store generation failed: {error}"))?;
     read_store_generation_file(&mut file)
@@ -286,7 +286,7 @@ pub(crate) fn read_store_generation_at(root: &fs::File) -> Result<String, String
     let mut file = open_at(
         root.as_raw_fd(),
         &name,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
     )
     .map_err(|error| format!("read snapshot store generation failed: {error}"))?;
     read_store_generation_file(&mut file)
@@ -563,7 +563,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 pub(crate) fn read_regular_file_nofollow(path: &Path) -> Result<Vec<u8>, String> {
     let mut file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
         .map_err(|e| format!("open {} failed: {e}", path.display()))?;
     if !file

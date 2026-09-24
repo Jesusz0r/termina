@@ -289,7 +289,7 @@ pub(crate) fn promotion_copy_tree_contents(
         let mut source_file = open_at(
             source_fd,
             &c_name,
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
         )
         .map_err(|error| {
             format!("open promotion tree source file {child_relative} failed: {error}")

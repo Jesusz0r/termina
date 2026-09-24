@@ -229,7 +229,7 @@ pub(crate) fn promotion_replace_root_state(
     let temporary_file = match open_at(
         parent.as_raw_fd(),
         &temporary,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
     ) {
         Ok(file) => {
             let temporary_identity = stat_promotion_journal_file(&file).map_err(|error| {

@@ -190,7 +190,7 @@ pub(crate) fn promotion_validate_retained_directory(
             let file = open_at(
                 directory_fd,
                 &c_name,
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
             )
             .map_err(|error| format!("open retained root file {name} failed: {error}"))?;
             if stat_file(&file)

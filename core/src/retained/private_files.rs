@@ -71,7 +71,7 @@ pub(crate) fn promotion_read_private_bounded_file(
     let file = open_at(
         parent.as_raw_fd(),
         name,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
     )
     .map_err(|error| format!("open {field} failed: {error}"))?;
     promotion_read_private_bounded_opened(parent, name, file, max_bytes, field)
@@ -86,7 +86,7 @@ pub(crate) fn promotion_read_private_bounded_if_present(
     let file = match open_at(
         parent.as_raw_fd(),
         name,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
     ) {
         Ok(file) => file,
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
@@ -184,7 +184,7 @@ pub(crate) fn promotion_publish_private_exclusive(
     let temporary_file = match open_at(
         parent.as_raw_fd(),
         &temporary,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
     ) {
         Ok(file) => {
             let temporary_identity = stat_promotion_journal_file(&file)

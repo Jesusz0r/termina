@@ -93,7 +93,12 @@ fn promotion_write_control_file(
     let mut file = open_at_mode(
         parent.as_raw_fd(),
         name,
-        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        libc::O_WRONLY
+            | libc::O_CREAT
+            | libc::O_TRUNC
+            | libc::O_NOFOLLOW
+            | libc::O_NONBLOCK
+            | libc::O_CLOEXEC,
         0o600,
     )
     .map_err(|error| format!("open promotion {field} failed: {error}"))?;
