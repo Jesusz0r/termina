@@ -302,6 +302,20 @@ function sessionBlockJson(value: unknown): string | null {
 }
 
 
+/** Character measurement shared by receipt production, replay, and recovery.
+ * Preserve stored counts and the existing coercions: these are session semantics,
+ * not a UTF-8 byte count or a token estimate. */
+export function sessionBlockChars(block: Record<string, unknown>): number {
+  if (typeof block.chars === "number") return block.chars;
+  if (block.type === "text") return String(block.text ?? "").length;
+  if (block.type === "tool_result") return String(block.content ?? "").length;
+  if (block.type === "tool_use") return JSON.stringify(block.input ?? {}).length;
+  if (block.type === "thinking" || block.type === "redacted_thinking") return String(block.thinking ?? JSON.stringify(block)).length;
+  if (block.type === "image") return 8_000;
+  return 0;
+}
+
+
 /** Exact UTF-8 byte length of a JSON value, used by receipt verification. */
 export function sessionBlockBytes(value: unknown): number | null {
   const json = sessionBlockJson(value);

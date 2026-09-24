@@ -8,6 +8,7 @@
 import {
   MAX_SESSION_RECORD_BYTES,
   sessionBlockBytes,
+  sessionBlockChars,
   sessionBlockHash,
   validateSessionReclaimReceipt,
 } from "./session.ts";
@@ -119,17 +120,6 @@ function payloadText(block: Block): string | null {
   return null;
 }
 
-/** Mirrors session.ts's blockChars calculation for eligibility and receipts. */
-function blockChars(block: Block): number {
-  if (typeof block.chars === "number") return block.chars;
-  if (block.type === "text") return String(block.text ?? "").length;
-  if (block.type === "tool_result") return String(block.content ?? "").length;
-  if (block.type === "tool_use") return JSON.stringify(block.input ?? {}).length;
-  if (block.type === "thinking" || block.type === "redacted_thinking") return String(block.thinking ?? JSON.stringify(block)).length;
-  if (block.type === "image") return 8_000;
-  return 0;
-}
-
 /** Conservative local estimate; provider usage remains authoritative. */
 export function estimateReclaimTokens(value: unknown): number {
   try {
@@ -238,13 +228,13 @@ export function planPruneStubs(messages: ReclaimMessage[], opts: ReclaimPlanOpti
       if (type === "tool_result" && block.stubbed) continue;
       if (isThinkingBlock(block) && !blocks.some((candidate) => isRecord(candidate) && !isThinkingBlock(candidate))) continue;
       const payload = payloadText(block);
-      if (payload === null || blockChars(block) < PRUNE_MIN_CHARS) continue;
+      if (payload === null || sessionBlockChars(block) < PRUNE_MIN_CHARS) continue;
       const originalBytes = sessionBlockBytes(block);
       const originalHash = sessionBlockHash(block);
       if (originalBytes === null || originalHash === null || originalBytes < 1 || originalBytes > MAX_SESSION_RECORD_BYTES) continue;
       const original: SessionReclaimOriginal = {
         type: type as string,
-        chars: blockChars(block),
+        chars: sessionBlockChars(block),
         bytes: originalBytes,
         sha256: originalHash,
       };

@@ -10,7 +10,7 @@ import { readSync } from "node:fs";
 import { combinedSegmentFingerprint, enforceSessionBundleLimit, fingerprintOpenSessionBundle, listCurrentSegments, openStableSessionBundle, recoverActiveSegment, validateOpenSegmentAccess } from "./bundles.ts";
 import { closeOpenSessionBundle } from "./descriptors.ts";
 import type { OpenSessionBundle, OpenSessionSegment } from "./descriptors.ts";
-import { MAX_SESSION_RECORD_BYTES, READ_CHUNK, RECEIPT_ID, UTF8_DECODER, YIELD_EVERY_BYTES, YIELD_EVERY_RECORDS, cancellation, cloneJson, formatStub, inspectEntry, integerAtLeast, isSessionBudgetExceeded, parseSessionBundlePath, recoveryKey, sessionBlockBytes, sessionBlockHash, sessionBudgetExceeded, sessionBundleLimit, validateSessionReclaimReceipt, yieldToEventLoop } from "./primitives.ts";
+import { MAX_SESSION_RECORD_BYTES, READ_CHUNK, RECEIPT_ID, UTF8_DECODER, YIELD_EVERY_BYTES, YIELD_EVERY_RECORDS, cancellation, cloneJson, formatStub, inspectEntry, integerAtLeast, isSessionBudgetExceeded, parseSessionBundlePath, recoveryKey, sessionBlockBytes, sessionBlockChars, sessionBlockHash, sessionBudgetExceeded, sessionBundleLimit, validateSessionReclaimReceipt, yieldToEventLoop } from "./primitives.ts";
 import type { ReplayContent, ReplayMessage, ReplayRecovery, ReplaySessionBundleOptions, ReplayState, SessionOperationOptions, SessionReclaimReceipt, SessionReclaimReceiptTarget, SessionResult } from "./primitives.ts";
 
 
@@ -24,19 +24,6 @@ function isReplayContent(content: unknown): content is ReplayContent {
 
 function isThinkingBlock(b: { type?: string }): boolean {
   return b.type === "thinking" || b.type === "redacted_thinking";
-}
-
-
-function blockChars(b: Record<string, unknown>): number {
-  if (typeof b.chars === "number") return b.chars;
-  if (b.type === "text") return String(b.text ?? "").length;
-  if (b.type === "tool_result") return String(b.content ?? "").length;
-  if (b.type === "tool_use") return JSON.stringify(b.input ?? {}).length;
-  if (b.type === "thinking" || b.type === "redacted_thinking") {
-    return String(b.thinking ?? JSON.stringify(b)).length;
-  }
-  if (b.type === "image") return 8_000;
-  return 0;
 }
 
 
@@ -143,7 +130,7 @@ function applyReceiptPrune(
     if (
       originalBytes !== receiptTarget.original.bytes ||
       originalHash !== receiptTarget.original.sha256 ||
-      blockChars(block) !== receiptTarget.original.chars
+      sessionBlockChars(block) !== receiptTarget.original.chars
     ) {
       return { ok: false, error: "recovery hash mismatch" };
     }
@@ -751,7 +738,7 @@ export async function recoverSessionBlocks(
     if (!block) return { ok: false, error: "missing source record" };
     const bytes = sessionBlockBytes(block);
     const hash = sessionBlockHash(block);
-    if (bytes !== target.original.bytes || hash !== target.original.sha256 || blockChars(block) !== target.original.chars) {
+    if (bytes !== target.original.bytes || hash !== target.original.sha256 || sessionBlockChars(block) !== target.original.chars) {
       return { ok: false, error: "recovery hash mismatch" };
     }
   }

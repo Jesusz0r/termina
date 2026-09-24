@@ -44,6 +44,16 @@ describe("Agent Core Reclaim Contract", () => {
     fillTokens: 10_000,
   };
 
+  it("preserves the session character measurement contract", () => {
+    expect(session.sessionBlockChars({ type: "text", text: "é🙂" })).toBe(3);
+    expect(session.sessionBlockChars({ type: "text", text: "ignored", chars: 12 })).toBe(12);
+    expect(session.sessionBlockChars({ type: "tool_result", content: { text: "x" } })).toBe(15);
+    expect(session.sessionBlockChars({ type: "tool_use", input: { n: 1 } })).toBe(7);
+    expect(session.sessionBlockChars({ type: "thinking", thinking: "abc" })).toBe(3);
+    expect(session.sessionBlockChars({ type: "image" })).toBe(8000);
+    expect(session.sessionBlockChars({ type: "unknown" })).toBe(0);
+  });
+
   it("exports frozen planner and computes deterministic estimates", () => {
     expect(typeof planPruneStubs).toBe("function");
     const first = estimateReclaimTokens(largeUnicode);
@@ -186,6 +196,21 @@ describe("Agent Core Reclaim Contract", () => {
 
     const forked = { ...receipt, sseq: 99, sourceSseq: 41 };
     expect(recoveryPlan(forked as any)?.sseq).toBe(41);
+  });
+
+  it("rejects a changed character count even when source bytes and hash match", () => {
+    const revision = makePruneRevision("rev-chars", [planPruneStubs(messages, plannerOptions)[0]!]);
+    revision.targets[0]!.original.chars += 1;
+    expect(validateSessionReclaimReceipt(revision).ok).toBe(true);
+    const state = session.createReplayState();
+    expect(session.applySessionRecord(state, {
+      storageSeq: 41, type: "message", message: { role: "assistant", content: [sourceBlock] },
+    })).toEqual({ ok: true });
+    expect(session.applySessionRecord(state, { storageSeq: 42, ...revision })).toEqual({
+      ok: false, error: "recovery hash mismatch",
+    });
+    expect(state.messages[0]!.content).toEqual([sourceBlock]);
+    expect(state.recoveries.size).toBe(0);
   });
 
   it("fails closed on malformed receipts, overflow, and invalid inputs", () => {

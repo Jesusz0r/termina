@@ -45,6 +45,41 @@ function seedBundle(records: unknown[]): { root: string; sessionFile: string } {
 }
 
 describe("successive reclaim recovery (#162)", () => {
+  const payload = "é🙂".repeat(1500);
+  for (const block of [
+    { type: "tool_result", content: payload, tool: "read_file" },
+    { type: "tool_result", content: [{ type: "text", text: payload }], chars: 5000, tool: "read_file" },
+    { type: "thinking", thinking: payload },
+    { type: "thinking", thinking: null, data: payload },
+    { type: "redacted_thinking", data: payload },
+  ]) {
+    it(`round-trips receipt measurement for ${block.type} (${Object.keys(block).join(", ")})`, async () => {
+      const messages = [
+        { role: "assistant", sseq: 1, content: [block, { type: "text", text: "visible" }] },
+        { role: "user", sseq: 2, content: "recent one" },
+        { role: "user", sseq: 3, content: "recent two" },
+      ];
+      const picks = reclaim.planPruneStubs(messages, { systemTokens: 8192, usable: 1024, protectTokens: 0 });
+      expect(picks).toHaveLength(1);
+      const revision = reclaim.makePruneRevision("rev-measure", picks);
+      const { root, sessionFile } = seedBundle([
+        ...messages.map(({ sseq, ...message }) => ({ storageSeq: sseq, type: "message", message })),
+        { storageSeq: 4, ...revision },
+      ]);
+      try {
+        const replayed = await session.replaySessionBundle(sessionFile);
+        expect(replayed.ok).toBe(true);
+        const recovered = await session.recoverSessionBlock(sessionFile, {
+          revisionId: "rev-measure", sseq: 1, blockIndex: 0,
+        });
+        expect(recovered.ok).toBe(true);
+        if (recovered.ok) expect(recovered.block).toEqual(block);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("recovers planner-generated drops that reuse a shifted index", async () => {
     const root = mkdtempSync(join(tmpdir(), "agent-core-reclaim-planner-"));
     try {
