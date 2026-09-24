@@ -353,6 +353,17 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("project-local toolchain bins are not executed", !envJail.includes("HACKED"));
     const trustedPnpmDir = mkdtempSync(join(tmpdir(), "agent-core-pnpm-"));
     leftovers.push(trustedPnpmDir);
+    const probeCaseDir = mkdtempSync(join(tmpdir(), "agent-core-env-probe-"));
+    leftovers.push(probeCaseDir);
+    // PATH alone does not isolate these fixtures: trustedPath also searches
+    // Homebrew and user directories. Host tools can exhaust the shared deadline
+    // before the fixture under test runs. Non-executable files stop fallback
+    // without spending the deadline launching unrelated shell processes.
+    for (const directory of [trustedPnpmDir, probeCaseDir]) {
+      for (const bin of ["python3", "rustc", "go", "gcc", "javac", "clang", "npm", "pnpm"]) {
+        writeFileSync(join(directory, bin), "", { mode: 0o644 });
+      }
+    }
     writeFileSync(join(trustedPnpmDir, "pnpm"), "#!/bin/sh\necho 9.0.0-test\n", { mode: 0o755 });
     chmodSync(join(trustedPnpmDir, "pnpm"), 0o755);
     let envTrustedPnpm = "";
@@ -364,8 +375,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     }
     check("trusted pnpm version is reported", envTrustedPnpm.includes("pnpm 9.0.0-test"));
 
-    const probeCaseDir = mkdtempSync(join(tmpdir(), "agent-core-env-probe-"));
-    leftovers.push(probeCaseDir);
     const probeCwd = mkdtempSync(join(tmpdir(), "agent-core-env-probe-cwd-"));
     leftovers.push(probeCwd);
     writeFileSync(join(probeCaseDir, "gcc"), "#!/bin/sh\necho 'flag provided but not defined: -version' >&2\nexit 2\n", { mode: 0o755 });
