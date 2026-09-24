@@ -24,7 +24,7 @@ use super::hash::hash_path;
 use super::ops_capture::stat_cached_entry;
 use super::refs::{commit_tree, fail_before_state_ref, update_state_ref};
 use super::tree_cache::cache_tree_map;
-use super::trees::{FlatEntry, write_nested_tree, write_tree_delta};
+use super::trees::{FlatEntry, delta_directories, write_nested_tree, write_tree_delta};
 use super::walk::{TreeLookupKind, tree_lookup};
 
 const CACHE_FILE: &str = "capture-stat-cache";
@@ -683,24 +683,12 @@ pub(crate) fn verify_sparse_changes(
     }
     // A deletion superseded by a descendant addition turned its path into a
     // directory; every other deletion must leave the path absent.
-    let mut superseded: HashSet<String> = HashSet::new();
-    for path in changed_entries.keys() {
-        if changed_entries.get(path) == Some(&None) {
-            continue;
-        }
-        let mut rest = path.as_str();
-        while let Some(i) = rest.rfind('/') {
-            rest = &rest[..i];
-            if changed_entries.get(rest) == Some(&None) {
-                superseded.insert(rest.to_string());
-            }
-        }
-    }
+    let directories = delta_directories(changed_entries);
     for (rel_path, entry) in changed_entries {
         if entry.is_some() {
             continue;
         }
-        if superseded.contains(rel_path) {
+        if directories.contains(rel_path) {
             match tree_lookup(store, tree, rel_path, TreeLookupKind::Tree)? {
                 Some(_) => {}
                 None => return Err(format!("tree verification mismatch for {rel_path}")),

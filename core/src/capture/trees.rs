@@ -87,6 +87,52 @@ pub(crate) fn write_nested_tree_for_ref(
     Ok(oid)
 }
 
+/// Ancestors of added leaves become directories, superseding leaf deletions
+/// at those names. The writer, flat cache, and verifier use this same rule.
+pub(crate) fn delta_directories(changes: &HashMap<String, Option<FlatEntry>>) -> HashSet<String> {
+    let mut directories = HashSet::new();
+    for (path, entry) in changes {
+        if entry.is_none() {
+            continue;
+        }
+        let mut rest = path.as_str();
+        while let Some(i) = rest.rfind('/') {
+            rest = &rest[..i];
+            directories.insert(rest.to_string());
+        }
+    }
+    directories
+}
+
+/// Apply the same subtree replacement rules as the sparse tree writer. Scan
+/// the parent map once; do not rescan all leaves for each directory change.
+pub(crate) fn apply_flat_delta(
+    flat: &mut HashMap<String, FlatEntry>,
+    changes: &HashMap<String, Option<FlatEntry>>,
+) {
+    let directories = delta_directories(changes);
+    flat.retain(|path, _| {
+        if changes.contains_key(path) || directories.contains(path) {
+            return false;
+        }
+        let mut rest = path.as_str();
+        while let Some(i) = rest.rfind('/') {
+            rest = &rest[..i];
+            if let Some(entry) = changes.get(rest)
+                && (entry.is_some() || !directories.contains(rest))
+            {
+                return false;
+            }
+        }
+        true
+    });
+    for (path, entry) in changes {
+        if let Some(entry) = entry {
+            flat.insert(path.clone(), *entry);
+        }
+    }
+}
+
 /// Write a new tree by patching the parent tree with only the changed
 /// paths. Unchanged directories keep their existing tree objects; only
 /// the ancestors of a change are rewritten bottom-up. Returns None when
@@ -98,29 +144,13 @@ pub(crate) fn write_tree_delta(
     parent_tree: Oid,
     changes: &HashMap<String, Option<FlatEntry>>,
 ) -> Result<Option<Oid>, String> {
-    // A deletion of X is superseded when the same batch also changes paths
-    // under X/: the path turned into a directory and its children carry
-    // the truth. Without this rule a "rm -rf d && echo hi > d" batch would
-    // resurrect the stale child deletions over the new file.
-    let mut superseded: HashSet<String> = HashSet::new();
-    for path in changes.keys() {
-        if changes.get(path) == Some(&None) {
-            continue;
-        }
-        let mut rest = path.as_str();
-        while let Some(i) = rest.rfind('/') {
-            rest = &rest[..i];
-            if changes.get(rest) == Some(&None) {
-                superseded.insert(rest.to_string());
-            }
-        }
-    }
+    let directories = delta_directories(changes);
 
     // Group the changes under their parent directory so one recursion
     // level only touches its own direct children.
     let mut per_dir: HashMap<String, HashMap<String, Option<FlatEntry>>> = HashMap::new();
     for (path, entry) in changes {
-        if superseded.contains(path) {
+        if entry.is_none() && directories.contains(path) {
             continue;
         }
         let (dir, name) = match path.rsplit_once('/') {
@@ -227,7 +257,11 @@ fn write_dir_delta(
             per_dir,
             child_dirs,
         )?;
-        entries.retain(|e| e.name != child.as_str());
+        // Deleting a stale descendant must not delete a file which now
+        // occupies its ancestor. Only a non-empty child can replace it.
+        entries.retain(|entry| {
+            entry.name != child.as_str() || (child_oid.is_none() && entry.mode != 0o040000)
+        });
         if let Some(oid) = child_oid {
             entries.push(TreeEntry {
                 mode: 0o040000,

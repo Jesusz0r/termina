@@ -195,6 +195,14 @@ impl CaptureHarness {
     }
 }
 
+impl Drop for CaptureHarness {
+    fn drop(&mut self) {
+        // Stop the child before the fixture field removes its source/store,
+        // including when a regression assertion panics.
+        self.core.shutdown();
+    }
+}
+
 fn state_str(state: &Value, key: &str) -> String {
     state
         .get(key)
@@ -436,6 +444,91 @@ fn directory_hint_fails_loudly_and_preserves_subtree() {
     assert_eq!(full_paths, baseline_paths);
 
     harness.shutdown();
+}
+
+#[test]
+fn directory_and_deleted_child_hints_preserve_live_siblings() {
+    let mut harness = CaptureHarness::with_files(
+        "inc-dir-and-delete",
+        &[("keep.txt", "keep"), ("dir/a.txt", "a"), ("dir/b.txt", "b")],
+    );
+    let baseline = harness.capture(None);
+    fs::remove_file(harness.source.join("dir/a.txt")).unwrap();
+    let delta = harness.incremental(&state_str(&baseline, "commit"), &["dir", "dir/a.txt"]);
+    let paths = harness.paths(&state_str(&delta, "commit"));
+    assert!(
+        paths.contains("dir/b.txt"),
+        "live sibling must survive: {paths:?}"
+    );
+    assert!(!paths.contains("dir/a.txt"));
+    let full = harness.capture(None);
+    assert_eq!(delta["tree"], full["tree"]);
+    let repeat = harness.incremental(&state_str(&delta, "commit"), &["keep.txt"]);
+    assert_eq!(repeat["tree"], delta["tree"]);
+    harness.shutdown();
+    let mut restarted = CoreProcess::spawn(&harness.home, harness.fixture.path());
+    let response = restarted
+        .request_ok(
+            "capture-incremental",
+            harness.payload(json!({
+                "parentCommit": delta["commit"], "hints": ["keep.txt"],
+            })),
+            DEADLINE,
+        )
+        .unwrap();
+    assert_eq!(response["state"]["tree"], delta["tree"]);
+    restarted.shutdown();
+}
+
+#[test]
+fn directory_removal_or_replacement_does_not_poison_cached_flat_map() {
+    for replacement in [false, true] {
+        let mut harness = CaptureHarness::with_files(
+            "inc-dir-replaced",
+            &[("keep.txt", "keep"), ("dir/a.txt", "a"), ("dir/b.txt", "b")],
+        );
+        let baseline = harness.capture(None);
+        fs::remove_dir_all(harness.source.join("dir")).unwrap();
+        if replacement {
+            fs::write(harness.source.join("dir"), "now a file").unwrap();
+        }
+        let delta = harness.incremental(&state_str(&baseline, "commit"), &["dir"]);
+        // A no-op child deletion must not change the cached flat map of this tree.
+        let repeat = harness.incremental(&state_str(&delta, "commit"), &["dir/a.txt"]);
+        assert_eq!(repeat["tree"], delta["tree"]);
+        let full = harness.capture(None);
+        assert_eq!(full["tree"], delta["tree"]);
+        harness.shutdown();
+    }
+}
+
+#[test]
+fn lone_new_or_replacement_directory_hint_cannot_hide_unhinted_children() {
+    for replaces_file in [false, true] {
+        let mut harness =
+            CaptureHarness::with_files("inc-unhinted-children", &[("keep.txt", "keep")]);
+        if replaces_file {
+            fs::write(harness.source.join("new-dir"), b"old leaf").unwrap();
+        }
+        let baseline = harness.capture(None);
+        if replaces_file {
+            fs::remove_file(harness.source.join("new-dir")).unwrap();
+        }
+        fs::create_dir(harness.source.join("new-dir")).unwrap();
+        fs::write(
+            harness.source.join("new-dir/unhinted.txt"),
+            b"must not disappear",
+        )
+        .unwrap();
+        let error = harness.incremental_err(&state_str(&baseline, "commit"), &["new-dir"]);
+        assert!(error.contains("directory"), "{error}");
+        let full = harness.capture(None);
+        assert!(
+            harness
+                .paths(&state_str(&full, "commit"))
+                .contains("new-dir/unhinted.txt")
+        );
+    }
 }
 
 #[test]

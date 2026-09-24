@@ -6,8 +6,8 @@ use std::time::UNIX_EPOCH;
 
 use crate::test_hooks::pause_at_hook;
 use crate::util::{
-    has_git_segment, is_safe_relative, now_ms, oid_ext, opt_s, require_utf8_git_path,
-    require_utf8_path_bytes, s, stat_at,
+    has_git_segment, is_safe_relative, now_ms, oid_ext, open_at, opt_s, require_utf8_git_path,
+    require_utf8_path_bytes, s, stat_at, stat_file,
 };
 use crate::{BUDGET_MAX_FILE_BYTES, BUDGET_MAX_NEW_BLOB_BYTES, BUDGET_MAX_PATHS};
 use crate::{
@@ -27,7 +27,9 @@ use super::parent_delta::{
 };
 use super::refs::{commit_tree, fail_before_state_ref, update_state_ref};
 use super::tree_cache::{cache_tree_map, collect_tree_map_cached};
-use super::trees::{FlatEntry, nested_from_flat, write_nested_tree, write_tree_delta};
+use super::trees::{
+    FlatEntry, apply_flat_delta, nested_from_flat, write_nested_tree, write_tree_delta,
+};
 use super::walk::{collect_tree_map, resolve_tree};
 
 /// Enumerate the capture domain: tracked files plus untracked non-ignored
@@ -591,7 +593,6 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     let mut new_blob_bytes = 0u64;
     for rel_path in changed.iter() {
         let Some(path) = capture_fs.resolve(rel_path)? else {
-            flat.remove(rel_path);
             changed_entries.insert(rel_path.clone(), None);
             continue;
         };
@@ -607,8 +608,33 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
             if parent_has_subtree && !child_hinted {
                 return Err(format!("capture hint names a directory: {rel_path}"));
             }
-            flat.remove(rel_path);
-            changed_entries.insert(rel_path.clone(), None);
+            if !child_hinted {
+                let directory = open_at(
+                    path.parent.as_raw_fd(),
+                    &path.leaf,
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+                .map_err(|error| format!("open hinted directory {rel_path} failed: {error}"))?;
+                let empty = crate::promote_fs::promotion_directory_is_empty(directory.as_raw_fd())?;
+                let opened = stat_file(&directory)
+                    .map_err(|error| format!("stat hinted directory {rel_path} failed: {error}"))?;
+                let current = stat_at(path.parent.as_raw_fd(), &path.leaf).map_err(|error| {
+                    format!("stat hinted directory path {rel_path} failed: {error}")
+                })?;
+                if opened != path.identity || current != opened {
+                    return Err(format!(
+                        "hinted directory changed while checking: {rel_path}"
+                    ));
+                }
+                if !empty {
+                    return Err(format!(
+                        "capture hint names a non-empty directory without child hints: {rel_path}"
+                    ));
+                }
+            }
+            if flat.contains_key(rel_path) {
+                changed_entries.insert(rel_path.clone(), None);
+            }
             continue;
         }
         match hash_path(
@@ -625,17 +651,16 @@ pub(crate) fn op_capture_incremental(req: &Value) -> Result<Value, String> {
                 new_blob_bytes = new_blob_bytes
                     .checked_add(new_bytes)
                     .ok_or("new-blob byte accounting overflow")?;
-                flat.insert(rel_path.clone(), (mode, oid));
                 expected.insert(rel_path.clone(), (mode, oid));
                 changed_entries.insert(rel_path.clone(), Some((mode, oid)));
             }
             None => {
                 // The path is gone or is a gitlink: drop it from the tree.
-                flat.remove(rel_path);
                 changed_entries.insert(rel_path.clone(), None);
             }
         }
     }
+    apply_flat_delta(&mut flat, &changed_entries);
     let tree = match write_tree_delta(
         &mut object_transaction,
         &store,
