@@ -1,4 +1,7 @@
 //! Promotion-bound directory ops: open, list, prepare, and ensure.
+#[cfg(test)]
+#[path = "dirs_tests.rs"]
+mod tests;
 use std::os::fd::AsRawFd;
 
 use serde_json::{Value, json};
@@ -131,6 +134,15 @@ pub(crate) fn op_promotion_bound_list_entries(req: &Value) -> Result<Value, Stri
 /// that index as `expectedMissingAt`, making an unexpected pre-created
 /// component a conflict instead of silently accepting it.
 pub(crate) fn op_promotion_bound_prepare_directory(req: &Value) -> Result<Value, String> {
+    prepare_directory(req, std::fs::File::sync_all)
+}
+
+// Keep the sync seam at the operation boundary so tests can verify ordering
+// and failure propagation without changing process-wide filesystem behavior.
+fn prepare_directory(
+    req: &Value,
+    mut sync: impl FnMut(&std::fs::File) -> std::io::Result<()>,
+) -> Result<Value, String> {
     let root_path = s(req, "root")?;
     let (root, _root_identity, _capability) =
         open_promotion_bound_root(req, "root", "rootIdentity", "rootCapability")?;
@@ -175,7 +187,6 @@ pub(crate) fn op_promotion_bound_prepare_directory(req: &Value) -> Result<Value,
         .try_clone()
         .map_err(|error| format!("clone promotion prepare root failed: {error}"))?;
     let mut missing_at = None;
-    let mut created = false;
     let mut chain = Vec::with_capacity(components.len());
     for (index, (_, component)) in components.iter().enumerate() {
         match open_at(
@@ -243,8 +254,7 @@ pub(crate) fn op_promotion_bound_prepare_directory(req: &Value) -> Result<Value,
                         format!("create promotion prepare component {index} failed: {mkdir_error}")
                     },
                 )?;
-                created = true;
-                current = open_at(
+                let next = open_at(
                     current.as_raw_fd(),
                     component,
                     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
@@ -252,7 +262,7 @@ pub(crate) fn op_promotion_bound_prepare_directory(req: &Value) -> Result<Value,
                 .map_err(|open_error| {
                     format!("open created promotion prepare component {index} failed: {open_error}")
                 })?;
-                let created_identity = stat_file(&current).map_err(|error| {
+                let created_identity = stat_file(&next).map_err(|error| {
                     format!("fstat created promotion prepare component {index} failed: {error}")
                 })?;
                 if !created_identity.is_dir() {
@@ -260,7 +270,16 @@ pub(crate) fn op_promotion_bound_prepare_directory(req: &Value) -> Result<Value,
                         "created promotion prepare component {index} is not a directory"
                     ));
                 }
+                // Publish each new directory entry durably before advancing
+                // or issuing a capability for the completed chain.
+                sync(&next).map_err(|error| {
+                    format!("sync created promotion prepare component {index} failed: {error}")
+                })?;
+                sync(&current).map_err(|error| {
+                    format!("sync promotion prepare parent of component {index} failed: {error}")
+                })?;
                 chain.push(created_identity);
+                current = next;
             }
             Err(error) => {
                 return Err(format!(
@@ -278,11 +297,6 @@ pub(crate) fn op_promotion_bound_prepare_directory(req: &Value) -> Result<Value,
         .map_err(|error| format!("fstat promotion prepared directory failed: {error}"))?;
     if !identity.is_dir() {
         return Err("promotion prepared target is not a directory".to_string());
-    }
-    if created {
-        current
-            .sync_all()
-            .map_err(|error| format!("sync promotion prepared directory failed: {error}"))?;
     }
     let prepared_identity = PromotionIdentity {
         dev: identity.dev,

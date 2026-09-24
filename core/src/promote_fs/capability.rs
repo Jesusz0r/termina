@@ -40,6 +40,14 @@ pub(crate) fn issue_promotion_root_capability(
     let mut capabilities = promotion_root_capabilities()
         .lock()
         .map_err(|_| "promotion root capability registry poisoned".to_string())?;
+    issue_in_registry(&mut capabilities, path, identity)
+}
+
+fn issue_in_registry(
+    capabilities: &mut HashMap<String, PromotionRootCapability>,
+    path: &str,
+    identity: PromotionIdentity,
+) -> Result<String, String> {
     if let Some((token, _)) = capabilities
         .iter()
         .find(|(_, capability)| capability.path == path && capability.identity == identity)
@@ -82,17 +90,16 @@ mod promotion_root_capability_tests {
 
     #[test]
     fn registry_is_bounded_without_replacing_reused_capabilities() {
-        let mut registry = promotion_root_capabilities()
-            .lock()
-            .expect("promotion root capability registry poisoned");
-        registry.clear();
-        drop(registry);
+        // Capacity tests must not fill or clear the live registry used by
+        // concurrent operation tests.
+        let mut registry = HashMap::new();
 
         let active_identity = PromotionIdentity { dev: 1, ino: 1 };
-        let active = issue_promotion_root_capability("/active", active_identity)
+        let active = issue_in_registry(&mut registry, "/active", active_identity)
             .expect("test capability fits a cleared registry");
         for index in 1..MAX_PROMOTION_ROOT_CAPABILITIES {
-            issue_promotion_root_capability(
+            issue_in_registry(
+                &mut registry,
                 &format!("/root-{index}"),
                 PromotionIdentity {
                     dev: 1,
@@ -103,25 +110,18 @@ mod promotion_root_capability_tests {
         }
 
         assert_eq!(
-            issue_promotion_root_capability("/active", active_identity)
+            issue_in_registry(&mut registry, "/active", active_identity)
                 .expect("reused test capability resolves"),
             active
         );
         assert!(
-            issue_promotion_root_capability("/overflow", PromotionIdentity { dev: 2, ino: 1 },)
-                .is_err()
+            issue_in_registry(
+                &mut registry,
+                "/overflow",
+                PromotionIdentity { dev: 2, ino: 1 },
+            )
+            .is_err()
         );
-        assert_eq!(
-            promotion_root_capabilities()
-                .lock()
-                .expect("promotion root capability registry poisoned")
-                .len(),
-            MAX_PROMOTION_ROOT_CAPABILITIES
-        );
-
-        promotion_root_capabilities()
-            .lock()
-            .expect("promotion root capability registry poisoned")
-            .clear();
+        assert_eq!(registry.len(), MAX_PROMOTION_ROOT_CAPABILITIES);
     }
 }
