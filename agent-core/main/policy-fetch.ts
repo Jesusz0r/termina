@@ -9,7 +9,7 @@
  */
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
-import type { Readable, Transform } from "node:stream";
+import { pipeline, type Readable, type Transform } from "node:stream";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { createValidatedLookup, type CallbackDnsLookup } from "./url.ts";
 
@@ -52,12 +52,12 @@ function abortError(signal?: AbortSignal): Error {
   return Object.assign(new Error("aborted"), { name: "AbortError" });
 }
 
-const DECODERS: Record<string, () => Transform> = {
-  gzip: createGunzip,
-  "x-gzip": createGunzip,
-  deflate: createInflate,
-  br: createBrotliDecompress,
-};
+const DECODERS = new Map<string, () => Transform>([
+  ["gzip", createGunzip],
+  ["x-gzip", createGunzip],
+  ["deflate", createInflate],
+  ["br", createBrotliDecompress],
+]);
 
 /**
  * Pipe content-decoding over the wire stream. Unknown encodings pass
@@ -69,13 +69,18 @@ function decodeHttpBody(res: IncomingMessage, headers: PolicyHeaders): Readable 
     .split(",")
     .map((token) => token.trim().toLowerCase())
     .filter((token) => token.length > 0 && token !== "identity");
-  let stream: Readable = res;
+  const decoders: Transform[] = [];
   for (const token of tokens.reverse()) {
-    const make = DECODERS[token];
-    if (!make) continue;
-    stream = stream.pipe(make());
+    const make = DECODERS.get(token);
+    if (make) decoders.push(make());
   }
-  return stream;
+  const body = decoders.at(-1);
+  if (!body) return res;
+  // Pipeline forwards wire and intermediate errors to the returned body and
+  // destroys every stage when the consumer cancels. The consumer reads errors
+  // from that body; the callback also handles errors before it starts reading.
+  pipeline([res, ...decoders], () => {});
+  return body;
 }
 
 export function policyRequest(input: PolicyRequestInput): Promise<PolicyHttpResponse> {
