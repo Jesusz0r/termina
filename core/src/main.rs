@@ -44,7 +44,9 @@ use promotion_files::{
     promotion_rename_unsupported,
 };
 mod promotion_remove;
-use promotion_remove::{op_promotion_bound_remove_tree, op_promotion_bound_transition};
+use promotion_remove::{
+    op_promotion_bound_remove_tree, op_promotion_bound_rename, op_promotion_bound_transition,
+};
 mod retained;
 mod store_ops;
 mod util;
@@ -189,6 +191,7 @@ fn dispatch(op: &str, req: &Value) -> Result<Value, String> {
         "promotion-bound-create-symlink" => op_promotion_bound_create_symlink(req),
         "promotion-bound-install-directory" => op_promotion_bound_install_directory(req),
         "promotion-bound-remove-tree" => op_promotion_bound_remove_tree(req),
+        "promotion-bound-rename" => op_promotion_bound_rename(req),
         "unref" => op_unref(req),
         "git-head" => op_git_head(req),
         "git-top-level" => op_git_top_level(req),

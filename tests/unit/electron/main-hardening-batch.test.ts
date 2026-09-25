@@ -363,7 +363,7 @@ describe("main hardening batch (refs #219)", () => {
     const end = main.indexOf("private async openFileInEditor", start);
     expect(start).toBeGreaterThanOrEqual(0);
     const span = main.slice(start, end);
-    expect(span).toContain("renameNoReplace(src, dest)");
+    expect(span).toContain("renameBoundEntry(workspace.root, src, dest)");
     expect(span).toContain("errorOnExist: true");
     expect(span).toContain("Residual race");
   });

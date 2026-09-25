@@ -9,13 +9,14 @@
  */
 // First import: installs on evaluation, before any other module can stat into asar.
 import "./asar-stats-deprecation.ts";
+import { renameBoundEntry } from "./worldline-git.js";
 import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu, nativeTheme, shell } from "electron";
 
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
-import { access, cp, link, lstat, mkdir, open, readFile, readdir, readlink, realpath as fsRealpath, rename as fsRename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
+import { access, cp, lstat, mkdir, open, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -7549,93 +7550,6 @@ class TerminaApp {
     await handle.close().catch(() => undefined);
   }
 
-  /**
-   * Rename without replacing: refuses when the destination exists, including
-   * destinations created concurrently after admission. Plain rename(2)
-   * replaces the destination on POSIX, and a pre-check alone is racy, so
-   * files move via link+unlink, symlinks via readlink+symlink+unlink, and
-   * directories reserve the name with mkdir (onto which rename only lands
-   * while it stayed an empty directory). Same-name and case-only
-   * self-renames cannot destroy anything and stay plain renames. Windows
-   * rename never replaces, so it needs no reservation dance.
-   */
-  private async renameNoReplace(src: string, dest: string): Promise<void> {
-    if (src === dest) return;
-    if (process.platform === "win32") {
-      try {
-        await fsRename(src, dest);
-      } catch (err) {
-        if (existsSync(dest)) throw new Error("destination already exists");
-        throw err;
-      }
-      return;
-    }
-    // A case-only rename on a case-insensitive volume addresses the file
-    // itself: replacing it cannot destroy anything.
-    try {
-      const [a, b, la, lb] = await Promise.all([stat(src), stat(dest), lstat(src), lstat(dest)]);
-      if (!la.isSymbolicLink() && !lb.isSymbolicLink() && a.dev === b.dev && a.ino === b.ino) {
-        await fsRename(src, dest);
-        return;
-      }
-    } catch {
-      /* The destination is absent (or the source vanished): continue below. */
-    }
-    const st = await lstat(src);
-    if (st.isDirectory()) {
-      try {
-        await mkdir(dest);
-      } catch (err) {
-        if (isErrno(err, "EEXIST")) throw new Error("destination already exists");
-        throw err;
-      }
-      // The name is now ours: rename lands only while it stayed an empty
-      // directory (ENOTEMPTY/ENOTDIR fail closed), or if it vanished.
-      try {
-        await fsRename(src, dest);
-      } catch (err) {
-        // Remove only our own empty reservation, never real content: rmdir
-        // refuses files, symlinks, and non-empty directories alike, so a
-        // destination swapped after the reservation survives the cleanup.
-        await rmdir(dest).catch(() => undefined);
-        throw err;
-      }
-      return;
-    }
-    if (st.isSymbolicLink()) {
-      const target = await readlink(src);
-      try {
-        await symlink(target, dest);
-      } catch (err) {
-        if (isErrno(err, "EEXIST")) throw new Error("destination already exists");
-        throw err;
-      }
-      try {
-        await unlink(src);
-      } catch (err) {
-        await unlink(dest).catch(() => undefined);
-        throw err;
-      }
-      return;
-    }
-    try {
-      await link(src, dest);
-    } catch (err) {
-      if (isErrno(err, "EEXIST")) throw new Error("destination already exists");
-      throw err;
-    }
-    try {
-      // The source may have been swapped after admission; only an unchanged
-      // non-directory, non-symlink source may move.
-      const again = await lstat(src);
-      if (again.isDirectory() || again.isSymbolicLink()) throw new Error("source changed during rename");
-      await unlink(src);
-    } catch (err) {
-      await unlink(dest).catch(() => undefined);
-      throw err;
-    }
-  }
-
   private async listDir(projectId: unknown, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
     const target = this.explorerWorkspace(projectId);
     if ("error" in target) return { entries: [], error: target.error };
@@ -8378,7 +8292,7 @@ class TerminaApp {
       return this.mutateExplorer(projectId, async (workspace, live) => {
         const abs = await this.projectAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
-        await this.renameNoReplace(abs, join(dirname(abs), newName));
+        await renameBoundEntry(workspace.root, abs, join(dirname(abs), newName));
         return { ok: true };
       }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
@@ -8428,7 +8342,7 @@ class TerminaApp {
         if (!dest) return { ok: false, error: "destination already exists" };
         if (!live()) return { ok: false, error: "project is not open" };
         try {
-          if (move) await this.renameNoReplace(src, dest);
+          if (move) await renameBoundEntry(workspace.root, src, dest);
           else await cp(src, dest, { recursive: true, errorOnExist: true, force: false });
         } catch (err) {
           if (isErrno(err, "EEXIST")) return { ok: false, error: "destination already exists" };

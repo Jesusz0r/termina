@@ -1,10 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { afterAll, beforeAll, describe, it, expect } from "vitest";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { link, lstat, mkdir, open, readlink, rename as fsRename, rm, stat, symlink, unlink } from "node:fs/promises";
+import { link, open } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { isErrno } from "../../../shared/guards.ts";
 import ts from "typescript";
+import { renameBoundEntry, disposeWorldlineGitCore } from "../../../electron/worldline-git.ts";
 
 /**
  * Explorer no-replace mutations (refs #167).
@@ -62,12 +63,14 @@ const createFileExclusive = loadMethod(
   [open, isErrno],
 ) as (abs: string) => Promise<void>;
 
-const renameNoReplace = loadMethod(
-  "renameNoReplace",
-  "private async renameNoReplace(",
-  ["fsRename", "stat", "lstat", "mkdir", "rm", "readlink", "symlink", "unlink", "link", "isErrno", "existsSync"],
-  [fsRename, stat, lstat, mkdir, rm, readlink, symlink, unlink, link, isErrno, existsSync],
-) as (src: string, dest: string) => Promise<void>;
+const originalCoreBin = process.env.TERMINA_CORE_BIN;
+beforeAll(() => { process.env.TERMINA_CORE_BIN = join(root, "core/target/debug/termina-core"); });
+afterAll(() => {
+  disposeWorldlineGitCore();
+  if (originalCoreBin === undefined) delete process.env.TERMINA_CORE_BIN;
+  else process.env.TERMINA_CORE_BIN = originalCoreBin;
+});
+const renameNoReplace = (src: string, dest: string) => renameBoundEntry(dirname(src), src, dest);
 
 function handlerSpan(channel: string, nextChannel: string): string {
   const start = main.indexOf(`ipcMain.handle("${channel}"`);
@@ -89,7 +92,7 @@ describe("explorer no-replace mutations (refs #167)", () => {
     expect(create).toContain("mkdir(abs)");
     expect(create).not.toContain("mkdir(abs, { recursive: true })");
     const rename = handlerSpan("explorer:rename", "explorer:delete");
-    expect(rename).toContain("renameNoReplace");
+    expect(rename).toContain("renameBoundEntry(workspace.root,");
     expect(rename).not.toContain("fsRename(abs, join(");
   });
 

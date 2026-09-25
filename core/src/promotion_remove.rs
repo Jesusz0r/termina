@@ -1,6 +1,8 @@
 //! Promotion quarantine, remove-tree, transition, and in-place unlink.
 mod cleanup;
 mod remove_tree;
+mod rename;
+pub(crate) use rename::op_promotion_bound_rename;
 mod transition;
 mod unlink;
 

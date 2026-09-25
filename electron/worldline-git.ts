@@ -12,6 +12,7 @@
  */
 
 // Split into ./worldline-git/ modules (issue #38). This entry re-exports the public surface.
+export { renameBoundEntry } from "./worldline-git/bound-rename.js";
 export { captureRootInRepo, disposeWorldlineGitCore, gitCommitFile, gitCommitTree, gitCommittedChanges, gitCommonDir, gitHead, gitIgnoredFiles, gitObjectFormat, gitTopLevel, gitTrackedFiles, gitWorkingChanges, trustResourceHashes } from "./worldline-git/git-reads.js";
 export { SnapshotStore } from "./worldline-git/snapshot-store.js";
 export type { SourceState } from "./worldline-git/snapshot-store.js";
