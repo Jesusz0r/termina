@@ -4957,6 +4957,10 @@ export function shutdownAgentCore(options: ShutdownOptions = {}): Promise<Shutdo
 
 function requestProcessShutdown(code: number, reason: string): void {
   if (processExitPromise) return;
+  // The parent's SIGKILL watchdog dies with the parent. Exit anyway if
+  // graceful shutdown does not finish.
+  const forceExit = setTimeout(() => process.exit(code), DEFAULT_SHUTDOWN_TIMEOUT_MS + 500);
+  forceExit.unref();
   processExitPromise = shutdownAgentCore({ reason })
     .then((result) => {
       if (!result.ok) {
@@ -4977,6 +4981,12 @@ function installProcessShutdownHandlers(): void {
   process.once("SIGTERM", () => requestProcessShutdown(0, "sigterm"));
   process.once("SIGHUP", () => requestProcessShutdown(0, "sighup"));
   process.once("SIGINT", () => requestProcessShutdown(0, "sigint"));
+  const orphanWatch = setInterval(() => {
+    if (process.ppid !== 1) return;
+    clearInterval(orphanWatch);
+    requestProcessShutdown(0, "parent-exited");
+  }, 1000);
+  orphanWatch.unref();
 }
 
 async function refreshPendingImageCount(): Promise<void> {

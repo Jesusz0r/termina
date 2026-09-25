@@ -359,9 +359,9 @@ export class CoreClient {
     this.retiring = null;
     for (const target of targets) {
       if (!target) continue;
-      try {
-        target.child.kill();
-      } catch {
+        try {
+          target.child.kill("SIGKILL");
+        } catch {
         /* Already exiting; its exit event is now stale and ignored. */
       }
     }

@@ -202,16 +202,15 @@ export class PtyTerminal {
   }
 
   kill(signal?: string): void {
+    const name = signal ?? "SIGTERM";
+    // Signal the group even after node-pty has reported exit. The session
+    // leader (spawn-helper on macOS) can still be alive after the shell exits.
+    this.killGroup(name);
     if (this.exited || !this.pty) return;
     this.pendingInput.length = 0;
     this.pendingInputBytes = 0;
     try {
-      this.killGroup(signal ?? "SIGTERM");
-    } catch {
-      /* ignore */
-    }
-    try {
-      this.pty.kill(signal);
+      this.pty.kill(name);
     } catch {
       /* ignore */
     }

@@ -209,7 +209,22 @@ fn dispatch(op: &str, req: &Value) -> Result<Value, String> {
     }
 }
 
+fn stop_when_orphaned() {
+    // The snapshot core is not a daemon. If the app is killed before it can
+    // signal this process, init becomes the parent and the child must exit.
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if unsafe { libc::getppid() } == 1 {
+                let _ = writeln!(io::stderr(), "[core] parent exited; stopping");
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
 fn main() {
+    stop_when_orphaned();
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     for line in stdin.lock().lines() {
