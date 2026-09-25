@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,15 +44,15 @@ async function makeManager(opts?: {
   capturePrimary?: () => Promise<string | null>;
   getStore?: () => Promise<{ merge3: (a: string, b: string) => Promise<{ ok: boolean; tree?: string; conflicts?: string[]; reason?: string }> } | null>;
 }): Promise<{ manager: WorldlineManager; root: string }> {
-  const root = await mkdtemp(join(tmpdir(), "termina-honest-details-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "termina-honest-details-")));
   const worldsRoot = join(root, "worlds");
   const primaryRoot = join(root, "primary");
-  await mkdir(worldsRoot, { recursive: true });
   await mkdir(primaryRoot, { recursive: true });
+  const identity = await lstat(primaryRoot, { bigint: true });
   const manager = new WorldlineManager({
     worldsRoot,
     primaryRoot,
-    primaryRootIdentity: { dev: "1", ino: "1" },
+    primaryRootIdentity: { dev: String(identity.dev), ino: String(identity.ino) },
     realHome: root,
     userData: root,
     primaryEventsDir: root,
@@ -97,8 +97,23 @@ async function makeManager(opts?: {
     primarySessionDir: async (cwd: string) => join(cwd, "sessions"),
     installPromoted: async () => ({ terminalId: "unused" }),
   } as never);
-  (manager as unknown as { ready: Promise<void> }).ready = Promise.resolve();
-  return { manager, root };
+  // Replacing this promise orphaned real native bootstrap work: dispose then
+  // returned while that work could still create directories under the fixture.
+  try {
+    await (manager as unknown as { ready: Promise<void> }).ready;
+    return { manager, root };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function disposeFixture(manager: WorldlineManager, root: string): Promise<void> {
+  // Detail-only comparisons below are injected records, not materialized
+  // candidates. Remove those records before exercising real manager disposal.
+  (manager as unknown as { comparisons: Map<string, ComparisonState> }).comparisons.clear();
+  await manager.dispose();
+  await rm(root, { recursive: true, force: true });
 }
 
 function injectComparison(manager: WorldlineManager, root: string, version = 4): ComparisonState {
@@ -149,6 +164,16 @@ describe("worldline honest details / silent degradation (issues #246 #257 #269)"
     listMocks.changedFiles.mockClear();
   });
 
+  it("awaits real bootstrap before handing a fixture to disposal", async () => {
+    const { manager, root } = await makeManager();
+    try {
+      const state = manager as unknown as { worldsRootBinding: unknown; primaryRootBinding: unknown; readyError: Error | null };
+      expect(state.worldsRootBinding).toBeTruthy();
+      expect(state.primaryRootBinding).toBeTruthy();
+      expect(state.readyError).toBeNull();
+    } finally { await disposeFixture(manager, root); }
+  });
+
   it("keeps the manager contracts fail-closed and regex-free", () => {
     expect(managerSrc).not.toContain("/* Conflict status can be incomplete. */");
     expect(managerSrc).not.toContain("/already exists/i");
@@ -170,8 +195,7 @@ describe("worldline honest details / silent degradation (issues #246 #257 #269)"
       injectComparison(manager, root);
       expect(await manager.ignoredWrites("cmp-1", "A")).toBeNull();
     } finally {
-      await manager.dispose().catch(() => undefined);
-      await rm(root, { recursive: true, force: true });
+      await disposeFixture(manager, root);
     }
   });
 
@@ -187,8 +211,7 @@ describe("worldline honest details / silent degradation (issues #246 #257 #269)"
       expect(res.details?.ignoredFiles).toBeNull();
       expect(res.details?.ignoredBytes).toBeNull();
     } finally {
-      await manager.dispose().catch(() => undefined);
-      await rm(root, { recursive: true, force: true });
+      await disposeFixture(manager, root);
     }
   });
 
@@ -209,8 +232,7 @@ describe("worldline honest details / silent degradation (issues #246 #257 #269)"
       expect(res.details?.conflictError).toBe("merge3 exploded");
       expect(res.details?.version).toBe(3);
     } finally {
-      await manager.dispose().catch(() => undefined);
-      await rm(root, { recursive: true, force: true });
+      await disposeFixture(manager, root);
     }
   });
 
@@ -238,8 +260,7 @@ describe("worldline honest details / silent degradation (issues #246 #257 #269)"
           .forkCoreSessions(cmp, { ...run, promptParentEntryId: "0" }),
       ).rejects.toThrow(/alternative session address is missing/);
     } finally {
-      await manager.dispose().catch(() => undefined);
-      await rm(root, { recursive: true, force: true });
+      await disposeFixture(manager, root);
     }
   });
 });
