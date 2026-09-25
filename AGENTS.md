@@ -41,6 +41,10 @@ An owner may be a module or a directory with private helpers; its public API sta
 
 When a touched file exceeds 800 lines, assess extraction. Extract cohesive responsibilities with a distinct lifecycle, test surface, or reason to change; keep helpers with their owner. Line count is a review trigger, not a reason for unrelated refactoring. Section comments do not replace module boundaries.
 
+## Clean-code methodology
+
+Use KISS + YAGNI by default, selective SOLID at architectural boundaries, and one owner for each business rule. Simplicity means easy to reason about, not merely fewer lines; the decision priorities above still apply. Introduce abstractions for current requirements, not hypothetical reuse. See [CONTRIBUTING.md](CONTRIBUTING.md#clean-code-methodology) for application guidance and the review checklist.
+
 ## Rules
 
 **No backwards compat.** Don't add shims, deprecated aliases, or feature-flagged old paths. Migrate internal callers, delete the old interface. Temporary compat only at the narrowest boundary when an external file on disk forces it (prefs on disk, snapshot format, promotion journals from a previous build); delegate to the canonical impl and remove when the constraint lifts. When a feature is removed, remove its IPC/types/helpers/tests/docs too.

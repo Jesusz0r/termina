@@ -65,6 +65,79 @@ matrix is not in pull-request CI:
   children.
 - Model-driven suites need a configured agent provider/model.
 
+## Clean-code methodology
+
+Use **KISS and YAGNI by default, selective SOLID at architectural boundaries,
+and one owner for each business rule**. These are design and review guidelines,
+not new CI gates. The [decision priorities in AGENTS.md](AGENTS.md#decision-priority-when-rules-conflict)
+remain authoritative: simplicity never overrides data integrity, process
+isolation, or main-process responsiveness.
+
+> Use the simplest complete solution, keep each invariant under one owner,
+> and introduce abstractions only when current requirements justify them.
+
+### Defaults: KISS, YAGNI, and selective DRY
+
+- **KISS (keep it simple):** optimize for understanding, not the fewest lines.
+  Keep effects, failure paths, transaction ordering, and cleanup explicit.
+- **YAGNI (you aren't going to need it):** solve the current requirement.
+  Prefer existing code, composition, or a small local change over speculative
+  plugin systems, configuration switches, or generic frameworks.
+- **DRY (don't repeat yourself):** centralize business rules and invariants.
+  Similar syntax alone does not justify an abstraction; unrelated code can
+  look alike without sharing a responsibility.
+
+Search for the existing owner before adding behavior. The
+[canonical ownership map](AGENTS.md#one-canonical-implementation) identifies
+those boundaries: Rust owns Git and snapshots, main owns authoritative state
+and orchestration, preload exposes the typed bridge, and the renderer owns
+presentation and transient UI state. Do not add parallel implementations.
+
+### Apply SOLID where it helps
+
+Apply these principles to modules and functions as well as classes. They do
+not require an object-oriented rewrite or extra architectural layers.
+
+- **Single responsibility:** group code by invariant, lifecycle, or reason to
+  change. One responsibility has one owner, which may include private helpers.
+- **Open/closed:** extend established extension points when needed. Editing an
+  existing function is often simpler than building hypothetical extensibility.
+- **Liskov substitution:** implementations sharing a contract must preserve its
+  semantics, including errors, lifecycle behavior, and cleanup guarantees.
+- **Interface segregation:** keep IPC contracts and host seams focused. Do not
+  expose a broad privileged API to a consumer that needs one operation.
+- **Dependency inversion:** use dependency injection at meaningful I/O and
+  testing seams, not an interface around every helper.
+
+An abstraction should reduce the effort needed to understand and change an
+operation, not merely spread it across more files.
+
+### Refactor from evidence
+
+Separate validation and decision logic from filesystem, PTY, Electron, and
+subprocess effects when that makes behavior easier to understand and test.
+Keep cohesive transaction sequencing visible; do not fragment snapshot,
+write-lease, or recovery logic just to make functions smaller or pure.
+
+Extract a module when it has a distinct lifecycle, invariant, test surface,
+or reason to change. Do not impose arbitrary function lengths or argument
+counts. The existing 800-line file threshold in `AGENTS.md` triggers an
+assessment, not a mandatory split or unrelated refactor. Keep comments that
+explain invariants, ordering constraints, and non-obvious reasons.
+
+### Review checklist
+
+1. Does the change preserve data integrity, isolation, and responsiveness?
+2. Does each business rule or invariant have one owner?
+3. Is this the smallest complete solution to a current requirement?
+4. Are effects, failure paths, and cleanup explicit?
+5. Does each new abstraction make the code easier to understand than a direct
+   implementation?
+6. Are changed contracts migrated fully, with obsolete paths removed and only
+   the on-disk compatibility exceptions permitted by `AGENTS.md` retained?
+7. Do the checks cover changed behavior and relevant failure cases, following
+   the [verification requirements](AGENTS.md#conventions--verification)?
+
 ## Code conventions
 
 - Convention: comments use Simplified Technical English (STE): short
