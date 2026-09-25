@@ -38,6 +38,8 @@ export class PtyTerminal {
 
   onData: (data: string) => boolean | void = () => {};
   onExit: (code: number) => void = () => {};
+  /** Native process exit starts runtime's deadline, even with a retained tail. */
+  onNativeExit: () => void = () => {};
 
   /** The pty child pid (the process-group leader). */
   get pid(): number {
@@ -80,6 +82,7 @@ export class PtyTerminal {
       this.pendingInput.length = 0;
       this.pendingInputBytes = 0;
       this.pendingExitCode = exitCode;
+      this.onNativeExit();
       // A native exit can race the final source pause. Keep feeding the
       // already-read tail through the bounded egress owner before announcing
       // exit; closeOutput() is the explicit cancellation path.

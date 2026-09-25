@@ -132,6 +132,7 @@ export interface TerminalRuntimeSpawnOptions {
 export class TerminalRuntime {
   private terminalSeq = 0;
   private readonly terminals = new Map<string, AgentTerminalInstance>();
+  private readonly pendingSourceDrains = new Map<AgentTerminalInstance, () => void>();
   private readonly sidecarQueues = new Map<string, SidecarEventQueue>();
   private readonly sidecarSources = new Map<string, SidecarWatch>();
   /** Distinct candidate tailers (own events dirs). Never the primary tailer. */
@@ -246,10 +247,29 @@ export class TerminalRuntime {
       resume: () => inst.pty.resume(),
     });
     const rendererTarget = opts.rendererTarget;
+    let exitDeadline: number | null = null;
+    let sourceTailCancelled = false;
+    let sourceDrainTimer: ReturnType<typeof setTimeout> | null = null;
+    inst.pty.onNativeExit = () => {
+      if (inst.exitHandled || exitDeadline !== null || this.terminals.get(inst.id) !== inst) return;
+      exitDeadline = Date.now() + PTY_EXIT_DRAIN_TIMEOUT_MS;
+      // Do not finish egress yet: that closes admission to the source tail.
+      // Cancel the unadmitted tail only when the shared deadline expires.
+      const cancelTail = () => {
+        sourceTailCancelled = true;
+        inst.pty.cancelOutput();
+      };
+      this.pendingSourceDrains.set(inst, cancelTail);
+      sourceDrainTimer = setTimeout(cancelTail, PTY_EXIT_DRAIN_TIMEOUT_MS);
+    };
     inst.pty.onExit = async (code: number, origin: "native" | "forced" = "native") => {
       if (inst.exitHandled) return;
       inst.exitHandled = true;
-      const drained = await this.egress.finish(inst.id, terminalGeneration, code, PTY_EXIT_DRAIN_TIMEOUT_MS);
+      if (sourceDrainTimer !== null) clearTimeout(sourceDrainTimer);
+      this.pendingSourceDrains.delete(inst);
+      const remaining = exitDeadline === null ? PTY_EXIT_DRAIN_TIMEOUT_MS : Math.max(0, exitDeadline - Date.now());
+      const egressDrained = await this.egress.finish(inst.id, terminalGeneration, code, remaining);
+      const drained = egressDrained && !sourceTailCancelled;
       if (!drained) this.egress.cancel(inst.id, terminalGeneration);
       const details = { code, origin, drained };
       let beforeError: unknown;
@@ -380,6 +400,7 @@ export class TerminalRuntime {
 
   disposeEgress(): void {
     this.egress.dispose();
+    for (const cancelTail of this.pendingSourceDrains.values()) cancelTail();
   }
 
   enqueueSidecar(terminalId: string, event: SidecarEvent): SidecarEventDelivery {

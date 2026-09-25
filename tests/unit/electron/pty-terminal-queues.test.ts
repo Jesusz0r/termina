@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { MAX_PENDING_INPUT_BYTES, PtyTerminal } from "../../../electron/pty-terminal.ts";
 import { splitPtyData } from "../../../electron/pty-egress.ts";
+import { TerminalRuntime } from "../../../electron/terminal-runtime.ts";
+import type { AgentTerminalInstance } from "../../../electron/terminal-instance.ts";
 
 interface HollowView {
   pendingInput: Array<{ data: string; offset: number }>;
@@ -61,6 +63,45 @@ function hollow(): { term: PtyTerminal; view: HollowView; written: string[]; pau
 }
 
 describe("pty-terminal queues (refs #195)", () => {
+  it.each([false, true])("bounds source-tail and renderer drain together (late renderer: %s)", async (lateRenderer) => {
+    const { term, view } = hollow();
+    const exits: boolean[] = [];
+    const sent: number[] = [];
+    const runtime = new TerminalRuntime({
+      sendChunk: (_id, _generation, _window, _renderer, seq) => { sent.push(seq); return true; },
+      sendExit: () => true,
+      isDisposed: () => false, shouldAdmitSidecar: () => true,
+      onSidecarEvent() {}, onSidecarError() {}, onPtyExitBeforeRelease() {},
+      onPtyExitAfterRelease: (_inst, _target, details) => { exits.push(details.drained); },
+    }, { maxQueueChunks: 2, flushIntervalMs: 0 });
+    const inst = { id: "term-1", generation: 1, pty: term, closed: false, exitHandled: false, notePtyOutput() {} } as unknown as AgentTerminalInstance;
+    vi.useFakeTimers();
+    try {
+      runtime.adopt(inst, { tailer: { watch() {}, stopWatching() {}, setExpectedProducer() {} }, skipSidecarWatch: true, rendererTarget: null });
+      view.pendingOutput.push({ data: "x".repeat(192 * 1024), offset: 0 });
+      view.flushOutput();
+      expect(view.pendingOutput).toHaveLength(1);
+      view.exited = true;
+      view.pendingExitCode = 0;
+      term.onNativeExit();
+      view.flushOutput();
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(runtime.get(inst.id)).toBe(inst);
+      if (lateRenderer) {
+        runtime.attachViewer(1, 1);
+        runtime.attach(inst.id, 1, 1, 1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(sent.length).toBeGreaterThan(0);
+        runtime.acknowledge(inst.id, 1, 1, 1, sent[0]!);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(view.pendingOutput).toHaveLength(0);
+      }
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(runtime.get(inst.id)).toBeUndefined();
+      expect(view.pendingOutput).toHaveLength(0);
+      expect(exits).toEqual([false]);
+    } finally { runtime.disposeEgress(); vi.useRealTimers(); }
+  });
   it("caps queued input depth and drops the excess", () => {
     const { term, view } = hollow();
     // Block the chunked drain so the queue accumulates like an IPC burst.
