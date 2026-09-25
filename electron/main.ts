@@ -8389,6 +8389,11 @@ class TerminaApp {
     }
   }
 
+  /** Serve image and PDF previews. Registered once, before the window loads. */
+  private registerMediaProtocol(): void {
+    protocol.handle("termina-media", (request) => this.handleMediaPreview(request));
+  }
+
   /** Stream one image or PDF that belongs to an open workspace. */
   private async handleMediaPreview(request: Request): Promise<Response> {
     let url: URL;
@@ -8637,7 +8642,7 @@ class TerminaApp {
       },
     });
     this.registerIpc();
-    protocol.handle("termina-media", (request) => this.handleMediaPreview(request));
+    this.registerMediaProtocol();
     this.startLoginHintWatch();
     void detectShells();
     // The launch scratch cleanup is native-bound and asynchronous.  A

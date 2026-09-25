@@ -32,27 +32,24 @@ describe("editor keys tabs by canonicalizePath (refs #273)", () => {
     const body = openFile();
     expect(body).toContain("let key = canonicalizePath(path)");
     expect(body.indexOf("let key = canonicalizePath(path)")).toBeLessThan(body.indexOf("this.tabs.get(key)"));
-    expect(body).toContain("acquireSharedFileModel(key, owner)");
-    // Original path: main realpaths it; a rewritten /private/tmp key is not required.
-    expect(body).toContain("window.termina.openFile(path, owner)");
+    const loaded = methodBody(editor, "private async openFileNow(");
+    expect(loaded.indexOf("canonicalizePath(res.path)")).toBeLessThan(loaded.indexOf("this.makeTab("));
+    expect(loaded).toContain("acquireSharedFileModel(key, owner)");
+    expect(loaded).toContain("window.termina.openFile(path, owner)");
   });
 
-  it("retargets to res.path above the version check so a lost-race tab still hears watcher pushes (refs #209)", () => {
-    const body = openFile();
-    const retarget = body.indexOf("this.retargetTab(");
-    const versionCheck = body.indexOf("model.getAlternativeVersionId() === initialVersionId");
-    expect(retarget).toBeGreaterThanOrEqual(0);
-    expect(versionCheck).toBeGreaterThanOrEqual(0);
-    expect(retarget).toBeLessThan(versionCheck);
-    expect(body).toContain("typeof res.path === \"string\" && res.path");
-    expect(body).toContain("canonicalizePath(res.path)");
-    expect(body).toContain("if (resolved !== key) key = this.retargetTab(key, resolved)");
-    expect(body).toContain("lost a race with a user edit");
+  it("keys the new tab by main's real path before the text model is filled", () => {
+    const loaded = methodBody(editor, "private async openFileNow(");
+    const resolved = loaded.indexOf("canonicalizePath(res.path)");
+    const filled = loaded.indexOf("model.setValue(res.content)");
+    expect(resolved).toBeGreaterThanOrEqual(0);
+    expect(filled).toBeGreaterThan(resolved);
+    expect(loaded).toContain("if (this.tabs.has(resolvedPath))");
   });
 
   it("has no alias table", () => {
     expect(editor).not.toContain("canonicalKeys");
-    expect(methodBody(editor, "private retargetTab(from: string, to: string): string")).toContain("this.tabs.set(to, tab)");
+    expect(methodBody(editor, "private resolveKey(path: string): string | null")).toContain("canonicalizePath(path)");
   });
 
   it("routes watcher and deletion pushes through canonicalizePath", () => {

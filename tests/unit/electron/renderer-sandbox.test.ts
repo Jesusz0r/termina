@@ -80,9 +80,12 @@ check(
   directives.includes("style-src 'self' 'unsafe-inline'") && directives.includes("worker-src 'self' blob:"),
 );
 check(
-  "csp denies objects, frames, foreign bases, and forms",
-  directives.includes("object-src 'none'")
-    && directives.includes("frame-src 'none'")
+  "csp allows preview frames only from the app media scheme",
+  directives.includes("object-src termina-media:")
+    && directives.includes("frame-src termina-media:")
+    && !csp.includes("object-src *")
+    && !csp.includes("frame-src *")
+    && !csp.includes("object-src 'none'")
     && directives.includes("base-uri 'self'")
     && directives.includes("form-action 'none'"),
 );

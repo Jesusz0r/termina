@@ -71,11 +71,11 @@ describe("editor save acknowledgment (refs #126)", () => {
   it("ignores late acknowledgments for closed or replaced tabs", () => {
     const ack = memberBody(editor, "private acknowledgeSave(");
     expect(ack).toContain("const tab = this.tabs.get(key)");
-    expect(ack).toContain("if (!tab || tab.model !== model) return;");
+    expect(ack).toContain("if (!tab || !isTextTab(tab) || tab.model !== model) return;");
     const saveActive = memberBody(editor, "async saveActive()");
-    expect(saveActive).toContain("if (!live || live !== tab || !live.owner) return;");
+    expect(saveActive).toContain("if (!live || live !== tab || !live.owner || !isTextTab(live)) return;");
     const flushKeys = memberBody(editor, "async flushKeys(keys: string[], writerId?: string): Promise<{ ok: boolean; failed: string[] }>");
-    expect(flushKeys).toContain("if (!live || live !== tab || !live.owner) return false;");
+    expect(flushKeys).toContain("if (!live || live !== tab || !live.owner || !isTextTab(live)) return false;");
   });
 
   it("serializes overlapping saves per tab so the last writer wins in order", () => {

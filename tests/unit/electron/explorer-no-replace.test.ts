@@ -63,8 +63,12 @@ const createFileExclusive = loadMethod(
   [open, isErrno],
 ) as (abs: string) => Promise<void>;
 
+const debugCore = join(root, "core/target/debug/termina-core");
+const releaseCore = join(root, "core/target/release/termina-core");
 const originalCoreBin = process.env.TERMINA_CORE_BIN;
-beforeAll(() => { process.env.TERMINA_CORE_BIN = join(root, "core/target/debug/termina-core"); });
+beforeAll(() => {
+  process.env.TERMINA_CORE_BIN = existsSync(debugCore) ? debugCore : releaseCore;
+});
 afterAll(() => {
   disposeWorldlineGitCore();
   if (originalCoreBin === undefined) delete process.env.TERMINA_CORE_BIN;

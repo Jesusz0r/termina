@@ -271,11 +271,13 @@ describe("main hardening batch (refs #219)", () => {
     const openFile = loadMethod(
       "openFileInEditor",
       "private async openFileInEditor(",
-      ["stat", "readFile", "MAX_OPEN_FILE_SIZE"],
+      ["stat", "readFile", "MAX_OPEN_FILE_SIZE", "previewKind", "MAX_PREVIEW_FILE_SIZE"],
       [
         async () => ({ isFile: () => true, size: 10 }),
         async () => "x".repeat(3 * 1024 * 1024),
         2 * 1024 * 1024,
+        (path: string) => path.endsWith(".pdf") || /\.(png|jpe?g|gif|webp|svg)$/i.test(path) ? "image" : null,
+        32 * 1024 * 1024,
       ],
     ) as (absPath: string, owner: unknown) => Promise<{ ok: boolean; error?: string }>;
     const app = {
@@ -288,8 +290,14 @@ describe("main hardening batch (refs #219)", () => {
     const smallOpen = loadMethod(
       "openFileInEditor",
       "private async openFileInEditor(",
-      ["stat", "readFile", "MAX_OPEN_FILE_SIZE"],
-      [async () => ({ isFile: () => true, size: 5 }), async () => "small", 2 * 1024 * 1024],
+      ["stat", "readFile", "MAX_OPEN_FILE_SIZE", "previewKind", "MAX_PREVIEW_FILE_SIZE"],
+      [
+        async () => ({ isFile: () => true, size: 5, mtimeMs: 1 }),
+        async () => "small",
+        2 * 1024 * 1024,
+        () => null,
+        32 * 1024 * 1024,
+      ],
     ) as (absPath: string, owner: unknown) => Promise<{ ok: boolean; content?: string }>;
     expect(await smallOpen.call(app, "/proj/small.txt", {})).toMatchObject({ ok: true, content: "small" });
   });
