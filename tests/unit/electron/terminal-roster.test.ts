@@ -10,6 +10,14 @@ describe("terminal roster model pin", () => {
     expect(entry?.model).toBe("anthropic/claude-opus-4-6");
   });
 
+  it("keeps a shell's absolute directory and drops a relative one", () => {
+    const [kept] = parseTerminalRoster([{ id: "term-1", type: "shell", shell: "/bin/zsh", cwd: "/tmp/work" }]);
+    const [dropped] = parseTerminalRoster([{ id: "term-2", type: "shell", shell: "/bin/zsh", cwd: "relative" }]);
+    expect(kept?.cwd).toBe("/tmp/work");
+    expect(dropped?.cwd).toBeUndefined();
+    expect(dropped?.id).toBe("term-2");
+  });
+
   it("drops malformed models but keeps the entry", () => {
     for (const model of ["", "no-slash", "/leading", "trailing/", "has space/x", "a\nb/x", "x".repeat(201)]) {
       const [entry] = parseTerminalRoster([{ id: "term-1", type: "agent", engine: "core", model }]);

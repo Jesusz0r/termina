@@ -98,6 +98,7 @@ import {
   type TerminalRosterEntry,
 } from "./terminal-roster.js";
 import { rosterFilePath, type RosterTerminal } from "./roster-store.js";
+import { processCwd } from "./process-cwd.js";
 import { AgentTerminalInstance } from "./terminal-instance.js";
 import { TerminalRuntime, dispatchViewerId, worldlineViewerId } from "./terminal-runtime.js";
 import {
@@ -2685,6 +2686,31 @@ class TerminaApp {
     return bundleSessionFile(await this.coreProjectSessionDir(cwd), sessionId);
   }
 
+  /** Shell tabs reopen where `cd` left them. A missing directory falls back to the project root. */
+  private async shellRestoreCwd(rec: TerminalRosterEntry, projectCwd: string): Promise<string> {
+    if (rec.type !== "shell" || !rec.cwd) return projectCwd;
+    try {
+      if ((await stat(rec.cwd)).isDirectory()) return rec.cwd;
+    } catch {
+      /* The directory was removed or unmounted. */
+    }
+    return projectCwd;
+  }
+
+  /** Copy each live shell's process directory onto the instance before the roster is written. */
+  private async refreshShellDirectories(): Promise<void> {
+    await Promise.all([...this.runtime.values()].map(async (inst) => {
+      if (inst.type !== "shell" || inst.closed || !inst.persist) return;
+      const cwd = await processCwd(inst.pty.pid);
+      if (!cwd) return;
+      try {
+        if ((await stat(cwd)).isDirectory()) inst.cwd = cwd;
+      } catch {
+        /* The process directory disappeared between the read and the stat. */
+      }
+    }));
+  }
+
   private saveTerminalRoster(project: ProjectState): void {
     const live: RosterTerminal[] = [];
     for (const id of project.terminalIds) {
@@ -2780,7 +2806,7 @@ class TerminaApp {
     for (const rec of loaded.entries) {
       this.noteTerminalId(rec.id);
       try {
-        const inst = await this.createTerminal(project.cwd, {
+        const inst = await this.createTerminal(await this.shellRestoreCwd(rec, project.cwd), {
           id: rec.id,
           type: rec.type,
           engine: "core",
@@ -8876,6 +8902,7 @@ class TerminaApp {
     if (this.initialRestorePromise) {
       await this.initialRestorePromise.catch(() => undefined);
     }
+    await this.refreshShellDirectories();
     for (const project of this.projects.values()) {
       if (!this.projectIsSwitching(project.id)) this.saveTerminalRoster(project);
     }

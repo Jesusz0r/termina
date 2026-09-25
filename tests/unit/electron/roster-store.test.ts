@@ -65,6 +65,7 @@ function agent(id: string, model = "anthropic/claude-opus-4-6"): RosterTerminal 
   return {
     id,
     type: "agent",
+    cwd: "/tmp",
     sessionId: null,
     sessionFile: null,
     model,

@@ -22,6 +22,8 @@ export type TerminalRosterEntry = {
   type: "agent" | "shell";
   engine?: "core";
   shell?: string;
+  /** Directory the shell was in when the roster was saved. */
+  cwd?: string;
   sessionId?: string | null;
   sessionFile?: string | null;
   /** Provider-qualified model the session last used (core resume pin). */
@@ -32,6 +34,11 @@ export type TerminalRosterEntry = {
   /** Last verify verdict for the badge. */
   verify?: { state: "untested" | "pass" | "fail" | "timeout" | "cancelled"; command: string | null; summary: string | null };
 };
+
+/** Absolute directory string safe to store and spawn from. */
+export function isRosterShellCwd(value: string): boolean {
+  return isAbsPath(value);
+}
 
 function isAbsPath(value: string): boolean {
   if (!value || value.length > MAX_PATH || /[\x00-\x1f]/.test(value)) return false;
@@ -95,6 +102,7 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
     // Agent tabs are always core. A stale engine field on disk is ignored.
     if (rec.type === "agent") entry.engine = "core";
     if (rec.type === "shell" && typeof rec.shell === "string" && isAbsPath(rec.shell)) entry.shell = rec.shell;
+    if (rec.type === "shell" && typeof rec.cwd === "string" && isAbsPath(rec.cwd)) entry.cwd = rec.cwd;
     if (typeof rec.sessionId === "string" && isCoreSessionId(rec.sessionId)) {
       entry.sessionId = rec.sessionId;
     }

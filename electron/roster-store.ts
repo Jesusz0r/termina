@@ -18,6 +18,7 @@ import {
   MAX_ROSTER_PLAN_TASKS,
   composeTerminalRoster,
   fitTerminalRoster,
+  isRosterShellCwd,
   parseTerminalRoster,
   type TerminalRosterEntry,
 } from "./terminal-roster.js";
@@ -27,6 +28,7 @@ export interface RosterTerminal {
   readonly id: string;
   readonly type: "agent" | "shell";
   readonly shellPath?: string;
+  readonly cwd: string;
   readonly sessionId: string | null;
   readonly sessionFile: string | null;
   readonly model: string | null;
@@ -76,6 +78,7 @@ export class TerminalRosterStore {
     const entry: TerminalRosterEntry = { id: inst.id, type: inst.type };
     if (inst.type === "agent") entry.engine = "core";
     if (inst.type === "shell" && inst.shellPath) entry.shell = inst.shellPath;
+    if (inst.type === "shell" && isRosterShellCwd(inst.cwd)) entry.cwd = inst.cwd;
     if (inst.sessionId) entry.sessionId = inst.sessionId;
     if (inst.sessionFile) entry.sessionFile = inst.sessionFile;
     // The session's own last model (tracked from sidecar agent_settings /
