@@ -151,8 +151,8 @@ export class SessionRetentionOwner {
       const preparedFileIdentity = await retainedLedgerFileIdentity(root);
       const preparedLedger = await loadRetainedUsageLedger(root, rootBinding, { persist: false });
       const lock = acquireSessionRetentionLock(root);
-      this.assertLockRoot(lock, rootBinding);
       try {
+        this.assertLockRoot(lock, rootBinding);
         const currentFileIdentity = await retainedLedgerFileIdentity(root);
         const ledger = sameIdentity(preparedFileIdentity, currentFileIdentity)
           ? preparedLedger
@@ -202,8 +202,8 @@ export class SessionRetentionOwner {
         // ledger when the full proof cannot be rebuilt.
       }
       const lock = acquireSessionRetentionLock(root);
-      this.assertLockRoot(lock, rootBinding);
       try {
+        this.assertLockRoot(lock, rootBinding);
         let ledger: RetainedUsageLedger | null;
         try {
           const currentFileIdentity = await retainedLedgerFileIdentity(root);
@@ -299,8 +299,8 @@ export class SessionRetentionOwner {
     const preparedFileIdentity = await retainedLedgerFileIdentity(root);
     const preparedLedger = await loadRetainedUsageLedger(root, rootBinding, { persist: false });
     const lock = acquireSessionRetentionLock(root);
-    this.assertLockRoot(lock, rootBinding);
     try {
+      this.assertLockRoot(lock, rootBinding);
       const currentFileIdentity = await retainedLedgerFileIdentity(root);
       const ledger = sameIdentity(preparedFileIdentity, currentFileIdentity)
         ? preparedLedger
