@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { insertionIndex, reorderPermutation } from "../../../shared/tab-order.ts";
+import { insertionIndex, orderByStrip, reorderPermutation } from "../../../shared/tab-order.ts";
 
 describe("tab order", () => {
   it("accepts a permutation and rejects a different set", () => {
@@ -8,6 +8,36 @@ describe("tab order", () => {
     expect(reorderPermutation(["a", "b"], ["b"])).toBeNull();
     expect(reorderPermutation(["a", "b"], ["b", "a", "a"])).toBeNull();
     expect(reorderPermutation(["a", "b"], ["b", "c"])).toBeNull();
+  });
+
+  it("publishes terminals in project-strip order, then terminal-strip order", () => {
+    const live = [
+      { id: "term-1", projectId: "p1" },
+      { id: "term-2", projectId: "p1" },
+      { id: "term-3", projectId: "p2" },
+      { id: "term-4", projectId: null },
+    ];
+    const projects = [
+      { id: "p2", terminalIds: ["term-3"] },
+      { id: "p1", terminalIds: ["term-2", "term-1"] },
+    ];
+    expect(orderByStrip(live, projects).map((terminal) => terminal.id)).toEqual([
+      "term-3",
+      "term-2",
+      "term-1",
+      "term-4",
+    ]);
+  });
+
+  it("keeps creation order for terminals the strips do not rank", () => {
+    const live = [
+      { id: "term-9", projectId: "p1" },
+      { id: "term-8", projectId: "p1" },
+    ];
+    expect(orderByStrip(live, [{ id: "p1", terminalIds: [] }]).map((terminal) => terminal.id)).toEqual([
+      "term-9",
+      "term-8",
+    ]);
   });
 
   it("lands before the tab whose midpoint the pointer has not passed", () => {

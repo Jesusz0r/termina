@@ -133,7 +133,7 @@ import {
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { evictOldest } from "../shared/evict-oldest.js";
-import { reorderPermutation } from "../shared/tab-order.js";
+import { orderByStrip, reorderPermutation } from "../shared/tab-order.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
 import { syncParentDir } from "../shared/fsync.js";
 import { isErrno } from "../shared/guards.js";
@@ -4633,7 +4633,11 @@ class TerminaApp {
   }
 
   private instanceList(): InstanceSummary[] {
-    return [...this.runtime.values()].filter((t) => !t.closed).map((t) => ({
+    const live = orderByStrip(
+      [...this.runtime.values()].filter((t) => !t.closed),
+      [...this.projects.values()].map((project) => ({ id: project.id, terminalIds: [...project.terminalIds] })),
+    );
+    return live.map((t) => ({
       id: t.id,
       generation: t.generation,
       cwd: t.cwd,
