@@ -10,7 +10,12 @@ const devSrc = readFileSync(new URL("../../../scripts/dev.ts", import.meta.url),
 const defsSrc = readFileSync(new URL("../../../scripts/bundle-defs.ts", import.meta.url), "utf8");
 
 describe("shared bundle definitions (refs #133)", () => {
-  it("defines the four bundles with entry, output, and format", () => {
+  it("defines the app and worker bundles with entry, output, and format", () => {
+    expect(TERMINA_BUNDLES.contentSearchWorker).toEqual({
+      entryPoints: ["electron/content-search/match-lines.js"],
+      outfile: "dist-electron/content-search-worker.mjs", format: "esm",
+    });
+    expect(buildSrc).toContain("terminaBuildOptions(TERMINA_BUNDLES.contentSearchWorker)");
     expect(TERMINA_BUNDLES.main).toEqual({ entryPoints: ["electron/main.ts"], outfile: "dist-electron/main.mjs", format: "esm" });
     expect(TERMINA_BUNDLES.sessionWorker).toEqual({
       entryPoints: ["electron/session-worker.ts"],

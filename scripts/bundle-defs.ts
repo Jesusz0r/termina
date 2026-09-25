@@ -12,7 +12,7 @@
  */
 import type { BuildOptions } from "esbuild";
 
-export type TerminaBundleName = "main" | "sessionWorker" | "agentCore" | "preload";
+export type TerminaBundleName = "main" | "sessionWorker" | "contentSearchWorker" | "agentCore" | "preload";
 
 export interface TerminaBundleDef {
   entryPoints: string[];
@@ -34,6 +34,11 @@ export const TERMINA_BUNDLES: Record<TerminaBundleName, TerminaBundleDef> = {
   main: {
     entryPoints: ["electron/main.ts"],
     outfile: "dist-electron/main.mjs",
+    format: "esm",
+  },
+  contentSearchWorker: {
+    entryPoints: ["electron/content-search/match-lines.js"],
+    outfile: "dist-electron/content-search-worker.mjs",
     format: "esm",
   },
   sessionWorker: {

@@ -19,6 +19,7 @@ import { IGNORED_SEGMENTS, matchGitignore, type GitignoreRules } from "../shared
 import type { ContentHit } from "../shared/types.ts";
 import { isRecord } from "../shared/guards.ts";
 import { ensureGitignoreChain, listProjectPaths } from "./quick-open.js";
+import { ContentLineMatcher } from "./content-search/line-matcher.js";
 
 interface ContentSearchResult {
   hits: ContentHit[];
@@ -271,76 +272,65 @@ async function scanContentSearch(
   candidates: readonly string[],
   stop: () => boolean,
 ): Promise<ContentSearchResult> {
-  let regex: RegExp;
+  const matcher = new ContentLineMatcher(pattern, stop, CONTENT_SEARCH_BUDGET_MS);
   try {
-    regex = new RegExp(pattern);
-  } catch {
-    return { hits: [], truncated: false };
-  }
-  const hits: ContentHit[] = [];
-  let truncated = false;
-  let filesScanned = 0;
-  let bytesScanned = 0;
-  const rules: GitignoreRules = new Map();
-  const loaded = new Set<string>();
-  for (const rel of candidates) {
-    if (stop()) return { hits: [], truncated: false };
-    if (filesScanned >= MAX_SCAN_FILES) {
-      truncated = true;
-      break;
-    }
-    const posixRel = rel.split(sep).join("/");
-    const slash = posixRel.lastIndexOf("/");
-    await ensureGitignoreChain(rules, loaded, root, slash === -1 ? "" : posixRel.slice(0, slash));
-    if (matchGitignore(rules, posixRel)) continue;
-    const abs = join(root, rel);
-    let size: number;
-    let isFile = false;
-    try {
-      const st = await stat(abs);
-      size = st.size;
-      isFile = st.isFile();
-    } catch {
-      continue;
-    }
-    if (!isFile) continue;
-    if (size > MAX_SCAN_FILE_BYTES) {
-      truncated = true;
-      continue;
-    }
-    let content: string;
-    try {
-      content = await readFile(abs, "utf8");
-    } catch {
-      continue;
-    }
-    filesScanned++;
-    bytesScanned += content.length;
-    if (bytesScanned > MAX_SCAN_BYTES) {
-      truncated = true;
-      break;
-    }
-    if (content.includes("\0")) continue;
-    let perFile = 0;
-    const lines = content.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const found = regex.exec(lines[i] ?? "");
-      if (!found) continue;
-      hits.push({ relPath: rel, line: i + 1, column: (found.index ?? 0) + 1, text: previewLine(lines[i] ?? "") });
-      if (++perFile >= MAX_CONTENT_HITS_PER_FILE) {
-        // Other files still have hits worth collecting; only the total cap
-        // ends the scan.
+    await matcher.match("", 1, MAX_CONTENT_PREVIEW);
+    if (matcher.invalid) return { hits: [], truncated: false };
+    const hits: ContentHit[] = [];
+    let truncated = false;
+    let filesScanned = 0;
+    let bytesScanned = 0;
+    const rules: GitignoreRules = new Map();
+    const loaded = new Set<string>();
+    for (const rel of candidates) {
+      if (stop()) return { hits: [], truncated: false };
+      if (matcher.stopped) return { hits: matcher.timedOut ? hits : [], truncated: matcher.timedOut };
+      if (filesScanned >= MAX_SCAN_FILES) {
         truncated = true;
         break;
       }
-      if (hits.length >= MAX_CONTENT_HITS) {
+      const posixRel = rel.split(sep).join("/");
+      const slash = posixRel.lastIndexOf("/");
+      await ensureGitignoreChain(rules, loaded, root, slash === -1 ? "" : posixRel.slice(0, slash));
+      if (matchGitignore(rules, posixRel)) continue;
+      const abs = join(root, rel);
+      let size: number;
+      let isFile = false;
+      try {
+        const st = await stat(abs);
+        size = st.size;
+        isFile = st.isFile();
+      } catch {
+        continue;
+      }
+      if (!isFile) continue;
+      if (size > MAX_SCAN_FILE_BYTES) {
+        truncated = true;
+        continue;
+      }
+      let content: string;
+      try {
+        content = await readFile(abs, "utf8");
+      } catch {
+        continue;
+      }
+      filesScanned++;
+      bytesScanned += content.length;
+      if (bytesScanned > MAX_SCAN_BYTES) {
         truncated = true;
         break;
       }
+      if (content.includes("\0")) continue;
+      const matches = await matcher.match(content, Math.min(MAX_CONTENT_HITS_PER_FILE, MAX_CONTENT_HITS - hits.length), MAX_CONTENT_PREVIEW);
+      if (matcher.stopped) return { hits: matcher.timedOut ? hits : [], truncated: matcher.timedOut };
+      for (const match of matches) hits.push({ relPath: rel, ...match, text: previewLine(match.text) });
+      if (matches.length >= MAX_CONTENT_HITS_PER_FILE) truncated = true;
+      if (hits.length >= MAX_CONTENT_HITS) { truncated = true; break; }
     }
-    if (hits.length >= MAX_CONTENT_HITS) break;
+    return { hits, truncated };
+  } finally {
+    await matcher.dispose();
   }
-  return { hits, truncated };
 }
 
 /**

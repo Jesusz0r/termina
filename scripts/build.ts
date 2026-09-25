@@ -17,6 +17,7 @@ buildCore();
 
 // The session worker runs core session-bundle work off the main thread.
 await build(terminaBuildOptions(TERMINA_BUNDLES.sessionWorker));
+await build(terminaBuildOptions(TERMINA_BUNDLES.contentSearchWorker));
 
 await build(terminaBuildOptions(TERMINA_BUNDLES.agentCore));
 
