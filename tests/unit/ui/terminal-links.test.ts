@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { ILink, Terminal } from "@xterm/xterm";
-import { cellColumnsForLine, createTerminalLinkProvider, parseTerminalFileLinks } from "../../../src/terminal-links.ts";
+import { cellColumnsForLine, createTerminalLinkProvider, parseTerminalFileLinks, parseTerminalWebLinks } from "../../../src/terminal-links.ts";
 
 /** Minimal fake buffer line: cells with chars/width plus the string view. */
 function makeFakeLine(
@@ -30,7 +30,7 @@ function makeFakeLine(
 
 function provideForLine(line: ReturnType<typeof makeFakeLine>): ILink[] | undefined {
   const term = { buffer: { active: { getLine: (y: number) => (y === 0 ? line : undefined) } }, element: undefined };
-  const provider = createTerminalLinkProvider(term as unknown as Terminal, () => {});
+  const provider = createTerminalLinkProvider(term as unknown as Terminal, () => {}, () => {});
   let result: ILink[] | undefined;
   provider.provideLinks(1, (links) => {
     result = links;
@@ -151,6 +151,18 @@ describe("Terminal file link detection", () => {
     const text = "Visit https://example.com/foo.ts or http://localhost:5173/test.js for info.";
     const links = parseTerminalFileLinks(text);
     expect(links).toHaveLength(0);
+  });
+
+  it("detects web URLs, including a localhost server, without the trailing period", () => {
+    const links = parseTerminalWebLinks("Open https://example.com/docs, and http://localhost:5173/.");
+    expect(links.map((link) => link.url)).toEqual([
+      "https://example.com/docs",
+      "http://localhost:5173/",
+    ]);
+    expect(links[1].text).toBe("http://localhost:5173/");
+    expect(parseTerminalWebLinks("listening on localhost:3000").map((link) => link.url)).toEqual([
+      "http://localhost:3000/",
+    ]);
   });
 
   it("ignores plain words and numbers that are not files", () => {

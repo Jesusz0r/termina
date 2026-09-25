@@ -9,7 +9,7 @@
  */
 // First import: installs on evaluation, before any other module can stat into asar.
 import "./asar-stats-deprecation.ts";
-import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu, nativeTheme } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu, nativeTheme, shell } from "electron";
 
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
@@ -99,6 +99,7 @@ import {
 } from "./terminal-roster.js";
 import { rosterFilePath, type RosterTerminal } from "./roster-store.js";
 import { processCwd } from "./process-cwd.js";
+import { terminalWebUrl } from "../shared/terminal-link.js";
 import { AgentTerminalInstance } from "./terminal-instance.js";
 import { TerminalRuntime, dispatchViewerId, worldlineViewerId } from "./terminal-runtime.js";
 import {
@@ -7935,6 +7936,17 @@ class TerminaApp {
     });
     ipcMain.handle("project:reorder", (_e, ids: unknown) => this.reorderProjects(ids));
     ipcMain.handle("terminals:reorder", (_e, projectId: unknown, ids: unknown) => this.reorderProjectTerminals(projectId, ids));
+
+    ipcMain.handle("shell:open-external", async (_e, url: unknown) => {
+      const href = typeof url === "string" ? terminalWebUrl(url) : null;
+      if (!href) return { ok: false, error: "that link cannot be opened" };
+      try {
+        await shell.openExternal(href);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    });
 
     ipcMain.handle("clipboard:write", (_e, text: unknown) => {
       if (typeof text !== "string") return { ok: false, error: "clipboard text is invalid" };

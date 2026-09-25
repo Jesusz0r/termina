@@ -15,7 +15,8 @@ import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { terminalTheme } from "./terminal-themes";
 import { isMacPlatform } from "./settings-shortcuts";
 import { toast } from "./components/modals";
-import { createTerminalLinkProvider } from "./terminal-links";
+import { createTerminalLinkProvider, isTerminalLinkClick, parseTerminalFileLinks } from "./terminal-links";
+import { terminalOscFileTarget, terminalWebUrl } from "../shared/terminal-link";
 
 export class PtyView {
   private term: Terminal;
@@ -70,6 +71,10 @@ export class PtyView {
       theme: terminalTheme(appearance.theme),
       cursorBlink: true,
       scrollback: 3000,
+      linkHandler: {
+        allowNonHttpProtocols: true,
+        activate: (event, text) => this.openOscLink(event, text),
+      },
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
@@ -92,13 +97,13 @@ export class PtyView {
     this.term.loadAddon(this.webglAddon);
     this.searchAddon = new SearchAddon();
     this.term.loadAddon(this.searchAddon);
-    if (this.onOpenFile) {
-      this.linkProviderDisposable = this.term.registerLinkProvider(
-        createTerminalLinkProvider(this.term, (link) => {
-          this.onOpenFile?.(link.path, link.line, link.column);
-        }),
-      );
-    }
+    this.linkProviderDisposable = this.term.registerLinkProvider(
+      createTerminalLinkProvider(
+        this.term,
+        (link) => this.onOpenFile?.(link.path, link.line, link.column),
+        (url) => this.openWeb(url),
+      ),
+    );
     this.term.open(container);
     this.clipboardTarget = this.term.textarea ?? null;
     this.clipboardTarget?.addEventListener("copy", this.onCopy, true);
@@ -136,6 +141,25 @@ export class PtyView {
     } catch {
       /* not available */
     }
+  }
+
+  /** OSC 8 from the agent: http(s) opens in the browser, a painted file target opens in the editor. */
+  private openOscLink(event: MouseEvent, uri: string): void {
+    if (!isTerminalLinkClick(event)) return;
+    const fileTarget = terminalOscFileTarget(uri);
+    if (fileTarget) {
+      const file = parseTerminalFileLinks(fileTarget)[0];
+      if (file) this.onOpenFile?.(file.path, file.line, file.column);
+      return;
+    }
+    const web = terminalWebUrl(uri);
+    if (web) this.openWeb(web);
+  }
+
+  private openWeb(url: string): void {
+    void window.termina.openExternal(url).then((result) => {
+      if (!result.ok) this.reportTerminalError(result.error ?? "could not open the link");
+    }).catch(() => this.reportTerminalError("could not open the link"));
   }
 
   /** Core TUI does not enable mouse tracking (so drag-select works).

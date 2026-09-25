@@ -1,20 +1,6 @@
 import type { IBufferLine, IBufferRange, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
-
-const KNOWN_EXTENSIONS = new Set([
-  "ts", "tsx", "js", "jsx", "mjs", "cjs",
-  "rs", "py", "go", "java", "c", "cpp", "cc", "cxx", "h", "hpp", "cs", "rb", "php", "swift", "kt", "scala",
-  "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
-  "json", "jsonl", "json5", "yaml", "yml", "toml", "html", "htm", "css", "scss", "sass", "less", "sql",
-  "md", "markdown", "mdx", "txt", "xml", "svg", "env", "lock",
-  "vue", "svelte", "astro", "graphql", "gql", "proto", "ini", "cfg", "conf", "diff", "patch",
-  "log", "csv", "tsv",
-]);
-
-const KNOWN_FILENAMES = new Set([
-  "dockerfile", "makefile", "gemfile", "rakefile", "cmakelists.txt", "license", "licence", "readme",
-  ".gitignore", ".gitattributes", ".editorconfig", ".env", ".npmrc", ".prettierrc", ".eslintrc",
-  "cargo.toml", "cargo.lock", "package.json", "pnpm-lock.yaml", "tsconfig.json",
-]);
+import { isRecognizedTerminalPath, terminalWebUrl } from "../shared/terminal-link";
+import { isMacPlatform } from "./settings-shortcuts";
 
 interface ParsedTerminalFileLink {
   /** The exact raw string in the terminal line that was matched. */
@@ -95,17 +81,7 @@ function parseTargetReference(
   }
 
   const cleanPath = opts.diffHeader ? cleaned.replace(/^[ab]\//, "") : cleaned;
-  const baseName = cleanPath.split("/").pop() ?? "";
-  const dotIdx = baseName.lastIndexOf(".");
-  const ext = dotIdx > 0 ? baseName.slice(dotIdx + 1).toLowerCase() : "";
-  const hasDirectory = cleanPath.includes("/");
-
-  const isRecognized =
-    (ext && KNOWN_EXTENSIONS.has(ext)) ||
-    KNOWN_FILENAMES.has(baseName.toLowerCase()) ||
-    (hasDirectory && ext.length >= 1 && ext.length <= 10 && /^[a-zA-Z0-9]+$/.test(ext));
-
-  if (!isRecognized) return null;
+  if (!isRecognizedTerminalPath(cleanPath)) return null;
   return { path: cleanPath, line, column: col };
 }
 
@@ -133,7 +109,7 @@ export function parseTerminalFileLinks(lineText: string): ParsedTerminalFileLink
 
   // 1. Locate all web URLs (http:// and https://) so they are never treated as file links
   const webUrls: { start: number; end: number }[] = [];
-  const webRegex = /https?:\/\/[^\s"'`()\[\]{}]+/gi;
+  const webRegex = /(?:https?:\/\/|(?:localhost|127\.0\.0\.1):)\S+/gi;
   let m: RegExpExecArray | null;
   while ((m = webRegex.exec(lineText)) !== null) {
     webUrls.push({ start: m.index, end: m.index + m[0].length });
@@ -253,6 +229,35 @@ export function parseTerminalFileLinks(lineText: string): ParsedTerminalFileLink
   return links.sort((a, b) => a.startIndex - b.startIndex);
 }
 
+export interface ParsedTerminalWebLink {
+  text: string;
+  url: string;
+  startIndex: number;
+  endIndex: number;
+}
+
+/** http(s) URLs on one terminal line. Trailing punctuation stays outside the link. */
+export function parseTerminalWebLinks(lineText: string): ParsedTerminalWebLink[] {
+  const links: ParsedTerminalWebLink[] = [];
+  if (!lineText) return links;
+  const webRegex = /(?:https?:\/\/|(?:localhost|127\.0\.0\.1):)\S+/gi;
+  let match: RegExpExecArray | null;
+  while ((match = webRegex.exec(lineText)) !== null) {
+    let text = match[0];
+    while (/[.,;!?:]$/.test(text) || (text.endsWith(")") && !text.includes("("))) text = text.slice(0, -1);
+    const url = terminalWebUrl(text);
+    if (!url) continue;
+    links.push({ text, url, startIndex: match.index, endIndex: match.index + text.length });
+  }
+  return links;
+}
+
+/** Cmd-click on macOS, Ctrl-click elsewhere. A plain click keeps selecting text. */
+export function isTerminalLinkClick(event: Pick<MouseEvent, "button" | "metaKey" | "ctrlKey" | "altKey">): boolean {
+  if (event.button !== 0 || event.altKey) return false;
+  return isMacPlatform() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+}
+
 /**
  * Maps each UTF-16 offset of a line's string (up to `textLength`) to its
  * 0-based terminal cell, using only the supported buffer API.
@@ -287,7 +292,8 @@ export function cellColumnsForLine(line: IBufferLine, textLength: number): numbe
  */
 export function createTerminalLinkProvider(
   term: Terminal,
-  onOpen: (link: ParsedTerminalFileLink) => void,
+  onOpenFile: (link: ParsedTerminalFileLink) => void,
+  onOpenWeb: (url: string) => void,
 ): ILinkProvider {
   return {
     provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void): void {
@@ -304,7 +310,8 @@ export function createTerminalLinkProvider(
       }
 
       const parsed = parseTerminalFileLinks(lineText);
-      if (parsed.length === 0) {
+      const webs = parseTerminalWebLinks(lineText);
+      if (parsed.length === 0 && webs.length === 0) {
         callback(undefined);
         return;
       }
@@ -312,35 +319,48 @@ export function createTerminalLinkProvider(
       // Link ranges are terminal cells (1-based, end-inclusive), not string offsets.
       const columns = cellColumnsForLine(line, lineText.length);
       const cellOf = (offset: number): number => (offset < columns.length ? columns[offset]! : offset);
-
-      const links: ILink[] = parsed.map((item) => {
-        const startX = cellOf(item.startIndex) + 1;
-        const endCharIdx = Math.max(0, item.endIndex - 1);
+      const rangeFor = (startIndex: number, endIndex: number): IBufferRange => {
+        const startX = cellOf(startIndex) + 1;
+        const endCharIdx = Math.max(0, endIndex - 1);
         const endX = cellOf(endCharIdx) + 1;
-
-        const range: IBufferRange = {
+        return {
           start: { x: startX, y: bufferLineNumber },
           end: { x: endX, y: bufferLineNumber },
         };
-        const tooltip = `Open ${item.path}${item.line ? `:${item.line}${item.column ? `:${item.column}` : ""}` : ""}`;
-        return {
+      };
+
+      const links: ILink[] = [
+        ...parsed.map((item): ILink => ({
           text: item.text,
-          range,
-          decorations: {
-            pointerCursor: true,
-            underline: true,
-          },
+          range: rangeFor(item.startIndex, item.endIndex),
+          decorations: { pointerCursor: true, underline: true },
           hover() {
-            term.element?.setAttribute("title", tooltip);
+            term.element?.setAttribute("title", `Open ${item.path}${item.line ? `:${item.line}${item.column ? `:${item.column}` : ""}` : ""}`);
           },
           leave() {
             term.element?.removeAttribute("title");
           },
-          activate(_event: MouseEvent) {
-            onOpen(item);
+          activate(event: MouseEvent) {
+            if (!isTerminalLinkClick(event)) return;
+            onOpenFile(item);
           },
-        };
-      });
+        })),
+        ...webs.map((item): ILink => ({
+          text: item.url,
+          range: rangeFor(item.startIndex, item.endIndex),
+          decorations: { pointerCursor: true, underline: true },
+          hover() {
+            term.element?.setAttribute("title", item.url);
+          },
+          leave() {
+            term.element?.removeAttribute("title");
+          },
+          activate(event: MouseEvent) {
+            if (!isTerminalLinkClick(event)) return;
+            onOpenWeb(item.url);
+          },
+        })),
+      ];
 
       callback(links);
     },

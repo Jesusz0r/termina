@@ -103,7 +103,7 @@ export function wrapSpans(spans: StyledSpan[], width: number): Array<{ frags: St
     row = [];
     used = 0;
   };
-  const add = (g: string, style: StyleId): void => {
+  const add = (g: string, style: StyleId, link?: string): void => {
     if (g === "\n") {
       flush();
       return;
@@ -111,18 +111,18 @@ export function wrapSpans(spans: StyledSpan[], width: number): Array<{ frags: St
     const cells = graphemeCells(g, used);
     if (cells === 0) {
       const last = row[row.length - 1];
-      if (last && last.style === style) last.text += g;
-      else row.push({ text: g, style });
+      if (last && last.style === style && last.link === link) last.text += g;
+      else row.push(link ? { text: g, style, link } : { text: g, style });
       return;
     }
     if (used > 0 && used + cells > cols) flush();
     const placed = graphemeCells(g, used);
     const last = row[row.length - 1];
-    if (last && last.style === style) last.text += g;
-    else row.push({ text: g, style });
+    if (last && last.style === style && last.link === link) last.text += g;
+    else row.push(link ? { text: g, style, link } : { text: g, style });
     used += placed;
   };
-  for (const span of spans) forEachGrapheme(span.text, (g) => add(g, span.style));
+  for (const span of spans) forEachGrapheme(span.text, (g) => add(g, span.style, span.link));
   rows.push({ frags: row, cells: used });
   return rows;
 }
@@ -156,9 +156,11 @@ export function paintRow(frags: StyledSpan[], cols: number, entry: TranscriptEnt
                 : frag.style === 6
                   ? "\x1b[2;90m"
                   : "";
-    if (sgr) out += sgr;
+    if (sgr || frag.link) out += sgr;
+    if (frag.link) out += `\x1b]8;;${frag.link}\x07\x1b[4m`;
     out += frag.text;
-    if (sgr) {
+    if (frag.link) out += "\x1b]8;;\x07";
+    if (sgr || frag.link) {
       out += "\x1b[0m";
       if (bg) out += `\x1b[48;5;${bg}m`;
       if (entry.kind === "thinking") out += "\x1b[3;90m";

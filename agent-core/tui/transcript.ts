@@ -4,6 +4,7 @@
  * Owns output sanitizing, markdown spans, transcript entries, and TUI IO
  * contracts. Split from agent-core/tui.ts (issue #38).
  */
+import { terminalOscUri } from "../../shared/terminal-link.ts";
 
 
 export const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -151,7 +152,7 @@ export function closeSanitize(input: string, start: SanitizerState): string {
 
 export type StyleId = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
-export type StyledSpan = { text: string; style: StyleId };
+export type StyledSpan = { text: string; style: StyleId; link?: string };
 
 
 type MarkdownBoundary = {
@@ -217,6 +218,21 @@ export function toolStatusLabel(state: ToolUiState | undefined): string {
 }
 
 
+/** Index of the `)` that closes a markdown link target, allowing parentheses inside the URL. */
+function markdownTargetEnd(text: string, openParen: number): number {
+  let depth = 1;
+  for (let i = openParen + 1; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === "\n") return -1;
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
 function parseInline(text: string, scanned: { n: number }, depth = 0): StyledSpan[] {
   scanned.n += text.length;
   if (depth >= MAX_MD_NEST) return text ? [{ text, style: 0 }] : [];
@@ -259,6 +275,20 @@ function parseInline(text: string, scanned: { n: number }, depth = 0): StyledSpa
         spans.push({ text: text.slice(i + 1, end), style: 3 });
         i = end + 1;
         continue;
+      }
+    }
+    if (text[i] === "[" && text[i - 1] !== "!") {
+      const labelEnd = text.indexOf("](", i + 1);
+      const targetEnd = labelEnd > i + 1 ? markdownTargetEnd(text, labelEnd + 1) : -1;
+      if (labelEnd > i + 1 && targetEnd > labelEnd + 2) {
+        const uri = terminalOscUri(text.slice(labelEnd + 2, targetEnd));
+        if (uri) {
+          flush(0);
+          const inner = parseInline(text.slice(i + 1, labelEnd), { n: 0 }, depth + 1);
+          for (const span of inner) spans.push({ text: span.text, style: span.style, link: span.link ?? uri });
+          i = targetEnd + 1;
+          continue;
+        }
       }
     }
     buf += text[i];

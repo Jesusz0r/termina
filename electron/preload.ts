@@ -158,6 +158,7 @@ const bridge: TerminaBridge = {
   projectClose: (projectId) => ipcRenderer.invoke("project:close", projectId),
   reorderProjects: (ids) => ipcRenderer.invoke("project:reorder", ids),
   reorderTerminals: (projectId, ids) => ipcRenderer.invoke("terminals:reorder", projectId, ids),
+  openExternal: (url) => ipcRenderer.invoke("shell:open-external", url),
   openFile: (path, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:open", path, owner),
   saveFile: (path, content, owner: ProjectWorkspaceRef, restore) =>
     ipcRenderer.invoke("file:save", path, content, owner, restore === true),

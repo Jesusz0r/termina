@@ -764,6 +764,8 @@ export interface TerminaBridge {
   reorderProjects(ids: string[]): Promise<{ ok: boolean }>;
   /** Persist one project's terminal tab order. `ids` is that project's terminals, in strip order. */
   reorderTerminals(projectId: string, ids: string[]): Promise<{ ok: boolean }>;
+  /** Open an http(s) URL in the system browser. */
+  openExternal(url: string): Promise<{ ok: boolean; error?: string }>;
   onProjectClosed(cb: (e: { projectId: string; activationGeneration: number }) => void): () => void;
   openFile(path: string, owner: ProjectWorkspaceRef): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }>;
   /** Persist an editor buffer. Pass restore to recreate a missing regular
