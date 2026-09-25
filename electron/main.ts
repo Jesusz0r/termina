@@ -10,10 +10,16 @@
 // First import: installs on evaluation, before any other module can stat into asar.
 import "./asar-stats-deprecation.ts";
 import { renameBoundEntry } from "./worldline-git.js";
-import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu, nativeTheme, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu, nativeTheme, protocol, shell } from "electron";
 
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "termina-media",
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
+  },
+]);
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { access, cp, lstat, mkdir, open, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat } from "node:fs/promises";
@@ -133,6 +139,7 @@ import {
   sameUserPath,
   sanitizeSessionDir,
 } from "./main/project-workspace.js";
+import { previewContentType, previewKind } from "../shared/preview-media.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { evictOldest } from "../shared/evict-oldest.js";
@@ -165,6 +172,8 @@ import {
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
+/** Images and PDFs are streamed, not loaded into the text editor. */
+const MAX_PREVIEW_FILE_SIZE = 32 * 1024 * 1024;
 const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
 /** Bound for ~/.termina/agent/auth.json when checking whether a provider exists. */
 const MAX_AUTH_JSON_BYTES = 128 * 1024;
@@ -8353,14 +8362,19 @@ class TerminaApp {
     });
   }
 
-  private async openFileInEditor(absPath: string, owner: unknown): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }> {
+  private async openFileInEditor(absPath: string, owner: unknown): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: true; path: string; preview: "image" | "pdf"; version: number } | { ok: false; path: string; error: string }> {
     const target = this.projectWorkspace(owner);
     if (!target) return { ok: false, path: absPath, error: "invalid project workspace" };
     const managed = await this.managedPath(absPath, target.workspace.id);
     if (!managed) return { ok: false, path: absPath, error: "path is outside a managed workspace" };
+    const kind = previewKind(managed.path);
     try {
       const st = await stat(managed.path);
       if (!st.isFile()) return { ok: false, path: managed.path, error: "not a file" };
+      if (kind) {
+        if (st.size > MAX_PREVIEW_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to preview (${st.size} bytes)` };
+        return { ok: true, path: managed.path, preview: kind, version: st.mtimeMs };
+      }
       if (st.size > MAX_OPEN_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to open (${st.size} bytes)` };
       const content = await readFile(managed.path, "utf8");
       // The file may have grown between the stat and the read: enforce the
@@ -8373,6 +8387,43 @@ class TerminaApp {
     } catch (err) {
       return { ok: false, path: managed.path, error: (err as Error).message };
     }
+  }
+
+  /** Stream one image or PDF that belongs to an open workspace. */
+  private async handleMediaPreview(request: Request): Promise<Response> {
+    let url: URL;
+    try {
+      url = new URL(request.url);
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+    const absPath = url.searchParams.get("path");
+    if (url.hostname !== "media" || !absPath || !previewKind(absPath) || absPath.includes("\0")) {
+      return new Response(null, { status: 404 });
+    }
+    for (const project of this.projects.values()) {
+      for (const ws of project.workspaces.values()) {
+        const managed = await this.managedPath(absPath, ws.id);
+        if (!managed || !previewKind(managed.path)) continue;
+        const type = previewContentType(managed.path);
+        if (!type) continue;
+        try {
+          const st = await stat(managed.path);
+          if (!st.isFile() || st.size > MAX_PREVIEW_FILE_SIZE) return new Response(null, { status: 404 });
+          const body = await readFile(managed.path);
+          return new Response(body, {
+            headers: {
+              "Content-Type": type,
+              "Content-Length": String(body.byteLength),
+              "Cache-Control": "no-store",
+            },
+          });
+        } catch {
+          return new Response(null, { status: 404 });
+        }
+      }
+    }
+    return new Response(null, { status: 404 });
   }
 
   /**
@@ -8586,6 +8637,7 @@ class TerminaApp {
       },
     });
     this.registerIpc();
+    protocol.handle("termina-media", (request) => this.handleMediaPreview(request));
     this.startLoginHintWatch();
     void detectShells();
     // The launch scratch cleanup is native-bound and asynchronous.  A

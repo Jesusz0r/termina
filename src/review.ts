@@ -150,7 +150,7 @@ export class ReviewView {
     this.owner = owner;
     this.nameEl.textContent = relPath;
     this.baseline = res.baseline;
-    const currentText = current.ok ? current.content : "";
+    const currentText = current.ok && "content" in current ? current.content : "";
 
     this.setDiff(this.baseline ?? "", currentText);
 
@@ -312,7 +312,7 @@ export class ReviewView {
           request.waiters.forEach((resolve) => resolve());
           continue;
         }
-        let current: { ok: true; content: string } | { ok: false; error?: string };
+        let current: { ok: true; content: string } | { ok: true; preview: "image" | "pdf" } | { ok: false; error?: string };
         try {
           current = request.content !== undefined
             ? { ok: true, content: request.content }
@@ -327,7 +327,7 @@ export class ReviewView {
         if (request.version === this.refreshVersion && sameReview()) {
           if (!current.ok) {
             toast(`could not refresh review: ${current.error}`, "error");
-          } else {
+          } else if ("content" in current) {
             this.modifiedModel?.setValue(current.content);
             (document.getElementById("review-open") as HTMLButtonElement).disabled = false;
           }

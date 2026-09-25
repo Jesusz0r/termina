@@ -767,7 +767,7 @@ export interface TerminaBridge {
   /** Open an http(s) URL in the system browser. */
   openExternal(url: string): Promise<{ ok: boolean; error?: string }>;
   onProjectClosed(cb: (e: { projectId: string; activationGeneration: number }) => void): () => void;
-  openFile(path: string, owner: ProjectWorkspaceRef): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }>;
+  openFile(path: string, owner: ProjectWorkspaceRef): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: true; path: string; preview: "image" | "pdf"; version: number } | { ok: false; path: string; error: string }>;
   /** Persist an editor buffer. Pass restore to recreate a missing regular
    *  file (and parents) under the same write lease; ordinary save still
    *  refuses a missing path. */

@@ -2251,7 +2251,8 @@ function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: Edit
       return;
     }
     if (res.ok && projectViews.get(owner.projectId)?.editorMgr === editor) {
-      editor.updateContent(path, res.content, res.changedLines ?? latest?.changedLines);
+      if (res.ok && "preview" in res) editor.refreshPreview(path, res.preview, res.version);
+      else if (res.ok) editor.updateContent(path, res.content, res.changedLines ?? latest?.changedLines);
     }
   }).catch((err) => {
     if (largeChangeEpoch.get(key) !== epoch) return;

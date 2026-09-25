@@ -8,6 +8,7 @@
  */
 import * as monaco from "monaco-editor";
 import { canonicalizePath } from "../shared/canonical-path";
+import { previewMediaUrl, type PreviewKind } from "../shared/preview-media";
 import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { languageForPath } from "./editor-language";
@@ -145,20 +146,32 @@ function acquireSharedFileModel(
   };
 }
 
-interface OpenTab {
-  key: string; // absolute path
+interface TextTab {
+  key: string;
+  media: null;
   model: monaco.editor.ITextModel;
   owner: ProjectWorkspaceRef | null;
   releaseModel: () => void;
   contentListener: monaco.IDisposable | null;
   dom: HTMLElement;
   dirtyDot: HTMLElement;
-  /** The model version last known to match the disk content. */
   savedVersionId: number;
-  /** Live agent-change decorations on this model. */
   changeDecorations: string[];
-  /** First changed line to reveal when this tab becomes active. */
   agentRevealLine: number | null;
+}
+
+interface MediaTab {
+  key: string;
+  media: { kind: PreviewKind; version: number };
+  owner: ProjectWorkspaceRef | null;
+  dom: HTMLElement;
+  dirtyDot: HTMLElement;
+}
+
+type OpenTab = TextTab | MediaTab;
+
+function isTextTab(tab: OpenTab): tab is TextTab {
+  return tab.media === null;
 }
 
 const AGENT_CHANGE_DECO: monaco.editor.IModelDecorationOptions = {
@@ -183,6 +196,10 @@ export class EditorManager {
   private needsLogin = false;
   /** The single replaceable preview tab (VS Code style). */
   private previewKey: string | null = null;
+  /** Opens in flight, keyed by the requested path, so a second click waits. */
+  private opening = new Map<string, Promise<void>>();
+  private editorContainer: HTMLElement;
+  private previewEl: HTMLElement;
   /** Tab keys with unsaved user edits. */
   private userDirty = new Set<string>();
   /** Dirty tabs whose file was deleted on disk (kept open for an explicit save-or-discard). */
@@ -211,6 +228,11 @@ export class EditorManager {
     applyEmptyStateShortcutHints(emptyEl);
     this.projectOpen = projectOpen;
     this.needsLogin = projectOpen && needsLogin;
+    this.editorContainer = container;
+    this.previewEl = document.createElement("div");
+    this.previewEl.className = "editor-preview";
+    this.previewEl.hidden = true;
+    container.insertAdjacentElement("afterend", this.previewEl);
 
     this.editor = monaco.editor.create(container, {
       theme: "termina-dark",
@@ -299,24 +321,67 @@ export class EditorManager {
       if (!preview && this.previewKey === key) this.pinPreview();
       this.onFileOpened();
       this.activate(key);
-      if (typeof opts.line === "number" && opts.line > 0) {
+      if (typeof opts.line === "number" && opts.line > 0 && isTextTab(existing)) {
         this.revealPosition(opts.line, opts.column);
       }
       return;
     }
-    // Keep a replacement tab in the map before closing the previous preview.
-    // Closing the last tab first would collapse the editor, then expand it again.
+    const pending = this.opening.get(key);
+    if (pending) return pending;
+    const run = this.openFileNow(path, key, preview, owner, opts.line, opts.column);
+    this.opening.set(key, run);
+    try {
+      await run;
+    } finally {
+      if (this.opening.get(key) === run) this.opening.delete(key);
+    }
+  }
+
+  private async openFileNow(
+    path: string,
+    key: string,
+    preview: boolean,
+    owner: ProjectWorkspaceRef,
+    line: number | undefined,
+    column: number | undefined,
+  ): Promise<void> {
     const replacing = preview && this.previewKey && this.previewKey !== key ? this.previewKey : null;
+    const res = await window.termina.openFile(path, owner);
+    if (!res.ok) throw new Error(res.error);
+    const resolvedPath = canonicalizePath(res.path);
+    if (resolvedPath !== key) {
+      if (this.tabs.has(resolvedPath)) {
+        this.activate(resolvedPath);
+        this.onFileOpened();
+        return;
+      }
+      key = resolvedPath;
+    }
+    if ("preview" in res) {
+      const tab = this.makeTab(key, owner, { media: { kind: res.preview, version: res.version } });
+      if (preview) {
+        this.previewKey = key;
+        tab.dom.classList.add("preview");
+      }
+      this.tabs.set(key, tab);
+      this.order.push(key);
+      if (replacing && this.tabs.has(replacing)) this.closeTab(replacing);
+      this.renderTabs();
+      this.activate(key);
+      this.onFileOpened();
+      return;
+    }
     const lease = acquireSharedFileModel(key, owner);
     const model = lease.model;
-    const tab = this.makeTab(key, model, owner, lease.release);
+    const tab = this.makeTab(key, owner, { model, releaseModel: lease.release });
+    if (!isTextTab(tab)) {
+      lease.release();
+      return;
+    }
     if (preview) {
       this.previewKey = key;
       tab.dom.classList.add("preview");
     }
-    // User edits pin the preview into a permanent tab. Programmatic content
-    // replacements (watcher/agent live updates) come through as isFlush and
-    // do not pin. The same event marks the tab unsaved.
     tab.contentListener = model.onDidChangeContent((e) => {
       if (e.isFlush) return;
       this.clearAgentChanges(tab.key);
@@ -330,48 +395,21 @@ export class EditorManager {
     this.syncEmptyState();
 
     const initialVersionId = model.getAlternativeVersionId();
-    const res = await window.termina.openFile(path, owner);
-    if (res.ok) {
-      const current = this.tabs.get(key);
-      // Retarget above the version check so a lost-race tab still hears
-      // watcher pushes on main's realpath (user symlinks that are not
-      // /tmp or /var). /tmp↔/private/tmp already matched at open.
-      if (current?.model === model && typeof res.path === "string" && res.path) {
-        const resolved = canonicalizePath(res.path);
-        if (resolved !== key) key = this.retargetTab(key, resolved);
+    if (model.getAlternativeVersionId() === initialVersionId) {
+      model.setValue(res.content);
+      tab.savedVersionId = model.getAlternativeVersionId();
+      if (res.changedLines && res.changedLines.length > 0) {
+        this.paintAgentChanges(tab, res.changedLines);
+        tab.agentRevealLine = res.changedLines[0];
+      } else {
+        tab.agentRevealLine = null;
       }
-      if (current?.model === model && model.getAlternativeVersionId() === initialVersionId) {
-        model.setValue(res.content);
-        tab.savedVersionId = model.getAlternativeVersionId();
-        // Paint the last watcher transition even though this open has no
-        // previous model content to diff against.
-        if (res.changedLines && res.changedLines.length > 0) {
-          this.paintAgentChanges(tab, res.changedLines);
-          tab.agentRevealLine = res.changedLines[0];
-        } else {
-          tab.agentRevealLine = null;
-        }
-      } else if (current?.model === model && this.userDirty.has(key)) {
-        // The initial read lost a race with a user edit. Never replace the
-        // user's model with delayed disk bytes; surface the normal conflict.
-        if (!current.dom.classList.contains("conflict")) {
-          current.dom.classList.add("conflict");
-          current.dom.title = `${key} — changed on disk while you have unsaved edits`;
-          this.onConflict(key);
-        }
-        if (this.previewKey === key) this.pinPreview();
-      }
-      if (this.tabs.get(key)?.model === model) {
-        this.activate(key);
-        this.onFileOpened();
-        if (typeof opts.line === "number" && opts.line > 0) {
-          this.revealPosition(opts.line, opts.column);
-        }
-      }
-      return;
     }
-    if (this.tabs.get(key)?.model === model && model.getAlternativeVersionId() === initialVersionId) this.closeTab(key);
-    throw new Error(res.error);
+    this.activate(key);
+    this.onFileOpened();
+    if (typeof line === "number" && line > 0) {
+      this.revealPosition(line, column);
+    }
   }
 
   /** True when at least one file or snapshot tab is open. */
@@ -392,28 +430,6 @@ export class EditorManager {
   private resolveKey(path: string): string | null {
     const key = canonicalizePath(path);
     return this.tabs.has(key) ? key : null;
-  }
-
-  /** Move a tab from the as-opened key to main's realpath. No alias table. */
-  private retargetTab(from: string, to: string): string {
-    if (from === to) return from;
-    const tab = this.tabs.get(from);
-    if (!tab || (this.tabs.has(to) && this.tabs.get(to) !== tab)) return from;
-    this.tabs.delete(from);
-    tab.key = to;
-    this.tabs.set(to, tab);
-    this.order = this.order.map((k) => (k === from ? to : k));
-    if (this.previewKey === from) this.previewKey = to;
-    if (this.activeKey === from) this.activeKey = to;
-    if (this.userDirty.delete(from)) this.userDirty.add(to);
-    if (this.deletedOnDisk.delete(from)) this.deletedOnDisk.add(to);
-    if (this.mineKeys.delete(from)) this.mineKeys.add(to);
-    const queued = this.saveQueue.get(from);
-    if (queued) {
-      this.saveQueue.delete(from);
-      this.saveQueue.set(to, queued);
-    }
-    return to;
   }
 
   /** Update model content from the watcher (live edits). A model with
@@ -439,6 +455,7 @@ export class EditorManager {
       }
       return;
     }
+    if (!isTextTab(tab)) return;
     const model = tab.model;
     const before = model.getValue();
     if (before === content) return;
@@ -464,7 +481,7 @@ export class EditorManager {
     }
   }
 
-  private paintAgentChanges(tab: OpenTab, lines: number[]): void {
+  private paintAgentChanges(tab: TextTab, lines: number[]): void {
     const last = tab.model.getLineCount();
     const decos: monaco.editor.IModelDeltaDecoration[] = [];
     for (const line of lines) {
@@ -476,7 +493,7 @@ export class EditorManager {
 
   private clearAgentChanges(key: string): void {
     const tab = this.tabs.get(key);
-    if (!tab) return;
+    if (!tab || !isTextTab(tab)) return;
     tab.agentRevealLine = null;
     if (tab.changeDecorations.length === 0) return;
     tab.changeDecorations = tab.model.deltaDecorations(tab.changeDecorations, []);
@@ -489,7 +506,7 @@ export class EditorManager {
   /** The tab dot reflects unsaved user edits only: content that matches
    *  the disk (agent pushes, saves, undo back to the saved version) hides
    *  it again. */
-  private syncDirty(tab: OpenTab): void {
+  private syncDirty(tab: TextTab): void {
     const dirty = tab.model.getAlternativeVersionId() !== tab.savedVersionId;
     tab.dirtyDot.style.display = dirty ? "inline-block" : "none";
     if (dirty) this.userDirty.add(tab.key);
@@ -543,7 +560,11 @@ export class EditorManager {
     for (const tab of this.tabs.values()) tab.dom.classList.remove("mine");
   }
 
-  private makeTab(key: string, model: monaco.editor.ITextModel, owner: ProjectWorkspaceRef | null, releaseModel: () => void): OpenTab {
+  private makeTab(
+    key: string,
+    owner: ProjectWorkspaceRef | null,
+    source: { model: monaco.editor.ITextModel; releaseModel: () => void } | { media: MediaTab["media"] },
+  ): OpenTab {
     const dom = document.createElement("div");
     dom.className = "editor-tab";
     const name = document.createElement("span");
@@ -563,18 +584,27 @@ export class EditorManager {
     const close = document.createElement("span");
     close.className = "tab-close";
     close.textContent = "×";
-    const tab: OpenTab = {
-      key,
-      model,
-      owner,
-      releaseModel,
-      contentListener: null,
-      dom,
-      dirtyDot: dirty,
-      savedVersionId: model.getAlternativeVersionId(),
-      changeDecorations: [],
-      agentRevealLine: null,
-    };
+    const tab: OpenTab = "model" in source
+      ? {
+          key,
+          media: null,
+          model: source.model,
+          owner,
+          releaseModel: source.releaseModel,
+          contentListener: null,
+          dom,
+          dirtyDot: dirty,
+          savedVersionId: source.model.getAlternativeVersionId(),
+          changeDecorations: [],
+          agentRevealLine: null,
+        }
+      : {
+          key,
+          media: source.media,
+          owner,
+          dom,
+          dirtyDot: dirty,
+        };
     // Listeners read tab.key so a post-open retarget keeps chrome working.
     mine.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -590,7 +620,7 @@ export class EditorManager {
       // A direct editor gesture: this is the one activation path that
       // takes focus. Programmatic opens never steal terminal focus.
       this.activate(tab.key);
-      this.focusEditor();
+      if (isTextTab(tab)) this.focusEditor();
     });
     dom.addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -643,13 +673,15 @@ export class EditorManager {
     const tab = this.tabs.get(key);
     if (!tab) return;
     this.activeKey = key;
-    this.editor.setModel(tab.model);
+    if (isTextTab(tab)) this.editor.setModel(tab.model);
+    else this.editor.setModel(null);
     for (const t of this.tabs.values()) t.dom.classList.toggle("active", t.key === key);
+    this.showMedia(tab);
     this.syncEmptyState();
     this.layout();
     // No focus here: opening or switching tabs must not steal terminal
     // focus. Only a direct click on the tab chrome focuses (see makeTab).
-    if (tab.agentRevealLine !== null) {
+    if (isTextTab(tab) && tab.agentRevealLine !== null) {
       this.revealAgentChange(tab.agentRevealLine);
       tab.agentRevealLine = null;
     }
@@ -658,6 +690,40 @@ export class EditorManager {
   /** Recalculate Monaco size. Call this after a hidden container becomes visible. */
   layout(): void {
     this.editor.layout();
+  }
+
+  private showMedia(tab: OpenTab): void {
+    if (!tab.media) {
+      this.previewEl.hidden = true;
+      this.previewEl.replaceChildren();
+      this.editorContainer.hidden = false;
+      return;
+    }
+    this.editorContainer.hidden = true;
+    this.previewEl.hidden = false;
+    this.previewEl.replaceChildren();
+    const src = previewMediaUrl(tab.key, tab.media.version);
+    if (tab.media.kind === "image") {
+      const img = document.createElement("img");
+      img.alt = pathBasename(tab.key);
+      img.src = src;
+      this.previewEl.append(img);
+      return;
+    }
+    const frame = document.createElement("iframe");
+    frame.title = pathBasename(tab.key);
+    frame.src = src;
+    this.previewEl.append(frame);
+  }
+
+  /** A watched image or PDF was rewritten. Reload the preview, not the text model. */
+  refreshPreview(path: string, kind: PreviewKind, version: number): void {
+    const resolved = this.resolveKey(path);
+    if (resolved === null) return;
+    const tab = this.tabs.get(resolved);
+    if (!tab?.media) return;
+    tab.media = { kind, version };
+    if (this.activeKey === resolved) this.showMedia(tab);
   }
 
   /** Move cursor to line/column and scroll it into center. Never focuses:
@@ -686,9 +752,11 @@ export class EditorManager {
   closeTab(key: string): void {
     const tab = this.tabs.get(key);
     if (!tab) return;
-    tab.contentListener?.dispose();
-    tab.contentListener = null;
-    tab.releaseModel();
+    if (isTextTab(tab)) {
+      tab.contentListener?.dispose();
+      tab.contentListener = null;
+      tab.releaseModel();
+    }
     this.tabs.delete(key);
     this.order = this.order.filter((k) => k !== key);
     this.userDirty.delete(key);
@@ -700,6 +768,9 @@ export class EditorManager {
       if (this.activeKey) this.activate(this.activeKey);
       else {
         this.editor.setModel(null);
+        this.previewEl.hidden = true;
+        this.previewEl.replaceChildren();
+        this.editorContainer.hidden = false;
         this.syncEmptyState();
       }
     }
@@ -709,7 +780,7 @@ export class EditorManager {
   async saveActive(): Promise<void> {
     if (!this.activeKey || this.activeKey.startsWith("timeline:")) return;
     const tab = this.tabs.get(this.activeKey);
-    if (!tab) return;
+    if (!tab || !isTextTab(tab)) return;
     if (!tab.owner) {
       toast(`could not save ${pathBasename(tab.key)}: file owner is unavailable`, "error");
       return;
@@ -718,7 +789,7 @@ export class EditorManager {
       const live = this.tabs.get(tab.key);
       // The tab closed (or was replaced) while queued: a stale op must not
       // touch the disposed model, let alone a new tab under the same key.
-      if (!live || live !== tab || !live.owner) return;
+      if (!live || live !== tab || !live.owner || !isTextTab(live)) return;
       const submittedText = live.model.getValue();
       const submittedVersion = live.model.getAlternativeVersionId();
       const savedAtSubmit = live.savedVersionId;
@@ -765,7 +836,7 @@ export class EditorManager {
    *  tab ignores the late ack. */
   private acknowledgeSave(key: string, model: monaco.editor.ITextModel, submittedVersion: number, savedAtSubmit: number): void {
     const tab = this.tabs.get(key);
-    if (!tab || tab.model !== model) return;
+    if (!tab || !isTextTab(tab) || tab.model !== model) return;
     if (tab.savedVersionId === savedAtSubmit) tab.savedVersionId = submittedVersion;
     this.syncDirty(tab);
     if (this.deletedOnDisk.delete(key)) {
@@ -792,14 +863,14 @@ export class EditorManager {
     for (const key of keys) {
       if (!this.userDirty.has(key)) continue;
       const tab = this.tabs.get(key);
-      if (!tab) continue;
+      if (!tab || !isTextTab(tab)) continue;
       if (!tab.owner) {
         failed.push(key);
         continue;
       }
       const ok = await this.chainSave(key, async () => {
         const live = this.tabs.get(key);
-        if (!live || live !== tab || !live.owner) return false;
+        if (!live || live !== tab || !live.owner || !isTextTab(live)) return false;
         const submittedText = live.model.getValue();
         const submittedVersion = live.model.getAlternativeVersionId();
         const savedAtSubmit = live.savedVersionId;
@@ -1008,7 +1079,7 @@ export class EditorManager {
     // Replay shows one tab: close the previous snapshot tab. Clicks keep one
     // tab per dot, so comparing moments stays easy.
     const existing = this.tabs.get(key);
-    if (existing) {
+    if (existing && isTextTab(existing)) {
       existing.model.setValue(content);
       this.activate(key);
       this.onFileOpened();
@@ -1026,7 +1097,7 @@ export class EditorManager {
     }
     const replacingPreview = this.previewKey && this.previewKey !== key ? this.previewKey : null;
     const model = monaco.editor.createModel(content, languageForPath(relPath), monaco.Uri.parse(`timeline://${terminalId}/${encodeURIComponent(eventKey)}`));
-    const tab = this.makeTab(key, model, null, () => model.dispose());
+    const tab = this.makeTab(key, null, { model, releaseModel: () => model.dispose() });
     tab.dom.classList.add("timeline-tab");
     tab.dom.title = `${relPath} — ${label}`;
     this.tabs.set(key, tab);
@@ -1143,6 +1214,7 @@ export class EditorManager {
     closeContextMenu();
     this.editor.dispose();
     for (const tab of this.tabs.values()) {
+      if (!isTextTab(tab)) continue;
       tab.contentListener?.dispose();
       tab.contentListener = null;
       tab.releaseModel();
