@@ -156,6 +156,8 @@ const bridge: TerminaBridge = {
   onProjectClosed: (cb) => bindPushEvent("project:closed", cb),
   projectActivate: (projectId) => ipcRenderer.invoke("project:activate", projectId),
   projectClose: (projectId) => ipcRenderer.invoke("project:close", projectId),
+  reorderProjects: (ids) => ipcRenderer.invoke("project:reorder", ids),
+  reorderTerminals: (projectId, ids) => ipcRenderer.invoke("terminals:reorder", projectId, ids),
   openFile: (path, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:open", path, owner),
   saveFile: (path, content, owner: ProjectWorkspaceRef, restore) =>
     ipcRenderer.invoke("file:save", path, content, owner, restore === true),

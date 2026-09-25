@@ -760,6 +760,10 @@ export interface TerminaBridge {
   projectOpenPath(cwd: string): Promise<{ cwd: string } | { cancelled: true }>;
   projectActivate(projectId: string): Promise<{ ok: boolean }>;
   projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
+  /** Persist project tab order. `ids` is every open project, in strip order. */
+  reorderProjects(ids: string[]): Promise<{ ok: boolean }>;
+  /** Persist one project's terminal tab order. `ids` is that project's terminals, in strip order. */
+  reorderTerminals(projectId: string, ids: string[]): Promise<{ ok: boolean }>;
   onProjectClosed(cb: (e: { projectId: string; activationGeneration: number }) => void): () => void;
   openFile(path: string, owner: ProjectWorkspaceRef): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }>;
   /** Persist an editor buffer. Pass restore to recreate a missing regular

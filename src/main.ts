@@ -79,6 +79,7 @@ import {
   forgetActivityCue,
   noteActivityCue,
 } from "./activity-cue";
+import { attachTabReorder } from "./main/tab-reorder";
 import { CHALLENGE_PROFILES, isTuiOwnedShortcut, pathBasename } from "../shared/types";
 import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
@@ -805,7 +806,6 @@ function createPaneShell(instanceId: string): Pane {
   });
   tabEl.append(statusEl, nameEl, wlineEl, closeEl);
   tabEl.addEventListener("click", () => activatePane(instanceId));
-  setupTabDrag(tabEl);
   termTabsList.appendChild(tabEl);
 
   const view = new PtyView(
@@ -1943,27 +1943,25 @@ createTerminalDropZone({
   },
 });
 
-// drag to reorder terminal tabs
-let dragTabEl: HTMLElement | null = null;
-function setupTabDrag(tabEl: HTMLElement): void {
-  tabEl.draggable = true;
-  tabEl.addEventListener("dragstart", () => {
-    dragTabEl = tabEl;
-    tabEl.classList.add("dragging");
-  });
-  tabEl.addEventListener("dragend", () => {
-    dragTabEl = null;
-    tabEl.classList.remove("dragging");
-  });
-  tabEl.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    if (!dragTabEl || dragTabEl === tabEl) return;
-    const list = termTabsList;
-    const rect = tabEl.getBoundingClientRect();
-    const before = e.clientX < rect.left + rect.width / 2;
-    list.insertBefore(dragTabEl, before ? tabEl : tabEl.nextSibling);
-  });
-}
+attachTabReorder(projectTabsEl, {
+  tabClass: "project-tab",
+  onCommit: () => {
+    void window.termina.reorderProjects(orderedProjectIds()).catch((err) => {
+      toast(`could not save project tab order: ${(err as Error).message}`, "warning");
+    });
+  },
+});
+attachTabReorder(termTabsList, {
+  tabClass: "terminal-tab",
+  canDrag: (tab) => tab.style.display !== "none",
+  onCommit: () => {
+    if (!activeProjectId) return;
+    const ids = orderedProjectPanes().map((pane) => pane.instanceId);
+    void window.termina.reorderTerminals(activeProjectId, ids).catch((err) => {
+      toast(`could not save terminal tab order: ${(err as Error).message}`, "warning");
+    });
+  },
+});
 
 // -------------------------------------------------------- agent events ----
 

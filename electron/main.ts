@@ -133,6 +133,7 @@ import {
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { evictOldest } from "../shared/evict-oldest.js";
+import { reorderPermutation } from "../shared/tab-order.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
 import { syncParentDir } from "../shared/fsync.js";
 import { isErrno } from "../shared/guards.js";
@@ -7902,6 +7903,8 @@ class TerminaApp {
       if (typeof projectId !== "string") return { ok: false, error: "invalid project" };
       return this.closeProject(projectId);
     });
+    ipcMain.handle("project:reorder", (_e, ids: unknown) => this.reorderProjects(ids));
+    ipcMain.handle("terminals:reorder", (_e, projectId: unknown, ids: unknown) => this.reorderProjectTerminals(projectId, ids));
 
     ipcMain.handle("clipboard:write", (_e, text: unknown) => {
       if (typeof text !== "string") return { ok: false, error: "clipboard text is invalid" };
@@ -8727,6 +8730,35 @@ class TerminaApp {
     } finally {
       this.sendInstances();
     }
+  }
+
+  /** Write project-tab order. The next launch reopens `openProjects` in this sequence. */
+  private reorderProjects(ids: unknown): { ok: boolean } {
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) return { ok: false };
+    const current = [...this.projects.keys()];
+    const next = reorderPermutation(current, ids as string[]);
+    if (!next) return { ok: false };
+    if (next.every((id, index) => id === current[index])) return { ok: true };
+    const ordered = next.map((id) => this.projects.get(id)!);
+    for (const id of next) this.projects.delete(id);
+    for (const project of ordered) this.projects.set(project.id, project);
+    void this.persistOpenProjects();
+    return { ok: true };
+  }
+
+  /** Write one project's terminal-tab order. The roster restores tabs in this sequence. */
+  private reorderProjectTerminals(projectId: unknown, ids: unknown): { ok: boolean } {
+    if (typeof projectId !== "string" || !Array.isArray(ids) || ids.some((id) => typeof id !== "string")) return { ok: false };
+    const project = this.projects.get(projectId);
+    if (!project) return { ok: false };
+    const current = [...project.terminalIds];
+    const next = reorderPermutation(current, ids as string[]);
+    if (!next) return { ok: false };
+    if (next.every((id, index) => id === current[index])) return { ok: true };
+    project.terminalIds.clear();
+    for (const id of next) project.terminalIds.add(id);
+    if (!this.projectIsSwitching(project.id)) this.saveTerminalRoster(project);
+    return { ok: true };
   }
 
   /** Record the open projects so the next launch restores them. */

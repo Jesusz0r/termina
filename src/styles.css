@@ -745,8 +745,54 @@ body {
   color: var(--text);
 }
 
-.terminal-tab.dragging {
-  opacity: 0.5;
+.terminal-tab,
+.project-tab {
+  cursor: grab;
+  transition: transform 140ms ease;
+}
+
+.tab-close {
+  cursor: pointer;
+}
+
+body.tab-reordering,
+body.tab-reordering * {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.tab-grabbed {
+  position: fixed;
+  z-index: 80;
+  margin: 0;
+  pointer-events: none;
+  cursor: grabbing;
+  transform: scale(1.04) translateY(-2px);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.terminal-tab.tab-grabbed {
+  background: var(--bg-raised);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.project-tab.tab-grabbed {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.tab-drop-slot {
+  flex: 0 0 auto;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+#project-tabs > .tab-drop-slot {
+  border-radius: 6px 6px 0 0;
 }
 
 .terminal-tab .tab-name {
@@ -2171,7 +2217,7 @@ body {
   border: 1px solid transparent;
   border-bottom: none;
   border-radius: 6px 6px 0 0;
-  cursor: pointer;
+  cursor: grab;
   max-width: 220px;
   white-space: nowrap;
   overflow: visible;
