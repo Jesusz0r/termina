@@ -10,7 +10,7 @@ import {
   type SubagentChild,
   type SubagentLauncher,
 } from "../../../electron/subagents.ts";
-import { parseSubagentResultFile } from "../../../agent-core/subagents.ts";
+import { MAX_SUBAGENT_RUNS_USER, parseSubagentResultFile } from "../../../agent-core/subagents.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -91,6 +91,7 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
 function setup(opts: {
   maxAttempts?: number;
   maxChildren?: number;
+  canonicalPath?: (path: string) => Promise<string>;
   backoffMs?: number[];
   launchFailures?: number;
   dispatch?: { keys: Set<string>; root: string };
@@ -101,7 +102,7 @@ function setup(opts: {
   eventsDirFor?: (terminalId: string) => string | null;
 } = {}) {
   const dir = tmp();
-  const { dispatch, launchFailures = 0, isWorldlineTerminal, workspaceRootFor, autoApproveAllowedFor, sessionRootFor, eventsDirFor, ...hostOpts } = opts;
+  const { canonicalPath, dispatch, launchFailures = 0, isWorldlineTerminal, workspaceRootFor, autoApproveAllowedFor, sessionRootFor, eventsDirFor, ...hostOpts } = opts;
   const notes: Array<{ terminalId: string; note: string }> = [];
   const watched: string[] = [];
   const unwatched: string[] = [];
@@ -128,13 +129,13 @@ function setup(opts: {
       attachSession: (terminalId, viewerId) => { sessions.push({ op: "attach", terminalId, viewerId }); },
       detachSession: (terminalId, viewerId) => { sessions.push({ op: "detach", terminalId, viewerId }); },
       dispatchKeysFor: async () => dispatch ?? { keys: new Set<string>(), root: "" },
-      canonicalPath: async (p) => {
+      canonicalPath: canonicalPath ?? (async (p) => {
         try {
           return realpathSync(p);
         } catch {
           return p;
         }
-      },
+      }),
       isWorldlineTerminal: isWorldlineTerminal ?? (() => false),
       workspaceRootFor: workspaceRootFor ?? (() => ({ root: "/", cwd: "/" })),
       autoApproveAllowedFor: autoApproveAllowedFor ?? (() => false),
@@ -182,6 +183,31 @@ describe("SubagentHost", () => {
     await s.host.handleSpawn("term-7", "bg-1", "some/dir.task.json");
     await s.host.handleSpawn("term-7", "bg-1", "run.task");
     expect(s.host.activeCount()).toBe(0);
+  });
+
+  it.each([false, true])("checks capacity atomically after asynchronous claims (user requested: %s)", async (userRequested) => {
+    const cap = userRequested ? MAX_SUBAGENT_RUNS_USER : 1;
+    const waiters: Array<() => void> = [];
+    const s = setup({ maxChildren: 1, canonicalPath: async (path) => {
+      if (/claim-\d+$/.test(path)) await new Promise<void>((resolve) => {
+        waiters.push(resolve);
+        if (waiters.length === cap + 1) for (const release of waiters) release();
+      });
+      return path;
+    } });
+    const cwd = tmp();
+    await Promise.all(Array.from({ length: cap + 1 }, (_, index) => {
+      const runId = `bg-${index + 1}`;
+      const name = `subagent-term-7-${runId}.task.json`;
+      s.writeTask(validTask({ runId, cwd, userRequested, paths: [`claim-${index}`] }), name);
+      return s.host.handleSpawn("term-7", runId, name);
+    }));
+    expect(s.host.activeCount()).toBe(cap);
+    expect(s.launches).toHaveLength(cap);
+    expect(s.notes.filter(({ note }) => note.includes("at capacity"))).toHaveLength(1);
+    s.host.killOwner("term-7", "test complete");
+    for (const child of s.procs) child.exit(null, "SIGTERM");
+    await until(() => s.notes.length === cap + 1);
   });
 
   it("caps concurrent children", async () => {

@@ -467,13 +467,6 @@ export class SubagentHost {
         }
       }
     }
-    const cap = task.userRequested
-      ? Math.max(this.maxChildren, MAX_SUBAGENT_HOST_CHILDREN_USER)
-      : this.maxChildren;
-    if (this.runs.size >= cap) {
-      await this.finishFailed(sourceTerminalId, runId, task, `subagent host at capacity (${cap} runs)`);
-      return;
-    }
     let cwdStat: { isDirectory(): boolean } | null = null;
     try {
       cwdStat = statSync(task.cwd);
@@ -563,6 +556,13 @@ export class SubagentHost {
         );
         return;
       }
+    }
+    const cap = task.userRequested
+      ? Math.max(this.maxChildren, MAX_SUBAGENT_HOST_CHILDREN_USER)
+      : this.maxChildren;
+    if (this.runs.size >= cap) {
+      await this.finishFailed(sourceTerminalId, runId, task, `subagent host at capacity (${cap} runs)`);
+      return;
     }
     this.runs.set(key, run);
     await this.startAttempt(run);
