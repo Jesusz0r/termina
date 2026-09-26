@@ -1,13 +1,15 @@
 /**
  * Pointer reorder for a tab strip.
  *
- * The grabbed tab lifts out of the strip and follows the pointer. A slot
- * stays in the strip and moves as the pointer crosses a neighbor's midpoint,
+ * A click switches. The grabbed tab lifts only after the press is held, then
+ * follows the pointer. A slot stays in the strip and moves as the pointer
+ * crosses a neighbor's midpoint,
  * and the other tabs slide into the gap before the pointer is released.
  */
 import { insertionIndex } from "../../shared/tab-order";
 
-const GRAB_PX = 5;
+/** A press that is released before this is a click. Drag starts only on a hold. */
+const HOLD_MS = 300;
 
 export function attachTabReorder(
   list: HTMLElement,
@@ -19,14 +21,15 @@ export function attachTabReorder(
 ): void {
   let pointerId = -1;
   let tab: HTMLElement | null = null;
-  let startX = 0;
-  let startY = 0;
   let originNext: ChildNode | null = null;
   let placeholder: HTMLElement | null = null;
   let offsetX = 0;
   let offsetY = 0;
   let dragged = false;
   let suppressClick = false;
+  let holdTimer: number | null = null;
+  let lastX = 0;
+  let lastY = 0;
 
   const canDrag = opts.canDrag ?? (() => true);
 
@@ -103,7 +106,13 @@ export function attachTabReorder(
     slide(() => list.insertBefore(slot, anchor));
   };
 
-  const lift = (el: HTMLElement, event: PointerEvent): void => {
+  const clearHold = (): void => {
+    if (holdTimer === null) return;
+    window.clearTimeout(holdTimer);
+    holdTimer = null;
+  };
+
+  const lift = (el: HTMLElement, clientX: number, clientY: number): void => {
     const rect = el.getBoundingClientRect();
     originNext = el.nextSibling;
     const slot = document.createElement("div");
@@ -112,8 +121,8 @@ export function attachTabReorder(
     slot.style.height = `${rect.height}px`;
     placeholder = slot;
     el.before(slot);
-    offsetX = event.clientX - rect.left;
-    offsetY = event.clientY - rect.top;
+    offsetX = clientX - rect.left;
+    offsetY = clientY - rect.top;
     el.classList.add("tab-grabbed");
     el.style.width = `${rect.width}px`;
     el.style.height = `${rect.height}px`;
@@ -132,18 +141,26 @@ export function attachTabReorder(
     if (!canDrag(hit)) return;
     pointerId = event.pointerId;
     tab = hit;
-    startX = event.clientX;
-    startY = event.clientY;
+    lastX = event.clientX;
+    lastY = event.clientY;
     dragged = false;
-    list.setPointerCapture(event.pointerId);
+    clearHold();
+    // Capture only once the hold becomes a drag. Capturing on press retargets
+    // the click to the strip, so the tab's switch handler never runs.
+    holdTimer = window.setTimeout(() => {
+      holdTimer = null;
+      if (!tab || pointerId !== event.pointerId) return;
+      lift(tab, lastX, lastY);
+      try {
+        list.setPointerCapture(event.pointerId);
+      } catch {
+        // The press already ended; pointerup puts the tab back.
+      }
+    }, HOLD_MS);
   });
 
   list.addEventListener("pointermove", (event) => {
-    if (event.pointerId !== pointerId || !tab) return;
-    if (!dragged) {
-      if (Math.hypot(event.clientX - startX, event.clientY - startY) < GRAB_PX) return;
-      lift(tab, event);
-    }
+    if (event.pointerId !== pointerId || !tab || !dragged) return;
     tab.style.left = `${event.clientX - offsetX}px`;
     tab.style.top = `${event.clientY - offsetY}px`;
     moveSlot(event.clientX);
@@ -151,9 +168,23 @@ export function attachTabReorder(
 
   const finish = (event: PointerEvent, commit: boolean): void => {
     if (event.pointerId !== pointerId) return;
+    clearHold();
+    if (!dragged) {
+      pointerId = -1;
+      tab = null;
+      return;
+    }
     if (list.hasPointerCapture(event.pointerId)) list.releasePointerCapture(event.pointerId);
     end(commit);
   };
+
+  window.addEventListener("pointermove", (event) => {
+    if (event.pointerId !== pointerId || dragged) return;
+    lastX = event.clientX;
+    lastY = event.clientY;
+  });
+  window.addEventListener("pointerup", (event) => finish(event, true));
+  window.addEventListener("pointercancel", (event) => finish(event, false));
 
   list.addEventListener("pointerup", (event) => finish(event, true));
   list.addEventListener("pointercancel", (event) => finish(event, false));
@@ -165,9 +196,14 @@ export function attachTabReorder(
   }, true);
 
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && dragged) {
+    if (event.key === "Escape" && (dragged || holdTimer !== null)) {
+      clearHold();
       if (list.hasPointerCapture(pointerId)) list.releasePointerCapture(pointerId);
-      end(false);
+      if (dragged) end(false);
+      else {
+        pointerId = -1;
+        tab = null;
+      }
     }
   });
 }
