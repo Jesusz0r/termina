@@ -30,6 +30,19 @@ export function previewContentType(path: string): string | null {
   return `image/${ext}`;
 }
 
+/** Only PDF documents may navigate a preview frame; SVG remains image-only. */
+export function isPdfPreviewUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const path = url.searchParams.get("path");
+    return url.protocol === "termina-media:" && url.hostname === "media"
+      && url.pathname === "/file" && !url.username && !url.password && !url.port
+      && !!path && !path.includes("\0") && previewKind(path) === "pdf";
+  } catch {
+    return false;
+  }
+}
+
 /** URL the renderer loads. `version` is the file mtime so a rewrite refetches. */
 export function previewMediaUrl(absPath: string, version: number): string {
   const url = new URL("termina-media://media/file");

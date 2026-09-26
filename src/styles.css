@@ -2166,10 +2166,9 @@ body.tab-reordering * {
 .editor-preview {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  min-width: 0;
+  overflow: hidden;
   display: flex;
-  align-items: center;
-  justify-content: center;
   background: var(--bg);
 }
 
@@ -2177,10 +2176,91 @@ body.tab-reordering * {
   display: none;
 }
 
-.editor-preview img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
+.image-preview {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.image-preview-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: 12px;
+}
+
+.image-preview-toolbar button {
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.image-preview-toolbar button:hover:not(:disabled),
+.image-preview-toolbar button[aria-pressed="true"] {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.image-preview-toolbar button:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.image-preview-toolbar button:focus-visible,
+.image-preview-viewport:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.image-preview-toolbar output {
+  min-width: 54px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.image-preview-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: none;
+}
+
+.image-preview-viewport.pannable { cursor: grab; }
+.image-preview-viewport.dragging { cursor: grabbing; }
+
+.image-preview-stage {
+  display: grid;
+  place-items: center;
+}
+
+.image-preview-stage img {
+  display: block;
+  max-width: none;
+  max-height: none;
+  user-select: none;
+}
+
+.image-preview-stage img[hidden],
+.image-preview-status[hidden] {
+  display: none;
+}
+
+.image-preview-status {
+  padding: 16px;
+  color: var(--text-dim);
+  font-size: 12px;
 }
 
 .editor-preview iframe {

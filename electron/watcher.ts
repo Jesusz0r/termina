@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { evictOldest } from "../shared/evict-oldest.js";
+import { decodeEditorText } from "./main/editor-file.js";
 import {
   IGNORED_SEGMENTS,
   matchGitignore,
@@ -816,18 +817,16 @@ export class ProjectWatcher {
       return;
     }
 
+    const buf = await readFile(abs);
     let content: string;
     try {
-      const buf = await readFile(abs);
-      // NUL bytes do not appear in text. Check the buffer, not the decoded
-      // string: valid text can contain the replacement character.
-      if (buf.includes(0)) {
-        await this.reportUncached(abs, relPath, generation);
-        return;
-      }
-      content = buf.toString("utf8");
-    } catch (error) {
-      throw error;
+      content = decodeEditorText(buf);
+    } catch {
+      // Apply the same text boundary as initial editor opens. In particular,
+      // invalid UTF-8 without NUL must not become replacement characters in a
+      // live model or its pre-change baseline.
+      await this.reportUncached(abs, relPath, generation);
+      return;
     }
     if (generation !== this.generation) return;
 
@@ -926,9 +925,9 @@ export class ProjectWatcher {
             if (!st.isFile() || st.size > MAX_FILE_SIZE) continue;
             const buf = await readFile(full);
             if (!active()) return;
-            if (buf.includes(0)) continue; // binary
+            const content = decodeEditorText(buf);
             const key = this.canonicalize ? await this.canonicalize(full) : full;
-            if (!this.lastContents.has(key)) this.putCached(key, buf.toString("utf8"));
+            if (!this.lastContents.has(key)) this.putCached(key, content);
           } catch {
             /* unreadable — seen-only is enough */
           }

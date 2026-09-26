@@ -9,6 +9,7 @@
 import * as monaco from "monaco-editor";
 import { canonicalizePath } from "../shared/canonical-path";
 import { previewMediaUrl, type PreviewKind } from "../shared/preview-media";
+import { ImagePreview, type ImagePreviewState } from "./image-preview";
 import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { languageForPath } from "./editor-language";
@@ -163,6 +164,7 @@ interface TextTab {
 interface MediaTab {
   key: string;
   media: { kind: PreviewKind; version: number };
+  imageState?: ImagePreviewState;
   owner: ProjectWorkspaceRef | null;
   dom: HTMLElement;
   dirtyDot: HTMLElement;
@@ -197,9 +199,10 @@ export class EditorManager {
   /** The single replaceable preview tab (VS Code style). */
   private previewKey: string | null = null;
   /** Opens in flight, keyed by the requested path, so a second click waits. */
-  private opening = new Map<string, Promise<void>>();
+  private opening = new Map<string, Promise<string>>();
   private editorContainer: HTMLElement;
   private previewEl: HTMLElement;
+  private imagePreview: ImagePreview | null = null;
   /** Tab keys with unsaved user edits. */
   private userDirty = new Set<string>();
   /** Dirty tabs whose file was deleted on disk (kept open for an explicit save-or-discard). */
@@ -327,7 +330,19 @@ export class EditorManager {
       return;
     }
     const pending = this.opening.get(key);
-    if (pending) return pending;
+    if (pending) {
+      const openedKey = await pending;
+      const opened = this.tabs.get(openedKey);
+      if (!opened) return;
+      // A double-click can arrive while the single-click read is in flight.
+      // Share the read, but do not discard the second request's pin or location.
+      if (!preview && this.previewKey === openedKey) this.pinPreview();
+      this.activate(openedKey);
+      if (typeof opts.line === "number" && opts.line > 0 && isTextTab(opened)) {
+        this.revealPosition(opts.line, opts.column);
+      }
+      return;
+    }
     const run = this.openFileNow(path, key, preview, owner, opts.line, opts.column);
     this.opening.set(key, run);
     try {
@@ -344,16 +359,17 @@ export class EditorManager {
     owner: ProjectWorkspaceRef,
     line: number | undefined,
     column: number | undefined,
-  ): Promise<void> {
+  ): Promise<string> {
     const replacing = preview && this.previewKey && this.previewKey !== key ? this.previewKey : null;
     const res = await window.termina.openFile(path, owner);
     if (!res.ok) throw new Error(res.error);
     const resolvedPath = canonicalizePath(res.path);
     if (resolvedPath !== key) {
       if (this.tabs.has(resolvedPath)) {
+        if (!preview && this.previewKey === resolvedPath) this.pinPreview();
         this.activate(resolvedPath);
         this.onFileOpened();
-        return;
+        return resolvedPath;
       }
       key = resolvedPath;
     }
@@ -369,14 +385,14 @@ export class EditorManager {
       this.renderTabs();
       this.activate(key);
       this.onFileOpened();
-      return;
+      return key;
     }
     const lease = acquireSharedFileModel(key, owner);
     const model = lease.model;
     const tab = this.makeTab(key, owner, { model, releaseModel: lease.release });
     if (!isTextTab(tab)) {
       lease.release();
-      return;
+      throw new Error("text file did not create a text tab");
     }
     if (preview) {
       this.previewKey = key;
@@ -410,6 +426,11 @@ export class EditorManager {
     if (typeof line === "number" && line > 0) {
       this.revealPosition(line, column);
     }
+    return key;
+  }
+
+  hasFile(path: string): boolean {
+    return this.resolveKey(path) !== null;
   }
 
   /** True when at least one file or snapshot tab is open. */
@@ -692,22 +713,26 @@ export class EditorManager {
     this.editor.layout();
   }
 
+  private clearMedia(): void {
+    this.imagePreview?.dispose();
+    this.imagePreview = null;
+    this.previewEl.replaceChildren();
+  }
+
   private showMedia(tab: OpenTab): void {
+    this.clearMedia();
     if (!tab.media) {
       this.previewEl.hidden = true;
-      this.previewEl.replaceChildren();
       this.editorContainer.hidden = false;
       return;
     }
     this.editorContainer.hidden = true;
     this.previewEl.hidden = false;
-    this.previewEl.replaceChildren();
     const src = previewMediaUrl(tab.key, tab.media.version);
     if (tab.media.kind === "image") {
-      const img = document.createElement("img");
-      img.alt = pathBasename(tab.key);
-      img.src = src;
-      this.previewEl.append(img);
+      tab.imageState ??= { scale: null, left: 0, top: 0 };
+      this.imagePreview = new ImagePreview(src, pathBasename(tab.key), tab.imageState);
+      this.previewEl.append(this.imagePreview.element);
       return;
     }
     const frame = document.createElement("iframe");
@@ -723,7 +748,11 @@ export class EditorManager {
     const tab = this.tabs.get(resolved);
     if (!tab?.media) return;
     tab.media = { kind, version };
-    if (this.activeKey === resolved) this.showMedia(tab);
+    if (this.activeKey === resolved) {
+      const focusedControl = this.imagePreview?.focusedControl ?? -1;
+      this.showMedia(tab);
+      if (focusedControl >= 0) this.imagePreview?.restoreFocus(focusedControl);
+    }
   }
 
   /** Move cursor to line/column and scroll it into center. Never focuses:
@@ -769,7 +798,7 @@ export class EditorManager {
       else {
         this.editor.setModel(null);
         this.previewEl.hidden = true;
-        this.previewEl.replaceChildren();
+        this.clearMedia();
         this.editorContainer.hidden = false;
         this.syncEmptyState();
       }
@@ -1212,6 +1241,8 @@ export class EditorManager {
 
   dispose(): void {
     closeContextMenu();
+    this.clearMedia();
+    this.previewEl.remove();
     this.editor.dispose();
     for (const tab of this.tabs.values()) {
       if (!isTextTab(tab)) continue;

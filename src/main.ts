@@ -52,6 +52,7 @@ import { projectChangedPaths } from "./explorer-file";
 import { showUnsavedConfirm, toast } from "./components/modals";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { evictOldest } from "../shared/evict-oldest";
+import { previewKind } from "../shared/preview-media";
 import { showContextMenu, type ContextMenuItem } from "./components/context-menu";
 import { applyEmptyStateShortcutHints, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
 import { CommandDispatcher } from "./commands";
@@ -2239,6 +2240,7 @@ let changeEpochSeq = 0;
 const changeKey = (owner: ProjectWorkspaceRef, path: string): string => `${owner.projectId}\u0000${owner.workspaceId}\u0000${path}`;
 
 function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: EditorManagerInstance): void {
+  if (!editor.hasFile(path)) return;
   const key = changeKey(owner, path);
   const at = lastChangePush.get(key)?.at;
   const epoch = ++changeEpochSeq;
@@ -2251,10 +2253,13 @@ function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: Edit
       fetchLargeChange(path, owner, editor);
       return;
     }
-    if (res.ok && projectViews.get(owner.projectId)?.editorMgr === editor) {
-      if (res.ok && "preview" in res) editor.refreshPreview(path, res.preview, res.version);
-      else if (res.ok) editor.updateContent(path, res.content, res.changedLines ?? latest?.changedLines);
+    if (projectViews.get(owner.projectId)?.editorMgr !== editor || !editor.hasFile(path)) return;
+    if (!res.ok) {
+      toast(`could not refresh ${pathBasename(path)}: ${res.error}`, "warning");
+      return;
     }
+    if ("preview" in res) editor.refreshPreview(path, res.preview, res.version);
+    else editor.updateContent(path, res.content, res.changedLines ?? latest?.changedLines);
   }).catch((err) => {
     if (largeChangeEpoch.get(key) !== epoch) return;
     largeChangeEpoch.delete(key);
@@ -2272,12 +2277,13 @@ window.termina.onFileChanged((p) => {
   lastChangePush.set(key, { at, changedLines: p.changedLines });
   evictOldest(lastChangePush, MAX_LAST_CHANGE_PUSH);
   activityPane.dropStaleAcceptMarks(p.path);
-  if (p.content !== undefined) {
+  if (p.content !== undefined && !previewKind(p.path)) {
     largeChangeEpoch.delete(key);
     if (view.editorMgr) view.editorMgr.updateContent(p.path, p.content, p.changedLines);
   } else {
-    // Main omitted the bytes. A newer change bumps the fetch epoch so a
-    // hung read cannot block the next push.
+    // Media (including text-based SVG) needs a new preview URL, not a model
+    // update. Omitted text bytes use the same fetch. A newer change bumps the
+    // epoch so a hung read cannot block the next push.
     if (view.editorMgr) fetchLargeChange(p.path, owner, view.editorMgr);
   }
   if (activeProjectId !== p.projectId) return;

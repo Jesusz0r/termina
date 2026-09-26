@@ -436,6 +436,23 @@ as you type; click × or press `Escape` to clear.
 - Unsaved edits show a dot on the tab; **Save** is `Cmd/Ctrl+S`, **Save all** is `Cmd/Ctrl+Alt+S`.
 - Word wrap and minimap follow your Settings preferences.
 
+### File previews
+
+Images open with **− / +**, a zoom percentage, **Fit**, and **100%** controls.
+Scroll or drag to move around an enlarged image. Use `Ctrl/Cmd` + scroll or a
+trackpad pinch to zoom at the pointer. With the image area focused, `+` / `−`
+zoom, `0` restores actual size, and `F` fits the image to the pane. Fit does
+not enlarge small images. Pinned image tabs retain their zoom and scroll
+position when you switch tabs.
+
+PDFs use the built-in viewer's zoom, fit, rotation, and page-number controls.
+They are read-only previews, not editable text.
+
+Code, Markdown, HTML, and other UTF-8 text files open in the text editor;
+Markdown and HTML are not rendered. Binary files without a supported preview,
+and unsupported text encodings, show an error instead of opening as editable
+text. There are no dedicated Office, archive, audio, or video viewers.
+
 ### Mine marks
 
 Every editor tab has an `M` marker: click it to mark the file as yours. Mine

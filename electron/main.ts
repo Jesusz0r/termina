@@ -139,7 +139,8 @@ import {
   sameUserPath,
   sanitizeSessionDir,
 } from "./main/project-workspace.js";
-import { previewContentType, previewKind } from "../shared/preview-media.js";
+import { isPdfPreviewUrl, previewContentType, previewKind } from "../shared/preview-media.js";
+import { decodeEditorText, readEditorFile } from "./main/editor-file.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { evictOldest } from "../shared/evict-oldest.js";
@@ -1262,9 +1263,9 @@ class TerminaApp {
     });
     win.webContents.on("will-frame-navigate", (details) => {
       if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
-      // No subframe is part of the application bridge. Deny it before a
-      // foreign document can execute the preload, and apply the same origin
-      // boundary to main-frame navigations initiated by page content.
+      // PDF subframes have no application capability. The media protocol
+      // validates workspace access; all other subframe navigation stays denied.
+      if (!details.isMainFrame && isPdfPreviewUrl(details.url)) return;
       if (!details.isMainFrame || !this.isTrustedRendererUrl(details.url)) {
         details.preventDefault();
         return;
@@ -7422,6 +7423,10 @@ class TerminaApp {
         this.addPendingHint(inst, relPath);
         this.scheduleMomentCapture(inst, rendererTarget);
       }
+      ws.changeLines.delete(canonical);
+      // Media previews and already-open text tabs still need to observe the
+      // change. Fetch on demand; never push decoded binary bytes through IPC.
+      this.send("file:changed", { projectId: owner.id, workspaceId: ws.id, path: canonical, relPath, status }, rendererTarget);
     };
     watcher.onFileDeleted = async (path) => {
       const rendererTarget = this.captureRendererSendTarget();
@@ -8384,13 +8389,7 @@ class TerminaApp {
         return { ok: true, path: managed.path, preview: kind, version: st.mtimeMs };
       }
       if (st.size > MAX_OPEN_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to open (${st.size} bytes)` };
-      const content = await readFile(managed.path, "utf8");
-      // The file may have grown between the stat and the read: enforce the
-      // budget on what was actually read, not on what was advertised.
-      const contentBytes = Buffer.byteLength(content, "utf8");
-      if (contentBytes > MAX_OPEN_FILE_SIZE) {
-        return { ok: false, path: managed.path, error: `file is too large to open (${contentBytes} bytes)` };
-      }
+      const content = decodeEditorText(await readEditorFile(managed.path, MAX_OPEN_FILE_SIZE));
       return { ok: true, path: managed.path, content, changedLines: managed.workspace.changeLines.get(managed.path) };
     } catch (err) {
       return { ok: false, path: managed.path, error: (err as Error).message };
@@ -8417,16 +8416,15 @@ class TerminaApp {
     for (const project of this.projects.values()) {
       for (const ws of project.workspaces.values()) {
         const managed = await this.managedPath(absPath, ws.id);
-        if (!managed || !previewKind(managed.path)) continue;
+        if (!managed || previewKind(managed.path) !== previewKind(absPath)) continue;
         const type = previewContentType(managed.path);
         if (!type) continue;
         try {
-          const st = await stat(managed.path);
-          if (!st.isFile() || st.size > MAX_PREVIEW_FILE_SIZE) return new Response(null, { status: 404 });
-          const body = await readFile(managed.path);
+          const body = await readEditorFile(managed.path, MAX_PREVIEW_FILE_SIZE);
           return new Response(body, {
             headers: {
               "Content-Type": type,
+              "X-Content-Type-Options": "nosniff",
               "Content-Length": String(body.byteLength),
               "Cache-Control": "no-store",
             },

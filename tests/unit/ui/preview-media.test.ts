@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { previewContentType, previewKind, previewMediaUrl } from "../../../shared/preview-media.ts";
+import { isPdfPreviewUrl, previewContentType, previewKind, previewMediaUrl } from "../../../shared/preview-media.ts";
 
 describe("editor media preview", () => {
   it("classifies images and pdfs, and leaves source files as text", () => {
@@ -9,6 +9,17 @@ describe("editor media preview", () => {
     expect(previewKind("/proj/main.ts")).toBeNull();
     expect(previewContentType("/proj/a.jpeg")).toBe("image/jpeg");
     expect(previewContentType("/proj/notes.pdf")).toBe("application/pdf");
+  });
+
+  it("allows only app-owned PDF URLs to navigate a subframe", () => {
+    expect(isPdfPreviewUrl(previewMediaUrl("/proj/notes.PDF", 1))).toBe(true);
+    for (const value of [
+      previewMediaUrl("/proj/image.svg", 1), previewMediaUrl("/proj/page.html", 1),
+      previewMediaUrl("/proj/bad\0.pdf", 1), "https://media/file?path=/proj/notes.pdf",
+      "termina-media://foreign/file?path=/proj/notes.pdf", "termina-media://media/other?path=/proj/notes.pdf",
+      "termina-media://user@media/file?path=/proj/notes.pdf", "termina-media://media:123/file?path=/proj/notes.pdf",
+      "termina-media://media/file", "not a URL",
+    ]) expect(isPdfPreviewUrl(value)).toBe(false);
   });
 
   it("points the preview at the media scheme with the file version", () => {
