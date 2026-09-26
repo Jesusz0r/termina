@@ -215,7 +215,10 @@ export function redirectPath(id: ProviderId, callbackToken?: string): string {
 
 
 function redirectHost(id: ProviderId): string {
-  return id === "openai-codex" ? "localhost" : "127.0.0.1";
+  // Anthropic's public client allowlists localhost, not 127.0.0.1. The two
+  // names are different redirect URIs even though both are this machine.
+  if (id === "openai-codex" || id === "anthropic") return "localhost";
+  return "127.0.0.1";
 }
 
 

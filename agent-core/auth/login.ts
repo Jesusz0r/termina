@@ -230,17 +230,24 @@ function waitForCallback(
 ): Promise<{ code: string } | { error: string }> {
   return new Promise((resolve) => {
     let done = false;
+    const servers: Array<ReturnType<typeof createServer>> = [];
     const finish = (result: { code: string } | { error: string }) => {
       if (done) return;
       done = true;
       signal?.removeEventListener("abort", onAbort);
       // A browser keep-alive connection would otherwise hold the handle
       // open past close(); drop connections first, then close.
-      server.closeAllConnections?.();
-      server.close();
+      for (const server of servers) {
+        try {
+          server.closeAllConnections?.();
+          server.close();
+        } catch {
+          /* A loopback that never started listening throws on close. */
+        }
+      }
       resolve(result);
     };
-    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const handle = (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
       if (url.pathname !== path) {
         res.statusCode = 404;
@@ -269,23 +276,31 @@ function waitForCallback(
       }
       res.end("<p>Termina agent-core is signed in. You can close this tab.</p>");
       finish({ code });
-    });
+    };
     const onAbort = () => finish({ error: "login cancelled" });
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) {
       onAbort();
       return;
     }
-    server.on("error", (err) => {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EADDRINUSE") finish({ error: `port ${port} busy — another login may be running` });
-      else finish({ error: `login failed: ${(err as Error).message}` });
-    });
-    server.listen(port, "127.0.0.1", () => {
-      if (done) server.close();
-    });
-    // The login server must never hold the event loop open by itself.
-    server.unref?.();
+    const listen = (host: string, required: boolean) => {
+      const server = createServer(handle);
+      servers.push(server);
+      server.on("error", (err: NodeJS.ErrnoException) => {
+        // ::1 is optional. Closing it here emits another error on the same
+        // listener and would recurse.
+        if (!required) return;
+        if (err.code === "EADDRINUSE") finish({ error: `port ${port} busy — another login may be running` });
+        else finish({ error: `login failed: ${err.message}` });
+      });
+      server.listen(port, host, () => {
+        if (done) server.close();
+      });
+      server.unref?.();
+    };
+    listen("127.0.0.1", true);
+    // localhost may resolve to ::1. Anthropic redirects there.
+    listen("::1", false);
   });
 }
 
