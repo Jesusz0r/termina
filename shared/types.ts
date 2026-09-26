@@ -223,6 +223,10 @@ export interface PtyModesPayload {
   windowGeneration: number;
   rendererGeneration: number;
   bracketedPasteMode: boolean;
+  /** Child enabled modifyOtherKeys or the kitty keyboard protocol. */
+  modifierReporting: boolean;
+  /** DECSET 1, application cursor keys. */
+  applicationCursor: boolean;
 }
 
 export interface InstanceSummary {

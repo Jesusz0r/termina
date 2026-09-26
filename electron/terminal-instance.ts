@@ -5,6 +5,7 @@
  */
 import { PtyTerminal } from "./pty-terminal.js";
 import { BracketedPasteModeTracker } from "./pty-bracketed-paste.js";
+import { PtyKeyboardModeTracker } from "./pty-keyboard-mode.js";
 import type { RunRecord } from "./worldlines/index.js";
 import type {
   ModifiedFile,
@@ -100,14 +101,34 @@ export class AgentTerminalInstance {
   currentRun: RunRecord | null = null;
   /** DECSET 2004 as last seen on this PTY's output. Restored on renderer attach. */
   private readonly bracketedPaste = new BracketedPasteModeTracker();
+  /** modifyOtherKeys / kitty keyboard protocol / DECSET 1 from this PTY's output. */
+  private readonly keyboardMode = new PtyKeyboardModeTracker();
 
   get bracketedPasteMode(): boolean {
     return this.bracketedPaste.enabled;
   }
 
-  /** Advance tracked DECSET 2004 from one successfully queued PTY quantum. */
-  notePtyOutput(data: string): void {
+  /** Child has enabled modifyOtherKeys or the kitty keyboard protocol. */
+  get modifierReporting(): boolean {
+    return this.keyboardMode.modifierReporting;
+  }
+
+  /** DECSET 1 as last seen on this PTY's output. */
+  get applicationCursor(): boolean {
+    return this.keyboardMode.applicationCursor;
+  }
+
+  /**
+   * Advance tracked PTY modes from one successfully queued quantum.
+   * Returns true when modifier reporting or application cursor keys changed.
+   */
+  notePtyOutput(data: string): boolean {
+    const beforeReporting = this.keyboardMode.modifierReporting;
+    const beforeCursor = this.keyboardMode.applicationCursor;
     this.bracketedPaste.feed(data);
+    this.keyboardMode.feed(data);
+    return this.keyboardMode.modifierReporting !== beforeReporting
+      || this.keyboardMode.applicationCursor !== beforeCursor;
   }
 
   constructor(

@@ -2001,10 +2001,11 @@ function renderAcceptedPtyRecords(
   }
 }
 
-window.termina.onPtyModes(({ id, generation, bracketedPasteMode }) => {
+window.termina.onPtyModes(({ id, generation, bracketedPasteMode, modifierReporting, applicationCursor }) => {
   const pane = panes.get(id);
   if (!pane || pane.error || pane.generation !== generation) return;
   pane.view.setBracketedPasteMode(bracketedPasteMode);
+  pane.view.setKeyboardMode({ modifierReporting, applicationCursor });
 });
 
 window.termina.onPtyData(({ id, generation, windowGeneration, rendererGeneration, sequence, data }) => {

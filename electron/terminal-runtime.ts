@@ -81,6 +81,8 @@ export interface TerminalRuntimeHost {
     rendererTarget: PtyRendererSendTarget | null,
     details: { code: number; origin: "native" | "forced"; drained: boolean },
   ): void | Promise<void>;
+  /** Modifier reporting or application cursor keys changed on queued output. */
+  onPtyKeyboardMode?(id: string, generation: number): void;
 }
 
 export interface TerminalRuntimeOptions extends PtyEgressSchedulerOptions {
@@ -301,7 +303,7 @@ export class TerminalRuntime {
     const inst = this.terminals.get(id);
     if (this.host.isDisposed() || !inst || inst.closed || inst.generation !== terminalGeneration) return false;
     const accepted = this.egress.enqueue(id, terminalGeneration, data);
-    if (accepted) inst.notePtyOutput(data);
+    if (accepted && inst.notePtyOutput(data)) this.host.onPtyKeyboardMode?.(id, terminalGeneration);
     return accepted;
   }
 

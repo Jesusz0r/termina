@@ -530,6 +530,9 @@ class TerminaApp {
     onSidecarError: (error, failedEvent) => console.warn(`[main] sidecar ${failedEvent.t} failed: ${error.message}`),
     onPtyExitBeforeRelease: (inst, rendererTarget, details) => this.handlePtyExitBeforeRelease(inst, rendererTarget, details),
     onPtyExitAfterRelease: (inst, rendererTarget, details) => this.handlePtyExitAfterRelease(inst, rendererTarget, details),
+    onPtyKeyboardMode: (id, generation) => {
+      this.sendPtyModes(id, generation, this.rendererWindowGeneration, this.rendererGeneration);
+    },
   }, {
     eventsDir: process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-sidecars"),
     rosterHost: { usableModel: (model) => this.usableAgentModel(model) },
@@ -7799,6 +7802,8 @@ class TerminaApp {
         windowGeneration,
         rendererGeneration,
         bracketedPasteMode: inst.bracketedPasteMode,
+        modifierReporting: inst.modifierReporting,
+        applicationCursor: inst.applicationCursor,
       });
       return true;
     } catch {

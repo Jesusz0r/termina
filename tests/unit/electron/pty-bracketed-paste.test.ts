@@ -77,7 +77,7 @@ describe("bracketed-paste attach handshake (refs #278)", () => {
     expect(instance).toContain("this.bracketedPaste.feed(data)");
     const accept = runtime.slice(runtime.indexOf("acceptOutput("), runtime.indexOf("markClosed("));
     expect(accept).toContain("const accepted = this.egress.enqueue(id, terminalGeneration, data)");
-    expect(accept).toContain("if (accepted) inst.notePtyOutput(data)");
+    expect(accept).toContain("if (accepted && inst.notePtyOutput(data))");
   });
 
   it("replays DECSET 2004 on pty:ready before hydrate starts the pump", () => {

@@ -17,6 +17,7 @@ import { isMacPlatform } from "./settings-shortcuts";
 import { toast } from "./components/modals";
 import { createTerminalLinkProvider, isTerminalLinkClick, parseTerminalFileLinks } from "./terminal-links";
 import { terminalOscFileTarget, terminalWebUrl } from "../shared/terminal-link";
+import { shellLineEdit } from "./terminal-keys";
 
 export class PtyView {
   private term: Terminal;
@@ -44,6 +45,8 @@ export class PtyView {
   private dropInFlight = false;
   private pasteInFlight = false;
   private clipboardTarget: HTMLTextAreaElement | null = null;
+  private modifierReporting = false;
+  private applicationCursor = false;
   private readonly onCopy = (event: ClipboardEvent) => this.handleCopy(event);
   private readonly onPaste = (event: ClipboardEvent) => this.handleNativePaste(event);
 
@@ -105,6 +108,18 @@ export class PtyView {
       ),
     );
     this.term.open(container);
+    // Before xterm's textarea listener. Modifier CSI is forwarded only after
+    // the child enables it; otherwise the unbound tail is inserted.
+    container.addEventListener("keydown", (event) => {
+      const bytes = shellLineEdit(event, {
+        modifierReporting: this.modifierReporting,
+        applicationCursor: this.applicationCursor,
+      });
+      if (bytes === null) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (bytes) this.sendInput(bytes);
+    }, true);
     this.clipboardTarget = this.term.textarea ?? null;
     this.clipboardTarget?.addEventListener("copy", this.onCopy, true);
     this.clipboardTarget?.addEventListener("paste", this.onPaste, true);
@@ -258,8 +273,6 @@ export class PtyView {
       const macInput = {
         Backspace: "\x15",
         Delete: "\x0b",
-        ArrowLeft: "\x01",
-        ArrowRight: "\x05",
       }[event.key];
       if (macInput) {
         event.preventDefault();
@@ -416,6 +429,12 @@ export class PtyView {
    * Apply DECSET 2004 into this xterm only (not the PTY). Called once per
    * attach from the hydrate handshake so term.paste wraps correctly.
    */
+  /** Apply the child's keyboard mode from the hydrate handshake or a later change. */
+  setKeyboardMode(mode: { modifierReporting: boolean; applicationCursor: boolean }): void {
+    this.modifierReporting = mode.modifierReporting;
+    this.applicationCursor = mode.applicationCursor;
+  }
+
   setBracketedPasteMode(enabled: boolean): void {
     if (this.disposed) return;
     this.term.write(enabled ? BRACKETED_PASTE_ENABLE_CSI : BRACKETED_PASTE_DISABLE_CSI);
