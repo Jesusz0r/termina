@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { isErrno } from "../../../shared/guards.ts";
 import { normalizeAppPreferences } from "../../../shared/preferences.ts";
 import { emptyActivityInput } from "../../../electron/agent-activity.ts";
+import { decodeEditorText, readEditorFile } from "../../../electron/main/editor-file.ts";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI } from "../../../shared/terminal-control.ts";
 import { CHALLENGE_PROFILES, DEFAULT_SHORTCUTS, defaultAppPreferences } from "../../../shared/types.ts";
 import { isChallengeProfile, isWorldlineLabel } from "../../../electron/main/ipc-validate.ts";
@@ -271,13 +272,23 @@ describe("main hardening batch (refs #219)", () => {
     const openFile = loadMethod(
       "openFileInEditor",
       "private async openFileInEditor(",
-      ["stat", "readFile", "MAX_OPEN_FILE_SIZE", "previewKind", "MAX_PREVIEW_FILE_SIZE"],
+      ["stat", "readEditorFile", "MAX_OPEN_FILE_SIZE", "previewKind", "MAX_PREVIEW_FILE_SIZE", "decodeEditorText"],
       [
         async () => ({ isFile: () => true, size: 10 }),
-        async () => "x".repeat(3 * 1024 * 1024),
+        async (_path: string, maxBytes: number) => {
+          const dir = mkdtempSync(join(tmpdir(), "termina-grown-editor-file-"));
+          try {
+            const path = join(dir, "grown.txt");
+            writeFileSync(path, "x".repeat(3 * 1024 * 1024));
+            return await readEditorFile(path, maxBytes);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        },
         2 * 1024 * 1024,
         (path: string) => path.endsWith(".pdf") || /\.(png|jpe?g|gif|webp|svg)$/i.test(path) ? "image" : null,
         32 * 1024 * 1024,
+        decodeEditorText,
       ],
     ) as (absPath: string, owner: unknown) => Promise<{ ok: boolean; error?: string }>;
     const app = {
@@ -290,13 +301,14 @@ describe("main hardening batch (refs #219)", () => {
     const smallOpen = loadMethod(
       "openFileInEditor",
       "private async openFileInEditor(",
-      ["stat", "readFile", "MAX_OPEN_FILE_SIZE", "previewKind", "MAX_PREVIEW_FILE_SIZE"],
+      ["stat", "readEditorFile", "MAX_OPEN_FILE_SIZE", "previewKind", "MAX_PREVIEW_FILE_SIZE", "decodeEditorText"],
       [
         async () => ({ isFile: () => true, size: 5, mtimeMs: 1 }),
-        async () => "small",
+        async () => Buffer.from("small"),
         2 * 1024 * 1024,
         () => null,
         32 * 1024 * 1024,
+        decodeEditorText,
       ],
     ) as (absPath: string, owner: unknown) => Promise<{ ok: boolean; content?: string }>;
     expect(await smallOpen.call(app, "/proj/small.txt", {})).toMatchObject({ ok: true, content: "small" });

@@ -4,10 +4,21 @@ process.env.TERMINA_CORE_TEST = "1";
 
 import assert from "node:assert/strict";
 import { spawn } from "@lydell/node-pty";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("Agent Core Shutdown Approval Contract", () => {
   it("passes shutdown-with-pending-approval contract", async () => {
-    const cwd = process.cwd();
+    const root = mkdtempSync(join(tmpdir(), "termina-shutdown-approval-"));
+    const cwd = join(root, "project");
+    const home = join(root, "home");
+    mkdirSync(cwd);
+    mkdirSync(home);
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("TERMINA_") || key.startsWith("PI_")) delete env[key];
+    }
     const mainPath = new URL("../../../agent-core/main.ts", import.meta.url).pathname;
     const event = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
     const functionCall = {
@@ -42,7 +53,10 @@ describe("Agent Core Shutdown Approval Contract", () => {
         rows: 40,
         cwd,
         env: {
-          ...process.env,
+          ...env,
+          HOME: home,
+          TERMINA_AUTH_PATH: join(home, "auth.json"),
+          TERMINA_CORE_SESSION_FILE: join(root, "sessions", "core-shutdown", "current", "session.jsonl"),
           TERMINA_CORE_TEST: "1",
           TERMINA_CORE_PROVIDER: "openai",
           TERMINA_CORE_MODEL: "gpt-5.6-sol",
@@ -52,6 +66,10 @@ describe("Agent Core Shutdown Approval Contract", () => {
       },
     );
     
+    let exited = false;
+    const closed = new Promise<{ exitCode: number; signal?: number }>((resolve) => {
+      pty.onExit((result) => { exited = true; resolve(result); });
+    });
     let output = "";
     pty.onData((chunk) => { output += chunk; });
     const waitFor = async (predicate: () => boolean, timeoutMs: number) => {
@@ -62,25 +80,26 @@ describe("Agent Core Shutdown Approval Contract", () => {
       }
     };
     try {
-      await waitFor(() => /Type a task/.test(output), 8_000);
+      // The placeholder is painted before MCP startup finishes. Wait for the
+      // idle status (no spinner) so this test actually reaches an approval.
+      await waitFor(() => /termina\s+·\s+openai\//.test(output), 8_000);
       pty.write("please run the command\r");
       await waitFor(() => /Approve bash\?/.test(output), 8_000);
       // Ctrl-D invokes the same shutdown path as an explicit TUI exit while the
       // choice prompt is still live. A stuck approval promise would keep this
       // pty open or dereference the torn-down surface.
       pty.write("\x04");
-      const exit = await new Promise<{ exitCode: number; signal?: number }>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`shutdown timed out; output=${output}`)), 8_000);
-        pty.onExit((result) => {
-          clearTimeout(timer);
-          resolve(result);
-        });
-      });
+      await waitFor(() => exited, 8_000);
+      const exit = await closed;
       assert.equal(exit.exitCode, 0, output);
       assert.match(output, /approval-shutdown|interrupted|denied|quits/i);
       console.log("agent-core shutdown-with-pending-approval contract passed");
     } finally {
-      try { pty.kill(); } catch { /* already exited */ }
+      if (!exited) {
+        try { pty.kill("SIGKILL"); } catch { /* already exited */ }
+      }
+      await closed;
+      rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
 });

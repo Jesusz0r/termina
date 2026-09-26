@@ -129,7 +129,7 @@ describe("agent-core #262–#271 / #256", () => {
   });
 
   it("#270 observational set and utf8 owner stay singular", () => {
-    expect([...READ_TOOLS].sort()).toEqual(["fetch", "glob", "grep", "read_file"]);
+    expect([...READ_TOOLS].sort()).toEqual(["fetch", "glob", "grep", "read_file", "read_files"]);
     expect(utf8TextPrefix("ééé", 2)).toBe("é");
   });
 
