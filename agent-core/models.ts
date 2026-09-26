@@ -31,8 +31,10 @@ export type ModelInfo = {
   outputLimit?: number;
   /** Rejection ceiling when the route accepts more than its operating `context`. */
   contextCeiling?: number;
-  /** Wire reasoning-level values, from provider-reported metadata (Codex `supported_reasoning_levels`). */
+  /** Wire reasoning-level values, from provider-reported metadata (Codex `supported_reasoning_levels`, xAI `capabilities.reasoning_effort`, Anthropic `capabilities.effort`). */
   reasoningLevels?: string[];
+  /** xAI alias ids that share this row's metadata. Not displayed as separate models. */
+  aliases?: string[];
   /** Raw provider-reported parameter list (OpenRouter `supported_parameters`). */
   supportedParameters?: string[];
 };
@@ -170,21 +172,18 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
   // Doc-confirmed metadata only: OpenRouter `top_provider.max_completion_tokens`
   // and `supported_parameters` (https://openrouter.ai/docs/guides/overview/models.md);
   // Codex `supported_reasoning_levels[].effort`
-  // (https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs).
+  // (https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs);
+  // xAI `capabilities.reasoning_effort`
+  // (https://docs.x.ai/developers/rest-api-reference/inference/models);
+  // Anthropic `capabilities.effort`
+  // (https://platform.claude.com/docs/en/api/models/list).
   // Anthropic's docs page is a JS shell with no extractable schema, so no
   // Anthropic-specific keys are read here.
   const topProvider = isRecord(row.top_provider) ? row.top_provider : undefined;
   const outputRaw = Number(topProvider?.max_completion_tokens);
   const outputLimit = acceptedOutputLimit(outputRaw);
-  const reasoningLevels = Array.isArray(row.supported_reasoning_levels)
-    ? row.supported_reasoning_levels
-        .map((preset) => {
-          const rec = isRecord(preset) ? preset : undefined;
-          const effort = rec && typeof rec.effort === "string" ? rec.effort.trim().toLowerCase() : "";
-          return effort || null;
-        })
-        .filter((effort): effort is string => effort !== null)
-    : undefined;
+  const reasoningLevels = catalogReasoningLevels(row, provider);
+  const aliases = provider === "xai" ? catalogAliases(row, id) : undefined;
   const supportedParameters = Array.isArray(row.supported_parameters)
     ? row.supported_parameters.filter((param): param is string => typeof param === "string")
     : undefined;
@@ -196,8 +195,59 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
     ...(supportedEndpoints ? { supportedEndpoints } : {}),
     ...(outputLimit ? { outputLimit } : {}),
     ...(reasoningLevels?.length ? { reasoningLevels } : {}),
+    ...(aliases?.length ? { aliases } : {}),
     ...(supportedParameters?.length ? { supportedParameters } : {}),
   };
+}
+
+const ANTHROPIC_EFFORT_KEYS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+function supportedFlag(value: unknown): boolean {
+  return isRecord(value) && value.supported === true;
+}
+
+/** Anthropic lists each effort as `{ supported }` rather than a string array. */
+function anthropicEffortLevels(row: Record<string, unknown>): string[] | undefined {
+  const capabilities = isRecord(row.capabilities) ? row.capabilities : undefined;
+  const effort = isRecord(capabilities?.effort) ? capabilities.effort : undefined;
+  if (!effort || effort.supported !== true) return undefined;
+  const levels = ANTHROPIC_EFFORT_KEYS.filter((level) => supportedFlag(effort[level]));
+  return levels.length > 0 ? levels : undefined;
+}
+
+function catalogReasoningLevels(row: Record<string, unknown>, provider: ProviderId): string[] | undefined {
+  if (provider === "anthropic") return anthropicEffortLevels(row);
+  const raw = provider === "openai-codex"
+    ? row.supported_reasoning_levels
+    : provider === "xai"
+      ? (isRecord(row.capabilities) ? row.capabilities.reasoning_effort : undefined)
+      : undefined;
+  if (!Array.isArray(raw)) return undefined;
+  const levels = raw
+    .map((preset) => {
+      if (typeof preset === "string") return preset.trim().toLowerCase();
+      const rec = isRecord(preset) ? preset : undefined;
+      return rec && typeof rec.effort === "string" ? rec.effort.trim().toLowerCase() : "";
+    })
+    .filter(Boolean);
+  return levels.length > 0 ? levels : undefined;
+}
+
+function catalogAliases(row: Record<string, unknown>, id: string): string[] | undefined {
+  if (!Array.isArray(row.aliases)) return undefined;
+  const aliases = row.aliases
+    .filter((alias): alias is string => typeof alias === "string")
+    .map((alias) => alias.trim())
+    .filter((alias) => alias.length > 0 && alias !== id);
+  return aliases.length > 0 ? aliases : undefined;
+}
+
+/** Catalog row for an id, including an xAI alias of a canonical model. */
+export function findCatalogModel(models: readonly ModelInfo[] | undefined, id: string): ModelInfo | undefined {
+  if (!models) return undefined;
+  const exact = models.find((entry) => entry.id === id);
+  if (exact) return exact;
+  return models.find((entry) => entry.aliases?.includes(id));
 }
 
 export function parseModelsPayload(payload: unknown, provider: ProviderId): ModelInfo[] {

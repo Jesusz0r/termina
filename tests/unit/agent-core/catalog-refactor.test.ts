@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, catalogHeaders, filterCatalogModels, formatCatalogLines, isChatModel, parseModelsPayload, type CatalogModel } from "../../../agent-core/models.ts";
+import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, catalogHeaders, filterCatalogModels, findCatalogModel, formatCatalogLines, isChatModel, parseModelsPayload, type CatalogModel } from "../../../agent-core/models.ts";
 import { catalogOutputLimit, catalogSupportsTools } from "../../../agent-core/models/capabilities.ts";
 
 describe("catalogHeaders denylist", () => {
@@ -51,6 +51,25 @@ describe("catalog provider policy composition", () => {
       { id: row.id, context: 96000, supportedEndpoints: ["/responses", "/v1/messages"] },
     ]);
     expect(parseModelsPayload([row], "anthropic")).toEqual([{ id: row.id, context: 96000 }]);
+    expect(parseModelsPayload([{
+      id: "claude-opus-9",
+      capabilities: {
+        effort: {
+          supported: true,
+          low: { supported: true },
+          medium: { supported: false },
+          high: { supported: true },
+          xhigh: null,
+          max: { supported: true },
+        },
+      },
+    }], "anthropic")).toEqual([
+      { id: "claude-opus-9", reasoningLevels: ["low", "high", "max"] },
+    ]);
+    expect(parseModelsPayload([{
+      id: "claude-haiku-4-5",
+      capabilities: { effort: { supported: false, low: { supported: true } } },
+    }], "anthropic")).toEqual([{ id: "claude-haiku-4-5" }]);
   });
 
   it("keeps empty advertised endpoints distinct from absent metadata", () => {
@@ -92,6 +111,25 @@ describe("catalog provider policy composition", () => {
     expect(parseModelsPayload([codex], "openai-codex")).toEqual([
       { id: "gpt-5.6", reasoningLevels: ["low", "medium"] },
     ]);
+    const grok = {
+      id: "grok-5",
+      context_length: 500000,
+      aliases: ["grok-5-latest", "grok-5", ""],
+      capabilities: { reasoning_effort: ["low", " HIGH ", "xhigh"], default_reasoning_effort: "high" },
+    };
+    expect(parseModelsPayload({ data: [grok] }, "xai")).toEqual([
+      {
+        id: "grok-5",
+        context: 500000,
+        aliases: ["grok-5-latest"],
+        reasoningLevels: ["low", "high", "xhigh"],
+      },
+    ]);
+    expect(parseModelsPayload([{ id: "grok-4.20-0309-reasoning", capabilities: {} }], "xai")).toEqual([
+      { id: "grok-4.20-0309-reasoning" },
+    ]);
+    const listed = parseModelsPayload({ data: [grok] }, "xai");
+    expect(findCatalogModel(listed, "grok-5-latest")?.reasoningLevels).toEqual(["low", "high", "xhigh"]);
   });
 
   it("keeps the Codex operating window and records a higher rejection ceiling", () => {

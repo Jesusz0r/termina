@@ -149,6 +149,7 @@ import {
   catalogProviderId,
   contextCatalogEntryKey,
   loadProviderModels,
+  findCatalogModel,
   parseModelSwitch,
   pickDefaultModel,
   type CatalogModel,
@@ -353,7 +354,7 @@ const catalogs = new Map<ProviderId, ModelInfo[]>();
 const rateCatalog = createRateCatalog(providerProtocol);
 
 function routeReasoningLevels(provider: ProviderId = route.provider, model: string = route.model): string[] | undefined {
-  return catalogs.get(provider)?.find((entry) => entry.id === model)?.reasoningLevels;
+  return findCatalogModel(catalogs.get(provider), model)?.reasoningLevels;
 }
 
 // Resolve model metadata from the existing catalog for every request role,
@@ -3104,8 +3105,8 @@ async function callModel(
   const budgeted = outputTokenBudget({ thinking: actualEffort !== "off" });
   // Never request more output than the catalog-reported completion ceiling.
   const maxTokens = catalogLimit === null ? budgeted : Math.max(1_024, Math.min(budgeted, catalogLimit));
-  const thinking = thinkingRequestFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
-  const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
+  const thinking = thinkingRequestFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
+  const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
   const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels());
   const cacheIdentity = cacheIdentityForRole("main", route.provider, route.model);
   const cacheKey = cacheIdentity?.key;

@@ -82,6 +82,33 @@ describe("shared model capabilities across provider protocols", () => {
     }
   });
 
+  it("exposes documented Grok effort, including xhigh after 4.6", () => {
+    expect(supportedEffortLevels("xai", "grok-4.7", "openai-responses"))
+      .toEqual(["low", "medium", "high", "xhigh"]);
+    expect(supportedEffortLevels("xai", "grok-4.6", "openai-responses"))
+      .toEqual(["low", "medium", "high", "xhigh"]);
+    expect(supportedEffortLevels("openrouter", "x-ai/grok-4.7", "openai-responses"))
+      .toEqual(["low", "medium", "high", "xhigh"]);
+    expect(reasoningEffortFor("xai", "grok-4.7", "xhigh", "openai-responses")).toBe("xhigh");
+    expect(clampEffortLevel("xai", "grok-4.7", "max", "openai-responses")).toBe("xhigh");
+    // Model page lists xhigh; the reasoning guide says it is treated as high.
+    expect(supportedEffortLevels("xai", "grok-4.5", "openai-responses"))
+      .toEqual(["low", "medium", "high"]);
+    expect(supportedEffortLevels("xai", "grok-4.3", "openai-responses"))
+      .toEqual(["off", "low", "medium", "high", "xhigh"]);
+    expect(reasoningEffortFor("xai", "grok-4.3", "off", "openai-responses")).toBe("none");
+    expect(supportedEffortLevels("xai", "grok-4.20-multi-agent", "openai-responses"))
+      .toEqual(["low", "medium", "high", "xhigh"]);
+    expect(effortControlFor("xai", "grok-4.20-0309-reasoning", "openai-responses")).toBe("provider-default");
+    expect(effortControlFor("xai", "grok-5", "openai-responses")).toBe("provider-default");
+    expect(supportedEffortLevels("xai", "grok-5", "openai-responses", ["low", "medium", "high", "xhigh"]))
+      .toEqual(["low", "medium", "high", "xhigh"]);
+    expect(supportedEffortLevels("anthropic", "claude-opus-9", "anthropic-messages", ["low", "high", "max"]))
+      .toEqual(["low", "high", "max"]);
+    expect(adaptiveEffortFor("anthropic", "claude-opus-9", "max", "anthropic-messages", ["low", "high", "max"]))
+      .toBe("max");
+  });
+
   it("shares Gemini effort exclusions on native and relay Google protocols", () => {
     for (const provider of ["google", "opencode-zen", "opencode-go"] as const) {
       expect(supportedEffortLevels(provider, "gemini-3-pro", "google-generate"))

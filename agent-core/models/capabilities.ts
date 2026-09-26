@@ -1,4 +1,4 @@
-import { grokEffortLevelMap, modelLooksGrok, nonReasoningGrok } from "./families/xai.ts";
+import { grokEffortLevelMap, grokHasDocumentedEffort, modelLooksGrok, nonReasoningGrok } from "./families/xai.ts";
 import { openaiProviderEffortLevelMap, openaiResponsesReasoningFamily } from "./families/openai.ts";
 import type { ProviderId, ProviderProtocol } from "../auth.ts";
 import type { ModelInfo } from "../models.ts";
@@ -49,7 +49,12 @@ export function usesModelEffort(
   protocol: ProviderProtocol,
   reasoningLevels?: readonly string[],
 ): boolean {
-  if (reasoningLevels && reasoningLevels.length > 0) return wireEffortProtocol(protocol);
+  // Catalog levels are the set the provider published. Messages uses them for
+  // `output_config.effort` on a Claude thinking model; Responses/Completions
+  // use `reasoning.effort`.
+  if (reasoningLevels && reasoningLevels.length > 0) {
+    return wireEffortProtocol(protocol) || (protocol === "anthropic-messages" && claudeThinkingApi(model) !== "none");
+  }
   return EFFORT_MAP_RULES.some((rule) => rule.match(provider, model, protocol));
 }
 
@@ -117,7 +122,7 @@ const EFFORT_MAP_RULES: readonly EffortMapRule[] = [
   },
   {
     match: (_provider, model, protocol) =>
-      responsesProtocol(protocol) && modelLooksGrok(model) && !nonReasoningGrok(model),
+      responsesProtocol(protocol) && modelLooksGrok(model) && !nonReasoningGrok(model) && grokHasDocumentedEffort(model),
     map: (_provider, model) => grokEffortLevelMap(model),
   },
   {
@@ -232,11 +237,12 @@ export function thinkingRequestFor(
   model: string,
   effort: EffortLevel,
   protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
 ): ThinkingRequest | undefined {
   if (!usesAnthropicThinking(provider, model, protocol)) return undefined;
   const api = claudeThinkingApi(model);
   if (api === "none") return undefined;
-  const actual = clampEffortLevel(provider, model, effort, protocol);
+  const actual = clampEffortLevel(provider, model, effort, protocol, reasoningLevels);
   if (api === "adaptive") {
     if (actual === "off") return { type: "disabled" };
     return { type: "adaptive", display: "summarized" };
@@ -258,14 +264,15 @@ export function adaptiveEffortFor(
   model: string,
   effort: EffortLevel,
   protocol: ProviderProtocol,
+  reasoningLevels?: readonly string[],
 ): ReasoningEffort | undefined {
   if (!usesAnthropicThinking(provider, model, protocol)) return undefined;
   // Opus 4.5 composes output effort with budget thinking; every other
   // budget model takes depth from budget_tokens alone.
   if (claudeThinkingApi(model) !== "adaptive" && !opus45ComposesEffort(model)) return undefined;
-  const actual = clampEffortLevel(provider, model, effort, protocol);
+  const actual = clampEffortLevel(provider, model, effort, protocol, reasoningLevels);
   if (actual === "off") return undefined;
-  const mapped = effortLevelMap(provider, model, protocol)[actual];
+  const mapped = effortLevelMap(provider, model, protocol, reasoningLevels)[actual];
   return (typeof mapped === "string" ? mapped : actual) as ReasoningEffort;
 }
 
