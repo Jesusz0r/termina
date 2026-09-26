@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "website/**"
+      - "package.json"
+      - "scripts/stamp-website.ts"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -25,6 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: stamp site version from package.json
+        run: node --experimental-strip-types scripts/stamp-website.ts
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -9,6 +9,8 @@ release does not repeat them.
 ```bash
 # 1. Bump the version in package.json (electron-builder publishes under
 #    the package.json version, NOT the git tag — they must match).
+#    The site badge and download links are stamped from that version
+#    when pages deploys. Do not hand-edit a version into website HTML.
 # 2. Commit and push. 3. Tag and push:
 git tag v0.1.2
 git push origin v0.1.2
