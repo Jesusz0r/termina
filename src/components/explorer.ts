@@ -315,7 +315,7 @@ export class Explorer {
       state.expanded = true;
     }
 
-    // VS Code style: a node is a row, with the children indented BELOW it.
+    // A node is a row, with the children indented below it.
     const node = document.createElement("div");
     node.className = "explorer-node";
 
