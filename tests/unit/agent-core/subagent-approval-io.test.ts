@@ -18,7 +18,6 @@ import {
   writeSubagentApprovalRequest,
 } from "../../../agent-core/subagents/approval.ts";
 import {
-  MAX_SUBAGENT_FILE_BYTES,
   MAX_SUBAGENT_QUEUE_FILE_BYTES,
   MAX_SUBAGENT_INBOX_MSGS,
   MAX_SUBAGENT_MESSAGE_CHARS,

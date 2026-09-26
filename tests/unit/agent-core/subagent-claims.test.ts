@@ -50,7 +50,7 @@ describe("subagent claim enforcement", () => {
   it("rolls a committed inbox message back without resetting the sequence", () => {
     const dir = mkdtempSync(join(tmpdir(), "subagent-rewind-"));
     roots.push(dir);
-    expect(appendSubagentInboxMessage(dir, "term-7", "bg-1", "keep").seq).toBe(1);
+    expect(appendSubagentInboxMessage(dir, "term-7", "bg-1", "keep")).toEqual({ ok: true, seq: 1 });
     const late = appendSubagentInboxMessage(dir, "term-7", "bg-1", "too late");
     expect(late.ok).toBe(true);
     if (!late.ok) return;
