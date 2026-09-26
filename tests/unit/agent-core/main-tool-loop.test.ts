@@ -133,6 +133,31 @@ function expectPaired(messages: Row[]): void {
 }
 
 describe("real tool loop regressions", () => {
+  it("exposes and executes separate read modes while rejecting mixed and unsupported arguments", async () => {
+    await scenario(`
+      if (turn === 1) return [
+        { name: "read_files", input: { paths: ["file.txt", "second.txt"] } },
+        { name: "read_file", input: { path: "file.txt", start_line: 1, end_line: 1 } },
+        { name: "read_files", input: { paths: ["file.txt"], end_line: 1 } },
+        { name: "bash", input: { command: "exit 0", timeout: 100 } }
+      ];
+      return [];`, ({ requests, messages }) => {
+      const definitions = requests[0].tools;
+      expect(definitions.find((tool: Row) => tool.name === "read_file").parameters.required).toEqual(["path"]);
+      expect(definitions.find((tool: Row) => tool.name === "read_files").parameters.required).toEqual(["paths"]);
+      const results = toolResults(messages);
+      expect(results).toHaveLength(4);
+      expect(results[0].content).toContain("original");
+      expect(results[0].content).toContain("second file");
+      expect(results[1].content).toContain("original");
+      for (const result of results.slice(2)) {
+        expect(result.is_error).toBe(true);
+        expect(result.content).toContain("nothing was executed");
+        expect(result.content).not.toContain("output truncated");
+      }
+      expectPaired(messages);
+    }, 40_000, { "second.txt": "second file" });
+  });
   it("discovers MCP schemas on demand and executes through a stable provider tool surface", async () => {
     await scenario(`
       if (turn === 1) return [{ name: "search_mcp_tools", input: { query: "fixture_echo" } }];
@@ -200,7 +225,7 @@ describe("real tool loop regressions", () => {
 
   it("warns in model-visible history before stopping identical reads with fresh IDs", async () => {
     await scenario('return [{ name: "read_file", input: { path: "file.txt" } }];', (result) => {
-      expect(result.requests).toHaveLength(6);
+      expect(result.requests, result.output).toHaveLength(6);
       expect(JSON.stringify(result.requests[3])).toContain("Tool loop detected");
       expect(JSON.stringify(result.requests[3])).toContain("You already have this read_file result");
       expect(JSON.stringify(result.requests[3])).toContain("do not keep re-reading a template");
@@ -225,7 +250,7 @@ describe("real tool loop regressions", () => {
       if (turn === 4) return [{ name: "read_file", input: { path: "file.txt" } }];
       if (turn === 5) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "fixed" } }];
       return [];`, (result) => {
-      expect(result.requests).toHaveLength(6);
+      expect(result.requests, result.output).toHaveLength(6);
       expect(JSON.stringify(result.requests)).not.toContain("Settle gate");
       expect(result.events.find((row) => row.t === "agent_settled")?.error).toBeNull();
       expect(result.traces.some((row) => row.status === "stalled")).toBe(false);

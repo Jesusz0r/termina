@@ -1,6 +1,6 @@
 // @ts-nocheck
 /**
- * Prepare the packaged resources: the node runtime and the core binary.
+ * Prepare the packaged resources: Node, the core binary, CLI launcher, and ripgrep.
  *
  * The bundle ships its own node so the agent and its children resolve a
  * known runtime (Node >= 22.19). The core binary comes from the release
@@ -18,6 +18,7 @@ import { platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildCore, stageCoreBinary } from "./build-core.ts";
+import { prepareRipgrep } from "./prepare-ripgrep.ts";
 import { errorCode } from "../shared/guards.ts";
 import { readSystemProcessIdentity } from "../shared/process-identity.js";
 
@@ -786,6 +787,7 @@ async function main() {
   await prepareNode();
   prepareCore();
   prepareBin();
+  await prepareRipgrep({ resourcesDir: RESOURCES, downloadArchive: downloadVerifiedArchive });
   console.log(`resources ready in ${RESOURCES}`);
 }
 

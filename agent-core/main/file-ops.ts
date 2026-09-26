@@ -612,11 +612,11 @@ export function readProjectFile(
   return got;
 }
 
-/** Maximum files in one batched `read_file` call. One shared bound stays small. */
+/** Maximum files in one `read_files` call. One shared bound stays small. */
 export const READ_BATCH_CAP = 10;
 
 /**
- * Batched `read_file`: one bounded result for up to READ_BATCH_CAP files.
+ * `read_files`: one bounded result for up to READ_BATCH_CAP files.
  * Composes the single-file reader, so jail confinement, the range header, and
  * per-file truncation stay canonical. Sections are whole-file atomic: the
  * result keeps an order-stable prefix that fits READ_CAP_BYTES and names
@@ -653,49 +653,46 @@ export function readProjectFiles(
   }
   const paths = input.paths as string[];
   if (paths.length === 1) return readProjectFile(cwd, { path: paths[0] }, allow);
-  const sections: string[] = [];
-  const failed: boolean[] = [];
-  for (const rel of paths) {
-    const got = readProjectFile(cwd, { path: rel }, allow);
-    sections.push(`<file path="${xmlSafe(rel)}">\n${got.content}\n</file>`);
-    failed.push(got.isError);
+  const omittedMarker = (start: number): string => start === paths.length ? "" :
+    `[batch truncated at ${READ_CAP_BYTES} bytes — ${paths.length - start} file(s) omitted: ${paths.slice(start).map((p) => JSON.stringify(p)).join(", ")} — read_file each omitted path explicitly]`;
+  if (Buffer.byteLength(omittedMarker(0), "utf8") > READ_CAP_BYTES) {
+    return fail("error: batch path metadata exceeds the output budget; use a smaller batch");
   }
   const included: string[] = [];
-  const omitted: string[] = [];
+  const results: ToolTextResult[] = [];
+  const continuations: string[] = [];
   let used = 0;
-  for (let i = 0; i < sections.length; i++) {
-    const sec = sections[i]!;
-    const need = Buffer.byteLength(sec, "utf8") + (included.length > 0 ? 1 : 0);
-    if (included.length === 0 || used + need <= READ_CAP_BYTES) {
-      included.push(sec);
-      used += need;
-    } else {
-      omitted.push(paths[i]!);
-    }
+  for (let i = 0; i < paths.length; i++) {
+    const rel = paths[i]!;
+    const got = readProjectFile(cwd, { path: rel }, allow);
+    const section = `<file path="${xmlSafe(rel)}">\n${got.content}\n</file>`;
+    const need = Buffer.byteLength(section, "utf8") + (included.length > 0 ? 1 : 0);
+    const tail = omittedMarker(i + 1);
+    const reserve = tail ? Buffer.byteLength(tail, "utf8") + 1 : 0;
+    // Reserve the omission marker before accepting a section. Never recut a
+    // single-file result: doing so destroys its exact continuation offset.
+    if (used + need + reserve > READ_CAP_BYTES) break;
+    included.push(section);
+    results.push(got);
+    used += need;
+    if (got.truncated) continuations.push(`Continue ${JSON.stringify(rel)}: ${got.continuation ?? "read_file this path explicitly"}`);
   }
-  const body = included.join("\n");
-  const repro = `read_file(${paths.length} paths)`;
-  const allFailed = failed.slice(0, included.length).every(Boolean) && omitted.length === 0;
+  const omitted = paths.slice(included.length);
+  const marker = omittedMarker(included.length);
   if (omitted.length > 0) {
-    const names = omitted.map((p) => JSON.stringify(p)).join(", ");
-    const marker = `[batch truncated at ${READ_CAP_BYTES} bytes — ${omitted.length} file(s) omitted: ${names} — read_file each omitted path explicitly]`;
-    const continuation = `Read the omitted paths explicitly with read_file: ${names}. Use one path per call or a smaller batch.`;
-    return logicalToolText(body, {
-      maxBytes: READ_CAP_BYTES,
-      state: allFailed ? "failed" : "complete",
-      isError: allFailed,
-      forceMarker: true,
-      marker,
-      continuation,
-      repro,
-    });
+    continuations.push(`Read the omitted paths explicitly with read_file: ${omitted.map((p) => JSON.stringify(p)).join(", ")}. Use one path per call or a smaller batch.`);
   }
-  return logicalToolText(body, {
+  const allFailed = omitted.length === 0 && results.every((result) => result.isError);
+  const result = logicalToolText(included.join("\n"), {
     maxBytes: READ_CAP_BYTES,
     state: allFailed ? "failed" : "complete",
     isError: allFailed,
-    repro,
+    forceMarker: omitted.length > 0,
+    marker,
+    continuation: continuations.join("\n") || null,
+    repro: `read_files(${paths.length} paths)`,
   });
+  return Object.freeze({ ...result, truncated: result.truncated || results.some((entry) => entry.truncated) });
 }
 
 function atomicWrite(path: string, content: string, mode?: number): void {

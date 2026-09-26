@@ -10,6 +10,7 @@ import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IGNORED_SEGMENTS, parseGitignore, type GitignoreRules } from "../../shared/gitignore.ts";
 import { freezeCwd, gitignoreSkips, readIgnoreFile, sortUtf8, underRoot } from "./files.ts";
+import { resolveBundledRipgrep } from "./bundled-ripgrep.ts";
 
 const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
@@ -72,6 +73,10 @@ export function trustedPath(pathEnv = process.env.PATH ?? "", cwdRoot?: string):
 
 export function resolveTrustedBin(bin: string, cwdRoot: string): string | null {
   const root = freezeCwd(cwdRoot);
+  if (bin === "rg") {
+    const bundled = resolveBundledRipgrep(import.meta.url, root);
+    if (bundled !== null) return bundled;
+  }
   for (const dir of trustedPath(process.env.PATH, cwdRoot).split(delimiter)) {
     if (!dir || !isAbsolute(dir)) continue;
     let realDir: string;

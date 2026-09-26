@@ -21,6 +21,7 @@ extraResources:
     to: termina-core
   - from: resources/node
     to: node
+  # CLI launcher plus checksum-pinned ripgrep and its licenses.
   - from: resources/bin
     to: bin
 mac:

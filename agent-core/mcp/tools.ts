@@ -9,6 +9,7 @@ import { MAX_MCP_TOOLS, MAX_MCP_TOOL_BYTES, SCHEMA_CAP, SCHEMA_MAX_DEPTH } from 
 
 export const KERNEL_TOOL_NAMES = new Set([
   "read_file",
+  "read_files",
   "write_file",
   "edit",
   "grep",

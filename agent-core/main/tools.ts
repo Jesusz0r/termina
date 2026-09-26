@@ -135,9 +135,9 @@ export function reproFor(use: ToolUse): string | undefined {
   const text = (key: string): string => typeof use.input[key] === "string" ? use.input[key] as string : "";
   if (use.name === "bash") return `bash ${shellQuote(text("command"))}`;
   if (use.name === "read_file") {
-    if (Array.isArray(use.input.paths)) return `read_file(${(use.input.paths as unknown[]).length} paths)`;
     return `read_file(${JSON.stringify(text("path"))})`;
   }
+  if (use.name === "read_files") return `read_files(${Array.isArray(use.input.paths) ? use.input.paths.length : 0} paths)`;
   if (use.name === "edit") return `edit(${JSON.stringify(text("path"))})`;
   if (use.name === "grep") return `grep ${shellQuote(text("pattern"))}`;
   if (use.name === "glob") return `glob ${shellQuote(text("pattern"))}`;
@@ -171,10 +171,8 @@ export function sidecarStartFor(use: {
 
 export function toolTranscriptDetail(use: ToolUse): string {
   if (use.name === "edit" || use.name === "write_file") return use.input.path ?? "";
-  if (use.name === "read_file") {
-    if (Array.isArray(use.input.paths)) return `${(use.input.paths as unknown[]).length} paths`;
-    return use.input.path ?? "";
-  }
+  if (use.name === "read_file") return use.input.path ?? "";
+  if (use.name === "read_files") return `${Array.isArray(use.input.paths) ? use.input.paths.length : 0} paths`;
   if (use.name === "bash") return use.input.command ?? "";
   if (use.name === "grep" || use.name === "glob") return use.input.pattern ?? "";
   if (use.name === "fetch") return String(use.input.url ?? "");
@@ -196,16 +194,18 @@ export function capDisplay(text: string, maxBytes: number): string {
   return utf8TextSuffix(text, maxBytes);
 }
 
-export function formatToolFollowup(use: ToolUse, outcome: { result: Record<string, unknown>; isError: boolean }): string {
+export function formatToolFollowup(use: ToolUse, outcome: Pick<ToolOutcome, "result" | "isError" | "bounded" | "executed">): string {
   const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
-  const status = outcome.isError ? "failed" : "done";
+  const state = outcome.bounded?.state;
+  const incomplete = state !== undefined && state !== "complete" && state !== "failed";
+  const status = outcome.executed === false ? "not executed" : incomplete ? `incomplete (${state})` : outcome.isError ? "failed" : "done";
   if (use.name === "bash") {
     const shown = displayToolOutput(content);
     return `◇ ${use.name} · ${status}${shown ? `\n${shown}` : ""}\n`;
   }
-  if (outcome.isError) {
+  if (outcome.isError || incomplete || outcome.executed === false) {
     const shown = displayToolOutput(content);
-    return `◇ ${use.name} · failed${shown ? `\n${shown}` : ""}\n`;
+    return `◇ ${use.name} · ${status}${shown ? `\n${shown}` : ""}\n`;
   }
   if (use.name === "grep" || use.name === "glob") {
     if (isGrepNoMatches(content)) return `◇ ${use.name} · done · no matches\n`;

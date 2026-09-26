@@ -366,9 +366,12 @@ export function boundedToolResult(
   input: string | Uint8Array,
   options: BoundedToolResultOptions,
 ): BoundedToolResult {
-  const text = boundText(input, options);
+  // Unlike a failed byte stream, a tool failure supplies a complete error
+  // message. Bound those bytes normally; keep execution state independent.
+  const text = boundText(input, options.state === "failed" ? { ...options, state: "complete" } : options);
   return Object.freeze({
     ...text,
+    state: options.state ?? text.state,
     content: text.text,
     isError: options.isError,
   });
@@ -581,15 +584,16 @@ export function logicalToolText(
     ? "[output truncated — re-run the tool for the rest]"
     : opts.marker ?? "";
   if (!opts.forceMarker || !marker) {
+    const result = boundedToolResult(content, {
+      maxBytes: opts.maxBytes,
+      direction: "head",
+      marker,
+      state: opts.state,
+      isError: opts.isError,
+    });
     return Object.freeze({
-      ...boundedToolResult(content, {
-        maxBytes: opts.maxBytes,
-        direction: "head",
-        marker,
-        state: opts.state,
-        isError: opts.isError,
-      }),
-      continuation: opts.continuation ?? (marker || null),
+      ...result,
+      continuation: opts.continuation ?? (result.truncated && marker ? marker : null),
       repro: opts.repro ?? null,
     });
   }

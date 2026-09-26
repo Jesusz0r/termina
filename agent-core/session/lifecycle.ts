@@ -9,7 +9,7 @@ import { errorCode } from "../../shared/guards.ts";
 import { closeSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, readSync, readdirSync, renameSync, writeSync, type BigIntStats } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { createCurrentDir, createSessionBundleWithAdmission, currentHasContent, listCurrentSegments, recoverActiveSegment, renameCurrentUnique, retainUnboundCleanup } from "./bundles.ts";
+import { createCurrentDir, createSessionBundleWithAdmission, createSessionBundleWithAdmissionAsync, currentHasContent, listCurrentSegments, recoverActiveSegment, renameCurrentUnique, retainUnboundCleanup } from "./bundles.ts";
 import { anchoredChildPath, fsyncDirectory, openDirectoryAnchor, validateDirectoryAnchor } from "./descriptors.ts";
 import type { DirectoryAnchor } from "./descriptors.ts";
 import { ACTIVE_NAME, ARCHIVE_PREFIX, BAD_PREFIX, CURRENT_DIR, MAX_SESSION_BUNDLE_BYTES, MAX_SESSION_RECORD_BYTES, MAX_SESSION_SEGMENT_BYTES, READ_CHUNK, errMsg, inspectEntry, isCoreSessionId, parseSessionBundlePath, partFileName, sessionBudgetExceeded, sessionBundleLimit, yieldToEventLoop } from "./primitives.ts";
@@ -41,6 +41,18 @@ export function ensureSessionBundle(
   return { ok: true, ...parsed };
 }
 
+
+/** Admit a new session before the first turn. Concurrent processes wait at
+ * the shared lock; existing sessions still use canonical recovery/validation. */
+export async function admitSessionBundle(sessionFile: string, signal?: AbortSignal): Promise<SessionResult> {
+  const parsed = parseSessionBundlePath(sessionFile);
+  if (!parsed) return { ok: false, error: "session path is not a core session bundle" };
+  if (!inspectEntry(parsed.currentDir)) {
+    const created = await createSessionBundleWithAdmissionAsync(parsed, signal);
+    if (!created.ok) return created;
+  }
+  return ensureSessionBundle(sessionFile);
+}
 
 export function prepareFreshSession(sessionFile: string, now = Date.now()): SessionResult<{ archived: string | null }> {
   const parsed = parseSessionBundlePath(sessionFile);

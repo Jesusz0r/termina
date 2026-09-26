@@ -24,6 +24,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { syncDirectory } from "./fsync.ts";
 import { errorCode } from "./guards.ts";
 
@@ -328,6 +329,29 @@ function recoverLock(lock: string, stale: SessionRetentionLockState): boolean {
   return cleanupLockTransition(lock, transition);
 }
 
+class SessionRetentionPendingError extends Error {}
+
+/** A lock directory can be observed between mkdir and owner publication, or
+ * during release. Wait boundedly for that generation to become inspectable or
+ * free; never delete an unreadable lock. Permanent corruption still fails closed.
+ * Yield between attempts so concurrent child startup never blocks the host.
+ * All acquisition and stale-owner recovery still belong to the sync owner. */
+export async function acquireSessionRetentionLockAsync(
+  root: string,
+  signal?: AbortSignal,
+): Promise<SessionRetentionLock> {
+  const deadline = performance.now() + 5_000;
+  for (;;) {
+    signal?.throwIfAborted();
+    try {
+      return acquireSessionRetentionLock(root);
+    } catch (error) {
+      if (!(error instanceof SessionRetentionPendingError) || performance.now() >= deadline) throw error;
+      await delay(25, undefined, { signal });
+    }
+  }
+}
+
 /** Acquire the shared app-owned retained-session admission lock. */
 export function acquireSessionRetentionLock(root: string): SessionRetentionLock {
   const canonicalRoot = realpathSync(resolve(root));
@@ -343,10 +367,10 @@ export function acquireSessionRetentionLock(root: string): SessionRetentionLock 
       const inspected = inspectLock(path);
       if (inspected === null) {
         if (resumeLock(path)) continue;
-        throw new Error("retained session admission lock is unreadable");
+        throw new SessionRetentionPendingError("retained session admission lock is unreadable");
       }
       if (inspected.owner.pid === process.pid || processAlive(inspected.owner.pid)) {
-        throw new Error("retained session root is busy");
+        throw new SessionRetentionPendingError("retained session root is busy");
       }
       if (!recoverLock(path, inspected)) throw new Error("retained session root is busy");
       continue;

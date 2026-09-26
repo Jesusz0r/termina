@@ -290,7 +290,19 @@ footprint, not these numbers.
   published schemas before sidecar formatting, approval, or execution. Missing
   write/edit bodies are errors, never implicit empty writes. Domain-specific
   validation stays with each tool's owner; MCP schemas stay server-owned.
-- Only consecutive `read_file`, `grep`, `glob`, and `fetch` calls run concurrently
+- `read_file` reads one path (with optional line range or byte continuation).
+  `read_files` reads 1–10 whole files or lists directories through the same
+  bounded reader; it does not accept offsets or line ranges. Tool schemas also drive runtime argument
+  validation; unsupported fields are rejected rather than silently ignored.
+- Glob traversal starts at the literal path prefix, preserving ancestor ignore
+  rules and confinement without spending its visit budget on unrelated trees.
+  Packaged releases include checksum-pinned ripgrep; the resolver prefers that
+  executable over trusted PATH locations. The bounded JavaScript fallback remains
+  available when no trusted ripgrep can be resolved.
+- First-turn session admission waits asynchronously for up to five seconds on
+  the shared retention lock. Cancellation and permanent lock corruption fail
+  closed; waiting never bypasses capacity checks or deletes unreadable locks.
+- Only consecutive `read_file`, `read_files`, `grep`, `glob`, and `fetch` calls run concurrently
   (at most four). Writes, bash, subagents, and unknown/MCP tools are ordering
   barriers. Identical reads share an execution only inside an uninterrupted
   read segment of one response. Adjacent duplicate actions are explicitly

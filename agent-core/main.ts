@@ -127,6 +127,7 @@ import {
   trackToolLoopTurn,
 } from "./stall.ts";
 import { providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
+import { READ_TOOL_DEFS } from "./main/read-tools.ts";
 import {
   HIGH_WATER,
   LOW_WATER,
@@ -314,6 +315,7 @@ import {
 import { applyNoQuietWins, collectTaskToolOutcomes } from "./trace/quiet-wins.ts";
 import {
   SessionWriter,
+  admitSessionBundle,
   applySessionRecord,
   clearSessionBundle,
   createReplayState,
@@ -1735,11 +1737,11 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
   if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
   if (use.name === "read_file") {
-    if (use.input.paths !== undefined) {
-      const got = readProjectFiles(canonicalCwd, use.input, frontMatter.allowPaths);
-      return done(use, got);
-    }
     const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
+    return done(use, got);
+  }
+  if (use.name === "read_files") {
+    const got = readProjectFiles(canonicalCwd, use.input, frontMatter.allowPaths);
     return done(use, got);
   }
   if (use.name === "write_file") {
@@ -1924,23 +1926,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
 }
 
 const TOOLS: Array<Record<string, unknown>> = [
-  {
-    name: "read_file",
-    description:
-      "Read a text file relative to the working directory. Results start with a path and line-range header, then the file bytes for that range — copy those bytes into edit old_text. Caps near 40 KB of file bytes. Optional start_line and end_line (inclusive). Pass offset (bytes) only to continue a truncated read; do not combine with start_line. A directory path lists that directory. Pass paths (up to 10) to read several files in one bounded 40 KB result; omitted tail files are named — read them explicitly. Use path or paths, not both; offset/start_line/end_line apply to path only.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        path: { type: "string", description: "File or directory path relative to the working directory." },
-        paths: { type: "array", description: "Up to 10 file paths for one bounded batch read.", items: { type: "string" } },
-        offset: { type: "number", description: "Byte offset to continue a truncated read. Do not combine with start_line." },
-        start_line: { type: "number", description: "1-based inclusive start line." },
-        end_line: { type: "number", description: "1-based inclusive end line." },
-      },
-      required: [],
-    },
-  },
+  ...READ_TOOL_DEFS,
   {
     name: "write_file",
     description:
@@ -4270,8 +4256,17 @@ async function runPrompt(
   // preflight failure before this prompt has built its own snapshot.
   activeRequestOverlay = null;
   protectedTaskApprovals.clear();
+  running = true;
+  interrupted = shutdownRequested;
+  currentAbort = new AbortController();
+  showPrompt();
   if (!streamPrepared) {
     try {
+      if (sessionFile) {
+        const admitted = await admitSessionBundle(sessionFile, currentAbort.signal);
+        if (!admitted.ok) throw new SessionStoreError(admitted.error);
+      }
+      if (interrupted || shutdownRequested) throw new Error("session admission interrupted");
       ensureFreshSession();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -4279,10 +4274,6 @@ async function runPrompt(
       return;
     }
   }
-  running = true;
-  showPrompt();
-  interrupted = shutdownRequested;
-  currentAbort = new AbortController();
   const pendingResult = eventsDir && terminalId
     ? await pendingImageState(eventsDir, terminalId)
     : { ok: true as const, count: 0, hasImages: false };

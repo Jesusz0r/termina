@@ -320,7 +320,7 @@ export async function collectFiles(
   start: string,
   root: string,
   visitCap: number,
-  opts?: { skipNul?: boolean; shouldStop?: () => boolean; budgetMs?: number },
+  opts?: { skipNul?: boolean; shouldStop?: () => boolean; budgetMs?: number; ignoreRules?: GitignoreRules },
 ): Promise<{
   files: string[];
   state: CompletionState;
@@ -334,7 +334,7 @@ export async function collectFiles(
   const files: string[] = [];
   const visited = new Set<string>();
   const seenFiles = new Set<string>();
-  const gitignore: GitignoreRules = new Map();
+  const gitignore: GitignoreRules = new Map(opts?.ignoreRules);
   let stopCallbackFailed = false;
   const shouldStop = (): boolean => {
     try {
@@ -627,10 +627,58 @@ export async function globFiles(
   });
   if (pattern.length < 1 || pattern.length > 256) return fail("error: pattern length must be 1–256");
   if (/[\[\]{}]/.test(pattern)) return fail("error: glob only supports * ** ?");
+  const started = Date.now();
+  const rawBudgetMs = opts?.budgetMs ?? GREP_BUDGET_MS;
+  const budgetMs = Number.isFinite(rawBudgetMs) && rawBudgetMs >= 0 ? rawBudgetMs : 0;
+  const remainingBudget = (): number => Math.max(0, budgetMs - (Date.now() - started));
+  const prefixStop = (): ToolTextResult | null => {
+    let state: CompletionState | null = null;
+    try {
+      if (opts?.shouldStop?.()) state = "interrupted";
+    } catch {
+      return fail("error: glob cancellation callback failed");
+    }
+    if (!state && remainingBudget() <= 0) state = "timeout";
+    return state ? logicalToolText(`(glob ${state} before traversal)`, {
+      maxBytes: GREP_BYTE_CAP, state, isError: true, continuation, repro,
+    }) : null;
+  };
+  const stopped = prefixStop();
+  if (stopped) return stopped;
   const root = freezeCwd(cwd);
-  const collected = await collectFiles(root, root, GREP_VISIT_CAP, {
+  // Only the literal prefix can constrain the walk. Wildcard components
+  // still use the canonical matcher, including ** matching zero directories.
+  const components = pattern.split("/");
+  const wildcard = components.findIndex((part) => /[*?]/.test(part));
+  const prefix = (wildcard < 0 ? components : components.slice(0, wildcard)).join("/") || ".";
+  const confined = confinePath(root, prefix);
+  if (!confined.ok) return fail(confined.error);
+  const empty = (): ToolTextResult => prefixStop() ?? logicalToolText(GREP_NO_MATCHES_PREFIX, {
+    maxBytes: GREP_BYTE_CAP, state: "complete", isError: false, marker: "", repro,
+  });
+  // Seed ancestor ignore rules without enumerating unrelated subtrees.
+  const rules: GitignoreRules = new Map();
+  const segments = posixRel(root, confined.abs).split("/").filter(Boolean);
+  let parent = root;
+  for (const segment of segments) {
+    const stopped = prefixStop();
+    if (stopped) return stopped;
+    const ignore = readIgnoreFile(join(parent, ".gitignore"));
+    if (ignore !== null) rules.set(posixRel(root, parent), parseGitignore(ignore));
+    parent = join(parent, segment);
+    const isDir = parent !== confined.abs || wildcard >= 0 || classifyWalkPath(parent, root)?.kind === "dir";
+    if (IGNORED_SEGMENTS.has(segment) || gitignoreSkips(rules, posixRel(root, parent), isDir)) return empty();
+  }
+  try {
+    lstatSync(confined.abs);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return empty();
+    return fail(`error: cannot inspect glob prefix ${JSON.stringify(prefix)}`);
+  }
+  const collected = await collectFiles(confined.abs, root, GREP_VISIT_CAP, {
     shouldStop: opts?.shouldStop,
-    budgetMs: opts?.budgetMs,
+    budgetMs: remainingBudget(),
+    ignoreRules: rules,
   });
   const out: string[] = [];
   for (const abs of collected.files) {

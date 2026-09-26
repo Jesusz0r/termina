@@ -6,7 +6,7 @@
  * rotate/create/recover helpers. Split from agent-core/session.ts (issue #38).
  */
 import { errorCode } from "../../shared/guards.ts";
-import { acquireSessionRetentionLock, releaseSessionRetentionLock, type SessionRetentionLock } from "../../shared/session-retention-lock.ts";
+import { acquireSessionRetentionLock, acquireSessionRetentionLockAsync, releaseSessionRetentionLock, validateSessionRetentionLease, type SessionRetentionLock } from "../../shared/session-retention-lock.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -661,6 +661,36 @@ export function createSessionBundleWithAdmission(
   parsed: SessionBundlePaths,
   hooks?: Pick<SessionTestHooks, "afterSessionProjectCreated" | "afterEmptySessionReservation">,
 ): SessionResult {
+  return createAdmittedSessionBundle(parsed, hooks);
+}
+
+export async function createSessionBundleWithAdmissionAsync(
+  parsed: SessionBundlePaths,
+  signal?: AbortSignal,
+): Promise<SessionResult> {
+  let lock: SessionRetentionLock;
+  try {
+    lock = await acquireSessionRetentionLockAsync(dirname(parsed.projectDir), signal);
+  } catch (error) {
+    return { ok: false, error: errMsg(error) };
+  }
+  try {
+    // Acquisition can resolve immediately but still yield at await. Honor a
+    // cancellation in that gap before consuming an empty-session reservation.
+    signal?.throwIfAborted();
+    return createAdmittedSessionBundle(parsed, undefined, lock);
+  } catch (error) {
+    return { ok: false, error: errMsg(error) };
+  } finally {
+    releaseSessionRetentionLock(lock);
+  }
+}
+
+function createAdmittedSessionBundle(
+  parsed: SessionBundlePaths,
+  hooks?: Pick<SessionTestHooks, "afterSessionProjectCreated" | "afterEmptySessionReservation">,
+  lease?: SessionRetentionLock,
+): SessionResult {
   const rawAdmissionRoot = dirname(parsed.projectDir);
   const projectName = basename(parsed.projectDir);
   if (!safeSessionChildName(projectName)) return { ok: false, error: "session project directory has an invalid name" };
@@ -680,7 +710,8 @@ export function createSessionBundleWithAdmission(
   const effective: SessionBundlePaths = { ...parsed, projectDir, bundleDir, currentDir, sessionFile };
   let lock: SessionRetentionLock;
   try {
-    lock = acquireSessionRetentionLock(admissionRoot);
+    if (lease && !validateSessionRetentionLease(admissionRoot, lease)) return { ok: false, error: "session admission lease changed" };
+    lock = lease ?? acquireSessionRetentionLock(admissionRoot);
   } catch (err) {
     return { ok: false, error: errMsg(err) };
   }
@@ -733,6 +764,6 @@ export function createSessionBundleWithAdmission(
   } finally {
     if (project) closeSync(project.fd);
     if (root) closeSync(root.fd);
-    releaseSessionRetentionLock(lock);
+    if (!lease) releaseSessionRetentionLock(lock);
   }
 }

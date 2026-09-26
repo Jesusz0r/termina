@@ -501,7 +501,7 @@ export async function grepFiles(
       return grepRipgrep(rg, root, confined.abs, pattern, input.glob, { ...opts, shouldStop });
     }
   }
-  if (unsafe) return fail(unsafe);
+  if (unsafe) return fail(`${unsafe}. The fallback search engine accepts only bounded simple patterns; split alternatives into simpler searches or use trusted ripgrep.`);
   let regex: RegExp;
   try {
     regex = new RegExp(pattern);
