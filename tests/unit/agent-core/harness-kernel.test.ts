@@ -2181,8 +2181,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     
     check("pickHeaders unsourced oat uses x-api-key", pickHeaders("sk-ant-oat-secret")["x-api-key"] === "sk-ant-oat-secret");
     check("pickHeaders unsourced oat has no bearer", pickHeaders("sk-ant-oat-secret").authorization === undefined);
-    check("pickHeaders oauth extra uses bearer", pickHeaders("sk-ant-oat-secret", { type: "oauth" }).authorization === "Bearer sk-ant-oat-secret");
-    check("pickHeaders oauth extra sets betas", Boolean(pickHeaders("sk-ant-oat-secret", { type: "oauth" })["anthropic-beta"]));
+    check("pickHeaders stored oauth is not bearer", pickHeaders("sk-ant-oat-secret", { type: "oauth" })["x-api-key"] === "sk-ant-oat-secret" && pickHeaders("sk-ant-oat-secret", { type: "oauth" }).authorization === undefined);
+    check("pickHeaders stored oauth sets no claude-code beta", pickHeaders("sk-ant-oat-secret", { type: "oauth" })["anthropic-beta"] === undefined);
     check("pickHeaders api key uses x-api-key", pickHeaders("sk-ant-api-x")["x-api-key"] === "sk-ant-api-x");
     check("pickHeaders api key has no bearer", pickHeaders("sk-ant-api-x").authorization === undefined);
     
@@ -2233,13 +2233,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("parseAuthCommand bare /login asks to pick", "error" in bareLogin && String(bareLogin.error).includes("pick a provider"));
     const bareLogout = parseAuthCommand("/logout");
     check("parseAuthCommand bare /logout asks to pick", "error" in bareLogout && String(bareLogout.error).includes("pick a provider"));
-    const codeLogin = parseAuthCommand("/login code");
-    check("parseAuthCommand code mode", "mode" in codeLogin && codeLogin.mode === "code");
+    const codeLogin = parseAuthCommand("/login openai code");
+    check("parseAuthCommand code mode", "mode" in codeLogin && codeLogin.mode === "code" && codeLogin.provider === "openai-codex");
     check("parseAuthCommand rejects unknown provider", "error" in parseAuthCommand("/login nope"));
     check("banner does not contain raw token", !authBanner({ ok: true, providerId: "anthropic", token: "sk-ant-oat-SUPERSECRET99", kind: "oauth", source: "oauth", baseUrl: "https://api.anthropic.com", headers: {} }).includes("SUPERSECRET"));
     const cancelledLogin = new AbortController();
     cancelledLogin.abort();
-    const cancelledResult = await runLogin("anthropic", "browser", {
+    const cancelledResult = await runLogin("openai-codex", "browser", {
       write: () => {},
       openUrl: () => {},
       signal: cancelledLogin.signal,
@@ -2250,7 +2250,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const prevDenyPort = process.env.TERMINA_TEST_REDIRECT_PORT;
     process.env.TERMINA_TEST_REDIRECT_PORT = "27323";
     let denyOut = "";
-    const denyP = runLogin("anthropic", "browser", {
+    const denyP = runLogin("openai-codex", "browser", {
       write: (t) => {
         denyOut += t;
       },
@@ -2260,7 +2260,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     try {
       const started = Date.now();
       while (!denyOut.includes("authorize:") && Date.now() - started < 2000) await new Promise((r) => setTimeout(r, 20));
-      await fetch("http://127.0.0.1:27323/callback?error=access_denied&state=x");
+      await fetch("http://127.0.0.1:27323/auth/callback?error=access_denied&state=x");
       denyResult = await denyP;
     } catch (err) {
       denyResult = { ok: false, error: String(err) };
@@ -2268,7 +2268,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("oauth access_denied is login cancelled", denyResult.ok === false && denyResult.error === "login cancelled");
     process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS = "150";
     process.env.TERMINA_TEST_REDIRECT_PORT = "27324";
-    const timedOut = await runLogin("anthropic", "browser", { write: () => {}, openUrl: () => {} });
+    const timedOut = await runLogin("openai-codex", "browser", { write: () => {}, openUrl: () => {} });
     check(
       "oauth wait times out as cancelled",
       timedOut.ok === false && String(timedOut.error).includes("login cancelled"),
@@ -2283,7 +2283,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     let mismatchOut = "";
     const mismatchAbort = new AbortController();
     const mismatchTimer = setTimeout(() => mismatchAbort.abort(), 4_000);
-    const mismatchP = runLogin("anthropic", "browser", {
+    const mismatchP = runLogin("openai-codex", "browser", {
       write: (t) => {
         mismatchOut += t;
       },
@@ -2297,7 +2297,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       const mismatchDeadline = Date.now() + 2000;
       while (Date.now() < mismatchDeadline) {
         try {
-          await fetch("http://127.0.0.1:27325/callback?code=foreign-code&state=wrong-state");
+          await fetch("http://127.0.0.1:27325/auth/callback?code=foreign-code&state=wrong-state");
           break;
         } catch {
           await new Promise((r) => setTimeout(r, 20));
@@ -2314,7 +2314,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     let missingOut = "";
     const missingAbort = new AbortController();
     const missingTimer = setTimeout(() => missingAbort.abort(), 4_000);
-    const missingP = runLogin("anthropic", "browser", {
+    const missingP = runLogin("openai-codex", "browser", {
       write: (t) => {
         missingOut += t;
       },
@@ -2328,7 +2328,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       const missingDeadline = Date.now() + 2000;
       while (Date.now() < missingDeadline) {
         try {
-          await fetch("http://127.0.0.1:27326/callback?code=foreign-code");
+          await fetch("http://127.0.0.1:27326/auth/callback?code=foreign-code");
           break;
         } catch {
           await new Promise((r) => setTimeout(r, 20));
@@ -2352,7 +2352,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       req.on("end", () => {
         let grant = "";
         try {
-          grant = JSON.parse(body).grant_type;
+          grant = body.includes("grant_type=")
+            ? new URLSearchParams(body).get("grant_type") ?? ""
+            : JSON.parse(body).grant_type;
         } catch {
           grant = "";
         }
@@ -2376,9 +2378,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     process.env.TERMINA_TEST_TOKEN_URL = `http://127.0.0.1:${tokenPort}/`;
     process.env.TERMINA_TEST_REDIRECT_PORT = "27321";
     resetAuthCache();
-    runLogout("anthropic");
+    runLogout("openai-codex");
     let loginOut = "";
-    const loginP = runLogin("anthropic", "browser", {
+    const loginP = runLogin("openai-codex", "browser", {
       write: (t) => {
         loginOut += t;
       },
@@ -2390,25 +2392,26 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       while (!loginOut.includes("authorize:") && Date.now() - started < 2000) await new Promise((r) => setTimeout(r, 20));
       const authUrl = (loginOut.match(/authorize: (\S+)/) || [])[1];
       const state = new URL(authUrl).searchParams.get("state");
-      await fetch(`http://127.0.0.1:27321/callback?code=test-code&state=${state}`);
+      await fetch(`http://127.0.0.1:27321/auth/callback?code=test-code&state=${state}`);
       loginResult = await loginP;
     } catch (err) {
       loginResult = { ok: false, error: String(err) };
     }
     check("login stores oauth credential", loginResult.ok === true);
     resetAuthCache();
-    const afterLogin = await resolveAuth("anthropic");
+    const afterLogin = await resolveAuth("openai-codex");
     check(
-      "login resolve uses bearer oat",
+      "login resolve uses oauth bearer",
       afterLogin.ok && afterLogin.kind === "oauth" && afterLogin.headers.authorization?.startsWith("Bearer ") && afterLogin.headers["x-api-key"] === undefined,
     );
-    modifyProvider("anthropic", (current) => ({ ...(typeof current === "object" && current !== null ? current : {}), expires: Date.now() - 1 }));
+    modifyProvider("openai-codex", (current) => ({ ...(typeof current === "object" && current !== null ? current : {}), expires: Date.now() - 1 }));
     resetAuthCache();
-    const afterRefresh = await resolveAuth("anthropic");
+    const afterRefresh = await resolveAuth("openai-codex");
     check(
       "expired oauth refreshes and persists",
-      afterRefresh.ok && afterRefresh.token === "sk-ant-oat-refreshed99" && JSON.parse(readFileSync(authFile, "utf8")).anthropic.refresh === "refresh-2",
+      afterRefresh.ok && afterRefresh.token === "sk-ant-oat-refreshed99" && JSON.parse(readFileSync(authFile, "utf8"))["openai-codex"].refresh === "refresh-2",
     );
+    runLogout("openai-codex");
     if (prevTokenUrl === undefined) delete process.env.TERMINA_TEST_TOKEN_URL;
     else process.env.TERMINA_TEST_TOKEN_URL = prevTokenUrl;
     if (prevRedir === undefined) delete process.env.TERMINA_TEST_REDIRECT_PORT;
@@ -4613,7 +4616,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "slash /login lists OpenAI and OpenAI (key)",
       matchingSlashCommands("/login").some((c) => c.name === "OpenAI" && c.submit === "/login openai oauth") &&
         matchingSlashCommands("/login").some((c) => c.name === "OpenAI (key)" && c.submit === "/login openai key") &&
-        matchingSlashCommands("/login").some((c) => c.name === "Anthropic" && c.submit === "/login anthropic oauth") &&
+        !matchingSlashCommands("/login").some((c) => c.submit === "/login anthropic oauth") &&
         matchingSlashCommands("/login").some((c) => c.name === "Anthropic (key)" && c.submit === "/login anthropic key") &&
         matchingSlashCommands("/login").some((c) => c.name === "GitHub Copilot" && c.submit === "/login github-copilot oauth") &&
         matchingSlashCommands("/login").some((c) => c.name === "xAI" && c.submit === "/login xai oauth") &&
@@ -4635,11 +4638,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "slash /login oauth lists OAuth rows",
       matchingSlashCommands("/login oauth").every((c) => !c.name.endsWith(" (key)")) &&
         matchingSlashCommands("/login oauth").some((c) => c.name === "OpenAI") &&
+        !matchingSlashCommands("/login oauth").some((c) => c.name === "Anthropic (key)") &&
         !matchingSlashCommands("/login oauth").some((c) => c.name === "Google Gemini (key)"),
     );
     check(
       "slash /login a is Anthropic only",
-      matchingSlashCommands("/login a").map((c) => c.name).join(" ") === "Anthropic Anthropic (key)",
+      matchingSlashCommands("/login a").map((c) => c.name).join(" ") === "Anthropic (key)",
     );
     check(
       "slash /login gemini is Google Gemini (key)",
@@ -5498,7 +5502,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "tui /login shows OpenAI and OpenAI (key)",
       loginTui.frame().includes("OpenAI (key)") && loginTui.frame().includes("Anthropic") && !loginTui.frame().includes("/login openai oauth"),
     );
-    loginTui.feed("\x1b[B\x1b[B\r");
+    loginTui.feed("\x1b[B\r");
     check("tui enter on highlighted OpenAI", loginPicks[0] === "/login openai oauth");
     check(
       "tui login echo uses the picker label",

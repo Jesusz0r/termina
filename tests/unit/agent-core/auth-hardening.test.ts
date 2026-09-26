@@ -184,6 +184,9 @@ describe("auth hardening batch", () => {
   it("item 8: mismatched login modes are rejected at parse time", () => {
     for (const line of [
       "/login anthropic device",
+      "/login anthropic browser",
+      "/login anthropic code",
+      "/login anthropic oauth",
       "/login xai browser",
       "/login xai code",
       "/login google code",
@@ -196,8 +199,8 @@ describe("auth hardening batch", () => {
       expect("error" in parsed, line).toBe(true);
     }
     expect(login.parseAuthCommand("/login xai device")).toEqual({ cmd: "login", mode: "device", provider: "xai" });
-    expect(login.parseAuthCommand("/login anthropic code")).toEqual({ cmd: "login", mode: "code", provider: "anthropic" });
-    expect(login.parseAuthCommand("/login anthropic browser")).toEqual({ cmd: "login", mode: "browser", provider: "anthropic" });
+    expect(login.parseAuthCommand("/login anthropic")).toEqual({ cmd: "login", mode: "key", provider: "anthropic" });
+    expect(login.parseAuthCommand("/login anthropic key")).toEqual({ cmd: "login", mode: "key", provider: "anthropic" });
     expect(login.parseAuthCommand("/login github-copilot device")).toEqual({ cmd: "login", mode: "device", provider: "github-copilot" });
     expect(login.parseAuthCommand("/login openai oauth")).toEqual({ cmd: "login", mode: "browser", provider: "openai-codex" });
   });
@@ -243,16 +246,52 @@ describe("auth hardening batch", () => {
     expect(anthropic.pickHeaders("plain-key", { type: "api_key" })["x-api-key"]).toBe("plain-key");
     // Source wins over the substring marker in both directions.
     expect(anthropic.pickHeaders("sk-ant-oat-xyz", { type: "api_key" })["x-api-key"]).toBe("sk-ant-oat-xyz");
-    const oauth = anthropic.pickHeaders("no-marker-here", { type: "oauth" });
-    expect(oauth.authorization).toBe("Bearer no-marker-here");
-    expect(oauth["anthropic-beta"]).toContain("oauth");
+    const storedOauth = anthropic.pickHeaders("no-marker-here", { type: "oauth" });
+    expect(storedOauth["x-api-key"]).toBe("no-marker-here");
+    expect(storedOauth.authorization).toBeUndefined();
+    expect(storedOauth["anthropic-beta"]).toBeUndefined();
     const envBearer = anthropic.pickHeaders("gateway-token", { envName: "ANTHROPIC_AUTH_TOKEN" });
     expect(envBearer.authorization).toBe("Bearer gateway-token");
+    expect(envBearer["anthropic-beta"]).toBeUndefined();
     expect(anthropic.pickHeaders("console-key", { envName: "ANTHROPIC_API_KEY" })["x-api-key"]).toBe("console-key");
     // Unsourced tokens fail closed to x-api-key; header keys off source, not a marker.
     expect(anthropic.pickHeaders("sk-ant-oat-legacy")["x-api-key"]).toBe("sk-ant-oat-legacy");
     expect(anthropic.pickHeaders("sk-ant-oat-legacy").authorization).toBeUndefined();
     expect(anthropic.pickHeaders("bare-key")["x-api-key"]).toBe("bare-key");
+  });
+
+  it("item 11: a stored Anthropic subscription token is not a credential", async () => {
+    const prevKey = process.env.ANTHROPIC_API_KEY;
+    const prevTok = process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    store.modifyProvider("anthropic", () => ({
+      type: "oauth",
+      access: "sk-ant-oat-old",
+      refresh: "sk-ant-oat-refresh",
+      expires: Date.now() + 60_000,
+    }));
+    store.resetAuthCache();
+    try {
+      expect(resolveMod.hasStoredCredential("anthropic")).toBe(false);
+      const ignored = await resolveMod.resolveAuth("anthropic");
+      expect(ignored).toEqual({
+        ok: false,
+        error: anthropic.ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED,
+      });
+      process.env.ANTHROPIC_API_KEY = "env-key-wins";
+      store.resetAuthCache();
+      const env = await resolveMod.resolveAuth("anthropic");
+      expect(env.ok && env.source).toBe("env");
+      expect(env.ok && env.token).toBe("env-key-wins");
+      expect(env.ok && env.headers["x-api-key"]).toBe("env-key-wins");
+    } finally {
+      if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevKey;
+      if (prevTok === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+      else process.env.ANTHROPIC_AUTH_TOKEN = prevTok;
+      store.resetAuthCache();
+    }
   });
 
   it("item 11: ANTHROPIC_AUTH_TOKEN resolves to bearer without any marker", async () => {
@@ -288,7 +327,7 @@ describe("auth hardening batch", () => {
       const deadline = Date.now() + 5_000;
       for (;;) {
         try {
-          const res = await fetch(`http://127.0.0.1:${port}/callback?error=access_denied`);
+          const res = await fetch(`http://127.0.0.1:${port}/auth/callback?error=access_denied`);
           await res.text();
           return;
         } catch {
@@ -300,7 +339,7 @@ describe("auth hardening batch", () => {
     try {
       for (let round = 0; round < 2; round++) {
         let opened = 0;
-        const pending = login.runLogin("anthropic", "browser", {
+        const pending = login.runLogin("openai-codex", "browser", {
           write: () => {},
           openUrl: () => { opened += 1; },
         });

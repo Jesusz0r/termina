@@ -117,10 +117,8 @@ describe("Agent Core Catalog Cancellation Contract", () => {
     const origin = `http://127.0.0.1:${address.port}`;
     
     const validAnthropic = () => ({
-      type: "oauth",
-      access: "sk-ant-oat-valid-access",
-      refresh: "refresh-valid",
-      expires: Date.now() + 60 * 60 * 1_000,
+      type: "api_key",
+      key: "sk-ant-api-test",
     });
     const expiredOauth = () => ({
       type: "oauth",
@@ -306,30 +304,39 @@ describe("Agent Core Catalog Cancellation Contract", () => {
         rmSync(root, { recursive: true, force: true });
       });
     
-      await t.test("provider turn detaches from a hanging expired-token refresh", async () => {
+      await t.test("provider turn rejects a stored Anthropic subscription token without refreshing", async () => {
         const app = await startScenario("provider-turn", { tokenMode: "hang" });
         try {
           app.replaceAuth({ anthropic: expiredOauth() });
           app.write("provider cancellation probe\r");
-          await waitFor(() => app.state.tokenHangs === 1, 2_000, "provider refresh to hang");
-          await expectCancelled(app, "(interrupted)");
+          await waitFor(
+            () => app.output.includes("anthropic subscription login is not supported"),
+            2_000,
+            () => `subscription login rejection; output=${clean(app.output)}`,
+          );
+          assert.equal(app.state.tokenHangs, 0);
+          assert.equal(app.state.providerRequests, 0);
           const session = readJsonLines(app.sessionFile);
           const sidecar = readJsonLines(join(app.eventsDir, `${app.terminalId}.jsonl`));
           assert.equal(session.some((row) => row.message?.role === "assistant"), false);
           assert.equal(sidecar.some((row) => row.t === "tool"), false);
-          assert.equal(app.state.providerRequests, 0);
         } finally {
           await app.stop();
         }
       });
     
-      await t.test("/models refresh cancels while auth refresh is hanging", async () => {
+      await t.test("/models refresh does not refresh a stored Anthropic subscription token", async () => {
         const app = await startScenario("models-auth", { tokenMode: "hang" });
         try {
           app.replaceAuth({ anthropic: expiredOauth() });
+          const mark = app.mark();
           app.write("/models refresh\r");
-          await waitFor(() => app.state.tokenHangs === 1, 2_000, "catalog auth refresh to hang");
-          await expectCancelled(app, "models request cancelled");
+          await waitFor(
+            () => app.tail(mark).includes("no model list") || app.tail(mark).includes("Type a task"),
+            2_000,
+            () => `models refresh after removed login; tail=${app.tail(mark)}`,
+          );
+          assert.equal(app.state.tokenHangs, 0);
         } finally {
           await app.stop();
         }
@@ -379,10 +386,10 @@ describe("Agent Core Catalog Cancellation Contract", () => {
       await t.test("post-login catalog keeps the login cancellation signal", async () => {
         const app = await startScenario("post-login", { modelModes: ["normal", "hang"], tokenMode: "normal" });
         try {
-          app.write("/login anthropic code\r");
-          await waitFor(() => clean(app.output).includes("paste the authorization code"), 2_000, "login code prompt");
-          app.write("fixture-code\r");
-          await waitFor(() => app.state.tokenRequests === 1 && app.state.catalogHangs === 1, 2_000, "post-login catalog body to hang");
+          app.write("/login anthropic key\r");
+          await waitFor(() => clean(app.output).includes("paste the anthropic API key"), 2_000, "login key prompt");
+          app.write("fixture-key\r");
+          await waitFor(() => app.state.tokenRequests === 0 && app.state.catalogHangs === 1, 2_000, "post-login catalog body to hang");
           await expectCancelled(app, "models request cancelled");
         } finally {
           await app.stop();
@@ -407,13 +414,13 @@ describe("Agent Core Catalog Cancellation Contract", () => {
             () => `normal model switch; tail=${app.tail(mark)}`,
           );
           mark = app.mark();
-          app.write("/login anthropic code\r");
-          await waitFor(() => app.tail(mark).includes("paste the authorization code"), 2_000, "normal login code prompt");
-          app.write("fixture-code\r");
+          app.write("/login anthropic key\r");
+          await waitFor(() => app.tail(mark).includes("paste the anthropic API key"), 2_000, "normal login key prompt");
+          app.write("fixture-key\r");
           await waitFor(
-            () => app.state.tokenRequests >= 1 && app.state.modelRequests >= 3 && app.tail(mark).includes("auth: oauth"),
+            () => app.state.tokenRequests === 0 && app.state.modelRequests >= 3 && app.tail(mark).includes("auth: api_key"),
             2_000,
-            "normal login completion",
+            () => `normal login completion; tail=${app.tail(mark)} tokenRequests=${app.state.tokenRequests} modelRequests=${app.state.modelRequests}`,
           );
         } finally {
           await app.stop();

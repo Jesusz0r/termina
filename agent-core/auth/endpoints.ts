@@ -13,18 +13,6 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 
-const ANTHROPIC_AUTHORIZE = "https://claude.ai/oauth/authorize";
-
-const ANTHROPIC_TOKEN = "https://platform.claude.com/v1/oauth/token";
-
-export const ANTHROPIC_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-
-export const ANTHROPIC_SCOPES =
-  "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
-
-const ANTHROPIC_REDIRECT_PORT = 53692;
-
-
 export const OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 const OPENAI_CODEX_AUTHORIZE = "https://auth.openai.com/oauth/authorize";
@@ -153,8 +141,6 @@ export function authorizeUrl(id: ProviderId): string {
   const test = testLoopbackOverride("TERMINA_TEST_AUTHORIZE_URL");
   if (test) return test;
   switch (id) {
-    case "anthropic":
-      return ANTHROPIC_AUTHORIZE;
     case "openai-codex":
       return OPENAI_CODEX_AUTHORIZE;
     case "openrouter":
@@ -169,8 +155,6 @@ export function tokenUrl(id: ProviderId): string {
   const test = testLoopbackOverride("TERMINA_TEST_TOKEN_URL");
   if (test) return test;
   switch (id) {
-    case "anthropic":
-      return ANTHROPIC_TOKEN;
     case "openai-codex":
       return OPENAI_CODEX_TOKEN;
     case "openrouter":
@@ -188,7 +172,7 @@ export function xaiDeviceUrl(): string {
 }
 
 
-export function redirectPort(id: ProviderId = "anthropic"): number {
+export function redirectPort(id: ProviderId): number {
   const raw = process.env.TERMINA_CORE_TEST === "1" ? process.env.TERMINA_TEST_REDIRECT_PORT : undefined;
   if (raw) {
     const n = Number(raw);
@@ -196,7 +180,7 @@ export function redirectPort(id: ProviderId = "anthropic"): number {
   }
   if (id === "openai-codex") return OPENAI_CODEX_REDIRECT_PORT;
   if (id === "openrouter") return OPENROUTER_REDIRECT_PORT;
-  return ANTHROPIC_REDIRECT_PORT;
+  throw new Error(`no redirect port for ${id}`);
 }
 
 
@@ -215,9 +199,9 @@ export function redirectPath(id: ProviderId, callbackToken?: string): string {
 
 
 function redirectHost(id: ProviderId): string {
-  // Anthropic's public client allowlists localhost, not 127.0.0.1. The two
+  // Codex's public client allowlists localhost, not 127.0.0.1. The two
   // names are different redirect URIs even though both are this machine.
-  if (id === "openai-codex" || id === "anthropic") return "localhost";
+  if (id === "openai-codex") return "localhost";
   return "127.0.0.1";
 }
 

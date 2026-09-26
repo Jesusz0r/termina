@@ -1,22 +1,22 @@
 import type { ProviderDefinition } from "./types.ts";
 
+/** Claude subscription OAuth is for Claude Code, not this app.
+ *  https://code.claude.com/docs/en/legal-and-compliance */
+export const ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED =
+  "anthropic subscription login is not supported — run /login anthropic key or set ANTHROPIC_API_KEY";
+
 export function pickHeaders(token: string, extra?: Record<string, unknown>): Record<string, string> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "anthropic-version": "2023-06-01",
   };
-  // Header keys off credential source, not a token substring.
-  // Static keys use x-api-key; OAuth / ANTHROPIC_AUTH_TOKEN use Bearer.
-  // https://platform.claude.com/docs/en/api/overview
+  // API keys use x-api-key. ANTHROPIC_AUTH_TOKEN is a gateway bearer, not a
+  // Claude subscription login.
   // https://platform.claude.com/docs/en/manage-claude/authentication
-  const storedType = typeof extra?.type === "string" ? extra.type : "";
+  // https://code.claude.com/docs/en/iam
   const envName = typeof extra?.envName === "string" ? extra.envName : "";
-  const oauth = storedType === "oauth" || envName === "ANTHROPIC_AUTH_TOKEN";
-  if (oauth) {
+  if (envName === "ANTHROPIC_AUTH_TOKEN") {
     headers.authorization = `Bearer ${token}`;
-    headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
-    headers["user-agent"] = "termina-agent-core/1";
-    headers["x-app"] = "cli";
   } else {
     headers["x-api-key"] = token;
   }
@@ -28,7 +28,7 @@ export const anthropic: ProviderDefinition = {
   baseEnv: "ANTHROPIC_BASE_URL",
   envKeys: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
   defaultModels: { main: "claude-sonnet-5", summary: "claude-haiku-4-5" },
-  loginMode: "browser",
+  loginMode: "key",
   protocol: () => "anthropic-messages",
   headers: pickHeaders,
   catalog: { acceptsId: (n) => n.includes("claude") || n.includes("haiku") },

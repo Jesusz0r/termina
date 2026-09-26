@@ -207,7 +207,7 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
     globalThis.fetch = async (input, init) => {
       const url = String(input);
       seen.push({ url, init });
-      if (url === "https://platform.claude.com/v1/oauth/token") {
+      if (url === "https://auth.openai.com/oauth/token") {
         return new Response(JSON.stringify({ access_token: "canonical-access", refresh_token: "canonical-refresh", expires_in: 3_600 }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -251,15 +251,15 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
       for (const mode of [undefined, "1"]) {
         if (mode === undefined) delete process.env.TERMINA_CORE_TEST;
         else process.env.TERMINA_CORE_TEST = mode;
-        modifyProvider("anthropic", () => ({
+        modifyProvider("openai-codex", () => ({
           type: "oauth",
           access: "expired-access",
           refresh: "refresh-old",
           expires: Date.now() - 1,
         }));
-        const refreshed = await refreshOauth("anthropic");
+        const refreshed = await refreshOauth("openai-codex");
         expect(refreshed).toEqual({ ok: true });
-        expect(seen.at(-1)?.url).toBe("https://platform.claude.com/v1/oauth/token");
+        expect(seen.at(-1)?.url).toBe("https://auth.openai.com/oauth/token");
 
         const device = await requestGithubDeviceCode();
         expect(device.deviceCode).toBe("canonical-device");
@@ -275,16 +275,16 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
         expect(seen.at(-1)?.url).toBe("https://api.github.com/copilot_internal/v2/token");
 
         let authorize = "";
-        const codeResult = await runLogin("anthropic", "code", {
+        const codeResult = await runLogin("openai-codex", "code", {
           write: (text) => { authorize += text; },
           waitForCode: async () => "",
         });
         expect(codeResult).toEqual({ ok: false, error: "login failed: empty code" });
         const authUrl = (authorize.match(/authorize: (\S+)/) || [])[1];
-        expect(new URL(authUrl).origin).toBe("https://claude.ai");
+        expect(new URL(authUrl).origin).toBe("https://auth.openai.com");
 
         const controller = new AbortController();
-        const browser = runLogin("anthropic", "browser", { write: () => {}, openUrl: () => {}, signal: controller.signal });
+        const browser = runLogin("openai-codex", "browser", { write: () => {}, openUrl: () => {}, signal: controller.signal });
         await new Promise((resolve) => setTimeout(resolve, 25));
         controller.abort();
         expect(await browser).toEqual({
@@ -304,14 +304,14 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
 
   it("handles normal bounded JSON login", async () => {
     useAuthFile("normal");
-    const result = await loginWithTokenEndpoint("anthropic", "/normal");
+    const result = await loginWithTokenEndpoint("openai-codex", "/normal");
     expect(result.ok).toBe(true);
-    expect(storedProvider("anthropic")?.access).toBe("normal-access");
+    expect(storedProvider("openai-codex")?.access).toBe("normal-access");
   });
 
   for (const [name, providerId, path] of [
-    ["postJson rejects a declared oversized response", "anthropic", "/declared-oauth"],
-    ["postJson rejects a chunked oversized response", "anthropic", "/chunked-oauth"],
+    ["postJson rejects a declared oversized response", "openrouter", "/declared-oauth"],
+    ["postJson rejects a chunked oversized response", "openrouter", "/chunked-oauth"],
     ["postForm rejects a declared oversized response", "openai-codex", "/declared-oauth"],
     ["postForm rejects a chunked oversized response", "openai-codex", "/chunked-oauth"],
   ] as const) {
@@ -341,12 +341,12 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
 
   it("rejects invalid UTF-8 responses", async () => {
     useAuthFile("invalid-utf8");
-    const result = await loginWithTokenEndpoint("anthropic", "/invalid-utf8");
+    const result = await loginWithTokenEndpoint("openai-codex", "/invalid-utf8");
     expect(result).toEqual({ ok: false, error: "auth response is not valid UTF-8" });
-    expect(storedProvider("anthropic")).toBeUndefined();
+    expect(storedProvider("openai-codex")).toBeUndefined();
   });
 
-  for (const providerId of ["anthropic", "openai-codex"] as const) {
+  for (const providerId of ["openrouter", "openai-codex"] as const) {
     it(`${providerId} token exchange stops when LoginIo is cancelled`, async () => {
       useAuthFile(`cancel-${providerId}`);
       const controller = new AbortController();
@@ -364,16 +364,16 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
   it("times out within internal timeout limit", async () => {
     useAuthFile("timeout");
     process.env.TERMINA_TEST_AUTH_HTTP_TIMEOUT_MS = "50";
-    const result = await settlesWithin(loginWithTokenEndpoint("anthropic", "/timeout"), 500);
+    const result = await settlesWithin(loginWithTokenEndpoint("openai-codex", "/timeout"), 500);
     if (result === null) server.closeAllConnections();
     expect(result).toEqual({ ok: false, error: "auth request timed out" });
-    expect(storedProvider("anthropic")).toBeUndefined();
+    expect(storedProvider("openai-codex")).toBeUndefined();
   });
 
   it("does not start a flight if already cancelled before refresh", async () => {
     useAuthFile("cancelled-before-refresh");
     process.env.TERMINA_TEST_TOKEN_URL = `${origin}/shared-refresh`;
-    modifyProvider("anthropic", () => ({
+    modifyProvider("openai-codex", () => ({
       type: "oauth",
       access: "expired-access",
       refresh: "shared-refresh-1",
@@ -382,19 +382,19 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
     const controller = new AbortController();
     controller.abort();
     const before = sharedRefreshRequests;
-    expect(await refreshOauth("anthropic", controller.signal)).toEqual({
+    expect(await refreshOauth("openai-codex", controller.signal)).toEqual({
       ok: false,
       error: "auth request cancelled",
     });
     await new Promise((resolve) => setTimeout(resolve, 180));
     expect(sharedRefreshRequests).toBe(before);
-    expect(storedProvider("anthropic")?.access).toBe("expired-access");
+    expect(storedProvider("openai-codex")?.access).toBe("expired-access");
   });
 
   it("does not cancel shared refresh when one waiter cancels", async () => {
     useAuthFile("shared-refresh");
     process.env.TERMINA_TEST_TOKEN_URL = `${origin}/shared-refresh`;
-    modifyProvider("anthropic", () => ({
+    modifyProvider("openai-codex", () => ({
       type: "oauth",
       access: "expired-access",
       refresh: "shared-refresh-1",
@@ -403,19 +403,19 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
     const first = new AbortController();
     const second = new AbortController();
     const before = sharedRefreshRequests;
-    const cancelledWaiter = refreshOauth("anthropic", first.signal);
-    const successfulWaiter = refreshOauth("anthropic", second.signal);
+    const cancelledWaiter = refreshOauth("openai-codex", first.signal);
+    const successfulWaiter = refreshOauth("openai-codex", second.signal);
     first.abort();
     expect(await cancelledWaiter).toEqual({ ok: false, error: "auth request cancelled" });
     expect(await successfulWaiter).toEqual({ ok: true });
     expect(sharedRefreshRequests).toBe(before + 1);
-    expect(storedProvider("anthropic")?.access).toBe("shared-access");
+    expect(storedProvider("openai-codex")?.access).toBe("shared-access");
   });
 
   it("keeps resolveAuth cancellation independent from shared refresh", async () => {
     useAuthFile("shared-resolve");
     process.env.TERMINA_TEST_TOKEN_URL = `${origin}/shared-refresh`;
-    modifyProvider("anthropic", () => ({
+    modifyProvider("openai-codex", () => ({
       type: "oauth",
       access: "expired-access",
       refresh: "shared-refresh-1",
@@ -423,14 +423,14 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
     }));
     const first = new AbortController();
     const second = new AbortController();
-    const cancelledWaiter = resolveAuth("anthropic", first.signal);
-    const successfulWaiter = resolveAuth("anthropic", second.signal);
+    const cancelledWaiter = resolveAuth("openai-codex", first.signal);
+    const successfulWaiter = resolveAuth("openai-codex", second.signal);
     first.abort();
     expect(await cancelledWaiter).toEqual({ ok: false, error: "auth request cancelled" });
     const auth = await successfulWaiter;
     expect(auth.ok && auth.token).toBe("shared-access");
     expect(existsSync(process.env.TERMINA_AUTH_PATH!)).toBe(true);
-    expect(JSON.parse(readFileSync(process.env.TERMINA_AUTH_PATH!, "utf8")).anthropic.access).toBe("shared-access");
+    expect(JSON.parse(readFileSync(process.env.TERMINA_AUTH_PATH!, "utf8"))["openai-codex"].access).toBe("shared-access");
   });
 
   async function waitForNeedle(holder: { text: string }, needle: string, timeoutMs = 2_000) {
@@ -455,7 +455,7 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
     throw new Error(`loopback not reachable: ${url}: ${String(last)}`);
   }
 
-  async function startBrowserLogin(providerId: "anthropic" | "openrouter", port: string, signal?: AbortSignal) {
+  async function startBrowserLogin(providerId: "openai-codex" | "openrouter", port: string, signal?: AbortSignal) {
     process.env.TERMINA_TEST_REDIRECT_PORT = port;
     const out = { text: "" };
     const login = runLogin(providerId, "browser", {
@@ -472,11 +472,11 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
     useAuthFile("oauth-wrong-state");
     const controller = new AbortController();
     try {
-      const { login } = await startBrowserLogin("anthropic", "27651", controller.signal);
-      const response = await fetchLoopback("http://127.0.0.1:27651/callback?code=foreign-code&state=wrong-state");
+      const { login } = await startBrowserLogin("openai-codex", "27651", controller.signal);
+      const response = await fetchLoopback("http://127.0.0.1:27651/auth/callback?code=foreign-code&state=wrong-state");
       expect(response.ok).toBe(true);
       expect(await login).toEqual({ ok: false, error: "login failed: state mismatch" });
-      expect(storedProvider("anthropic")).toBeUndefined();
+      expect(storedProvider("openai-codex")).toBeUndefined();
     } finally {
       controller.abort();
       process.env.TERMINA_TEST_REDIRECT_PORT = "27641";
@@ -487,11 +487,11 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
     useAuthFile("oauth-missing-state");
     const controller = new AbortController();
     try {
-      const { login } = await startBrowserLogin("anthropic", "27652", controller.signal);
-      const response = await fetchLoopback("http://127.0.0.1:27652/callback?code=foreign-code");
+      const { login } = await startBrowserLogin("openai-codex", "27652", controller.signal);
+      const response = await fetchLoopback("http://127.0.0.1:27652/auth/callback?code=foreign-code");
       expect(response.ok).toBe(true);
       expect(await login).toEqual({ ok: false, error: "login failed: state mismatch" });
-      expect(storedProvider("anthropic")).toBeUndefined();
+      expect(storedProvider("openai-codex")).toBeUndefined();
     } finally {
       controller.abort();
       process.env.TERMINA_TEST_REDIRECT_PORT = "27641";
@@ -503,13 +503,13 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
     process.env.TERMINA_TEST_TOKEN_URL = `${origin}/normal`;
     const controller = new AbortController();
     try {
-      const { login, authUrl } = await startBrowserLogin("anthropic", "27653", controller.signal);
+      const { login, authUrl } = await startBrowserLogin("openai-codex", "27653", controller.signal);
       const state = authUrl.searchParams.get("state");
       expect(state).toMatch(/^[0-9a-f]{32}$/i);
-      const response = await fetchLoopback(`http://127.0.0.1:27653/callback?code=test-code&state=${state}`);
+      const response = await fetchLoopback(`http://127.0.0.1:27653/auth/callback?code=test-code&state=${state}`);
       expect(response.ok).toBe(true);
       expect(await login).toEqual(expect.objectContaining({ ok: true }));
-      expect(storedProvider("anthropic")?.access).toBe("normal-access");
+      expect(storedProvider("openai-codex")?.access).toBe("normal-access");
     } finally {
       controller.abort();
       process.env.TERMINA_TEST_REDIRECT_PORT = "27641";

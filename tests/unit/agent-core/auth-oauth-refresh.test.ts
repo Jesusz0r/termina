@@ -41,7 +41,7 @@ describe("Agent Core OAuth refresh fail-closed (refs #351)", () => {
     }]) {
       it(`does not overwrite ${external ? "external" : "local"} credential changes: ${replacement?.type ?? "logout"}`, async () => {
         useAuthFile(`superseded-${external}-${replacement?.type ?? "logout"}`);
-        modifyProvider("anthropic", () => ({
+        modifyProvider("openai-codex", () => ({
           type: "oauth", access: "old-access", refresh: "old-refresh", expires: 0,
         }));
         if (external) utimesSync(process.env.TERMINA_AUTH_PATH!, 1, 1);
@@ -57,24 +57,24 @@ describe("Agent Core OAuth refresh fail-closed (refs #351)", () => {
             access_token: "refreshed-access", refresh_token: "rotated-refresh", expires_in: 3600,
           }));
         };
-        const flight = refreshOauth("anthropic");
+        const flight = refreshOauth("openai-codex");
         try {
           await requested;
           if (external) {
             // Simulate another process publishing while this process has a cached read.
             const path = process.env.TERMINA_AUTH_PATH!;
             const stat = statSync(path);
-            writeFileSync(path, JSON.stringify(replacement === null ? {} : { anthropic: replacement }));
+            writeFileSync(path, JSON.stringify(replacement === null ? {} : { "openai-codex": replacement }));
             utimesSync(path, stat.atime, stat.mtime);
           } else {
-            modifyProvider("anthropic", () => replacement);
+            modifyProvider("openai-codex", () => replacement);
           }
           const before = readFileSync(process.env.TERMINA_AUTH_PATH!, "utf8");
           release();
           expect(await flight).toEqual({
             ok: false, error: "auth refresh persist failed: auth refresh superseded by a credential change",
           });
-          expect(storedProvider("anthropic")).toEqual(replacement ?? undefined);
+          expect(storedProvider("openai-codex")).toEqual(replacement ?? undefined);
           expect(readFileSync(process.env.TERMINA_AUTH_PATH!, "utf8")).toBe(before);
         } finally {
           release();
@@ -87,7 +87,7 @@ describe("Agent Core OAuth refresh fail-closed (refs #351)", () => {
 
   it("allows unrelated provider changes while preserving both credentials", async () => {
     useAuthFile("unrelated-provider-change");
-    modifyProvider("anthropic", () => ({
+    modifyProvider("openai-codex", () => ({
       type: "oauth", access: "old-access", refresh: "old-refresh", expires: 0,
       metadata: { label: "keep" },
     }));
@@ -99,8 +99,8 @@ describe("Agent Core OAuth refresh fail-closed (refs #351)", () => {
       }));
     };
     try {
-      expect(await refreshOauth("anthropic")).toEqual({ ok: true });
-      expect(storedProvider("anthropic")).toMatchObject({
+      expect(await refreshOauth("openai-codex")).toEqual({ ok: true });
+      expect(storedProvider("openai-codex")).toMatchObject({
         access: "refreshed-access", refresh: "rotated-refresh", metadata: { label: "keep" },
       });
       expect(storedProvider("openai")).toEqual({ type: "api_key", key: "other-provider-key" });
@@ -109,7 +109,7 @@ describe("Agent Core OAuth refresh fail-closed (refs #351)", () => {
     }
   });
 
-  for (const providerId of ["google", "opencode-zen", "opencode-go"] as const) {
+  for (const providerId of ["anthropic", "google", "opencode-zen", "opencode-go"] as const) {
     it(`fails closed for stored oauth on ${providerId} with no refresh arm`, async () => {
       useAuthFile(`oauth-${providerId}`);
       const previousFetch = globalThis.fetch;
@@ -125,7 +125,9 @@ describe("Agent Core OAuth refresh fail-closed (refs #351)", () => {
         }));
         expect(await refreshOauth(providerId)).toEqual({
           ok: false,
-          error: "auth expired — run /login",
+          error: providerId === "anthropic"
+            ? "anthropic subscription login is not supported — run /login anthropic key or set ANTHROPIC_API_KEY"
+            : "auth expired — run /login",
         });
         expect(storedProvider(providerId)).toEqual(expect.objectContaining({
           type: "oauth",

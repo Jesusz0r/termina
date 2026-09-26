@@ -3,8 +3,8 @@ import * as endpoints from "../../../agent-core/auth/endpoints.ts";
 import { parseAuthCommand } from "../../../agent-core/auth/login.ts";
 import { SUPPORTED_PROVIDERS } from "../../../agent-core/auth/providers/types.ts";
 
-const BROWSER_OAUTH_IDS = ["anthropic", "openai-codex", "openrouter"] as const;
-const TOKEN_OAUTH_IDS = ["anthropic", "openai-codex", "openrouter", "xai"] as const;
+const BROWSER_OAUTH_IDS = ["openai-codex", "openrouter"] as const;
+const TOKEN_OAUTH_IDS = ["openai-codex", "openrouter", "xai"] as const;
 
 describe("OAuth URL helpers (#369)", () => {
   afterEach(() => {
@@ -13,8 +13,7 @@ describe("OAuth URL helpers (#369)", () => {
     delete process.env.TERMINA_TEST_DEVICE_URL;
   });
 
-  it("authorizeUrl switches on the three browser OAuth ids and throws for the rest", () => {
-    expect(endpoints.authorizeUrl("anthropic")).toBe("https://claude.ai/oauth/authorize");
+  it("authorizeUrl switches on the browser OAuth ids and throws for the rest", () => {
     expect(endpoints.authorizeUrl("openai-codex")).toBe("https://auth.openai.com/oauth/authorize");
     expect(endpoints.authorizeUrl("openrouter")).toBe("https://openrouter.ai/auth");
     for (const id of SUPPORTED_PROVIDERS) {
@@ -24,7 +23,6 @@ describe("OAuth URL helpers (#369)", () => {
   });
 
   it("tokenUrl does not default to Anthropic and throws for key-only ids", () => {
-    expect(endpoints.tokenUrl("anthropic")).toBe("https://platform.claude.com/v1/oauth/token");
     expect(endpoints.tokenUrl("openai-codex")).toBe("https://auth.openai.com/oauth/token");
     expect(endpoints.tokenUrl("openrouter")).toBe("https://openrouter.ai/api/v1/auth/keys");
     expect(endpoints.tokenUrl("xai")).toBe("https://auth.x.ai/oauth2/token");
@@ -39,11 +37,14 @@ describe("OAuth URL helpers (#369)", () => {
     expect("deviceUrl" in endpoints).toBe(false);
   });
 
-  it("login still only offers browser OAuth for the three authorize ids", () => {
-    expect(parseAuthCommand("/login anthropic browser")).toEqual({
+  it("login offers browser OAuth only for the remaining authorize ids", () => {
+    expect(parseAuthCommand("/login anthropic")).toEqual({
       cmd: "login",
-      mode: "browser",
+      mode: "key",
       provider: "anthropic",
+    });
+    expect(parseAuthCommand("/login anthropic browser")).toEqual({
+      error: "anthropic subscription login is not supported — run /login anthropic key or set ANTHROPIC_API_KEY",
     });
     expect(parseAuthCommand("/login openai oauth")).toEqual({
       cmd: "login",

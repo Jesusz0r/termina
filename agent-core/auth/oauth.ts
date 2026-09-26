@@ -10,7 +10,8 @@ import { COPILOT_HEADERS } from "./providers/github-copilot.ts";
 import { providerDefinition } from "./providers/index.ts";
 import { extractAccountId } from "./providers/openai-codex.ts";
 import { type ProviderId } from "./providers/types.ts";
-import { ANTHROPIC_CLIENT_ID, GITHUB_ACCESS_TOKEN_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_TOKEN_URL, GITHUB_DEVICE_GRANT, GITHUB_DEVICE_URL, OPENAI_CODEX_CLIENT_ID, XAI_CLIENT_ID, XAI_DEFAULT_EXPIRES_MS, XAI_DEFAULT_INTERVAL_MS, XAI_DEVICE_GRANT, XAI_MIN_INTERVAL_MS, XAI_POLL_MARGIN_MS, XAI_SCOPE, XAI_SLOW_DOWN_MS, isSupportedProvider, redirectUri, testLoopbackOverride, tokenUrl, validateCopilotApiUrl, xaiDeviceUrl } from "./endpoints.ts";
+import { ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED } from "./providers/anthropic.ts";
+import { GITHUB_ACCESS_TOKEN_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_TOKEN_URL, GITHUB_DEVICE_GRANT, GITHUB_DEVICE_URL, OPENAI_CODEX_CLIENT_ID, XAI_CLIENT_ID, XAI_DEFAULT_EXPIRES_MS, XAI_DEFAULT_INTERVAL_MS, XAI_DEVICE_GRANT, XAI_MIN_INTERVAL_MS, XAI_POLL_MARGIN_MS, XAI_SCOPE, XAI_SLOW_DOWN_MS, isSupportedProvider, redirectUri, testLoopbackOverride, tokenUrl, validateCopilotApiUrl, xaiDeviceUrl } from "./endpoints.ts";
 import { AUTH_REQUEST_CANCELLED, authFetch, authHttpError, isAuthHttpFailure, postForm, postJson } from "./http.ts";
 import { modifyProvider, readAuth, refreshFlights, type AuthWriteOpts } from "./store.ts";
 
@@ -107,6 +108,7 @@ export function persistApiKey(
 ): { ok: true } | { ok: false; error: string } {
   try {
     modifyProvider(providerId, (current) => {
+      if (providerId === "anthropic") return { type: "api_key", key };
       const cur = isRecord(current) ? current : {};
       return { ...cur, type: "api_key", key };
     }, opts);
@@ -131,12 +133,7 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
     let parsed: ReturnType<typeof parseOauthToken>;
     let extra: Record<string, unknown> = entry;
     if (providerId === "anthropic") {
-      const res = await postJson(tokenUrl(providerId), {
-        grant_type: "refresh_token",
-        refresh_token: entry.refresh,
-        client_id: ANTHROPIC_CLIENT_ID,
-      });
-      parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
+      return { ok: false, error: ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED };
     } else if (providerId === "openai-codex") {
       const res = await postForm(tokenUrl(providerId), {
         grant_type: "refresh_token",
@@ -217,60 +214,6 @@ export async function refreshOauth(providerId: string, signal?: AbortSignal): Pr
     void flight.then(cleanup, cleanup);
   }
   return waitForRefresh(flight, signal);
-}
-
-
-function anthropicTokenError(payload: unknown, status: number): string {
-  if (isRecord(payload)) {
-    const err = payload.error;
-    if (typeof err === "string" && err) {
-      const desc = typeof payload.error_description === "string" ? payload.error_description : "";
-      return desc ? `${err}: ${desc}` : err;
-    }
-    if (isRecord(err)) {
-      const message = typeof err.message === "string" ? err.message : "";
-      const type = typeof err.type === "string" ? err.type : "";
-      if (message && type) return `${type}: ${message}`;
-      if (message || type) return message || type;
-    }
-  }
-  return `Anthropic token exchange failed (HTTP ${status})`;
-}
-
-
-export async function exchangeAnthropic(
-  code: string,
-  verifier: string,
-  port: number,
-  state: string,
-  signal?: AbortSignal,
-  opts?: AuthWriteOpts,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  // platform.claude.com/v1/oauth/token rejects an authorization_code body
-  // that omits the authorize `state` as "Invalid request format" (no
-  // access_token). The public Claude docs do not describe this client.
-  if (!state) return { ok: false, error: "login failed: missing state" };
-  try {
-    const res = await postJson(
-      tokenUrl("anthropic"),
-      {
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: redirectUri("anthropic", port),
-        client_id: ANTHROPIC_CLIENT_ID,
-        code_verifier: verifier,
-        state,
-      },
-      signal,
-    );
-    if (!res.ok) return { ok: false, error: `login failed: ${anthropicTokenError(res.payload, res.status)}` };
-    const parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
-    if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
-    if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
-    return persistOauth("anthropic", parsed, {}, opts);
-  } catch (error) {
-    return { ok: false, error: authHttpError(error) ?? "login failed: Anthropic token exchange failed" };
-  }
 }
 
 

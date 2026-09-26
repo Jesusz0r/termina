@@ -71,14 +71,14 @@ describe("Agent Core Model Security & Catalog Hardening", () => {
     ]);
   }
 
-  function writeAnthropicOauth(access: string, expires: number) {
+  function writeCodexOauth(access: string, expires: number) {
     writeFileSync(
       process.env.TERMINA_AUTH_PATH!,
       `${JSON.stringify({
-        anthropic: {
+        "openai-codex": {
           type: "oauth",
           access,
-          refresh: "sk-ant-oat-refresh",
+          refresh: "codex-refresh",
           expires,
         },
       })}\n`,
@@ -380,7 +380,7 @@ describe("Agent Core Model Security & Catalog Hardening", () => {
       markTokenStarted();
       releaseToken = () => {
         res.setHeader("content-type", "application/json");
-        res.end('{"access_token":"sk-ant-oat-new","refresh_token":"sk-ant-oat-new-refresh","expires_in":3600}');
+        res.end('{"access_token":"codex-new","refresh_token":"codex-new-refresh","expires_in":3600}');
       };
     });
     let oldCatalogRequests = 0;
@@ -390,24 +390,24 @@ describe("Agent Core Model Security & Catalog Hardening", () => {
     });
     const catalog = await listen((req, res) => {
       res.setHeader("content-type", "application/json");
-      if (req.headers.authorization === "Bearer sk-ant-oat-old") {
+      if (req.headers.authorization === "Bearer codex-old") {
         oldCatalogRequests += 1;
         if (oldCatalogRequests === 2) markTwoOldRequests();
         res.statusCode = 401;
         res.end('{"error":"expired"}');
         return;
       }
-      res.end('{"data":[{"id":"claude-refreshed"}],"has_more":false}');
+      res.end('{"data":[{"id":"gpt-refreshed"}],"has_more":false}');
     });
     try {
       process.env.TERMINA_CORE_TEST = "1";
       process.env.TERMINA_TEST_MODELS_URL = `${catalog.origin}/models`;
       process.env.TERMINA_TEST_TOKEN_URL = `${token.origin}/token`;
-      writeAnthropicOauth("sk-ant-oat-old", Date.now() + 3_600_000);
+      writeCodexOauth("codex-old", Date.now() + 3_600_000);
       const firstController = new AbortController();
-      const first = loadProviderModels("anthropic", firstController.signal);
+      const first = loadProviderModels("openai-codex", firstController.signal);
       await tokenStarted;
-      const second = loadProviderModels("anthropic");
+      const second = loadProviderModels("openai-codex");
       await twoOldRequests;
       firstController.abort();
       const firstResult = await first;
@@ -415,7 +415,7 @@ describe("Agent Core Model Security & Catalog Hardening", () => {
       expect(tokenRequests).toBe(1);
       releaseToken();
       const secondResult = await second;
-      expect(secondResult).toEqual({ ok: true, models: [{ id: "claude-refreshed" }] });
+      expect(secondResult).toEqual({ ok: true, models: [{ id: "gpt-refreshed" }] });
       expect(tokenRequests).toBe(1);
     } finally {
       await catalog.close();

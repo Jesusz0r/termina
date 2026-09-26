@@ -112,7 +112,8 @@ describe("agent-core #262–#271 / #256", () => {
   it("#267 unsourced Anthropic tokens do not sniff OAuth markers", () => {
     expect(pickHeaders("sk-ant-oat-secret")["x-api-key"]).toBe("sk-ant-oat-secret");
     expect(pickHeaders("sk-ant-oat-secret").authorization).toBeUndefined();
-    expect(pickHeaders("sk-ant-oat-secret", { type: "oauth" }).authorization).toBe("Bearer sk-ant-oat-secret");
+    expect(pickHeaders("sk-ant-oat-secret", { type: "oauth" })["x-api-key"]).toBe("sk-ant-oat-secret");
+    expect(pickHeaders("sk-ant-oat-secret", { type: "oauth" }).authorization).toBeUndefined();
     expect(pickHeaders("gateway", { envName: "ANTHROPIC_AUTH_TOKEN" }).authorization).toBe("Bearer gateway");
   });
 

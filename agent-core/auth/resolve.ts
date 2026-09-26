@@ -9,6 +9,7 @@ import { modelLooksClaude } from "../models/families/anthropic.ts";
 import { modelLooksGemma, modelLooksGemini } from "../models/families/google.ts";
 import { modelLooksOpenAI } from "../models/families/openai.ts";
 import { modelLooksGrok } from "../models/families/xai.ts";
+import { ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED } from "./providers/anthropic.ts";
 import { providerDefinition } from "./providers/index.ts";
 import { SUPPORTED_PROVIDERS, type ProviderId } from "./providers/types.ts";
 import { AUTH_PROVIDER_ORDER, baseUrl, isSupportedProvider, maskSecret, needsRefresh, requestHeaders, validateCopilotApiUrl } from "./endpoints.ts";
@@ -111,11 +112,17 @@ export function firstAuthenticatedProvider(): ProviderId | null {
 }
 
 
+function unsupportedAnthropicOauth(id: ProviderId, entry: unknown): boolean {
+  return id === "anthropic" && isRecord(entry) && entry.type === "oauth";
+}
+
+
 function fromStored(
   id: ProviderId,
   entry: unknown,
 ): ResolvedAuth | { needsOauthRefresh: true; refresh: string; extra: Record<string, unknown> } | null {
   if (!isRecord(entry) || typeof entry.type !== "string") return null;
+  if (unsupportedAnthropicOauth(id, entry)) return null;
   if (entry.type === "api_key") {
     const key = typeof entry.key === "string" ? entry.key.trim() : "";
     if (!key) return null;
@@ -199,6 +206,9 @@ export async function resolveAuth(providerId: string = "anthropic", signal?: Abo
       baseUrl: baseUrl(providerId),
       headers: requestHeaders(providerId, env.token, { envName: env.envName }),
     };
+  }
+  if (got.ok && unsupportedAnthropicOauth(providerId, got.data[providerId])) {
+    return { ok: false, error: ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED };
   }
   return { ok: false, error: missingCredentialError(providerId) };
 }

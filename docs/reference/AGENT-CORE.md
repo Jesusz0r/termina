@@ -22,9 +22,9 @@ Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
 then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
 are overflow-recoverable. The kernel does not call the snapshot store.
 `termina-core` stays the snapshot/Git owner. Credentials live in
-`~/.termina/agent/auth.json` (`/login`, `/logout`). Providers: Anthropic,
-OpenAI, ChatGPT Codex OAuth, GitHub Copilot, xAI, Google, OpenRouter,
-OpenCode Go, OpenCode Zen.
+`~/.termina/agent/auth.json` (`/login`, `/logout`). Providers: Anthropic
+(API key only), OpenAI, ChatGPT Codex OAuth, GitHub Copilot, xAI, Google,
+OpenRouter, OpenCode Go, OpenCode Zen.
 
 The user-facing harness is those two `AGENTS.md` files plus skills. Skill
 bodies stay out of zone 1. Future harness experiments land as a skill, a
@@ -355,11 +355,14 @@ Tab completes; arrows move the highlight. `/help` prints the same list.
 (or `/skills <name>`) starts a turn that reads that `SKILL.md` with `read_file`.
 `/login` opens a provider picker. OAuth is the provider name (`OpenAI`);
 API key is `OpenAI (key)`. OpenAI OAuth is the ChatGPT Codex subscription;
-OpenAI key is the platform API. `/login [provider] [oauth|key]` and
-`/logout [provider]` still run when typed in full. Supported ids:
-`anthropic`, `openai-codex`, `github-copilot`, `xai`, `openrouter`,
-`openai`, `google`, `opencode-go`, `opencode-zen`. OpenCode Go and Zen
-are paste-key logins (`/login key opencode-go`, `/login key opencode-zen`).
+OpenAI key is the platform API. Anthropic is paste-key only
+(`/login anthropic` or `/login anthropic key`). Claude subscription OAuth
+is not a login method; a stored subscription token is ignored. `/login
+[provider] [oauth|key]` and `/logout [provider]` still run when typed in
+full. Supported ids: `anthropic`, `openai-codex`, `github-copilot`, `xai`,
+`openrouter`, `openai`, `google`, `opencode-go`, `opencode-zen`. OpenCode
+Go and Zen are paste-key logins (`/login key opencode-go`, `/login key
+opencode-zen`).
 
 Agent-core stores credentials in `~/.termina/agent/auth.json` (mode 0600).
 A stored credential wins over that provider's env key. OAuth tokens refresh

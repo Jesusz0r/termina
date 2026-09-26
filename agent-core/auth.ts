@@ -5,8 +5,8 @@
  * another product's credential store.
  *
  * Login shapes match the providers' public authentication flows
- * (Claude Code PKCE, Codex CLI PKCE, xAI Grok-CLI device code,
- * OpenRouter PKCE-minted key). This file is the only credential owner.
+ * (Codex CLI PKCE, xAI Grok-CLI device code, OpenRouter PKCE-minted key).
+ * Anthropic is an API key only. This file is the only credential owner.
  */
 
 // Split into ./auth/ modules (issue #38). This entry re-exports the public surface.

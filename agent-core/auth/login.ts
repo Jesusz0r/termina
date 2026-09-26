@@ -11,8 +11,9 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
-import { ANTHROPIC_CLIENT_ID, ANTHROPIC_SCOPES, OPENAI_CODEX_CLIENT_ID, OPENAI_CODEX_SCOPES, authPath, authorizeUrl, defaultLoginMode, isSupportedProvider, redirectPath, redirectPort, redirectUri } from "./endpoints.ts";
-import { exchangeAnthropic, exchangeCodex, exchangeGithubCopilotToken, exchangeOpenRouter, persistApiKey, persistOauth, pollGithubDeviceToken, pollXaiDeviceToken, requestGithubDeviceCode, requestXaiDeviceCode } from "./oauth.ts";
+import { OPENAI_CODEX_CLIENT_ID, OPENAI_CODEX_SCOPES, authPath, authorizeUrl, defaultLoginMode, isSupportedProvider, redirectPath, redirectPort, redirectUri } from "./endpoints.ts";
+import { exchangeCodex, exchangeGithubCopilotToken, exchangeOpenRouter, persistApiKey, persistOauth, pollGithubDeviceToken, pollXaiDeviceToken, requestGithubDeviceCode, requestXaiDeviceCode } from "./oauth.ts";
+import { ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED } from "./providers/anthropic.ts";
 import { authBanner, resolveAuth } from "./resolve.ts";
 import { modifyProvider, readAuth, type AuthWriteOpts, assertStoredAuthSupported } from "./store.ts";
 
@@ -29,7 +30,6 @@ const LOGIN_METHODS: {
   name: string;
   hint: string;
 }[] = [
-  { group: "anthropic", id: "anthropic", kind: "oauth", mode: "browser", name: "Anthropic", hint: "Claude Pro/Max" },
   { group: "anthropic", id: "anthropic", kind: "key", mode: "key", name: "Anthropic", hint: "API key" },
   { group: "openai", id: "openai-codex", kind: "oauth", mode: "browser", name: "OpenAI", hint: "ChatGPT Plus/Pro (Codex)" },
   { group: "openai", id: "openai", kind: "key", mode: "key", name: "OpenAI", hint: "API key" },
@@ -105,7 +105,10 @@ function resolveLoginPick(
     kind != null
       ? methods.find((m) => m.kind === kind)
       : methods.find((m) => m.mode === defaultLoginMode(m.id)) ?? methods[0];
-  if (!picked) return { error: `${groupOrId} has no ${kindWord} login` };
+  if (!picked) {
+    if (groupOrId === "anthropic" && kind === "oauth") return { error: ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED };
+    return { error: `${groupOrId} has no ${kindWord} login` };
+  }
   // An explicit mode word that contradicts the resolved flow is a parse
   // error, not a silent alias: "code" is the manual-paste browser variant,
   // while device/browser name their own flows. ("oauth"/"key" name kinds,
@@ -129,19 +132,6 @@ function pkce(): { verifier: string; challenge: string; state: string } {
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const state = randomBytes(16).toString("hex");
   return { verifier, challenge, state };
-}
-
-
-function buildAnthropicAuthorizeUrl(challenge: string, state: string, port: number): string {
-  const u = new URL(authorizeUrl("anthropic"));
-  u.searchParams.set("client_id", ANTHROPIC_CLIENT_ID);
-  u.searchParams.set("response_type", "code");
-  u.searchParams.set("redirect_uri", redirectUri("anthropic", port));
-  u.searchParams.set("scope", ANTHROPIC_SCOPES);
-  u.searchParams.set("state", state);
-  u.searchParams.set("code_challenge", challenge);
-  u.searchParams.set("code_challenge_method", "S256");
-  return u.toString();
 }
 
 
@@ -517,6 +507,9 @@ export async function runLogin(
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+  if (providerId === "anthropic" && mode !== "key") {
+    return { ok: false, error: ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED };
+  }
   // A corrupt store refuses every write. Ask once, up front — before any
   // browser flow — whether to discard the named file; the flag is decided
   // under the write lock, so a concurrent repair just merges normally.
@@ -572,12 +565,7 @@ export async function runLogin(
     if (!exchanged.ok) return exchanged;
     return finishResolved(providerId, io.signal);
   }
-  const url = buildAnthropicAuthorizeUrl(challenge, state, port);
-  const code = await collectCode("anthropic", chosen === "code" ? "code" : "browser", url, state, io);
-  if (!code.ok) return code;
-  const exchanged = await exchangeAnthropic(code.code, verifier, port, state, io.signal, authWrite);
-  if (!exchanged.ok) return exchanged;
-  return finishResolved(providerId, io.signal);
+  return { ok: false, error: `${providerId} has no browser login` };
 }
 
 

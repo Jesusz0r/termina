@@ -56,7 +56,7 @@ describe("login secret contract (refs #212)", () => {
 
   it("asks waitForCode for a secret on OAuth code paste", async () => {
     const { opts, io } = captureWait();
-    const result = await login.runLogin("anthropic", "code", io);
+    const result = await login.runLogin("openai-codex", "code", io);
     expect(result.ok).toBe(false);
     expect(opts).toEqual([{ secret: true }]);
   });
