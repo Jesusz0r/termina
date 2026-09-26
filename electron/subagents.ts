@@ -23,28 +23,34 @@ import { subagentViewerId } from "./terminal-runtime.js";
 import {
   MAX_SUBAGENT_ERROR_CHARS,
   MAX_SUBAGENT_RESULT_CHARS,
-  MAX_SUBAGENT_RUNS_USER,
   MAX_SUBAGENT_TOUCHED,
   SUBAGENT_RESULT_PREFIX,
   anchorClaimPath,
   parseSubagentTaskFile,
   parseSubagentResultFrame,
+  removeSubagentMarker,
   scanSubagentOutput,
+  subagentCancelFileName,
   subagentChildTid,
+  subagentLiveFileName,
+  subagentMarkerExists,
   subagentPathsOverlap,
   subagentResultFileName,
+  subagentSettlingFileName,
   subagentTaskFileName,
   truncateUtf8,
   utf8TextSuffix,
+  withSubagentCommitLock,
+  commitSubagentAdmission,
+  writeSubagentClaimsFile,
+  writeSubagentMarker,
   type SubagentOutcome,
   type SubagentTaskFile,
 } from "../agent-core/subagents.js";
 
-/** At most 4 child processes at once (Anthropic rule, host-wide). */
+/** At most 4 child processes at once (Anthropic rule, host-wide). A task file
+ * cannot raise this. */
 const MAX_SUBAGENT_HOST_CHILDREN = 4;
-/** Manual fan-out bound: user explicitly asked for many agents. Mirrors the
- * registry user cap so manual runs fail closed instead of fork-bombing. */
-const MAX_SUBAGENT_HOST_CHILDREN_USER = MAX_SUBAGENT_RUNS_USER;
 /** Pre-child launch attempts per run before reporting failure. */
 const SUBAGENT_MAX_ATTEMPTS = 3;
 /** Backoff between failed launches (attempts 2 and 3); never replay started work. */
@@ -53,8 +59,6 @@ const SUBAGENT_RETRY_BACKOFF_MS = [1000, 2000];
 export const SUBAGENT_STDOUT_CAP_BYTES = 256 * 1024;
 /** Stderr is evidence only, kept small. */
 export const SUBAGENT_STDERR_CAP_BYTES = 8 * 1024;
-/** Result text carried in the mailbox note; the file holds the full text. */
-const SUBAGENT_NOTE_RESULT_CHARS = 4000;
 /** Task text carried in the mailbox note; the file holds the full task. */
 const SUBAGENT_NOTE_TASK_CHARS = 2000;
 
@@ -290,6 +294,7 @@ export class SubagentHost {
     const run = this.runs.get(`${parentTerminalId}/${runId}`);
     if (!run || run.settled) return false;
     run.stop = { kind: "kill", reason };
+    writeSubagentMarker(run.eventsDir, subagentSettlingFileName(parentTerminalId, runId));
     if (run.retryTimer) {
       clearTimeout(run.retryTimer);
       run.retryTimer = null;
@@ -557,15 +562,26 @@ export class SubagentHost {
         return;
       }
     }
-    const cap = task.userRequested
-      ? Math.max(this.maxChildren, MAX_SUBAGENT_HOST_CHILDREN_USER)
-      : this.maxChildren;
+    if (subagentMarkerExists(dir, subagentCancelFileName(sourceTerminalId, runId))) {
+      await this.finishFailed(sourceTerminalId, runId, task, "subagent cancelled before admission");
+      return;
+    }
+    const cap = this.maxChildren;
     if (this.runs.size >= cap) {
       await this.finishFailed(sourceTerminalId, runId, task, `subagent host at capacity (${cap} runs)`);
       return;
     }
     this.runs.set(key, run);
+    this.publishClaims(sourceTerminalId, dir);
+    writeSubagentMarker(dir, subagentLiveFileName(sourceTerminalId, runId));
     await this.startAttempt(run);
+  }
+
+  private publishClaims(parentTerminalId: string, eventsDir: string): void {
+    const runs = [...this.runs.values()]
+      .filter((run) => run.parentTerminalId === parentTerminalId && !run.settled)
+      .map((run) => ({ runId: run.runId, paths: run.claims }));
+    writeSubagentClaimsFile(eventsDir, parentTerminalId, runs);
   }
 
   private async startAttempt(run: HostRun): Promise<void> {
@@ -575,6 +591,10 @@ export class SubagentHost {
       return;
     }
     this.attachParentSession(run);
+    if (run.stop?.kind === "kill" || subagentMarkerExists(run.eventsDir, subagentCancelFileName(run.parentTerminalId, run.runId))) {
+      await this.finishKilled(run, run.stop?.reason ?? "cancelled before launch");
+      return;
+    }
     run.attempts += 1;
     run.stdout = "";
     run.stdoutTruncated = false;
@@ -675,6 +695,16 @@ export class SubagentHost {
         stream.booted = false;
         stream.lastActivityAt = this.now();
       }
+      const admitted = await withSubagentCommitLock(dir, run.parentTerminalId, run.runId, () =>
+        commitSubagentAdmission(dir, run.parentTerminalId, run.runId, run.task.createdAt, { admitted: true }),
+      );
+      let admissionError = "host rejected the subagent";
+      if (!admitted.ok) admissionError = admitted.error;
+      else if (!admitted.value.admitted) admissionError = admitted.value.error;
+      if (!admitted.ok || !admitted.value.admitted) {
+        await this.finishFailed(run.parentTerminalId, run.runId, run.task, admissionError);
+        return;
+      }
       child = this.launch(process.execPath, [this.sinks.coreBinary(), "--subagent-task", join(dir, run.taskFile)], {
         cwd: run.task.cwd,
         env,
@@ -766,7 +796,17 @@ export class SubagentHost {
       return;
     }
     // No child ever existed (validation/capacity failure): still write the
-    // result so the parent's reconcile frees the slot exactly once.
+    // result so the parent's reconcile frees the slot exactly once. The
+    // decision file is what the waiting spawn tool reads; do not leave it
+    // waiting on a result it might not treat as admission.
+    const dir = this.sinks.eventsDirFor(parentTerminalId);
+    if (dir) {
+      const createdAt = task?.createdAt ?? 0;
+      await withSubagentCommitLock(dir, parentTerminalId, runId, () => {
+        commitSubagentAdmission(dir, parentTerminalId, runId, createdAt, { admitted: false, error });
+      });
+      writeSubagentMarker(dir, subagentSettlingFileName(parentTerminalId, runId));
+    }
     await this.writeResult(parentTerminalId, runId, "failed", "", [], error, task);
   }
 
@@ -779,6 +819,13 @@ export class SubagentHost {
   ): Promise<void> {
     if (run.settled) return;
     run.settled = true;
+    writeSubagentMarker(run.eventsDir, subagentSettlingFileName(run.parentTerminalId, run.runId));
+    await withSubagentCommitLock(run.eventsDir, run.parentTerminalId, run.runId, () => {
+      commitSubagentAdmission(run.eventsDir, run.parentTerminalId, run.runId, run.task.createdAt, {
+        admitted: false,
+        error: error ?? "subagent finished",
+      });
+    });
     // Retain the bundle for resume: a later sibling run can replay it as a
     // follow-up. Bounded and same-parent keyed; a host restart drops it all.
     // Eviction also removes the bundle directory from disk, so retained
@@ -843,7 +890,42 @@ export class SubagentHost {
       touched: [...run.touched],
     });
     while (this.pastTouched.length > MAX_SUBAGENT_PAST_TOUCHED) this.pastTouched.shift();
-    await this.writeResult(run.parentTerminalId, run.runId, outcome, result, flags, error, run.task, [...run.touched], merges, run.eventsDir);
+    const args = {
+      parentTerminalId: run.parentTerminalId,
+      runId: run.runId,
+      outcome,
+      result,
+      flags,
+      error,
+      task: run.task,
+      touched: [...run.touched],
+      merges,
+      eventsDir: run.eventsDir,
+    };
+    const publish = async (): Promise<void> => {
+      const wrote = await this.writeResult(
+        args.parentTerminalId,
+        args.runId,
+        args.outcome,
+        args.result,
+        args.flags,
+        args.error,
+        args.task,
+        args.touched,
+        args.merges,
+        args.eventsDir,
+      );
+      if (!wrote) {
+        const timer = setTimeout(() => void publish(), 2_000);
+        const unref = timer as { unref?: () => void };
+        unref.unref?.();
+        return;
+      }
+      removeSubagentMarker(args.eventsDir, subagentLiveFileName(args.parentTerminalId, args.runId));
+      removeSubagentMarker(args.eventsDir, subagentSettlingFileName(args.parentTerminalId, args.runId));
+      this.publishClaims(args.parentTerminalId, args.eventsDir);
+    };
+    await publish();
   }
 
   private async writeResult(
@@ -857,7 +939,7 @@ export class SubagentHost {
     touched: string[] = [],
     merges: Array<{ runId: string; paths: string[] }> = [],
     eventsDir?: string | null,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const dir = this.sinks.eventsDirFor(parentTerminalId) ?? eventsDir ?? null;
     const name = subagentResultFileName(parentTerminalId, runId);
     const body = JSON.stringify({
@@ -870,27 +952,55 @@ export class SubagentHost {
       touched: touched.slice(0, MAX_SUBAGENT_TOUCHED),
       settledAt: this.now(),
     });
+    let wrote = false;
     if (dir && name) {
-      const target = join(dir, name);
-      const temp = `${target}.${randomUUID()}.tmp`;
-      try {
-        writeFileSync(temp, body, { mode: 0o600 });
-        renameSync(temp, target);
-      } catch {
-        /* The mailbox note below still carries the outcome. */
-        try {
-          rmSync(temp);
-        } catch {
-          /* Orphaned temps match the sweep predicate. */
-        }
+      for (let attempt = 0; attempt < 3 && !wrote; attempt++) {
+        if (attempt > 0) await this.sleep(this.backoffMs[attempt - 1] ?? 1000);
+        const locked = await withSubagentCommitLock(dir, parentTerminalId, runId, () => {
+          writeSubagentMarker(dir, subagentSettlingFileName(parentTerminalId, runId));
+          const target = join(dir, name);
+          const temp = `${target}.${randomUUID()}.tmp`;
+          try {
+            writeFileSync(temp, body, { mode: 0o600 });
+            renameSync(temp, target);
+            this.writeResultNote(parentTerminalId, runId, outcome, error, task, merges);
+            return true;
+          } catch {
+            try {
+              rmSync(temp);
+            } catch {
+              /* Orphaned temps match the sweep predicate. */
+            }
+            return false;
+          }
+        });
+        wrote = locked.ok && locked.value;
       }
     }
+    if (!dir || !name) {
+      this.writeResultNote(parentTerminalId, runId, outcome, error, task, merges);
+      return true;
+    }
+    if (!wrote) return false;
+    removeSubagentMarker(dir, subagentLiveFileName(parentTerminalId, runId));
+    return true;
+  }
+
+  /** Pointer only. The result file is the outcome; this note must not claim to be it. */
+  private writeResultNote(
+    parentTerminalId: string,
+    runId: string,
+    outcome: SubagentOutcome,
+    error: string | null,
+    task: SubagentTaskFile | null,
+    merges: Array<{ runId: string; paths: string[] }>,
+  ): void {
     const headline = outcome === "settled"
       ? `## Subagent ${runId} settled`
       : outcome === "killed"
         ? `## Subagent ${runId} killed`
         : `## Subagent ${runId} failed`;
-    const lines = [headline, ""];
+    const lines = [headline, "", "The result was delivered to the session. This note is not the result.", ""];
     if (task) {
       // Quote the full brief up to a bounded budget. A hard cut once made a
       // complete brief read as a truncated spawn ("...cd apps/backend\n3"),
@@ -901,31 +1011,19 @@ export class SubagentHost {
       lines.push(`Task: ${brief}`, "");
     }
     if (task?.resumeRunId) lines.push(`Continued from ${task.resumeRunId}; its session history was replayed.`, "");
-    if (outcome === "settled") {
-      const text = result.length > SUBAGENT_NOTE_RESULT_CHARS ? `${result.slice(0, SUBAGENT_NOTE_RESULT_CHARS)}\n…[truncated]` : result;
-      lines.push(text);
-      if (flags.length > 0) lines.push("", `Scan flags: ${flags.join(", ")}`);
-      // Force grounding: the parent must digest this result before continuing,
-      // never poll a finished run or duplicate its work.
-      lines.push("", "Summarize this result and state your next step explicitly. The result above is complete; do not poll the run.");
-    } else if (error) {
+    if (error) {
       lines.push(`${outcome === "killed" ? "Reason" : "Error"}: ${error.slice(0, 1000)}`);
-      // A failed identical brief will fail identically: rewrite the task or
-      // dismiss the run instead of respawning it unchanged. Killed runs
-      // are exempt: the user cancelled, so a rewritten retry is legitimate.
       if (outcome === "failed") {
         lines.push("", "Do not respawn this exact brief. Rewrite the task or dismiss the run.");
       }
     }
-    // Parent merge task: siblings that touched the same files. The parent
-    // merges; siblings never negotiate with each other.
     for (const merge of merges) {
       lines.push("", `## Merge needed: ${merge.paths.map((p) => `\`${p}\``).join(", ")} also touched by ${merge.runId} — merge both results before trusting either.`);
     }
     try {
       this.sinks.appendMailboxNote(parentTerminalId, lines.join("\n"));
     } catch {
-      /* Mailbox delivery is best-effort; the result file is durable. */
+      /* The result file is the durable outcome. The session delivery reads it. */
     }
   }
 }

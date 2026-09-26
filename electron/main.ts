@@ -5058,6 +5058,11 @@ class TerminaApp {
         if (runId && taskFile) void this.subagents.handleSpawn(terminalId, runId, taskFile);
         break;
       }
+      case "subagent_cancel": {
+        const runId = typeof event.runId === "string" ? event.runId : "";
+        if (runId) this.subagents.kill(terminalId, runId, "cancelled by parent");
+        break;
+      }
     }
   }
 

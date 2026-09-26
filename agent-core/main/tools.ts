@@ -186,9 +186,6 @@ export function formatToolAnnounce(use: ToolUse): string {
   if (use.name === "bash") detail = `$ ${detail}`;
   else if (use.name === "spawn_subagent") {
     detail = String(use.input.task ?? "").slice(0, 80);
-    // Manual-bypass runs are privileged: mark them so a self-granted
-    // user_requested flag is visible in the transcript, not silent.
-    if (use.input.user_requested === true) detail += " · user-requested";
   } else if (use.name === "message_subagent") {
     detail = String(use.input.run_id ?? "");
   }

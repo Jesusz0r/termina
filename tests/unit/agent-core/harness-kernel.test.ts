@@ -546,9 +546,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       formatToolAnnounce({ id: "1", name: "edit", input: { path: "a.ts" } }) === "◆ Tool · edit\n  a.ts",
     );
     check(
-      "tool announce marks user-requested spawns",
-      formatToolAnnounce({ id: "1", name: "spawn_subagent", input: { task: "do things", user_requested: true } }).includes("user-requested") &&
-        !formatToolAnnounce({ id: "1", name: "spawn_subagent", input: { task: "do things" } }).includes("user-requested"),
+      "tool announce shows the spawn brief",
+      formatToolAnnounce({ id: "1", name: "spawn_subagent", input: { task: "do things" } }).includes("do things"),
     );
     check(
       "tool followup structures grep hits",

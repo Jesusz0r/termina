@@ -74,7 +74,7 @@ function killBashTree(pid: number | undefined, child: ChildProcess): void {
 
 export function runBash(
   command: string,
-  opts: { cwd: string; timeoutMs?: number; shouldStop?: () => boolean },
+  opts: { cwd: string; timeoutMs?: number; shouldStop?: () => boolean; sandboxProfile?: string },
 ): Promise<ToolTextResult> {
   const timeoutMs = opts.timeoutMs ?? BASH_TIMEOUT_MS;
   const repro = `bash ${shellQuote(command)}`;
@@ -87,12 +87,20 @@ export function runBash(
         if (value !== undefined) env[key] = value;
       }
       env.PATH = trustedPath(process.env.PATH, opts.cwd);
-      child = spawn("/bin/bash", ["-c", bashInvocation(command)], {
-        cwd: opts.cwd,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-        env,
-      });
+      const script = bashInvocation(command);
+      child = opts.sandboxProfile
+        ? spawn("/usr/bin/sandbox-exec", ["-p", opts.sandboxProfile, "/bin/bash", "-c", script], {
+          cwd: opts.cwd,
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+          env,
+        })
+        : spawn("/bin/bash", ["-c", script], {
+          cwd: opts.cwd,
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+          env,
+        });
     } catch (err) {
       resolve(logicalToolText(`error: ${(err as Error).message}`, {
         maxBytes: BASH_CAP_BYTES,

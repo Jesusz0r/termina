@@ -241,30 +241,48 @@ import { parseSkillCommand, skillSlashSubmit } from "./main/skill-slash.ts";
 import {
   SubagentRegistry,
   MAX_SUBAGENT_MESSAGE_CHARS,
+  SUBAGENT_ADMISSION_TIMEOUT_MS,
   appendSubagentInboxMessage,
+  rewindSubagentInboxMessage,
   appendSubagentOutboxMessage,
   clearSubagentApprovalFiles,
+  commitSubagentAdmission,
+  consumeSubagentResultFile,
   formatSubagentBrief,
   formatSubagentResultFrame,
+  formatSubagentSessionDelivery,
   isApprovalAnswer,
   isLiveSubagentRun,
   isWorldlineCandidateEnv,
+  loneSubagentRollback,
   parseSubagentApprovalName,
   parseSubagentTaskFile,
   readSubagentApprovalRequest,
+  readSubagentDecisionFile,
   readSubagentInbox,
+  readSubagentResultFile,
   takeSubagentOutboxLines,
   reconcileSubagentRuns,
   resolveSubagentPermissionMode,
   SUBAGENT_APPROVAL_POLL_MS,
   admitSubagentFanout,
   subagentApprovalTimeoutMs,
+  subagentBashSandbox,
+  subagentCancelFileName,
+  subagentCancelSidecarRecord,
   subagentChildTid,
   subagentDepthFromEnv,
+  subagentLiveFileName,
+  subagentMarkerExists,
+  subagentMutationBlock,
+  subagentUnconfinedToolBlock,
+  subagentSettlingFileName,
   subagentSpawnSidecarRecord,
   visibleSubagentTools,
+  withSubagentCommitLock,
   writeSubagentAckFile,
   writeSubagentApprovalRequest,
+  writeSubagentMarker,
   writeSubagentTaskFile,
   MAX_SUBAGENT_FILE_BYTES,
   MAX_SUBAGENT_RESULT_CHARS,
@@ -454,7 +472,7 @@ function parseSubagentTaskFlag(argv: string[]): string | null {
 }
 
 /** Active headless child run. Null everywhere except `--subagent-task`. */
-let activeSubagent: { task: SubagentTaskFile; inboxSeq: number } | null = null;
+let activeSubagent: { task: SubagentTaskFile; inboxSeq: number; inboxInvalid?: boolean } | null = null;
 /** Last settled run outcome, for the subagent result frame. Set at the single settle point. */
 let lastRunOutcome: { status: string; failure: string | null } | null = null;
 
@@ -1386,6 +1404,130 @@ function syncSubagentChrome(): void {
 }
 
 /**
+ * Persist host result files into the session, then delete them. The mailbox
+ * note is not this channel. A run already reported by a tool error is marked
+ * delivered and the file is dropped without a second injection.
+ */
+function deliverSubagentResults(): boolean {
+  if (activeSubagent || !eventsDir || !terminalId) return false;
+  reconcileSubagentRuns(eventsDir, terminalId, subagentRegistry);
+  let names: string[];
+  try {
+    names = readdirSync(eventsDir);
+  } catch {
+    return false;
+  }
+  const prefix = `subagent-${terminalId}-`;
+  const suffix = ".result.json";
+  let injected = false;
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith(suffix)) continue;
+    const runId = name.slice(prefix.length, name.length - suffix.length);
+    if (!/^bg-\d{1,10}$/.test(runId)) continue;
+    const known = subagentRegistry.get(runId);
+    if (known?.resultDelivered) {
+      consumeSubagentResultFile(eventsDir, terminalId, runId);
+      continue;
+    }
+    const read = readSubagentResultFile(eventsDir, terminalId, runId);
+    if (read.status !== "ok") continue;
+    if (known?.state === "active") subagentRegistry.settleRun(runId, read.file.result, read.file.outcome, read.file.error);
+    const current = subagentRegistry.get(runId);
+    const text = current
+      ? formatSubagentSessionDelivery(current)
+      : formatSubagentSessionDelivery({
+        id: runId,
+        state: read.file.outcome,
+        result: read.file.result,
+        error: read.file.error,
+        flags: read.file.flags,
+      });
+    pushMessage("user", [{ type: "text", text }]);
+    if (current) subagentRegistry.markResultDelivered(runId);
+    consumeSubagentResultFile(eventsDir, terminalId, runId);
+    injected = true;
+  }
+  return injected;
+}
+
+function subagentClaimError(absPath: string): string | null {
+  if (!eventsDir || !terminalId) return null;
+  const parentTid = activeSubagent?.task.parentTerminalId ?? terminalId;
+  return subagentMutationBlock(eventsDir, parentTid, activeSubagent?.task.runId ?? null, absPath);
+}
+
+async function waitForSubagentDecision(
+  runId: string,
+  createdAt: number,
+): Promise<{ admitted: true } | { admitted: false; error: string }> {
+  if (!eventsDir || !terminalId) return { admitted: false, error: "host admission requires an events directory" };
+  const deadline = Date.now() + SUBAGENT_ADMISSION_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (interrupted) break;
+    const decision = readSubagentDecisionFile(eventsDir, terminalId, runId, createdAt);
+    if (decision.status === "ok") {
+      return decision.admitted ? { admitted: true } : { admitted: false, error: decision.error };
+    }
+    await sleep(50);
+  }
+  // Take the same lock as the host. If the host already admitted, that wins:
+  // a timeout must not cancel a child that is about to start. Otherwise the
+  // rejection is the decision, and the host will not launch.
+  const locked = await withSubagentCommitLock(eventsDir, terminalId, runId, () =>
+    commitSubagentAdmission(eventsDir, terminalId, runId, createdAt, {
+      admitted: false,
+      error: interrupted ? "interrupted before host admission" : "host did not admit the subagent",
+    }),
+  );
+  if (!locked.ok) return { admitted: false, error: locked.error };
+  return locked.value;
+}
+
+async function rollbackLoneSubagentFanout(
+  uses: Array<{ name: string }>,
+  outcomes: Array<{ isError: boolean; result: { content?: string } }>,
+  activeBefore: number,
+  attempted: number,
+): Promise<void> {
+  const admitted = outcomes.filter((outcome, index) => uses[index]?.name === "spawn_subagent" && !outcome.isError);
+  if (!loneSubagentRollback(activeBefore, attempted, admitted.length)) return;
+  const outcome = admitted[0];
+  if (!outcome) return;
+  let runId = "";
+  try {
+    const parsed = JSON.parse(String(outcome.result.content ?? "")) as { runId?: string };
+    runId = typeof parsed.runId === "string" ? parsed.runId : "";
+  } catch {
+    runId = "";
+  }
+  if (!runId) return;
+  cancelSubagentRun(runId, "fan-out collapsed to one child; the run was not kept");
+  const deadline = Date.now() + SUBAGENT_ADMISSION_TIMEOUT_MS;
+  while (eventsDir && terminalId && Date.now() < deadline) {
+    const result = readSubagentResultFile(eventsDir, terminalId, runId);
+    if (result.status === "ok") {
+      subagentRegistry.markResultDelivered(runId);
+      consumeSubagentResultFile(eventsDir, terminalId, runId);
+      break;
+    }
+    await sleep(50);
+  }
+  outcome.isError = true;
+  outcome.result.content = "error: spawn at least 2 subagents; the other spawn in this turn failed, so this child was not kept";
+}
+
+function cancelSubagentRun(runId: string, reason: string): void {
+  if (!eventsDir || !terminalId) return;
+  writeSubagentMarker(eventsDir, subagentCancelFileName(terminalId, runId));
+  sidecar.logEvent(subagentCancelSidecarRecord(runId));
+  const run = subagentRegistry.get(runId);
+  if (run?.state === "active") {
+    subagentRegistry.settleRun(runId, reason, "failed", reason);
+    subagentRegistry.markResultDelivered(runId);
+  }
+}
+
+/**
  * Parent side of child approvals (Phase 3). Surface fresh requests from
  * live runs in the parent's own choice picker — Deny and Approve once
  * only, never Always, so a child can never escalate either side to
@@ -1497,7 +1639,13 @@ function drainSubagentInbox(): boolean {
   const run = activeSubagent;
   if (!run || !eventsDir) return false;
   const inbox = readSubagentInbox(eventsDir, run.task.parentTerminalId, run.task.runId);
-  if (!inbox) return false;
+  if (inbox.status === "invalid") {
+    if (run.inboxInvalid) return false;
+    run.inboxInvalid = true;
+    pushMessage("user", [{ type: "text", text: `Parent inbox is unreadable (${inbox.error}). Do not assume there are no redirects.` }]);
+    return true;
+  }
+  if (inbox.status !== "ok") return false;
   const fresh = inbox.messages.filter((m) => m.seq > run.inboxSeq);
   if (fresh.length === 0) return false;
   run.inboxSeq = fresh[fresh.length - 1]!.seq;
@@ -1535,6 +1683,7 @@ async function waitForSubagentTurns(): Promise<boolean> {
     syncSubagentChrome();
     pollSubagentApprovals();
     if (drainSubagentOutbox()) return true;
+    if (deliverSubagentResults()) return true;
     if (subagentRegistry.activeRuns().length === 0) return false;
     await new Promise((resolve) => setTimeout(resolve, SUBAGENT_APPROVAL_POLL_MS));
   }
@@ -1597,6 +1746,11 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
       if (!(await confirmProtectedMutation(use.input.path))) return notExecuted("error: protected file edit denied");
       if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
+      const confined = confinePath(canonicalCwd, use.input.path);
+      if (confined.ok) {
+        const blocked = subagentClaimError(confined.abs);
+        if (blocked) return notExecuted(blocked);
+      }
       const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
       return done(use, got.content, got.isError);
     });
@@ -1605,6 +1759,11 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
       if (!(await confirmProtectedMutation(use.input.path))) return notExecuted("error: protected file edit denied");
       if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
+      const confined = confinePath(canonicalCwd, use.input.path, { mustExist: true });
+      if (confined.ok) {
+        const blocked = subagentClaimError(confined.abs);
+        if (blocked) return notExecuted(blocked);
+      }
       const got = editProjectFile(
         canonicalCwd,
         use.input.path,
@@ -1634,7 +1793,13 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     const command = use.input.command ?? "";
     if (!(await confirmBash(command))) return notExecuted("error: bash denied");
     if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
-    const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
+    let sandboxProfile: string | undefined;
+    if (eventsDir && terminalId) {
+      const sandbox = subagentBashSandbox(eventsDir, activeSubagent?.task.parentTerminalId ?? terminalId, activeSubagent?.task.runId ?? null);
+      if (sandbox && "error" in sandbox) return notExecuted(sandbox.error);
+      sandboxProfile = sandbox?.profile;
+    }
+    const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted, ...(sandboxProfile ? { sandboxProfile } : {}) });
     return done(use, got);
   }
   if (use.name === "spawn_subagent") {
@@ -1691,28 +1856,67 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
       return done(use, `error: ${handoff.error}`, true);
     }
     sidecar.logEvent(subagentSpawnSidecarRecord(got.run.id, handoff.file, got.run.userRequested));
+    const decision = await waitForSubagentDecision(got.run.id, got.run.createdAt);
+    if (!decision.admitted) {
+      cancelSubagentRun(got.run.id, decision.error);
+      syncSubagentChrome();
+      return done(use, `error: ${decision.error}`, true);
+    }
     syncSubagentChrome();
     return done(use, JSON.stringify({ runId: got.run.id }));
   }
   if (use.name === "message_subagent") {
     const runId = String(use.input.run_id ?? "");
     const text = String(use.input.text ?? "");
-    const got = subagentRegistry.message(runId, text);
-    if (!got.ok) return done(use, `error: ${got.error}`, true);
-    // Mirror accepted messages to the inbox file the child drains. A failed
-    // mirror errors (fail closed) so the parent never believes an undelivered
-    // message landed.
-    if (eventsDir && terminalId) {
-      const mirrored = appendSubagentInboxMessage(eventsDir, terminalId, runId, text);
-      if (!mirrored.ok) return done(use, `error: ${mirrored.error}`, true);
+    if (!eventsDir || !terminalId) return done(use, "error: message_subagent requires an events directory", true);
+    reconcileSubagentRuns(eventsDir, terminalId, subagentRegistry);
+    const prepared = subagentRegistry.validateMessage(runId, text);
+    if (!prepared.ok) return done(use, `error: ${prepared.error}`, true);
+    const locked = await withSubagentCommitLock(eventsDir, terminalId, runId, () => {
+      if (subagentMarkerExists(eventsDir, subagentSettlingFileName(terminalId, runId))) {
+        return { ok: false as const, error: `subagent run ${runId} is settling` };
+      }
+      const result = readSubagentResultFile(eventsDir, terminalId, runId);
+      if (result.status === "ok") return { ok: false as const, error: `subagent run ${runId} is already ${result.file.outcome}` };
+      if (!subagentMarkerExists(eventsDir, subagentLiveFileName(terminalId, runId))) {
+        return { ok: false as const, error: `subagent run ${runId} is not live` };
+      }
+      const appended = appendSubagentInboxMessage(eventsDir, terminalId, runId, prepared.text);
+      if (!appended.ok) return appended;
+      if (
+        subagentMarkerExists(eventsDir, subagentSettlingFileName(terminalId, runId))
+        || readSubagentResultFile(eventsDir, terminalId, runId).status === "ok"
+      ) {
+        rewindSubagentInboxMessage(eventsDir, terminalId, runId, appended.seq);
+        return { ok: false as const, error: `subagent run ${runId} is settling` };
+      }
+      return appended;
+    });
+    if (!locked.ok) return done(use, `error: ${locked.error}`, true);
+    if (!locked.value.ok) {
+      reconcileSubagentRuns(eventsDir, terminalId, subagentRegistry);
+      return done(use, `error: ${locked.value.error}`, true);
     }
-    return done(use, JSON.stringify({ ok: true }));
+    const recorded = subagentRegistry.recordMessage(runId, prepared.text);
+    if (!recorded.ok) {
+      rewindSubagentInboxMessage(eventsDir, terminalId, runId, locked.value.seq);
+      return done(use, `error: ${recorded.error}`, true);
+    }
+    return done(use, JSON.stringify({ ok: true, seq: locked.value.seq }));
   }
   if (mcpSession && use.name === "search_mcp_tools") {
     const result = searchMcpTools(mcpSession.tools, use.input);
     return done(use, result, result.startsWith("error:"));
   }
   if (mcpSession && use.name === "call_mcp_tool") {
+    if (eventsDir && terminalId) {
+      const blocked = subagentUnconfinedToolBlock(
+        eventsDir,
+        activeSubagent?.task.parentTerminalId ?? terminalId,
+        activeSubagent?.task.runId ?? null,
+      );
+      if (blocked) return done(use, blocked, true);
+    }
     const got = await callDiscoveredMcpTool(mcpSession, use.input, { shouldStop: () => interrupted });
     return done(use, got);
   }
@@ -4263,6 +4467,7 @@ async function runPrompt(
       if (interrupted) break;
       drainSubagentInbox();
       drainSubagentOutbox();
+      deliverSubagentResults();
       // Child approval requests arrive mid-run; poll every model turn so a
       // picker (or fast deny) lands within a turn, not a user turn. Reconcile
       // first so a finished child leaves the title before the next model call.
@@ -4442,14 +4647,13 @@ async function runPrompt(
       const pendingOutcomes = new Map<number, Promise<ToolOutcome>>();
       const inputErrors = uses.map((use) => toolInputError(use, clientTools));
       const waves = toolExecutionWaves(uses);
-      const spawnFanout = admitSubagentFanout(
-        subagentRegistry.activeRuns().length,
-        waves.flat().filter((entry) =>
-          uses[entry.index]!.name === "spawn_subagent"
-          && !inputErrors[entry.index]
-          && entry.duplicateOf === undefined
-        ).length,
-      );
+      const subagentActiveBefore = subagentRegistry.activeRuns().length;
+      const spawnAttempts = waves.flat().filter((entry) =>
+        uses[entry.index]!.name === "spawn_subagent"
+        && !inputErrors[entry.index]
+        && entry.duplicateOf === undefined
+      ).length;
+      const spawnFanout = admitSubagentFanout(subagentActiveBefore, spawnAttempts);
       try {
       for (const wave of waves) {
         if (interrupted) break;
@@ -4520,6 +4724,7 @@ async function runPrompt(
       } finally {
         surface?.cancelPendingTools();
       }
+      if (!interrupted) await rollbackLoneSubagentFanout(uses, outcomes, subagentActiveBefore, spawnAttempts);
       // An interrupted turn must still answer the open tool calls, or the
       // stored pair breaks the next request.
       const answered = outcomes.length;

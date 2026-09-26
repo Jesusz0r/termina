@@ -116,7 +116,8 @@ export type SidecarEvent =
       entryId?: string | null;
     })
   | (SidecarMeta & { t: "tool_end"; toolCallId?: string; isError?: boolean })
-  | (SidecarMeta & { t: "subagent_spawn"; runId?: string; taskFile?: string; userRequested?: boolean });
+  | (SidecarMeta & { t: "subagent_spawn"; runId?: string; taskFile?: string; userRequested?: boolean })
+  | (SidecarMeta & { t: "subagent_cancel"; runId?: string });
 
 
 export type AgentStartEvent = Extract<SidecarEvent, { t: "agent_start" }>;

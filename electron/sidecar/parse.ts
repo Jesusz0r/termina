@@ -23,6 +23,7 @@ const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
   "tool",
   "tool_end",
   "subagent_spawn",
+  "subagent_cancel",
 ]);
 
 
@@ -157,6 +158,8 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
       return { ...meta, t: "tool_end", toolCallId: optionalString(rec.toolCallId), isError: optionalBoolean(rec.isError) };
     case "subagent_spawn":
       return { ...meta, t: "subagent_spawn", runId: optionalString(rec.runId), taskFile: optionalString(rec.taskFile), userRequested: optionalBoolean(rec.userRequested) };
+    case "subagent_cancel":
+      return { ...meta, t: "subagent_cancel", runId: optionalString(rec.runId) };
   }
 }
 

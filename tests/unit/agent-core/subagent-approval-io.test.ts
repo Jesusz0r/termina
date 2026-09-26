@@ -19,6 +19,7 @@ import {
 } from "../../../agent-core/subagents/approval.ts";
 import {
   MAX_SUBAGENT_FILE_BYTES,
+  MAX_SUBAGENT_QUEUE_FILE_BYTES,
   MAX_SUBAGENT_INBOX_MSGS,
   MAX_SUBAGENT_MESSAGE_CHARS,
   appendSubagentInboxMessage as publicAppendInbox,
@@ -94,14 +95,21 @@ describe("subagent approval + inbox I/O", () => {
     expect(appendSubagentInboxMessage(dir, "term-7", "bg-1", "x".repeat(MAX_SUBAGENT_MESSAGE_CHARS)).ok).toBe(true);
     expect(appendSubagentInboxMessage(dir, "term-7", "bg-1", "x".repeat(MAX_SUBAGENT_MESSAGE_CHARS + 1)).ok).toBe(false);
     const inbox = readSubagentInbox(dir, "term-7", "bg-1");
-    expect(inbox?.messages.map((m) => [m.seq, m.text])).toEqual([
+    expect(inbox.status).toBe("ok");
+    if (inbox.status !== "ok") return;
+    expect(inbox.messages.map((m) => [m.seq, m.text])).toEqual([
       [1, "hello"],
       [2, "again"],
       [3, "x".repeat(MAX_SUBAGENT_MESSAGE_CHARS)],
     ]);
-    expect(readSubagentInbox(dir, "term-7", "bg-404")).toBeNull();
-    for (let i = 0; i < MAX_SUBAGENT_INBOX_MSGS + 10; i++) appendSubagentInboxMessage(dir, "term-7", "bg-1", `m${i}`);
-    expect(readSubagentInbox(dir, "term-7", "bg-1")?.messages.length).toBe(MAX_SUBAGENT_INBOX_MSGS);
+    expect(readSubagentInbox(dir, "term-7", "bg-404").status).toBe("missing");
+    for (let i = inbox.messages.length; i < MAX_SUBAGENT_INBOX_MSGS; i++) {
+      expect(appendSubagentInboxMessage(dir, "term-7", "bg-1", `m${i}`).ok).toBe(true);
+    }
+    const full = readSubagentInbox(dir, "term-7", "bg-1");
+    expect(full.status === "ok" && full.messages.length).toBe(MAX_SUBAGENT_INBOX_MSGS);
+    expect(full.status === "ok" && full.messages[0]?.text).toBe("hello");
+    expect(appendSubagentInboxMessage(dir, "term-7", "bg-1", "one too many").ok).toBe(false);
   });
 
   it("gives the parent each new child turn once", () => {
@@ -119,7 +127,7 @@ describe("subagent approval + inbox I/O", () => {
     expect(appendSubagentOutboxMessage(dir, "term-7", "bg-1", "later").ok).toBe(true);
     expect(takeSubagentOutboxLines(dir, "term-7", seen)).toEqual(["Subagent bg-1 (seq 3): later"]);
     expect(takeSubagentOutboxLines(dir, "term-7", seen)).toEqual([]);
-    expect(readSubagentOutbox(dir, "term-9", "bg-1")).toBeNull();
+    expect(readSubagentOutbox(dir, "term-9", "bg-1").status).toBe("missing");
   });
 
   it("caps approval and inbox reads before parsing (#222)", () => {
@@ -130,7 +138,11 @@ describe("subagent approval + inbox I/O", () => {
     expect(readSubagentApprovalRequest(apprPath)).toEqual({ ok: false, error: "oversize" });
     const inboxName = subagentInboxFileName("term-7", "bg-1");
     expect(inboxName).not.toBeNull();
-    writeFileSync(join(dir, inboxName!), "z".repeat(MAX_SUBAGENT_FILE_BYTES + 1024));
-    expect(readSubagentInbox(dir, "term-7", "bg-1")).toBeNull();
+    writeFileSync(join(dir, inboxName!), "z".repeat(MAX_SUBAGENT_QUEUE_FILE_BYTES + 1024));
+    const oversize = readSubagentInbox(dir, "term-7", "bg-1");
+    expect(oversize.status).toBe("invalid");
+    expect(appendSubagentInboxMessage(dir, "term-7", "bg-1", "must not reset").ok).toBe(false);
+    const still = readSubagentInbox(dir, "term-7", "bg-1");
+    expect(still.status).toBe("invalid");
   });
 });

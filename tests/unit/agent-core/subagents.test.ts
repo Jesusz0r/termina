@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MAX_SUBAGENT_RUNS,
-  MAX_SUBAGENT_RUNS_USER,
   MIN_SUBAGENT_RUNS,
   SUBAGENT_TOOL_DEFS,
   SubagentRegistry,
@@ -16,6 +15,7 @@ import {
   parseSubagentResultFile,
   parseSubagentResultFrame,
   parseSubagentTaskFile,
+  consumeSubagentResultFile,
   readSubagentResultFile,
   reconcileSubagentRuns,
   scanSubagentOutput,
@@ -56,8 +56,8 @@ describe("subagents Phase 1 registry", () => {
     const spawn = SUBAGENT_TOOL_DEFS[0]!.input_schema as { required: string[] };
     expect(spawn.required).toEqual(["task"]);
     const description = String(SUBAGENT_TOOL_DEFS[0]!.description);
-    expect(description).toMatch(/mailbox note/i);
-    expect(description).toMatch(/next user turn/i);
+    expect(description).toMatch(/delivered into this session/i);
+    expect(description).toMatch(/host admits/i);
     expect(description).toMatch(/at least two spawn_subagent/i);
     expect(description).not.toMatch(/tool result when the run settles/i);
     const msg = SUBAGENT_TOOL_DEFS[1]!.input_schema as { required: string[] };
@@ -207,21 +207,14 @@ describe("subagents Phase 1 registry", () => {
     }
   });
 
-  it("lets user-requested runs bypass the auto cap up to the manual bound", async () => {
+  it("does not let user_requested raise the cap", async () => {
     const reg = registry();
     for (let i = 0; i < MAX_SUBAGENT_RUNS; i++) {
       expect((await reg.spawn({ task: `auto${i}`, parent })).ok).toBe(true);
     }
-    // Auto spawns stay capped even while manual slots remain.
-    expect((await reg.spawn({ task: "auto-extra", parent })).ok).toBe(false);
-    for (let i = 0; i < MAX_SUBAGENT_RUNS_USER - MAX_SUBAGENT_RUNS; i++) {
-      const got = await reg.spawn({ task: `manual${i}`, parent, userRequested: true });
-      expect(got.ok).toBe(true);
-      if (got.ok) expect(got.run.userRequested).toBe(true);
-    }
-    const over = await reg.spawn({ task: "manual-over", parent, userRequested: true });
-    expect(over.ok).toBe(false);
-    if (!over.ok) expect(over.error).toMatch(/user-requested/);
+    const flagged = await reg.spawn({ task: "flagged", parent, userRequested: true });
+    expect(flagged.ok).toBe(false);
+    if (!flagged.ok) expect(flagged.error).toMatch(/at most 4/);
   });
 
   it("keeps path-claim exclusivity for user-requested runs", async () => {
@@ -656,7 +649,10 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(reconcileSubagentRuns(dir, "term-7", reg).map((r) => r.id)).toEqual([spawned.run.id]);
     expect(reg.get(spawned.run.id)?.result).toBe("mine");
     const { existsSync } = await import("node:fs");
-    expect(existsSync(join(dir, "subagent-term-7-bg-1.result.json"))).toBe(false);
+    const resultPath = join(dir, "subagent-term-7-bg-1.result.json");
+    expect(existsSync(resultPath)).toBe(true);
+    consumeSubagentResultFile(dir, "term-7", spawned.run.id);
+    expect(existsSync(resultPath)).toBe(false);
     // A second reconcile cannot re-settle.
     expect(reconcileSubagentRuns(dir, "term-7", reg)).toEqual([]);
   });
@@ -823,13 +819,13 @@ describe("subagent settled retention window (#215)", () => {
   it("never evicts active runs", async () => {
     const reg = registry();
     const active: string[] = [];
-    for (let i = 0; i < MAX_SUBAGENT_RUNS; i++) {
+    for (let i = 0; i < MAX_SUBAGENT_RUNS - 1; i++) {
       const spawned = await reg.spawn({ task: `active-${i}`, parent });
       if (!spawned.ok) throw new Error(spawned.error);
       active.push(spawned.run.id);
     }
     for (let i = 0; i < 15; i++) {
-      const spawned = await reg.spawn({ task: `churn-${i}`, userRequested: true, parent });
+      const spawned = await reg.spawn({ task: `churn-${i}`, parent });
       if (!spawned.ok) throw new Error(spawned.error);
       expect(reg.settleRun(spawned.run.id, `result-${i}`).ok).toBe(true);
     }

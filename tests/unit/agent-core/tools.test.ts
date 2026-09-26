@@ -99,8 +99,8 @@ describe("formatToolAnnounce (#377)", () => {
     const bash = { id: "1", name: "bash", input: { command: "ls" } };
     expect(toolTranscriptDetail(bash)).toBe("ls");
     expect(formatToolAnnounce(bash)).toBe("◆ Tool · bash\n  $ ls");
-    const spawn = { id: "2", name: "spawn_subagent", input: { task: "do things", user_requested: true } };
+    const spawn = { id: "2", name: "spawn_subagent", input: { task: "do things" } };
     expect(toolTranscriptDetail(spawn)).toBe("");
-    expect(formatToolAnnounce(spawn)).toContain("user-requested");
+    expect(formatToolAnnounce(spawn)).toContain("do things");
   });
 });

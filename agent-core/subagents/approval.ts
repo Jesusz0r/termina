@@ -16,13 +16,14 @@
  * from `agent-core/subagents.ts`.
  */
 
-import { readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readBoundedRegularFile } from "../main/files.ts";
 import {
-  MAX_SUBAGENT_FILE_BYTES,
   MAX_SUBAGENT_INBOX_MSGS,
   MAX_SUBAGENT_MESSAGE_CHARS,
+  MAX_SUBAGENT_QUEUE_FILE_BYTES,
+  subagentCommitLockName,
 } from "../subagents.ts";
 
 /** How long a child waits for a parent approval before denying. */
@@ -174,6 +175,101 @@ export function subagentInboxFileName(parentTerminalId: string, runId: string): 
   return `subagent-${parentTerminalId}-${runId}.inbox.json`;
 }
 
+export type SubagentQueueRead =
+  | { status: "missing" }
+  | { status: "invalid"; error: string }
+  | { status: "ok"; version: 1; runId: string; nextSeq: number; messages: SubagentInboxMessage[] };
+
+function readSubagentQueue(eventsDir: string, name: string | null, runId: string, kind: "inbox" | "outbox"): SubagentQueueRead {
+  if (!name || !eventsDir) return { status: "missing" };
+  const path = join(eventsDir, name);
+  const bounded = readBoundedRegularFile(path, MAX_SUBAGENT_QUEUE_FILE_BYTES);
+  if ("error" in bounded) {
+    if (bounded.error.includes("ENOENT") || bounded.error.includes("no such file")) return { status: "missing" };
+    return { status: "invalid", error: `${kind} is unreadable` };
+  }
+  if (bounded.truncated) return { status: "invalid", error: `${kind} exceeds its file budget` };
+  let v: unknown;
+  try {
+    v = JSON.parse(bounded.text);
+  } catch {
+    return { status: "invalid", error: `${kind} is not JSON` };
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return { status: "invalid", error: `${kind} is not an object` };
+  const r = v as Record<string, unknown>;
+  if (r.version !== 1 || r.runId !== runId || !Array.isArray(r.messages)) {
+    return { status: "invalid", error: `${kind} is malformed` };
+  }
+  const messages: SubagentInboxMessage[] = [];
+  let maxSeq = 0;
+  for (const m of r.messages) {
+    if (!m || typeof m !== "object" || Array.isArray(m)) return { status: "invalid", error: `${kind} has a bad message` };
+    const e = m as Record<string, unknown>;
+    if (typeof e.seq !== "number" || !Number.isInteger(e.seq) || e.seq < 1 || typeof e.text !== "string") {
+      return { status: "invalid", error: `${kind} has a bad message` };
+    }
+    if (e.seq > maxSeq) maxSeq = e.seq;
+    messages.push({ seq: e.seq, text: e.text, at: typeof e.at === "number" ? e.at : 0 });
+  }
+  if (messages.length > MAX_SUBAGENT_INBOX_MSGS) return { status: "invalid", error: `${kind} exceeds its message cap` };
+  const nextSeq = typeof r.nextSeq === "number" && Number.isInteger(r.nextSeq) && r.nextSeq > maxSeq
+    ? r.nextSeq
+    : maxSeq + 1;
+  return { status: "ok", version: 1, runId, nextSeq, messages };
+}
+
+function appendSubagentQueueMessage(
+  eventsDir: string,
+  name: string | null,
+  runId: string,
+  text: string,
+  kind: "inbox" | "outbox",
+): { ok: true; seq: number } | { ok: false; error: string } {
+  if (!name || !eventsDir) return { ok: false, error: `bad subagent ${kind} identity` };
+  const clean = text.trim();
+  if (!clean) return { ok: false, error: "empty message" };
+  if (clean.length > MAX_SUBAGENT_MESSAGE_CHARS) {
+    return { ok: false, error: `message exceeds ${MAX_SUBAGENT_MESSAGE_CHARS} chars` };
+  }
+  const existing = readSubagentQueue(eventsDir, name, runId, kind);
+  if (existing.status === "invalid") return { ok: false, error: existing.error };
+  if (existing.status === "ok" && existing.messages.length >= MAX_SUBAGENT_INBOX_MSGS) {
+    return { ok: false, error: `${kind} is full (${MAX_SUBAGENT_INBOX_MSGS} messages)` };
+  }
+  const messages = existing.status === "ok" ? existing.messages : [];
+  const seq = existing.status === "ok" ? existing.nextSeq : 1;
+  messages.push({ seq, text: clean, at: Date.now() });
+  const ok = atomicWriteJsonSync(eventsDir, name, JSON.stringify({
+    version: 1,
+    runId,
+    nextSeq: seq + 1,
+    messages,
+  }));
+  return ok ? { ok: true, seq } : { ok: false, error: `${kind} write failed` };
+}
+
+/** Drop the message just appended if settle won the race before the lock was released. */
+export function rewindSubagentInboxMessage(
+  eventsDir: string,
+  parentTerminalId: string,
+  runId: string,
+  seq: number,
+): boolean {
+  const name = subagentInboxFileName(parentTerminalId, runId);
+  if (!name) return false;
+  const existing = readSubagentInbox(eventsDir, parentTerminalId, runId);
+  if (existing.status !== "ok") return false;
+  const last = existing.messages.at(-1);
+  if (!last || last.seq !== seq) return false;
+  const messages = existing.messages.slice(0, -1);
+  return atomicWriteJsonSync(eventsDir, name, JSON.stringify({
+    version: 1,
+    runId,
+    nextSeq: existing.nextSeq,
+    messages,
+  }));
+}
+
 /** Append a parent message to the run inbox file (transport the child drains). */
 export function appendSubagentInboxMessage(
   eventsDir: string,
@@ -181,54 +277,15 @@ export function appendSubagentInboxMessage(
   runId: string,
   text: string,
 ): { ok: true; seq: number } | { ok: false; error: string } {
-  const name = subagentInboxFileName(parentTerminalId, runId);
-  if (!name || !eventsDir) return { ok: false, error: "bad subagent inbox identity" };
-  const clean = text.trim();
-  if (!clean) return { ok: false, error: "empty message" };
-  if (clean.length > MAX_SUBAGENT_MESSAGE_CHARS) {
-    return { ok: false, error: `message exceeds ${MAX_SUBAGENT_MESSAGE_CHARS} chars` };
-  }
-  let messages: SubagentInboxMessage[] = [];
-  try {
-    const existing = readSubagentInbox(eventsDir, parentTerminalId, runId);
-    if (existing) messages = existing.messages;
-  } catch {
-    messages = [];
-  }
-  const seq = (messages.at(-1)?.seq ?? 0) + 1;
-  messages.push({ seq, text: clean, at: Date.now() });
-  while (messages.length > MAX_SUBAGENT_INBOX_MSGS) messages.shift();
-  const ok = atomicWriteJsonSync(eventsDir, name, JSON.stringify({ version: 1, runId, messages }));
-  return ok ? { ok: true, seq } : { ok: false, error: "inbox write failed" };
+  return appendSubagentQueueMessage(eventsDir, subagentInboxFileName(parentTerminalId, runId), runId, text, "inbox");
 }
 
 export function readSubagentInbox(
   eventsDir: string,
   parentTerminalId: string,
   runId: string,
-): { version: 1; runId: string; messages: SubagentInboxMessage[] } | null {
-  const name = subagentInboxFileName(parentTerminalId, runId);
-  if (!name || !eventsDir) return null;
-  const bounded = readBoundedRegularFile(join(eventsDir, name), MAX_SUBAGENT_FILE_BYTES);
-  if ("error" in bounded || bounded.truncated) return null;
-  const raw = bounded.text;
-  let v: unknown;
-  try {
-    v = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
-  const r = v as Record<string, unknown>;
-  if (r.version !== 1 || r.runId !== runId || !Array.isArray(r.messages)) return null;
-  const messages: SubagentInboxMessage[] = [];
-  for (const m of r.messages) {
-    if (!m || typeof m !== "object" || Array.isArray(m)) return null;
-    const e = m as Record<string, unknown>;
-    if (typeof e.seq !== "number" || !Number.isInteger(e.seq) || typeof e.text !== "string") return null;
-    messages.push({ seq: e.seq, text: e.text, at: typeof e.at === "number" ? e.at : 0 });
-  }
-  return { version: 1, runId, messages };
+): SubagentQueueRead {
+  return readSubagentQueue(eventsDir, subagentInboxFileName(parentTerminalId, runId), runId, "inbox");
 }
 
 export function subagentOutboxFileName(parentTerminalId: string, runId: string): string | null {
@@ -243,53 +300,15 @@ export function appendSubagentOutboxMessage(
   runId: string,
   text: string,
 ): { ok: true; seq: number } | { ok: false; error: string } {
-  const name = subagentOutboxFileName(parentTerminalId, runId);
-  if (!name || !eventsDir) return { ok: false, error: "bad subagent outbox identity" };
-  const clean = text.trim();
-  if (!clean) return { ok: false, error: "empty message" };
-  if (clean.length > MAX_SUBAGENT_MESSAGE_CHARS) {
-    return { ok: false, error: `message exceeds ${MAX_SUBAGENT_MESSAGE_CHARS} chars` };
-  }
-  let messages: SubagentInboxMessage[] = [];
-  try {
-    const existing = readSubagentOutbox(eventsDir, parentTerminalId, runId);
-    if (existing) messages = existing.messages;
-  } catch {
-    messages = [];
-  }
-  const seq = (messages.at(-1)?.seq ?? 0) + 1;
-  messages.push({ seq, text: clean, at: Date.now() });
-  while (messages.length > MAX_SUBAGENT_INBOX_MSGS) messages.shift();
-  const ok = atomicWriteJsonSync(eventsDir, name, JSON.stringify({ version: 1, runId, messages }));
-  return ok ? { ok: true, seq } : { ok: false, error: "outbox write failed" };
+  return appendSubagentQueueMessage(eventsDir, subagentOutboxFileName(parentTerminalId, runId), runId, text, "outbox");
 }
 
 export function readSubagentOutbox(
   eventsDir: string,
   parentTerminalId: string,
   runId: string,
-): { version: 1; runId: string; messages: SubagentInboxMessage[] } | null {
-  const name = subagentOutboxFileName(parentTerminalId, runId);
-  if (!name || !eventsDir) return null;
-  const bounded = readBoundedRegularFile(join(eventsDir, name), MAX_SUBAGENT_FILE_BYTES);
-  if ("error" in bounded || bounded.truncated) return null;
-  let v: unknown;
-  try {
-    v = JSON.parse(bounded.text);
-  } catch {
-    return null;
-  }
-  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
-  const r = v as Record<string, unknown>;
-  if (r.version !== 1 || r.runId !== runId || !Array.isArray(r.messages)) return null;
-  const messages: SubagentInboxMessage[] = [];
-  for (const m of r.messages) {
-    if (!m || typeof m !== "object" || Array.isArray(m)) return null;
-    const e = m as Record<string, unknown>;
-    if (typeof e.seq !== "number" || !Number.isInteger(e.seq) || typeof e.text !== "string") return null;
-    messages.push({ seq: e.seq, text: e.text, at: typeof e.at === "number" ? e.at : 0 });
-  }
-  return { version: 1, runId, messages };
+): SubagentQueueRead {
+  return readSubagentQueue(eventsDir, subagentOutboxFileName(parentTerminalId, runId), runId, "outbox");
 }
 
 /** Fresh child turns for this parent, oldest run id first. `seen` advances past them. */
@@ -317,7 +336,15 @@ export function takeSubagentOutboxLines(
   const lines: string[] = [];
   for (const runId of runIds) {
     const box = readSubagentOutbox(eventsDir, parentTerminalId, runId);
-    if (!box) continue;
+    if (box.status === "invalid") {
+      const key = `${runId}:invalid`;
+      if (!seen.has(key)) {
+        seen.set(key, 1);
+        lines.push(`Subagent ${runId} outbox is unreadable (${box.error}). Do not assume its turns were delivered.`);
+      }
+      continue;
+    }
+    if (box.status !== "ok") continue;
     const cursor = seen.get(runId) ?? 0;
     const fresh = box.messages.filter((m) => m.seq > cursor);
     if (fresh.length === 0) continue;
@@ -325,4 +352,57 @@ export function takeSubagentOutboxLines(
     for (const m of fresh) lines.push(`Subagent ${runId} (seq ${m.seq}): ${m.text}`);
   }
   return lines;
+}
+
+const COMMIT_LOCK_STALE_MS = 10_000;
+const COMMIT_LOCK_WAIT_MS = 2_000;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Exclusive commit between a parent message and a host settle. A crashed
+ * holder is reclaimed after COMMIT_LOCK_STALE_MS so one dead process cannot
+ * pin the run. The critical section itself must stay short.
+ */
+export async function withSubagentCommitLock<T>(
+  eventsDir: string,
+  parentTerminalId: string,
+  runId: string,
+  fn: () => T | Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  const name = subagentCommitLockName(parentTerminalId, runId);
+  if (!name || !eventsDir) return { ok: false, error: "bad subagent lock identity" };
+  const path = join(eventsDir, name);
+  const deadline = Date.now() + COMMIT_LOCK_WAIT_MS;
+  let held = false;
+  while (!held) {
+    try {
+      writeFileSync(path, JSON.stringify({ pid: process.pid, at: Date.now() }), { flag: "wx", mode: 0o600 });
+      held = true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") return { ok: false, error: "subagent commit lock failed" };
+      try {
+        if (Date.now() - statSync(path).mtimeMs > COMMIT_LOCK_STALE_MS) {
+          rmSync(path);
+          continue;
+        }
+      } catch {
+        /* The holder released it; retry the create. */
+      }
+      if (Date.now() > deadline) return { ok: false, error: "subagent commit lock busy" };
+      await sleepMs(20);
+    }
+  }
+  try {
+    return { ok: true, value: await fn() };
+  } finally {
+    try {
+      rmSync(path);
+    } catch {
+      /* The next waiter reclaims a stale lock. */
+    }
+  }
 }

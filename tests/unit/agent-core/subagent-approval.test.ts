@@ -230,7 +230,7 @@ describe("Subagent Approval Engine Contract", () => {
     expect(r.output).toContain('"result":"followed parent"');
     const { readSubagentOutbox } = await import("../../../agent-core/subagents.ts");
     const outbox = readSubagentOutbox(r.dir, "term-rt", "bg-1");
-    expect(outbox?.messages.map((m) => m.text)).toEqual(["early answer", "followed parent"]);
+    expect(outbox.status === "ok" && outbox.messages.map((m) => m.text)).toEqual(["early answer", "followed parent"]);
     const sessionFile = join(r.dir, "sub-term-rt-bg-1-session", "current", "session.jsonl");
     expect(readFileSync(sessionFile, "utf8")).toContain("Parent message (seq 1): change course now");
   });
@@ -309,6 +309,14 @@ describe("Subagent Approval Engine Contract", () => {
         for (const row of rows) {
           if ((row.t === "preflight_request" || row.t === "checkpoint_request") && row.requestId) {
             writeFileSync(join(dir, `ack-term-brief-${row.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
+          }
+        }
+        for (const name of readdirSync(dir)) {
+          const match = /^subagent-term-brief-(bg-\d+)\.task\.json$/.exec(name);
+          if (!match) continue;
+          const decisionName = `subagent-term-brief-${match[1]}.decision.json`;
+          if (!existsSync(join(dir, decisionName))) {
+            writeFileSync(join(dir, decisionName), JSON.stringify({ version: 1, runId: match[1], admitted: true, error: null }), { mode: 0o600 });
           }
         }
         const runIds = ["bg-1", "bg-2"];

@@ -210,6 +210,16 @@ describe("parent mid-stream approval polling", () => {
             }
           }
         }
+        for (const name of readdirSync(dir)) {
+          const match = new RegExp(`^subagent-${terminalId}-(bg-\\d+)\\.task\\.json$`).exec(name);
+          if (!match) continue;
+          const decisionName = `subagent-${terminalId}-${match[1]}.decision.json`;
+          if (!existsSync(join(dir, decisionName))) {
+            writeFileSync(join(dir, decisionName), JSON.stringify({ version: 1, runId: match[1], admitted: true, error: null }), { mode: 0o600 });
+          }
+          const liveName = `subagent-${terminalId}-${match[1]}.live`;
+          if (!existsSync(join(dir, liveName))) writeFileSync(join(dir, liveName), "", { mode: 0o600 });
+        }
       } catch {
         /* Wait for the sidecar. */
       }

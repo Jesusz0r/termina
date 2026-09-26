@@ -83,6 +83,12 @@ async function scenario(toolProgram: string, check: (result: {
       for (const name of readdirSync(events)) {
         const match = new RegExp(`^subagent-${terminalId}-(bg-\\d+)\\.task\\.json$`).exec(name);
         if (!match) continue;
+        const decisionName = `subagent-${terminalId}-${match[1]}.decision.json`;
+        if (!existsSync(join(events, decisionName))) {
+          writeFileSync(join(events, decisionName), JSON.stringify({ version: 1, runId: match[1], admitted: true, error: null }), { mode: 0o600 });
+        }
+        const liveName = `subagent-${terminalId}-${match[1]}.live`;
+        if (!existsSync(join(events, liveName))) writeFileSync(join(events, liveName), "", { mode: 0o600 });
         const resultName = `subagent-${terminalId}-${match[1]}.result.json`;
         if (existsSync(join(events, resultName))) continue;
         writeFileSync(join(events, resultName), JSON.stringify({

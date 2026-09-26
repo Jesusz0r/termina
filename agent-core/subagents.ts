@@ -37,11 +37,8 @@ import {
 
 /** A lone child is overhead: fan out at least two, or do the work on the parent. */
 export const MIN_SUBAGENT_RUNS = 2;
-/** Anthropic rule adopted by the plan: at most 4 parallel runs. */
+/** Anthropic rule adopted by the plan: at most 4 parallel runs. The model cannot raise it. */
 export const MAX_SUBAGENT_RUNS = 4;
-/** Manual fan-out bound: user explicitly asked for many agents. Still bounded
- * so one prompt cannot fork-bomb the host; concurrency stays safe. */
-export const MAX_SUBAGENT_RUNS_USER = 20;
 /** Children never receive the spawn tool: max spawn depth 1. */
 export const MAX_SUBAGENT_DEPTH = 1;
 /** Bound the parent-written subtask brief kept on the run record, in string length. */
@@ -52,6 +49,8 @@ export const MAX_SUBAGENT_BRIEF_CHARS = 12_000;
 export const MAX_SUBAGENT_TOUCHED = 200;
 /** Bound one parent-to-child message, in string length. */
 export const MAX_SUBAGENT_MESSAGE_CHARS = 8_000;
+/** How long the parent waits for the host to admit or reject a spawn. */
+export const SUBAGENT_ADMISSION_TIMEOUT_MS = 15_000;
 /** Bound one child result held for parent fan-in, in UTF-8 bytes on both sides of the host boundary (the host clamps identically; the suffix is historical). */
 export const MAX_SUBAGENT_RESULT_CHARS = 32_000;
 /** Bound one child failure diagnostic held for parent fan-in, in UTF-8 bytes on both sides of the host boundary (the host clamps identically; the suffix is historical). */
@@ -60,6 +59,13 @@ export const MAX_SUBAGENT_ERROR_CHARS = 4_000;
 export const MAX_SUBAGENT_CLAIM_PATHS = 20;
 /** Bound queued parent-to-child messages per run (bounded memory; Phase 2 drains). */
 export const MAX_SUBAGENT_INBOX_MSGS = 50;
+/**
+ * Inbox/outbox file budget. Derived from the queue contract so a full queue
+ * is always readable. The 64 KB handoff budget is for task/result files and
+ * must not be reused here: 50 messages of 8,000 characters do not fit in it.
+ */
+export const MAX_SUBAGENT_QUEUE_FILE_BYTES =
+  MAX_SUBAGENT_INBOX_MSGS * (MAX_SUBAGENT_MESSAGE_CHARS + 128) + 1024;
 /**
  * Settled-run retention window (#215). Active runs are always retained; the
  * registry keeps only the N most recently settled records for resume and
@@ -125,6 +131,8 @@ export interface SubagentRun {
   error: string | null;
   /** Additive scan markers on the result (see scanSubagentOutput). */
   flags: string[];
+  /** True once the outcome has been persisted into the parent session. */
+  resultDelivered: boolean;
   createdAt: number;
 }
 
@@ -135,7 +143,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
   {
     name: "spawn_subagent",
     description:
-      "Spawn a background subagent for one independent subtask. Never spawn a single child: issue at least two spawn_subagent calls in the same turn for parallel work; a lone subtask belongs on this agent. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately. This run stays open while children are active. Each finished child turn arrives here as a user message; use message_subagent to redirect a live run. When the child settles, the host writes a mailbox note you see on the next user turn. Summarize that result then and never poll the finished run. Siblings never share a subtask; pass paths to reserve them. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up. Pass user_requested true only when the user explicitly asked for many/parallel agents in this turn: it bypasses the 4-run auto cap.",
+      "Spawn a background subagent for one independent subtask. Never spawn a single child: issue at least two spawn_subagent calls in the same turn for parallel work; a lone subtask belongs on this agent. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id only after the host admits the child; a rejection is an error, not a run id. At most 4 runs at once; this tool cannot raise that cap. This run stays open while children are active. Each finished child turn arrives here as a user message; use message_subagent to redirect a live run. When the child settles, the result is delivered into this session. Summarize that result and never poll the finished run. Siblings never share a subtask; pass paths to reserve them. Writes to a sibling claim are refused. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -144,7 +152,6 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
         model: { type: "string" },
         effort: { type: "string" },
         resume: { type: "string" },
-        user_requested: { type: "boolean" },
         paths: { type: "array", items: { type: "string" } },
       },
       required: ["task"],
@@ -153,7 +160,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
   {
     name: "message_subagent",
     description:
-      "Push text into a running subagent (answers, redirects, cancellation reason). Unknown or finished run ids are errors, not silent drops.",
+      "Push text into a live subagent (answers, redirects, cancellation reason). Success means the message was committed to a live run. Unknown, not-yet-admitted, or finished run ids are errors, not silent drops.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -515,15 +522,9 @@ export function readSubagentResultFile(
 }
 
 /**
- * Settle locally active runs whose host result files landed. The parent
- * calls this at turn start, on each model loop, and from the idle approval
- * poll so slots (and the TUI live-run count) drop when a result file lands
- * without waiting for the next user turn. The human-readable result arrives
- * via the host mailbox note; this only reconciles registry truth. Consumed
- * result files are deleted best-effort:
- * the scanned outcome already lives on the run record, and a crash between
- * settle and delete is harmless (the run is no longer active, so a second
- * read can never re-settle it).
+ * Settle locally active runs whose host result files landed. Does not delete
+ * the file: the session delivery owns that, after the outcome is persisted.
+ * A crash between settle and delivery leaves the file for the next pass.
  */
 export function reconcileSubagentRuns(
   eventsDir: string,
@@ -537,27 +538,241 @@ export function reconcileSubagentRuns(
     if (read.status !== "ok") continue;
     const done = registry.settleRun(run.id, read.file.result, read.file.outcome, read.file.error);
     if (!done.ok) continue;
-    const name = subagentResultFileName(parentTerminalId, run.id);
-    if (name) {
-      try {
-        rmSync(join(eventsDir, name));
-      } catch {
-        /* The run record already holds the outcome; a leftover is host evidence. */
-      }
-    }
     settled.push(done.run);
   }
   return settled;
 }
 
-/** Sidecar body announcing a validated spawn; the host launches from the task file.
- * The userRequested flag is informational (manual bypass audit trail). */
+/** Delete a result file after its outcome has been persisted into the session. */
+export function consumeSubagentResultFile(eventsDir: string, parentTerminalId: string, runId: string): void {
+  const name = subagentResultFileName(parentTerminalId, runId);
+  if (!name || !eventsDir) return;
+  try {
+    rmSync(join(eventsDir, name));
+  } catch {
+    /* A leftover is re-read; delivery is idempotent once resultDelivered is set. */
+  }
+  for (const marker of [
+    subagentDecisionFileName(parentTerminalId, runId),
+    subagentLiveFileName(parentTerminalId, runId),
+    subagentCancelFileName(parentTerminalId, runId),
+    subagentSettlingFileName(parentTerminalId, runId),
+    subagentCommitLockName(parentTerminalId, runId),
+  ]) {
+    removeSubagentMarker(eventsDir, marker);
+  }
+}
+
+/** Session text for one settled run. This is the result the parent model reads. */
+export function formatSubagentSessionDelivery(run: {
+  id: string;
+  state: string;
+  result: string | null;
+  error: string | null;
+  flags: string[];
+}): string {
+  const headline = run.state === "killed"
+    ? `Subagent ${run.id} killed`
+    : run.state === "failed"
+      ? `Subagent ${run.id} failed`
+      : `Subagent ${run.id} settled`;
+  const lines = [headline, ""];
+  if (run.state === "settled") {
+    lines.push(run.result ?? "");
+    if (run.flags.length > 0) lines.push("", `Scan flags: ${run.flags.join(", ")}`);
+  } else if (run.error?.trim()) {
+    lines.push(run.error);
+  } else if (run.result?.trim()) {
+    lines.push(run.result);
+  }
+  lines.push("", "This is the run result. Do not poll the run.");
+  return lines.join("\n");
+}
+
+/** Sidecar body announcing a validated spawn; the host launches from the task file. */
 export function subagentSpawnSidecarRecord(
   runId: string,
   taskFile: string,
   userRequested = false,
 ): Record<string, unknown> {
   return { t: SUBAGENT_SPAWN_RECORD, runId, taskFile, userRequested };
+}
+
+/** Sidecar body asking the host to kill a run it already admitted. */
+export const SUBAGENT_CANCEL_RECORD = "subagent_cancel";
+
+export function subagentCancelSidecarRecord(runId: string): Record<string, unknown> {
+  return { t: SUBAGENT_CANCEL_RECORD, runId };
+}
+
+function subagentLeafName(parentTerminalId: string, runId: string, suffix: string): string | null {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(parentTerminalId)) return null;
+  if (!/^bg-\d{1,10}$/.test(runId)) return null;
+  if (!/^[a-z0-9.-]+$/.test(suffix)) return null;
+  return `subagent-${parentTerminalId}-${runId}.${suffix}`;
+}
+
+export function subagentDecisionFileName(parentTerminalId: string, runId: string): string | null {
+  return subagentLeafName(parentTerminalId, runId, "decision.json");
+}
+
+export function subagentLiveFileName(parentTerminalId: string, runId: string): string | null {
+  return subagentLeafName(parentTerminalId, runId, "live");
+}
+
+export function subagentCancelFileName(parentTerminalId: string, runId: string): string | null {
+  return subagentLeafName(parentTerminalId, runId, "cancel");
+}
+
+export function subagentSettlingFileName(parentTerminalId: string, runId: string): string | null {
+  return subagentLeafName(parentTerminalId, runId, "settling");
+}
+
+export function subagentCommitLockName(parentTerminalId: string, runId: string): string | null {
+  return subagentLeafName(parentTerminalId, runId, "commit.lock");
+}
+
+function writeSubagentDecisionFile(
+  eventsDir: string,
+  parentTerminalId: string,
+  runId: string,
+  decision: { admitted: true; createdAt: number } | { admitted: false; error: string; createdAt: number },
+): boolean {
+  const name = subagentDecisionFileName(parentTerminalId, runId);
+  if (!name || !eventsDir) return false;
+  if (existsSync(join(eventsDir, name))) return false;
+  return atomicWriteJsonSync(eventsDir, name, JSON.stringify({
+    version: 1,
+    runId,
+    admitted: decision.admitted,
+    error: decision.admitted ? null : decision.error,
+    createdAt: decision.createdAt,
+  }));
+}
+
+/**
+ * First writer wins, and only while the caller holds the commit lock.
+ * A decision from another boot (different createdAt) is replaced. A decision
+ * that is already on disk is never flipped.
+ */
+export function commitSubagentAdmission(
+  eventsDir: string,
+  parentTerminalId: string,
+  runId: string,
+  createdAt: number,
+  proposal: { admitted: true } | { admitted: false; error: string },
+): { admitted: true } | { admitted: false; error: string } {
+  const existing = readSubagentDecisionFile(eventsDir, parentTerminalId, runId, createdAt);
+  if (existing.status === "ok") {
+    if (existing.admitted) writeSubagentMarker(eventsDir, subagentLiveFileName(parentTerminalId, runId));
+    return existing.admitted ? { admitted: true } : { admitted: false, error: existing.error };
+  }
+  if (existing.status === "invalid") return { admitted: false, error: existing.error };
+  if (existing.status === "stale") removeSubagentMarker(eventsDir, subagentDecisionFileName(parentTerminalId, runId));
+  if (proposal.admitted && subagentMarkerExists(eventsDir, subagentCancelFileName(parentTerminalId, runId))) {
+    const rejected = { admitted: false as const, error: "subagent cancelled before admission", createdAt };
+    if (!writeSubagentDecisionFile(eventsDir, parentTerminalId, runId, rejected)) {
+      return rereadSubagentAdmission(eventsDir, parentTerminalId, runId, createdAt);
+    }
+    return { admitted: false, error: rejected.error };
+  }
+  const wrote = writeSubagentDecisionFile(eventsDir, parentTerminalId, runId, proposal.admitted
+    ? { admitted: true, createdAt }
+    : { admitted: false, error: proposal.error, createdAt });
+  if (!wrote) return rereadSubagentAdmission(eventsDir, parentTerminalId, runId, createdAt);
+  if (proposal.admitted) writeSubagentMarker(eventsDir, subagentLiveFileName(parentTerminalId, runId));
+  return proposal.admitted ? { admitted: true } : { admitted: false, error: proposal.error };
+}
+
+function rereadSubagentAdmission(
+  eventsDir: string,
+  parentTerminalId: string,
+  runId: string,
+  createdAt: number,
+): { admitted: true } | { admitted: false; error: string } {
+  const again = readSubagentDecisionFile(eventsDir, parentTerminalId, runId, createdAt);
+  if (again.status === "ok") {
+    return again.admitted ? { admitted: true } : { admitted: false, error: again.error };
+  }
+  return { admitted: false, error: again.status === "invalid" ? again.error : "could not record host admission" };
+}
+
+export type SubagentDecisionRead =
+  | { status: "missing" }
+  | { status: "stale" }
+  | { status: "invalid"; error: string }
+  | { status: "ok"; admitted: true }
+  | { status: "ok"; admitted: false; error: string };
+
+export function readSubagentDecisionFile(
+  eventsDir: string,
+  parentTerminalId: string,
+  runId: string,
+  expectedCreatedAt?: number,
+): SubagentDecisionRead {
+  const name = subagentDecisionFileName(parentTerminalId, runId);
+  if (!name || !eventsDir) return { status: "missing" };
+  const path = join(eventsDir, name);
+  if (!existsSync(path)) return { status: "missing" };
+  const bounded = readBoundedRegularFile(path, MAX_SUBAGENT_FILE_BYTES);
+  if ("error" in bounded || bounded.truncated) return { status: "invalid", error: "subagent decision is unreadable" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bounded.text);
+  } catch {
+    return { status: "invalid", error: "subagent decision is not JSON" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { status: "invalid", error: "subagent decision is not an object" };
+  const v = parsed as Record<string, unknown>;
+  if (v.version !== 1 || v.runId !== runId || typeof v.admitted !== "boolean") {
+    return { status: "invalid", error: "subagent decision is malformed" };
+  }
+  // A createdAt from another boot must not admit this run. A file that omits
+  // it is a test harness decision and is accepted.
+  if (
+    expectedCreatedAt !== undefined
+    && typeof v.createdAt === "number"
+    && v.createdAt !== expectedCreatedAt
+  ) {
+    // A stale admission must not start this boot's run. A rejection is
+    // fail-closed either way, so it still unblocks the waiter.
+    if (v.admitted) return { status: "stale" };
+  }
+  if (v.admitted) return { status: "ok", admitted: true };
+  return { status: "ok", admitted: false, error: typeof v.error === "string" && v.error.trim() ? v.error : "host rejected the subagent" };
+}
+
+export function writeSubagentMarker(eventsDir: string, name: string | null): boolean {
+  if (!name || !eventsDir) return false;
+  try {
+    writeFileSync(join(eventsDir, name), "", { flag: "wx", mode: 0o600 });
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "EEXIST";
+  }
+}
+
+export function subagentMarkerExists(eventsDir: string, name: string | null): boolean {
+  if (!name || !eventsDir) return false;
+  return existsSync(join(eventsDir, name));
+}
+
+export function removeSubagentMarker(eventsDir: string, name: string | null): void {
+  if (!name || !eventsDir) return;
+  try {
+    rmSync(join(eventsDir, name));
+  } catch {
+    /* Already gone. */
+  }
+}
+
+/**
+ * A turn that tried to fan out must not leave a single new child when nothing
+ * was already running. Adding one sibling to an existing run is allowed.
+ */
+export function loneSubagentRollback(activeBefore: number, attempted: number, admitted: number): boolean {
+  return activeBefore === 0 && attempted >= MIN_SUBAGENT_RUNS && admitted === 1;
 }
 
 // ---- Phase 2 slice 2a: child result framing (engine stdout → host) ----
@@ -721,6 +936,7 @@ export class SubagentRegistry {
     run.result = scanned.text;
     run.flags = scanned.flags;
     run.error = outcome === "settled" || !error?.trim() ? null : utf8TextPrefix(error, MAX_SUBAGENT_ERROR_CHARS);
+    run.resultDelivered = false;
     // Re-insert so map order is settle order for settled runs; the retention
     // window below trims the least recently settled first. Active relative
     // order is unchanged (the settling run leaves the active set).
@@ -831,10 +1047,10 @@ export class SubagentRegistry {
       effort = supportedEffortLevels(provider, model, protocol)[0] ?? "off";
     }
     const active = this.activeRuns();
-    const userRequested = req.userRequested === true;
-    const cap = userRequested ? MAX_SUBAGENT_RUNS_USER : MAX_SUBAGENT_RUNS;
-    if (active.length >= cap) {
-      return { ok: false, error: userRequested ? `at most ${cap} user-requested subagent runs at once` : `at most ${cap} subagent runs at once` };
+    // The model cannot raise the cap. userRequested is accepted only so a
+    // non-boolean is still a validation error; it never changes admission.
+    if (active.length >= MAX_SUBAGENT_RUNS) {
+      return { ok: false, error: `at most ${MAX_SUBAGENT_RUNS} subagent runs at once` };
     }
     for (const other of active) {
       for (const p of paths) {
@@ -846,7 +1062,7 @@ export class SubagentRegistry {
       id: `bg-${this.nextId++}`,
       task,
       resumeRunId,
-      userRequested,
+      userRequested: false,
       provider,
       model,
       protocol,
@@ -859,25 +1075,18 @@ export class SubagentRegistry {
       result: null,
       error: null,
       flags: [],
+      resultDelivered: false,
       createdAt: Date.now(),
     };
     this.runs.set(run.id, run);
     return { ok: true, run };
   }
 
-  message(runId: string, text: string): { ok: true } | { ok: false; error: string } {
+  /** Liveness and text checks. Does not enqueue: the inbox file is the commit. */
+  validateMessage(runId: string, text: string): { ok: true; text: string } | { ok: false; error: string } {
     const run = this.runs.get(runId);
     if (!run) return { ok: false, error: `unknown subagent run: ${runId}` };
-    if (run.state !== "active") {
-      // Ground the parent immediately: a nudge sent while the run was dying
-      // races settlement, and the bare "already failed" leaves the parent
-      // re-asking about a dead run instead of moving on.
-      const outcome = `subagent run ${runId} is already ${run.state}`;
-      const excerpt = (run.result ?? "").trim().slice(0, 300);
-      if (excerpt) return { ok: false, error: `${outcome} with result: ${excerpt}` };
-      const errExcerpt = (run.error ?? "").trim().slice(0, 300);
-      return { ok: false, error: errExcerpt ? `${outcome} with error: ${errExcerpt}` : `${outcome} with an empty result` };
-    }
+    if (run.state !== "active") return this.finishedMessageError(run);
     const clean = text?.trim() ?? "";
     if (!clean) return { ok: false, error: "message_subagent text must not be empty" };
     if (clean.length > MAX_SUBAGENT_MESSAGE_CHARS) {
@@ -886,8 +1095,35 @@ export class SubagentRegistry {
     if (run.inbox.length >= MAX_SUBAGENT_INBOX_MSGS) {
       return { ok: false, error: `subagent run ${runId} inbox is full (${MAX_SUBAGENT_INBOX_MSGS} messages)` };
     }
-    run.inbox.push(clean);
+    return { ok: true, text: clean };
+  }
+
+  /** Record a message that the inbox file has already committed. */
+  recordMessage(runId: string, text: string): { ok: true } | { ok: false; error: string } {
+    const checked = this.validateMessage(runId, text);
+    if (!checked.ok) return checked;
+    const run = this.runs.get(runId);
+    if (!run) return { ok: false, error: `unknown subagent run: ${runId}` };
+    run.inbox.push(checked.text);
     return { ok: true };
+  }
+
+  message(runId: string, text: string): { ok: true } | { ok: false; error: string } {
+    return this.recordMessage(runId, text);
+  }
+
+  /** The tool result already told the parent; do not inject the result file again. */
+  markResultDelivered(runId: string): void {
+    const run = this.runs.get(runId);
+    if (run) run.resultDelivered = true;
+  }
+
+  private finishedMessageError(run: SubagentRun): { ok: false; error: string } {
+    const outcome = `subagent run ${run.id} is already ${run.state}`;
+    const excerpt = (run.result ?? "").trim().slice(0, 300);
+    if (excerpt) return { ok: false, error: `${outcome} with result: ${excerpt}` };
+    const errExcerpt = (run.error ?? "").trim().slice(0, 300);
+    return { ok: false, error: errExcerpt ? `${outcome} with error: ${errExcerpt}` : `${outcome} with an empty result` };
   }
 
   /** Test-only reset; production registries live for the process. */
@@ -920,11 +1156,12 @@ export function isSubagentManagedFile(name: string): boolean {
   // The sweep deletes matches: reject anything that is not a plain leaf.
   if (!name || name.includes("/") || name.includes("\\") || name.includes("\0")) return false;
   if (
-    /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(task|result)\.json(\..*)?$/.test(name)
+    /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(task|result|decision)\.json(\..*)?$/.test(name)
   ) return true;
   if (
-    /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(approval-[A-Za-z0-9_-]{1,64}\.json|inbox\.json|outbox\.json)(\..*)?$/.test(name)
+    /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(approval-[A-Za-z0-9_-]{1,64}\.json|inbox\.json|outbox\.json|live|cancel|settling|commit\.lock)(\..*)?$/.test(name)
   ) return true;
+  if (/^subagent-[A-Za-z0-9_-]{1,128}\.claims\.json(\..*)?$/.test(name)) return true;
   if (/^ack-sub-[A-Za-z0-9_-]{1,64}-bg-\d{1,10}-appr-[A-Za-z0-9_-]{1,64}\.json(\..*)?$/.test(name)) return true;
   const stream = name.startsWith(".") ? name.slice(1) : name;
   if (stream.startsWith("cursor-")) {
@@ -946,6 +1183,8 @@ export {
   SUBAGENT_APPROVAL_TIMEOUT_MS,
   appendSubagentInboxMessage,
   appendSubagentOutboxMessage,
+  rewindSubagentInboxMessage,
+  withSubagentCommitLock,
   clearSubagentApprovalFiles,
   parseSubagentApprovalName,
   readSubagentApprovalRequest,
@@ -962,9 +1201,19 @@ export type {
   SubagentApprovalKind,
   SubagentApprovalRequest,
   SubagentInboxMessage,
+  SubagentQueueRead,
 } from "./subagents/approval.ts";
 export {
   isApprovalAnswer,
   isLiveSubagentRun,
   resolveSubagentPermissionMode,
 } from "./subagents/permission.ts";
+export {
+  readSubagentClaimsFile,
+  subagentBashSandbox,
+  subagentClaimsFileName,
+  subagentMutationBlock,
+  subagentUnconfinedToolBlock,
+  writeSubagentClaimsFile,
+} from "./subagents/claims.ts";
+export type { SubagentClaimSet, SubagentClaimsRead } from "./subagents/claims.ts";
