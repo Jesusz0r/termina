@@ -120,7 +120,7 @@ import {
   type AgentActivityInput,
 } from "./agent-activity.js";
 import { PathLookup } from "./path-lookup.js";
-import { attachAppWindowSecurity, attachMacTitlebarReclaim, appWindowOptions } from "./window-chrome.js";
+import { attachAppWindowSecurity, appWindowOptions } from "./window-chrome.js";
 import { nativeImageLooksUnpainted, nativeImageSolidHex, cssHexEquals } from "./paint-watchdog.js";
 import {
   isChallengeProfile,
@@ -1221,7 +1221,6 @@ class TerminaApp {
       theme: this.preferences.theme,
       hidden: E2E_HIDDEN_WINDOW,
       preload: join(__dirname, "preload.cjs"),
-      platform: process.platform,
     }));
     const windowGeneration = ++rendererWindowGenerationSeq;
     const rendererGeneration = ++rendererGenerationSeq;
@@ -1244,7 +1243,6 @@ class TerminaApp {
     this.rendererPendingLoad = this.currentPtyLifecycle();
     this.runtime.detachViewer(windowGeneration, rendererGeneration);
     win.removeMenu();
-    attachMacTitlebarReclaim(win, process.platform);
     attachAppWindowSecurity(win);
 
     // Keep: close/nav/crash fencing mutates TerminaApp PTY document generations.

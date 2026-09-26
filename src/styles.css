@@ -2214,9 +2214,10 @@ body.tab-reordering * {
   display: flex;
   align-items: stretch;
   gap: 4px;
-  /* Left padding clears the overlay traffic lights on this bar. */
   height: 36px;
-  padding: 0 8px 0 78px;
+  min-width: 0;
+  padding: 0 8px;
+  overflow: hidden;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
@@ -2227,9 +2228,17 @@ body.tab-reordering * {
   gap: 4px;
   overflow-x: auto;
   flex: 1;
+  min-width: 0;
+  scrollbar-width: none;
   /* The tabs paint above the new-project stub where they overlap. */
   position: relative;
   z-index: 1;
+}
+
+#project-tabs::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .project-tab {
