@@ -575,7 +575,7 @@ export async function runLogin(
   const url = buildAnthropicAuthorizeUrl(challenge, state, port);
   const code = await collectCode("anthropic", chosen === "code" ? "code" : "browser", url, state, io);
   if (!code.ok) return code;
-  const exchanged = await exchangeAnthropic(code.code, verifier, port, io.signal, authWrite);
+  const exchanged = await exchangeAnthropic(code.code, verifier, port, state, io.signal, authWrite);
   if (!exchanged.ok) return exchanged;
   return finishResolved(providerId, io.signal);
 }

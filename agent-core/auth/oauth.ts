@@ -220,13 +220,36 @@ export async function refreshOauth(providerId: string, signal?: AbortSignal): Pr
 }
 
 
+function anthropicTokenError(payload: unknown, status: number): string {
+  if (isRecord(payload)) {
+    const err = payload.error;
+    if (typeof err === "string" && err) {
+      const desc = typeof payload.error_description === "string" ? payload.error_description : "";
+      return desc ? `${err}: ${desc}` : err;
+    }
+    if (isRecord(err)) {
+      const message = typeof err.message === "string" ? err.message : "";
+      const type = typeof err.type === "string" ? err.type : "";
+      if (message && type) return `${type}: ${message}`;
+      if (message || type) return message || type;
+    }
+  }
+  return `Anthropic token exchange failed (HTTP ${status})`;
+}
+
+
 export async function exchangeAnthropic(
   code: string,
   verifier: string,
   port: number,
+  state: string,
   signal?: AbortSignal,
   opts?: AuthWriteOpts,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  // platform.claude.com/v1/oauth/token rejects an authorization_code body
+  // that omits the authorize `state` as "Invalid request format" (no
+  // access_token). The public Claude docs do not describe this client.
+  if (!state) return { ok: false, error: "login failed: missing state" };
   try {
     const res = await postJson(
       tokenUrl("anthropic"),
@@ -236,9 +259,11 @@ export async function exchangeAnthropic(
         redirect_uri: redirectUri("anthropic", port),
         client_id: ANTHROPIC_CLIENT_ID,
         code_verifier: verifier,
+        state,
       },
       signal,
     );
+    if (!res.ok) return { ok: false, error: `login failed: ${anthropicTokenError(res.payload, res.status)}` };
     const parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
