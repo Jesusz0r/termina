@@ -1038,7 +1038,8 @@ export class AgentTui {
         return;
       }
     }
-    if (!line && !wasChoice && !this.rawInput && this.toggleVisibleToolFold()) {
+    // An idle queue needs empty Enter for retry after failed admission.
+    if (!line && (!this.queued || this.busy) && !wasChoice && !this.rawInput && this.toggleVisibleToolFold()) {
       return;
     }
     this.chars = [];

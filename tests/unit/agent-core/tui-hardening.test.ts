@@ -73,6 +73,19 @@ describe("TUI text hardening (#227)", () => {
 });
 
 describe("TUI app hardening (#227)", () => {
+  it("submits empty Enter to retry queued input instead of folding a settled tool", () => {
+    const { tui, submitted } = makeTui();
+    tui.finishTool(tui.startTool("bash", "echo done"), "success", "tool payload");
+    tui.setQueued("retained message");
+    tui.feed("\r");
+    expect(submitted).toEqual([""]);
+    expect(tui.frame()).not.toContain("tool payload");
+    tui.setQueued("");
+    tui.feed("\r");
+    expect(submitted).toEqual([""]);
+    expect(tui.frame()).toContain("tool payload");
+  });
+
   it("leaves the cursor alone when Tab completes nothing", () => {
     const { tui, submitted } = makeTui();
     tui.feed("ab");

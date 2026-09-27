@@ -401,15 +401,41 @@ segments at process start. A failed replay moves `current/` to a unique
 archived bundles as logical sessions. Closing a tab keeps every non-empty
 session bundle.
 
+Messages submitted while the agent works steer the current run at the next
+safe boundary. A model response or an already-started group of tools finishes
+first; tools from that response that have not started are skipped. Their
+results record that they did not execute, then the steering messages enter
+conversation history in submission order before the next model call. Steering
+also wakes a parent waiting for background agents. It does not interrupt a
+running tool or answer an approval prompt. Unfinished provider-side tools must
+complete before new user text can enter their conversation.
+
+The input queue holds up to 16 messages; a full queue rejects the new message
+explicitly and restores it to the composer. Failed image/session persistence
+retains undelivered queued messages; after fixing the error, press Enter to
+retry them in order. Admission reserves the queued head's slot and never
+replaces a newer composer draft. Unfinished provider tools also hold back
+steering and child messages. If their continuation budget is exhausted, the
+queue is retained; `/clear` archives the interrupted conversation before Enter
+can retry those messages safely. `/plan` and `/skills` submissions keep their
+command behavior and wait until the current task finishes; later
+queued text does not jump ahead of them. Other slash commands retain their
+usual immediate or busy-state behavior. Input received during final
+checkpointing starts the next run rather than changing the settled run.
+
 Clipboard and Finder image drops never enter the pty. The host writes
 validated PNG, JPEG, WebP, and GIF files next to the sidecar as
 `image-<terminal>-<id>.<ext>` and a pending list `images-<terminal>.json`.
 A core terminal accepts at most four pending images, each at most 4 MiB.
-If the agent is already running, the batch stays queued for the next
-prompt. On submit the kernel claims that list, copies persisted files into
-the bundle's `current/` directory (`<session-id>-img-N.png`), and only then acknowledges
-the claim. A crash before persistence leaves the claim in place so the
-next prompt recovers the bytes. The prompt payload keeps refs, not bytes.
+The batch attaches to the next delivered user message, including in-run
+steering. Attachments belong to the terminal's pending batch, not to individual
+queued lines. When delivering that message, the kernel claims the list, copies
+persisted files into the bundle's `current/` directory (`<session-id>-img-N.png`),
+appends the user message, and only then acknowledges the claim. Failed
+acknowledgment is retried before the next delivery, without attaching the same
+images to another queued message. Pending attachments require session storage.
+A crash before persistence leaves the claim in place so the next prompt recovers
+the bytes. The prompt payload keeps refs, not bytes.
 Non-image drops on a core terminal insert `@relative/path` into the
 composer (in-project, tag-safe paths) or a POSIX-quoted absolute path,
 and do not submit them. Mixed drops attach the images and paste the

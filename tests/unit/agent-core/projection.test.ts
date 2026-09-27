@@ -276,6 +276,29 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     expect(pairedServer.ok).toBe(true);
   });
 
+  it("allows an explicit server continuation but never incomplete client calls or interrupting user text", () => {
+    const server = message("assistant", [{ type: "server_tool_use", id: "s1", name: "web_search", input: {} }], 1);
+    expect(projectPersistedMessages({ messages: [server], allowPendingServerTools: true })).toMatchObject({ ok: true });
+    expect(projectPersistedMessages({
+      messages: [server, message("assistant", [toolUse("c1", "read_file", "file.txt")], 2)],
+      allowPendingServerTools: true,
+    })).toEqual({ ok: false, error: "incomplete tool-call sequence: c1" });
+    for (const content of ["steering", [{ type: "text", text: "child result" }]]) {
+      expect(projectPersistedMessages({
+        messages: [server, message("user", content, 2)], allowPendingServerTools: true,
+      })).toEqual({ ok: false, error: "user content interrupts an unfinished server tool" });
+    }
+    expect(projectPersistedMessages({
+      messages: [server, message("assistant", [toolUse("c1", "read_file", "file.txt")], 2),
+        message("user", [toolResult("c1")], 3)],
+      allowPendingServerTools: true,
+    })).toMatchObject({ ok: true });
+    expect(projectPersistedMessages({
+      messages: [server, message("assistant", [{ type: "web_search_tool_result", tool_use_id: "s1", content: [] }], 2),
+        message("user", "steering after completion", 3)],
+    })).toMatchObject({ ok: true });
+  });
+
   it("strips C1 controls from host context without altering framing", () => {
     const host = "before\u0085after\u009f\nnext";
     const hostOverlay = overlayFor(host);

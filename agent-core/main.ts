@@ -42,11 +42,7 @@ import { modelLeaf } from "./models/families/identity.ts";
 import { claudeThinkingApi } from "./models/families/anthropic.ts";
 import { consumeAgentSessionEnvironment } from "../shared/agent-environment.ts";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  existsSync,
-  readdirSync,
-  rmSync,
-} from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
 import { dirname, join, relative } from "node:path";
@@ -156,13 +152,10 @@ import {
   type CatalogModel,
   type ModelInfo,
 } from "./models.ts";
+import { createPromptImagePreparer, RUN_IMAGE_CAP } from "./main/prompt-images.ts";
 import {
-  acknowledgePendingImages,
-  claimPendingImages,
   consumeStartupControl,
-  loadImageFromRoots,
   pendingImageState,
-  persistLoadedImages,
   promptFileName,
   readContextFilesResult,
   readProtectedPaths,
@@ -1010,6 +1003,7 @@ async function writeMainTrace(opts: {
 // ---- append-only session storage ----
 
 const sessionFile = resolveSessionFile(eventsDir, sessionId, sessionEnvironment.TERMINA_CORE_SESSION_FILE);
+const preparePromptImages = createPromptImagePreparer(sessionFile, eventsDir, terminalId);
 let storageSeq = 0;
 let sessionWriter: SessionWriter | null = null;
 let resumeBusy = false;
@@ -1686,6 +1680,7 @@ async function waitForSubagentTurns(): Promise<boolean> {
     pollSubagentApprovals();
     if (drainSubagentOutbox()) return true;
     if (deliverSubagentResults()) return true;
+    if (hasQueuedSteering()) return true;
     if (subagentRegistry.activeRuns().length === 0) return false;
     await new Promise((resolve) => setTimeout(resolve, SUBAGENT_APPROVAL_POLL_MS));
   }
@@ -2601,6 +2596,15 @@ type Block =
   | { type: "server_tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "web_search_tool_result"; tool_use_id: string; content: unknown };
 
+function hasPendingServerTools(response: readonly Record<string, unknown>[]): boolean {
+  const answered = new Set(response.filter((block) => block.type === "web_search_tool_result").map((block) => block.tool_use_id));
+  return response.some((block) => block.type === "server_tool_use" && !answered.has(block.id));
+}
+
+function historyHasPendingServerTools(): boolean {
+  return hasPendingServerTools(history.flatMap(message => Array.isArray(message.content) ? message.content : []));
+}
+
 /** Keep client results paired even when a server tool is still outstanding.
  * Claude forbids sibling user text in that case; attach harness guidance as a
  * nested text block without mutating the original tool outcome. */
@@ -2609,9 +2613,7 @@ export function toolResultsWithRecovery(
   response: readonly Record<string, unknown>[],
   recovery: string,
 ): ContentBlock[] {
-  const answered = new Set(response.filter((block) => block.type === "web_search_tool_result").map((block) => block.tool_use_id));
-  const pendingServer = response.some((block) => block.type === "server_tool_use" && !answered.has(block.id));
-  if (!pendingServer) return [...results, { type: "text", text: recovery }];
+  if (!hasPendingServerTools(response)) return [...results, { type: "text", text: recovery }];
   return results.map((block, index) => index === 0 ? {
     ...block,
     content: [
@@ -3274,7 +3276,7 @@ async function callModel(
     ? buildCachedPrefix(sys, clientTools)
     : { system: [{ type: "text", text: sys }], tools: clientTools.map((tool) => ({ ...tool })) };
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
-  const persistedProjection = projectRequest({ messages, imageRoots, overlay: null });
+  const persistedProjection = projectRequest({ messages, imageRoots, overlay: null, allowPendingServerTools: proto === "anthropic-messages" });
   if (!persistedProjection.ok) throw new Error(`request projection failed: ${persistedProjection.error}`);
   const persistedMessages = persistedProjection.persistedMessages;
   const prefixMarkerCount = proto === "anthropic-messages" && anthropicCacheSupported
@@ -4233,22 +4235,20 @@ function abortPromptStart(message: string, draft?: string): void {
   showPrompt();
 }
 
-/** Images carried into one run: pending claims first, then startup extras. */
-export const RUN_IMAGE_CAP = 4;
-
-/** Images dropped by the run cap (#222): pending claims come first, so a full claim evicts startup extras. */
-export function droppedRunImageCount(loadedCount: number, extrasCount: number): number {
-  return Math.max(0, loadedCount + extrasCount - RUN_IMAGE_CAP);
-}
-
 async function runPrompt(
   prompt: string,
   extraImages: Array<{ name: string; mediaType: string }> = [],
   planTurn = false,
+  admission?: { queued: boolean; onCommitted: () => void },
 ): Promise<void> {
+  const abortStart = (message: string): void => abortPromptStart(message, admission?.queued ? undefined : prompt);
   if (shutdownRequested) return;
   if (modelAvailabilityError) {
-    abortPromptStart(`${modelAvailabilityError}; choose an available model with /models or /model`, prompt);
+    abortStart(`${modelAvailabilityError}; choose an available model with /models or /model`);
+    return;
+  }
+  if (historyHasPendingServerTools()) {
+    abortStart("provider tool response is unfinished; use /clear to start a new conversation before retrying");
     return;
   }
   // The overlay belongs to one logical prompt.  Do not let an earlier
@@ -4270,7 +4270,7 @@ async function runPrompt(
       ensureFreshSession();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      abortPromptStart(message, prompt);
+      abortStart(message);
       return;
     }
   }
@@ -4278,7 +4278,7 @@ async function runPrompt(
     ? await pendingImageState(eventsDir, terminalId)
     : { ok: true as const, count: 0, hasImages: false };
   if (!pendingResult.ok) {
-    abortPromptStart(pendingResult.error, prompt);
+    abortStart(pendingResult.error);
     return;
   }
   const hasImages = pendingResult.hasImages || extraImages.length > 0;
@@ -4293,7 +4293,7 @@ async function runPrompt(
   const hostBridge = Boolean(eventsDir && terminalId && !activeSubagent);
   if (hostBridge && eventsDir && terminalId) {
     if (sidecar.isWriteStopped()) {
-      abortPromptStart("sidecar admission is paused", prompt);
+      abortStart("sidecar admission is paused");
       return;
     }
     const requestId = randomUUID();
@@ -4310,57 +4310,22 @@ async function runPrompt(
       // while the tailer may still be holding backpressure for capture.
       if (!ack) sidecar.logEvent({ t: "preflight_cancel", requestId });
       const err = String(ack && typeof ack.error === "string" ? ack.error : "preflight timed out");
-      abortPromptStart(err, prompt);
+      abortStart(err);
       return;
     }
     preflight = { requestId, token: typeof ack.token === "string" ? ack.token : null };
   }
-  const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
-  const claimResult = eventsDir && terminalId
-    ? await claimPendingImages(eventsDir, terminalId)
-    : { ok: true as const, claim: { claimId: "", images: [] } };
-  if (!claimResult.ok) {
-    cancelPreflight();
-    abortPromptStart(claimResult.error, prompt);
-    void refreshPendingImageCount();
-    return;
-  }
-  const claim = claimResult.claim;
-  const loaded = claim.images;
-  const extras = extraImages
-    .map((ref) => loadImageFromRoots(ref, imageRoots))
-    .filter((img): img is NonNullable<typeof img> => img !== null);
-  const allImages = [...loaded, ...extras].slice(0, RUN_IMAGE_CAP);
-  const droppedImages = droppedRunImageCount(loaded.length, extras.length);
-  if (droppedImages > 0) {
-    // Pending claims come first, so a full claim silently evicts structured
-    // startup images. Say so instead of dropping them without a trace.
-    out(`(note: dropped ${droppedImages} image${droppedImages === 1 ? "" : "s"} over the ${RUN_IMAGE_CAP}-image cap)\n`);
-  }
-  const persistedImages = persistLoadedImages(sessionFile, allImages);
-  if (!persistedImages.ok) {
-    cancelPreflight();
-    abortPromptStart(persistedImages.error, prompt);
-    return;
-  }
-  const images = persistedImages.images;
-  const persistedPendingNames: string[] = [];
-  if (eventsDir && terminalId && claim.claimId) {
-    if (sessionFile) {
-      const sessionDir = dirname(sessionFile);
-      for (let i = 0; i < loaded.length && i < images.length; i++) {
-        const ref = images[i]!;
-        const src = loaded[i]!;
-        if (ref.name === src.name) continue;
-        try {
-          if (existsSync(join(sessionDir, ref.name))) persistedPendingNames.push(src.name);
-        } catch {
-          /* Keep the pending source until acknowledgement. */
-        }
-      }
-    }
-  }
+  const preparedImages = await preparePromptImages(extraImages);
   void refreshPendingImageCount();
+  if (!preparedImages.ok) {
+    cancelPreflight();
+    abortStart(preparedImages.error);
+    return;
+  }
+  if (preparedImages.dropped > 0) {
+    out(`(note: dropped ${preparedImages.dropped} image${preparedImages.dropped === 1 ? "" : "s"} over the ${RUN_IMAGE_CAP}-image cap)\n`);
+  }
+  const images = preparedImages.images;
   const taggedPrompt = prompt.startsWith("/") ? prompt : expandFileTags(canonicalCwd, prompt);
   const contextResult = eventsDir && terminalId
     ? readContextFilesResult(eventsDir, terminalId, { shouldStop: () => interrupted })
@@ -4390,6 +4355,7 @@ async function runPrompt(
   let userMsg: Message;
   try {
     userMsg = pushUserPrompt(taggedPrompt, images);
+    admission?.onCommitted();
     try {
       persistRouteSettings();
     } catch {
@@ -4398,7 +4364,7 @@ async function runPrompt(
   } catch (err) {
     cancelPreflight();
     const message = err instanceof SessionStoreError ? err.message : err instanceof Error ? err.message : String(err);
-    abortPromptStart(message, prompt);
+    abortStart(message);
     return;
   }
   // Build once for this logical prompt. Retries and cache-field fallbacks
@@ -4408,7 +4374,7 @@ async function runPrompt(
   } catch (err) {
     cancelPreflight();
     const message = err instanceof Error ? err.message : String(err);
-    abortPromptStart(message, prompt);
+    abortStart(message);
     return;
   }
   // Rate lookup is optional and bounded. Capture the fully replaced catalog
@@ -4416,10 +4382,8 @@ async function runPrompt(
   // one immutable provenance snapshot.
   await rateCatalog.awaitInitial();
   const traceTask = beginTraceTask();
-  if (eventsDir && terminalId && claim.claimId) {
-    const ackImages = await acknowledgePendingImages(eventsDir, terminalId, claim.claimId, persistedPendingNames);
-    if (!ackImages.ok) out(`(host: ${ackImages.error})\n`);
-  }
+  const ackImages = await preparedImages.acknowledge();
+  if (!ackImages.ok) out(`(host: ${ackImages.error})\n`);
   sidecar.logEvent({
     t: "agent_start",
     runId: traceTask.runId,
@@ -4444,6 +4408,7 @@ async function runPrompt(
   let retriedProviderTermination = false;
   let terminatedDiagnostics: string | null = null;
   let resumePaused = false;
+  let pendingServerTools = false;
   let pauseTurnContinuations = 0;
   let lastPlanText = "";
   let cacheCostCompactionAttempted = false;
@@ -4456,15 +4421,18 @@ async function runPrompt(
   try {
     while (true) {
       if (interrupted) break;
-      drainSubagentInbox();
-      drainSubagentOutbox();
-      deliverSubagentResults();
+      if (!pendingServerTools && !resumePaused) {
+        if (await drainSteeringLines()) toolLoopTracker = emptyToolLoopTracker();
+        drainSubagentInbox();
+        drainSubagentOutbox();
+        deliverSubagentResults();
+      }
       // Child approval requests arrive mid-run; poll every model turn so a
       // picker (or fast deny) lands within a turn, not a user turn. Reconcile
       // first so a finished child leaves the title before the next model call.
       syncSubagentChrome();
       pollSubagentApprovals();
-      if (!resumePaused) {
+      if (!resumePaused && !pendingServerTools) {
         await reclaim();
         // Compact an expensive cache miss before the context limit forces it.
         const shouldCompactForCost =
@@ -4484,6 +4452,11 @@ async function runPrompt(
           if (!await summarize() && effectiveTotalTokens() >= usableTokens(contextCeiling())) truncate();
         }
       }
+      // Reclaim and summarization can await I/O while the user types.
+      if (!pendingServerTools && !resumePaused && await drainSteeringLines()) {
+        toolLoopTracker = emptyToolLoopTracker();
+      }
+      if (interrupted) break;
       resumePaused = false;
       let result: CallResult;
       const callStarted = Date.now();
@@ -4597,11 +4570,12 @@ async function runPrompt(
         sidecar.logEvent({ t: "plan", text: plan });
       }
       const serverNames = renderServerTools(result.blocks);
+      pendingServerTools = historyHasPendingServerTools();
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
       );
       if (uses.length === 0) {
-        const pauseTurn = result.stopReason === "pause_turn" && !interrupted;
+        const pauseTurn = (result.stopReason === "pause_turn" || pendingServerTools) && !interrupted;
         const pauseLimitReached = pauseTurn && pauseTurnContinuations >= MAX_PAUSE_TURN_CONTINUATIONS;
         await writeMainTrace({
           status: pauseLimitReached ? "pause-limit" : "ok",
@@ -4626,6 +4600,7 @@ async function runPrompt(
           continue;
         }
         if (!interrupted) reportSubagentTurn(assistantText, []);
+        if (!interrupted && !pendingServerTools && hasQueuedSteering()) continue;
         // message_subagent already reported delivery. A note that landed
         // during this generation is still unread; settling here would drop it.
         if (!interrupted && drainSubagentInbox()) continue;
@@ -4647,7 +4622,7 @@ async function runPrompt(
       const spawnFanout = admitSubagentFanout(subagentActiveBefore, spawnAttempts);
       try {
       for (const wave of waves) {
-        if (interrupted) break;
+        if (interrupted || hasQueuedSteering()) break;
         const chunk = wave.map((entry) => uses[entry.index]!);
         const handles = chunk.map((use, index) => {
           const invalid = inputErrors[wave[index]!.index];
@@ -4716,13 +4691,15 @@ async function runPrompt(
         surface?.cancelPendingTools();
       }
       if (!interrupted) await rollbackLoneSubagentFanout(uses, outcomes, subagentActiveBefore, spawnAttempts);
-      // An interrupted turn must still answer the open tool calls, or the
-      // stored pair breaks the next request.
+      // Pair all calls before appending steering. Tools in a completed wave
+      // keep their real results; later waves have not executed.
       const answered = outcomes.length;
       for (let i = answered; i < uses.length; i++) {
-        const outcome = done(uses[i]!, "(interrupted by user)", true);
+        const outcome = done(uses[i]!, interrupted
+          ? "(interrupted by user)"
+          : "(not executed: user steering arrived; follow the next user message before choosing further tools)", true);
         outcomes.push(outcome);
-        sidecar.logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
+        if (interrupted) sidecar.logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
       }
       let resultBlocks = outcomes.map((o, i): ContentBlock => {
         const b = o.result as ContentBlock;
@@ -4733,7 +4710,7 @@ async function runPrompt(
         return b;
       });
       let stalled = false;
-      if (!interrupted) {
+      if (!interrupted && !hasQueuedSteering()) {
         const turnCalls = uses.map((use, index) => ({
           name: use.name,
           input: use.input,
@@ -4745,7 +4722,8 @@ async function runPrompt(
         stalled = decision.stalled;
         if (decision.recovery) {
           // Persist recovery in model-visible history, not just the terminal.
-          resultBlocks = toolResultsWithRecovery(resultBlocks, result.blocks, decision.recovery);
+          resultBlocks = toolResultsWithRecovery(resultBlocks,
+            history.flatMap(message => Array.isArray(message.content) ? message.content : []), decision.recovery);
           out(`\n(${decision.recovery})\n`);
         }
       }
@@ -4762,7 +4740,7 @@ async function runPrompt(
         attempt: result.traceAttempt,
         toolOutcomes: outcomes.map((outcome, index) => toolOutcomeTraceInput(uses[index]!, outcome)),
       });
-      if (stalled) {
+      if (stalled && !hasQueuedSteering()) {
         taskFailure = `stalled: tool loop continued after recovery guidance (${uses.map((u) => u.name).join(", ")})`;
         taskOutcomeStatus = "failure";
         out(`\n(${taskFailure})\n`);
@@ -4779,6 +4757,7 @@ async function runPrompt(
       out("\n(interrupted)\n");
     }
     else if (err instanceof SessionStoreError) {
+      queueDrainBlocked = true;
       storageFailure = err.message;
       taskFailure = storageFailure;
       taskOutcomeStatus = "failure";
@@ -5313,31 +5292,87 @@ function printSkillPicker(): void {
 }
 
 let running = false;
-let queuedLine: string | null = null;
+const queuedLines: string[] = [];
+const MAX_QUEUED_LINES = 16;
+let queueDrainBlocked = false;
+let queueAdmission: symbol | null = null;
 let authBusy = false;
 
+function syncQueuedLines(): void {
+  const first = queuedLines[0] ?? "";
+  surface?.setQueued(queuedLines.length > 1 ? `${queuedLines.length} messages: ${first}` : first);
+}
+
 function drainQueuedLine(): void {
-  if (queuedLine === null) return;
-  const next = queuedLine;
-  queuedLine = null;
-  surface?.setQueued("");
-  dispatchLine(next);
+  if (queueDrainBlocked || queueAdmission || !queuedLines.length || engineBusy() || shutdownRequested) return;
+  const admission = Symbol();
+  queueAdmission = admission;
+  const commit = (): void => {
+    if (queueAdmission !== admission) return;
+    queuedLines.shift();
+    queueAdmission = null;
+    syncQueuedLines();
+  };
+  // Keep the head and its capacity reservation until the prompt is durable.
+  dispatchLine(queuedLines[0]!, commit);
+  setImmediate(() => {
+    // Commands handled without starting a prompt have no admission callback.
+    if (!engineBusy() && !queueDrainBlocked) commit();
+    drainQueuedLine();
+  });
 }
 
 function engineBusy(): boolean {
   return running || authBusy || resumeBusy || mcpBusy;
 }
 
-/** Single-slot typed-ahead queue shared by mid-run submits and picker-time typing. */
-function queueTypedLine(line: string): void {
-  sidecar.logEvent({ t: "steer_input", behavior: "steer" });
-  // Keep one typed-ahead prompt. More than one has no consumer yet.
-  queuedLine = line;
-  surface?.setQueued(line);
-  out("(queued — runs after the current task)\n");
+function hasQueuedSteering(): boolean {
+  const line = queuedLines[0];
+  // Commands retain normal dispatch and never let later text jump the queue.
+  return line !== undefined && !line.startsWith("/") && !line.startsWith("!");
 }
 
-function submit(line: string, planTurn = false): void {
+/** Only call between complete assistant/tool-result pairs. */
+async function drainSteeringLines(): Promise<boolean> {
+  let delivered = false;
+  const pending = queuedLines.length;
+  for (let i = 0; i < pending && hasQueuedSteering() && !interrupted; i++) {
+    const line = queuedLines[0]!;
+    const prepared = await preparePromptImages();
+    if (!prepared.ok) throw new SessionStoreError(prepared.error);
+    if (interrupted) break;
+    pushUserPrompt(expandFileTags(canonicalCwd, line), prepared.images);
+    // Enqueue may have happened before agent_start or in a preceding run.
+    // Invalidate replay for the run that actually receives this message too.
+    sidecar.logEvent({ t: "steer_input", behavior: "steer" });
+    // A failed append must leave both the text and image claim recoverable.
+    queuedLines.shift();
+    syncQueuedLines();
+    delivered = true;
+    const ack = await prepared.acknowledge();
+    if (!ack.ok) out(`(host: ${ack.error})\n`);
+    void refreshPendingImageCount();
+  }
+  if (delivered) out("(steering applied)\n");
+  return delivered;
+}
+
+/** Bounded FIFO shared by mid-run submits and picker-time typing. */
+function queueTypedLine(line: string): void {
+  if (queuedLines.length >= MAX_QUEUED_LINES) {
+    out(`(message queue full — not submitted; wait for a queued message to be delivered)\n`);
+    surface?.setDraft(line);
+    return;
+  }
+  queuedLines.push(line);
+  sidecar.logEvent({ t: "steer_input", behavior: "steer" });
+  syncQueuedLines();
+  out(line.startsWith("/")
+    ? "(queued — command runs after the current task)\n"
+    : "(queued — steers at the next safe boundary)\n");
+}
+
+function submit(line: string, planTurn = false, commitQueuedLine?: () => void): void {
   if (resumeBusy || mcpBusy) {
     out("(engine busy)\n");
     return;
@@ -5346,14 +5381,33 @@ function submit(line: string, planTurn = false): void {
     queueTypedLine(line);
     return;
   }
+  if (!commitQueuedLine && queuedLines.length > 0) {
+    queueTypedLine(line);
+    queueDrainBlocked = false;
+    drainQueuedLine();
+    return;
+  }
+  let committed = false;
+  queueDrainBlocked = false;
   // A rejected prompt promise must never kill the engine: the pty would
   // close and the terminal looks like it quit on the user.
-  void runPrompt(line, [], planTurn)
+  void runPrompt(line, [], planTurn, {
+    queued: commitQueuedLine !== undefined,
+    onCommitted: () => { committed = true; commitQueuedLine?.(); },
+  })
     .catch((err: unknown) => {
       out(`\nengine error: ${(err as Error).message}\n`);
       showPrompt();
     })
-    .then(() => drainQueuedLine());
+    .then(() => {
+      if (!committed && commitQueuedLine) queueAdmission = null;
+      if ((!committed || queueDrainBlocked) && queuedLines.length > 0) {
+        queueDrainBlocked = true;
+        out("(queued messages retained — fix the error, then press Enter to retry)\n");
+        return;
+      }
+      drainQueuedLine();
+    });
 }
 
 let loginCodeResolve: ((code: string) => void) | null = null;
@@ -5687,8 +5741,12 @@ function syncStatus(): void {
   logSettings();
 }
 
-function dispatchLine(line: string): void {
+function dispatchLine(line: string, commitQueuedLine?: () => void): void {
   if (!line) {
+    if (!engineBusy()) {
+      queueDrainBlocked = false;
+      drainQueuedLine();
+    }
     showPrompt();
     return;
   }
@@ -5886,12 +5944,16 @@ function dispatchLine(line: string): void {
   }
   const planPrompt = planSlashSubmit(line);
   if (planPrompt !== null) {
-    if (running) {
+    if (running || (!commitQueuedLine && queuedLines.length > 0)) {
       queueTypedLine(line);
+      if (!engineBusy()) {
+        queueDrainBlocked = false;
+        drainQueuedLine();
+      }
       showPrompt();
       return;
     }
-    submit(planPrompt, true);
+    submit(planPrompt, true, commitQueuedLine);
     showPrompt();
     return;
   }
@@ -5907,12 +5969,16 @@ function dispatchLine(line: string): void {
       showPrompt();
       return;
     }
-    if (running) {
+    if (running || (!commitQueuedLine && queuedLines.length > 0)) {
       queueTypedLine(line);
+      if (!engineBusy()) {
+        queueDrainBlocked = false;
+        drainQueuedLine();
+      }
       showPrompt();
       return;
     }
-    submit(skillSlashSubmit(skillCmd.skill, skillCmd.request));
+    submit(skillSlashSubmit(skillCmd.skill, skillCmd.request), false, commitQueuedLine);
     showPrompt();
     return;
   }
@@ -5939,7 +6005,7 @@ function dispatchLine(line: string): void {
     });
     return;
   }
-  submit(line);
+  submit(line, false, commitQueuedLine);
   showPrompt();
 }
 
@@ -6088,7 +6154,8 @@ async function main(): Promise<void> {
       .catch((err: unknown) => {
         out(`\nengine error: ${(err as Error).message}\n`);
         showPrompt();
-      });
+      })
+      .then(() => drainQueuedLine());
     return;
   }
   if (subagentTaskPath !== null) {

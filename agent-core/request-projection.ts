@@ -48,6 +48,8 @@ type ProjectRequestOptions = {
   overlay?: RequestOverlay | null;
   imageRoots?: readonly string[];
   maxBytes?: number;
+  /** Claude continues server calls itself; client calls must always be paired. */
+  allowPendingServerTools?: boolean;
 };
 
 type ProjectRequestResult =
@@ -151,10 +153,16 @@ function resultToolId(block: ProjectionBlock): string | null {
   return typeof id === "string" && id.length > 0 ? id : null;
 }
 
-function validateToolSequences(messages: readonly ProjectionMessage[]): string | null {
-  const active = new Map<string, number>();
+function validateToolSequences(messages: readonly ProjectionMessage[], allowPendingServerTools = false): string | null {
+  const active = new Map<string, boolean>();
   for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
     const message = messages[messageIndex]!;
+    if (message.role === "user" && [...active.values()].some(server => server)) {
+      const hasNonResultContent = typeof message.content === "string"
+        ? message.content.length > 0
+        : message.content.some(block => block.type !== "tool_result");
+      if (hasNonResultContent) return "user content interrupts an unfinished server tool";
+    }
     if (typeof message.content === "string" || !Array.isArray(message.content)) continue;
     for (const block of message.content) {
       if (!block || typeof block !== "object" || typeof block.type !== "string") continue;
@@ -163,7 +171,7 @@ function validateToolSequences(messages: readonly ProjectionMessage[]): string |
         const id = toolId(block);
         if (!id) return `tool call at message ${messageIndex} has no id`;
         if (active.has(id)) return `duplicate active tool call id: ${id}`;
-        active.set(id, messageIndex);
+        active.set(id, block.type === "server_tool_use");
         continue;
       }
       if (!TOOL_RESULT_TYPES.has(block.type)) continue;
@@ -173,9 +181,8 @@ function validateToolSequences(messages: readonly ProjectionMessage[]): string |
       active.delete(id);
     }
   }
-  if (active.size > 0) {
-    const [id] = active.keys();
-    return `incomplete tool-call sequence: ${id}`;
+  for (const [id, server] of active) {
+    if (!server || !allowPendingServerTools) return `incomplete tool-call sequence: ${id}`;
   }
   return null;
 }
@@ -240,9 +247,9 @@ function normalizeOverlay(
  * with the already-snapshotted overlay.
  */
 export function projectPersistedMessages(
-  opts: Pick<ProjectRequestOptions, "messages" | "imageRoots">,
+  opts: Pick<ProjectRequestOptions, "messages" | "imageRoots" | "allowPendingServerTools">,
 ): ProjectPersistedResult {
-  const sequenceError = validateToolSequences(opts.messages);
+  const sequenceError = validateToolSequences(opts.messages, opts.allowPendingServerTools);
   if (sequenceError) return { ok: false, error: sequenceError };
   return { ok: true, messages: projectMessages(opts.messages, opts.imageRoots ?? []) };
 }

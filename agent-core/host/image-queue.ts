@@ -180,7 +180,9 @@ export async function acknowledgePendingImages(
     return await withPendingImageLock(eventsDir, terminalId, async () => {
       const path = join(eventsDir, claimId);
       const rec = await readImageRecord(eventsDir, terminalId, path);
-      if (rec === "missing") queueFail("image queue is invalid");
+      // Cleanup can fail after the claim was removed. Retrying the committed
+      // acknowledgement must succeed without adopting these images again.
+      if (rec === "missing") return { ok: true as const };
       const kept: ImageRef[] = [];
       const done: ImageRef[] = [];
       for (const ref of rec.images) {

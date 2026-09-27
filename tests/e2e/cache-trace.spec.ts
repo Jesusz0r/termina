@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { mkdirSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Page, TestInfo } from "@playwright/test";
 import { test, expect } from "./fixtures.ts";
@@ -172,7 +172,17 @@ function closeServer(server: Server): Promise<void> {
 test.describe("deterministic Core cache traces", () => {
   let server: Server;
   let providerCalls = 0;
+  let steering = false;
+  let releaseFirstResponse: (() => void) | null = null;
+  const requests: Array<{ input: unknown }> = [];
   const previousEnv = new Map<string, string | undefined>();
+
+  test.beforeEach(() => {
+    providerCalls = 0;
+    steering = false;
+    requests.length = 0;
+    releaseFirstResponse = null;
+  });
 
   test.beforeAll(async () => {
     for (const key of ENV_KEYS) previousEnv.set(key, process.env[key]);
@@ -186,9 +196,23 @@ test.describe("deterministic Core cache traces", () => {
         response.writeHead(404).end();
         return;
       }
-      request.resume();
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
       request.on("end", () => {
+        requests.push(JSON.parse(body));
         const turn = providerCalls++;
+        if (steering && turn === 0) {
+          releaseFirstResponse = () => {
+            const item = { type: "function_call", id: "item-stale", call_id: "call-stale", name: "write_file",
+              arguments: JSON.stringify({ path: "stale.txt", content: "must not execute" }) };
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            response.end([
+              { type: "response.output_item.done", item },
+              { type: "response.completed", response: { status: "completed", output: [item], usage: {} } },
+            ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
+          };
+          return;
+        }
         const cached = turn * 10;
         const event = {
           type: "response.completed",
@@ -227,6 +251,41 @@ test.describe("deterministic Core cache traces", () => {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+    }
+  });
+
+  test("steers through the terminal before stale tools execute, preserving queued message order", async ({ page, runRoot, projectRoot, closeElectron }) => {
+    steering = true;
+    try {
+      await focusTerminal(page);
+      await page.keyboard.insertText("start the original task");
+      await expect.poll(() => terminalText(page)).toContain("start the original task");
+      await page.keyboard.press("Enter");
+      await expect.poll(() => releaseFirstResponse !== null).toBe(true);
+      for (const text of ["change direction now", "also explain the reasoning"]) {
+        await page.keyboard.insertText(text);
+        await expect.poll(() => terminalText(page)).toContain(text);
+        await page.keyboard.press("Enter");
+      }
+      await expect.poll(() => {
+        const sidecar = join(runRoot, "events", "term-1.jsonl");
+        return readFileSync(sidecar, "utf8").split("\n").filter(line => line.includes('"t":"steer_input"')).length;
+      }).toBe(2);
+      releaseFirstResponse!();
+      releaseFirstResponse = null;
+      await waitForSettledTurns(runRoot, 1);
+      expect(providerCalls).toBe(2);
+      const input = JSON.stringify(requests[1]!.input);
+      expect(input).toContain("change direction now");
+      expect(input).toContain("also explain the reasoning");
+      expect(input.indexOf("change direction now")).toBeLessThan(input.indexOf("also explain the reasoning"));
+      expect(input).toContain("not executed: user steering arrived");
+      expect(existsSync(join(projectRoot, "stale.txt"))).toBe(false);
+      expect(readTraceDirectory(traceDir(runRoot)).records.filter(record => record.recordType === "task-settled")).toHaveLength(1);
+    } finally {
+      releaseFirstResponse?.();
+      releaseFirstResponse = null;
+      await closeElectron();
     }
   });
 
