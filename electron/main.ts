@@ -81,6 +81,7 @@ import { MAX_SESSION_SEARCH_QUERY } from "./session-search.js";
 import { DiagnosticsRunner } from "./diagnostics.js";
 import { ScheduleRunner, type ScheduleTickTask } from "./schedule.js";
 import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
+import { formatProjectSnapshot, MAX_PROJECT_SNAPSHOT_BYTES } from "./main/project-snapshot.js";
 import { searchProjectContent } from "./content-search.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
@@ -184,8 +185,6 @@ const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
 const MAX_TERMINAL_DIMENSION = 1024;
 const MAX_EXPLORER_ENTRIES = 2000;
 const MAX_VERIFY_OUTPUT = 200_000;
-/** Bound for one project snapshot context file (tree listing for a turn). */
-const MAX_PROJECT_SNAPSHOT_BYTES = 12 * 1024;
 /** Debounce for snapshot refresh after watcher bursts. */
 const PROJECT_SNAPSHOT_DEBOUNCE_MS = 5000;
 /** Timeline snapshots bigger than this are dropped (dot stays, no content). */
@@ -3596,8 +3595,10 @@ class TerminaApp {
   /**
    * Write the per-turn project snapshot for one agent terminal: a bounded
    * tree inventory so the run starts oriented without spending tool calls
-   * on discovery. Stamped so the agent treats it as a hint; file tools see
-   * live state. Skipped silently without an events binding.
+   * on discovery. The hint line stays, but the bytes omit a clock: this file
+   * is the first message of the cached prefix, so a timestamp-only refresh
+   * would re-bill the whole prompt. An unchanged listing is not rewritten.
+   * Skipped silently without an events binding.
    */
   private async writeProjectSnapshot(inst: AgentTerminalInstance): Promise<void> {
     if (inst.type !== "agent" || inst.closed) return;
@@ -3614,31 +3615,11 @@ class TerminaApp {
       return;
     }
     if (this.runtime.get(inst.id) !== inst || inst.closed) return;
-    if (snapshot.entries.length === 0) {
+    const content = formatProjectSnapshot(root, snapshot);
+    if (!content) {
       await this.removeEventLeaf(inst, `project-${inst.id}.md`);
       return;
     }
-    const stamp = new Date().toISOString();
-    const build = (lines: string[], truncated: boolean): string =>
-      `## Project snapshot — \`${basename(root)}\` — ${stamp}\n\n` +
-      "Top-level tree first; `…(truncated)` means the listing hit a bound.\n" +
-      "A hint only — file tools see live state.\n\n" +
-      "```text\n" +
-      `${lines.join("\n")}\n` +
-      (truncated ? "…(truncated)\n" : "") +
-      "```\n";
-    // Shrink from the deepest levels until the file fits its byte bound, so
-    // medium projects keep a useful head instead of no snapshot at all.
-    let lines = snapshot.entries;
-    let truncated = snapshot.truncated;
-    let md = build(lines, truncated);
-    while (Buffer.byteLength(md, "utf8") > MAX_PROJECT_SNAPSHOT_BYTES && lines.length > 0) {
-      lines = lines.slice(0, Math.max(0, lines.length - 50));
-      truncated = true;
-      md = build(lines, truncated);
-    }
-    if (lines.length === 0) return;
-    const content = Buffer.from(md, "utf8");
     await writeBoundOwnedFile({
       root: eventsDir,
       rootIdentity: binding,
@@ -3647,6 +3628,7 @@ class TerminaApp {
       content,
       mode: 0o600,
       maxBytes: MAX_PROJECT_SNAPSHOT_BYTES,
+      skipIfUnchanged: true,
     }).catch((err) => {
       console.warn(`[main] could not write project snapshot: ${String(err)}`);
     });
@@ -7439,6 +7421,7 @@ class TerminaApp {
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
       this.pathIndex.noteRemoved(canonicalRoot, relPath);
       ws.generation++;
+      this.scheduleProjectSnapshot(ws.id);
       this.markCandidateEvidenceStale(ws.comparisonId);
       this.send("file:deleted", { projectId: owner.id, workspaceId: ws.id, path: p }, rendererTarget);
       for (const inst of workspaceTerminals()) {
