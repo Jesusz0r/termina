@@ -231,6 +231,7 @@ import {
 } from "./main/cache-diagnostics.ts";
 import { formatNetworkError, isRetryableNetworkError, retryAfter, retryNetworkAfter } from "./main/retry-after.ts";
 import { planSidecarText, planSlashSubmit } from "./main/plan-slash.ts";
+import { planListPresent } from "../shared/plan-task.ts";
 import { parseSkillCommand, skillSlashSubmit } from "./main/skill-slash.ts";
 import {
   SubagentRegistry,
@@ -4205,6 +4206,9 @@ async function runPrompt(
   planTurn = false,
   admission?: { queued: boolean; onCommitted: () => void },
 ): Promise<void> {
+  // Arm before early aborts so a failed `/plan` start still publishes the
+  // user's next reply. A list in this turn clears the flag.
+  if (planTurn) planPublishPending = true;
   const abortStart = (message: string): void => abortPromptStart(message, admission?.queued ? undefined : prompt);
   if (shutdownRequested) return;
   if (modelAvailabilityError) {
@@ -4532,6 +4536,9 @@ async function runPrompt(
       if (plan) {
         lastPlanText = plan;
         sidecar.logEvent({ t: "plan", text: plan });
+        // A clarifying question is not a board. Keep follow-ups publishing
+        // until the capped payload actually contains a task list.
+        if (planListPresent(plan)) planPublishPending = false;
       }
       const serverNames = renderServerTools(result.blocks);
       pendingServerTools = historyHasPendingServerTools();
@@ -4925,6 +4932,7 @@ export function testOnlyPersist(entry: Record<string, unknown> = { type: "checkp
  *  permissionMode stays on the terminal. */
 function resetLiveSessionState(): void {
   storageSeq = 0;
+  planPublishPending = false;
   history.length = 0;
   lastHandoff = null;
   clearSubagentApprovals();
@@ -5245,6 +5253,8 @@ function printSkillPicker(): void {
 }
 
 let running = false;
+/** After `/plan`, plain submits publish until a reply contains a task list. */
+let planPublishPending = false;
 const queuedLines: string[] = [];
 const MAX_QUEUED_LINES = 16;
 let queueDrainBlocked = false;
@@ -5958,7 +5968,7 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
     });
     return;
   }
-  submit(line, false, commitQueuedLine);
+  submit(line, planPublishPending, commitQueuedLine);
   showPrompt();
 }
 

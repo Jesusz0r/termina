@@ -2,15 +2,14 @@
  * Plan Board: what a task is, how it progresses, and which tasks Dispatch
  * may send to workers.
  *
- * A `/plan` turn logs assistant text on the sidecar. This module is the only
- * place that decides whether that text is a plan and how Dispatch claims rows.
+ * A `/plan` turn logs assistant text on the sidecar. Heading and task-line
+ * scan lives in `shared/plan-task.ts`. This module turns those lines into
+ * task objects and decides how Dispatch claims rows.
  */
 import { isAbsolute, relative } from "node:path";
-import { PLAN_HEADING_MARKER, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
+import { planListEntries } from "../shared/plan-task.ts";
 import type { CanonicalizePath, PlanTask } from "../shared/types.ts";
 
-const PLAN_HEADING_LINE = new RegExp("^" + PLAN_HEADING_MARKER + "$", "i");
-const PLAN_LINE = new RegExp("^" + PLAN_TASK_MARKER + String.raw`(.+)$`);
 const MAX_PLAN_TASKS = 20;
 const MAX_PATHS_PER_TASK = 5;
 
@@ -86,23 +85,8 @@ export function nextScheduleRun(spec: ScheduleSpec, fromMs: number, first: boole
 }
 
 export async function parsePlanTasks(text: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<PlanTask[]> {
-  const lines = text.split("\n");
-  const heading = lines.findIndex((raw) => PLAN_HEADING_LINE.test(raw.trim()));
-  if (heading < 0) return [];
-
   const tasks: PlanTask[] = [];
-  let started = false;
-  for (const raw of lines.slice(heading + 1)) {
-    if (!raw.trim()) {
-      if (started) break;
-      continue;
-    }
-    const line = parsePlanTaskLine(raw);
-    if (!line) {
-      if (started) break;
-      continue;
-    }
-    started = true;
+  for (const line of planListEntries(text, MAX_PLAN_TASKS)) {
     const model = parsePlanModelMarker(line.body);
     tasks.push({
       text: line.body,
@@ -110,7 +94,6 @@ export async function parsePlanTasks(text: string, cwd: string | null, canonical
       state: line.checked ? "done" : "pending",
       ...(model ? { model } : {}),
     });
-    if (tasks.length >= MAX_PLAN_TASKS) break;
   }
   return tasks;
 }
@@ -262,13 +245,6 @@ function siblingClaimPaths(workerId: string, jobs: Array<{ task: PlanTask; id: s
 
 function taskMentionsPath(task: PlanTask, relPath: string): boolean {
   return task.paths.some((p) => relPath === p || relPath.endsWith("/" + p));
-}
-
-function parsePlanTaskLine(line: string): { body: string; checked: boolean } | null {
-  const match = line.trim().match(PLAN_LINE);
-  const body = match?.[2]?.trim();
-  if (!body) return null;
-  return { body, checked: match?.[1]?.toLowerCase() === "x" };
 }
 
 async function planTaskPaths(body: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<string[]> {

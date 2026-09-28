@@ -306,8 +306,9 @@ it cannot restore.
 When the agent plans multi-step work — type **`/plan`** or **`/plan <request>`**
 in the terminal — the Plan Board (below the timeline) shows the task list
 with live progress: `○` pending, `◐` active, `✓` done. Ordinary replies do
-not fill the board; only a `/plan` turn publishes the list. The list stays
-until the next `/plan` or `/clear`.
+not fill the board. A `/plan` turn publishes its reply; if that reply only
+asks what to plan, later replies keep publishing until one contains the
+list. The list stays until the next `/plan` or `/clear`.
 
 ### Dispatching tasks
 

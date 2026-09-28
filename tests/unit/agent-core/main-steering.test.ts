@@ -31,7 +31,18 @@ async function steeringScenario(
   mode: "stream" | "tool" | "final" | "children" | "server",
   lines: string[],
   check: (result: { project: string; messages: Row[]; requests: Row[]; events: Row[]; output: string }) => void,
-  options: { initialLine?: string; attachImage?: boolean; expectedRuns?: number; beforePreflight?: boolean; failedImage?: boolean; failQueuedAdmission?: boolean; draftCase?: "typed" | "overflow"; failedServer?: boolean } = {},
+  options: {
+    initialLine?: string;
+    attachImage?: boolean;
+    expectedRuns?: number;
+    beforePreflight?: boolean;
+    failedImage?: boolean;
+    failQueuedAdmission?: boolean;
+    draftCase?: "typed" | "overflow";
+    failedServer?: boolean;
+    followUps?: string[];
+    replies?: string[];
+  } = {},
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "termina-steering-"));
   const project = join(root, "project"), home = join(root, "home"), events = join(root, "events");
@@ -60,6 +71,7 @@ async function steeringScenario(
       };
     }
     let turn = 0;
+    const planReplies = ${JSON.stringify(options.replies ?? null)};
     globalThis.fetch = async (input, init) => {
       if (String(input) === "https://models.dev/api.json") return new Response("{}", { status: 200 });
       if (++turn > 8) throw new Error("test request bound exceeded");
@@ -98,7 +110,8 @@ async function steeringScenario(
       const items = calls.map((call, i) => ({ type: "function_call", id: "item-" + turn + "-" + i,
         call_id: "call-" + turn + "-" + i, name: call.name, arguments: JSON.stringify(call.input) }));
       const events = items.map(item => ({ type: "response.output_item.done", item }));
-      if (!items.length) events.push({ type: "response.output_text.delta", delta: "finished" });
+      const reply = Array.isArray(planReplies) && typeof planReplies[turn - 1] === "string" ? planReplies[turn - 1] : "finished";
+      if (!items.length) events.push({ type: "response.output_text.delta", delta: reply });
       events.push({ type: "response.completed", response: { status: "completed", output: items, usage: {} } });
       return new Response(events.map(event => "data: " + JSON.stringify(event) + "\\n\\n").join(""), {
         status: 200, headers: { "content-type": "text/event-stream" },
@@ -229,6 +242,12 @@ async function steeringScenario(
         }), { mode: 0o600 });
       }
     }
+    let followUpRun = 1;
+    for (const followUp of options.followUps ?? []) {
+      await waitFor(() => rows(sidecarFile).filter(row => row.t === "checkpoint_result").length >= followUpRun);
+      submitInput(followUp + "\n");
+      followUpRun += 1;
+    }
     await waitFor(() => rows(sidecarFile).filter(row => row.t === "agent_settled").length === (options.expectedRuns ?? 1));
     // Wait for checkpoint/trace settlement before shutting down the interactive process.
     await waitFor(() => rows(sidecarFile).filter(row => row.t === "checkpoint_result").length === (options.expectedRuns ?? 1) - (options.failedImage ? 1 : 0));
@@ -326,6 +345,46 @@ describe("interactive conversation steering", () => {
     await steeringScenario("children", ["reconsider while the children work"], ({ requests, events }) => {
       expectOneRun(events);
       expect(JSON.stringify(requests[2].input)).toContain("reconsider while the children work");
+    });
+  });
+
+  it("publishes /plan follow-ups until a reply contains a task list", async () => {
+    const list = "Plan:\n- [ ] edit src/auth.ts\n";
+    await steeringScenario("final", [], ({ requests, events }) => {
+      expect(events.filter(row => row.t === "agent_start")).toHaveLength(3);
+      expect(requests).toHaveLength(3);
+      expect(JSON.stringify(requests[0].input)).toContain("Write a Plan Board list. Do not implement.");
+      const feature = JSON.stringify(requests[1].input.at(-1));
+      const thanks = JSON.stringify(requests[2].input.at(-1));
+      expect(feature).toContain("feature");
+      expect(feature).not.toContain("Write a Plan Board list");
+      expect(thanks).toContain("thanks");
+      expect(thanks).not.toContain("Write a Plan Board list");
+      expect(events.filter(row => row.t === "plan").map(row => row.text)).toEqual([
+        "What should I plan?",
+        list,
+      ]);
+    }, {
+      initialLine: "/plan",
+      followUps: ["feature", "thanks"],
+      replies: ["What should I plan?", list, "implemented"],
+      expectedRuns: 3,
+    });
+  });
+
+  it("stops plan publishing once the /plan reply contains a task list", async () => {
+    const list = "Plan:\n- [ ] edit src/auth.ts\n";
+    await steeringScenario("final", [], ({ requests, events }) => {
+      expect(requests).toHaveLength(2);
+      const followUp = JSON.stringify(requests[1].input.at(-1));
+      expect(followUp).toContain("now implement");
+      expect(followUp).not.toContain("Write a Plan Board list");
+      expect(events.filter(row => row.t === "plan").map(row => row.text)).toEqual([list]);
+    }, {
+      initialLine: "/plan fix auth",
+      followUps: ["now implement"],
+      replies: [list, "done"],
+      expectedRuns: 2,
     });
   });
 

@@ -255,7 +255,7 @@ scope for #331.
 | `shared/grep-pattern.ts` | `tests/unit/agent-core/harness-kernel.test.ts` |
 | `shared/guards.ts` | none |
 | `shared/line-diff.ts` | `tests/unit/electron/issue-60-main-loop.test.ts` |
-| `shared/plan-task.ts` | none |
+| `shared/plan-task.ts` | `tests/unit/agent-core/plan-slash.test.ts` |
 | `shared/preferences.ts` | `tests/unit/shared/preferences.test.ts` |
 | `shared/session-retention-lock.ts` | `tests/unit/electron/session-fork-retention.test.ts` |
 | `shared/terminal-control.ts` | none |
