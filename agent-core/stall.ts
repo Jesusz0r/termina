@@ -99,6 +99,19 @@ export function emptyFailureLoopTracker(): FailureLoopTracker {
   return { key: null, repeats: 0 };
 }
 
+/** Schema and call-shape rejections. The payload may change; the rejection does not. */
+function contractRejection(text: string): string | null {
+  const line = text.trim();
+  const invalid = line.match(/^error: invalid tool arguments: (.+)\. Use the declared tool schema; nothing was executed\.$/);
+  if (invalid) return `schema:${invalid[1]!}`;
+  if (line === "error: glob only supports * ** ?") return "glob-syntax";
+  if (line === "error: offset applies to a single path; omit it with paths" ||
+      line === "error: start_line/end_line apply to a single path; omit them with paths") {
+    return "paths-exclusive";
+  }
+  return null;
+}
+
 function stallFailureTarget(name: string, input: unknown): string {
   if (input && typeof input === "object" && !Array.isArray(input) && (name === "edit" || name === "write_file")) {
     // Changing a guessed snippet or body is not a new target after a failure.
@@ -136,10 +149,14 @@ function stallOutcomeKind(text: string, isError: boolean): "error" | "empty" | n
  * kind. Null for productive turns so only stuck error/empty loops accumulate.
  */
 export function stallFailureKey(call: { name: string; input: unknown; result: unknown; isError?: boolean }): string | null {
+  const text = stallResultText(call.result);
+  // A successful read of this source must not count as a schema rejection.
+  const rejected = call.isError === true ? contractRejection(text) : null;
+  if (rejected) return `${call.name}|${rejected}|error`;
   const target = stallFailureTarget(call.name, call.input);
-  const kind = stallOutcomeKind(stallResultText(call.result), call.isError === true);
+  const kind = stallOutcomeKind(text, call.isError === true);
   if (!kind) return null;
-  const prefix = stallResultText(call.result).trim().split("\n")[0]?.slice(0, 80).toLowerCase().replace(/\d+/g, "#") ?? "";
+  const prefix = text.trim().split("\n")[0]?.slice(0, 80).toLowerCase().replace(/\d+/g, "#") ?? "";
   return `${call.name}|${target}|${kind}|${prefix}`;
 }
 
@@ -213,6 +230,11 @@ function recoveryGuidance(calls: readonly ToolTurnCall[]): string {
     "Tool loop detected: repeated calls are not making progress. Recover autonomously; do not repeat the failing approach. ";
   const suffix =
     " Continue the original task after recovery. If recovery is not possible, explain the concrete blocker instead of retrying.";
+  if (calls.some((call) => call.isError === true && contractRejection(stallResultText(call.result)))) {
+    return prefix +
+      "The tool rejected the call shape. Use only the declared arguments. Do not retry the rejected flag, brace expansion, or a line range on a paths batch." +
+      suffix;
+  }
   if (calls.some((call) => call.name === "edit" && call.isError)) {
     return prefix +
       "Use read_file on the failed path before another edit. Copy a small, unique old_text from the current file; preserve its whitespace. Do not guess another snippet or overwrite " +

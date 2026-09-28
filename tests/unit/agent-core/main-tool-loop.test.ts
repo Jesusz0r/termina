@@ -223,6 +223,20 @@ describe("real tool loop regressions", () => {
     });
   });
 
+  it.each([
+    '{ name: "bash", input: { command: "echo " + turn, timeout: 5 } }',
+    '{ name: "glob", input: { pattern: "{a,b}" + turn } }',
+  ])("stops real contract rejections despite unrelated input changes: %s", async (call) => {
+    await scenario(`return [${call}];`, (result) => {
+      expect(result.requests, result.output).toHaveLength(6);
+      expect(JSON.stringify(result.requests[3])).toContain("Use only the declared arguments");
+      expect(toolResults(result.messages)).toHaveLength(6);
+      expect(toolResults(result.messages).every((row) => row.is_error === true)).toBe(true);
+      expect(result.events.find((row) => row.t === "agent_settled")?.error).toContain("stalled");
+      expectPaired(result.messages);
+    });
+  });
+
   it("warns in model-visible history before stopping identical reads with fresh IDs", async () => {
     await scenario('return [{ name: "read_file", input: { path: "file.txt" } }];', (result) => {
       expect(result.requests, result.output).toHaveLength(6);

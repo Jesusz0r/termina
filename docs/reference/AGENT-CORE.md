@@ -311,9 +311,13 @@ footprint, not these numbers.
   to eight turns using a bounded 24-turn hash window. Three repetitions produce
   model-visible recovery guidance (failed edits: re-read and copy a snippet;
   empty searches: broaden scope; identical successful reads: write_file/edit
-  instead of reading again); three more repetitions of that same loop
-  stop the run. Changed observations allow recovery; re-reading unchanged text
-  and oscillating edits do not count as progress.
+  instead of reading again; a rejected call shape: use the declared arguments);
+  three more repetitions of that same loop stop the run. A schema or call-shape
+  rejection is the same failure even when the rest of the input changes.
+  Changed observations break exact-repeat and cycle matches; re-reading
+  unchanged text and oscillating edits do not count as progress. Successful
+  calls mixed with repeated failures do not reset the normalized-failure
+  tracker. That mixed-result policy is unchanged.
 - Every admitted client call gets one paired result, including calls refused
   for duplication or cancellation. Duplicate call IDs fail
   admission. Recovery is appended after results, or nested inside a result when

@@ -23,6 +23,69 @@ describe("stall detector", () => {
     expect(trackStallTurn(emptyStallTracker(), null)).toEqual({ fingerprint: null, repeats: 0 });
   });
 
+  it("does not treat a successful read of a rejection message as a schema failure", () => {
+    const quoted = {
+      name: "read_file",
+      input: { path: "stall.ts" },
+      result: "error: invalid tool arguments: bash.timeout is not a supported argument. Use the declared tool schema; nothing was executed.",
+      isError: false,
+    };
+    expect(stallFailureKey(quoted)).toBeNull();
+  });
+
+  it("stops a repeated rejected argument even when the rest of the input changes", () => {
+    const rejected = (command: string) => ({
+      name: "bash",
+      input: { command, timeout: 5 },
+      result: "error: invalid tool arguments: bash.timeout is not a supported argument. Use the declared tool schema; nothing was executed.",
+      isError: true,
+    });
+    let tracker = emptyToolLoopTracker();
+    for (let turn = 1; turn <= STALL_FAILURE_TURNS * 2; turn++) {
+      const step = trackToolLoopTurn(tracker, [rejected(`echo ${turn}`)]);
+      tracker = step.tracker;
+      expect(step.stalled).toBe(turn === STALL_FAILURE_TURNS * 2);
+      if (turn === STALL_FAILURE_TURNS) expect(step.recovery).toMatch(/declared arguments/);
+      else expect(step.recovery).toBeNull();
+    }
+  });
+
+  it.each([
+    "error: ENOENT: cannot open 'glob only supports.txt'",
+    "error: operation failed: ranges apply to a single path",
+    "error: diagnostic quoted invalid tool arguments: bash.timeout is not a supported argument",
+  ])("keeps runtime errors target-specific: %s", (result) => {
+    const call = (path: string) => ({ name: "read_file", input: { path }, result, isError: true });
+    expect(stallFailureKey(call("a.txt"))).not.toBe(stallFailureKey(call("b.txt")));
+  });
+
+  it("distinguishes changed invalid arguments and clears their escalation", () => {
+    const rejected = (flag: string, path: string) => ({
+      name: "read_file", input: { path, [flag]: true }, isError: true,
+      result: `error: invalid tool arguments: read_file.${flag} is not a supported argument. Use the declared tool schema; nothing was executed.`,
+    });
+    expect(stallFailureKey(rejected("offsets", "a"))).not.toBe(stallFailureKey(rejected("ranges", "a")));
+    let tracker = emptyToolLoopTracker();
+    for (let i = 0; i < 3; i++) tracker = trackToolLoopTurn(tracker, [rejected("offsets", `${i}`)]).tracker;
+    const changed = trackToolLoopTurn(tracker, [rejected("ranges", "b")]);
+    expect(changed.tracker.recoveryOffered).toBe(false);
+    expect(changed.recovery).toBeNull();
+    expect(changed.stalled).toBe(false);
+  });
+
+  it.each(["glob", "grep"])("recognizes real %s syntax rejection across changed patterns", (name) => {
+    let tracker = emptyToolLoopTracker();
+    for (let turn = 1; turn <= 6; turn++) {
+      const step = trackToolLoopTurn(tracker, [{
+        name, input: { pattern: `{a,b}${turn}` }, isError: true,
+        result: "error: glob only supports * ** ?",
+      }]);
+      tracker = step.tracker;
+      expect(step.recovery !== null).toBe(turn === 3);
+      expect(step.stalled).toBe(turn === 6);
+    }
+  });
+
   it("trips after STALL_TURNS identical tool turns", () => {
     let tracker = emptyStallTracker();
     const print = stallTurnFingerprint([bashCall("git status -sb", "M migrate.ts")])!;
