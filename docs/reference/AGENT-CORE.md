@@ -329,7 +329,8 @@ footprint, not these numbers.
   main agent.
 
 Regression coverage: `stall-tracker.test.ts`, `tool-dispatch.test.ts`,
-`main-tool-loop.test.ts`, `provider-tool-args.test.ts`, and
+`main-tool-loop.test.ts`, `main-steering.test.ts`, `plan-slash.test.ts`,
+`provider-tool-args.test.ts`, and
 `tests/unit/electron/subagents-host.test.ts`. Main-loop tests use real local
 execution with mocked provider streams and isolated projects/HOME/session roots.
 These are execution guarantees, not a claim that a model will never propose

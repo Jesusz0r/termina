@@ -31,7 +31,7 @@ async function steeringScenario(
   mode: "stream" | "tool" | "final" | "children" | "server",
   lines: string[],
   check: (result: { project: string; messages: Row[]; requests: Row[]; events: Row[]; output: string }) => void,
-  options: { attachImage?: boolean; expectedRuns?: number; beforePreflight?: boolean; failedImage?: boolean; failQueuedAdmission?: boolean; draftCase?: "typed" | "overflow"; failedServer?: boolean } = {},
+  options: { initialLine?: string; attachImage?: boolean; expectedRuns?: number; beforePreflight?: boolean; failedImage?: boolean; failQueuedAdmission?: boolean; draftCase?: "typed" | "overflow"; failedServer?: boolean } = {},
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "termina-steering-"));
   const project = join(root, "project"), home = join(root, "home"), events = join(root, "events");
@@ -160,7 +160,7 @@ async function steeringScenario(
   try {
     owned = new OwnedProcessTree(child.pid!);
     await waitFor(() => rows(sidecarFile).some(row => row.t === "session_ready"));
-    submitInput("start work\n");
+    submitInput((options.initialLine ?? "start work") + "\n");
     await waitFor(() => {
       if (options.beforePreflight) return rows(sidecarFile).some(row => row.t === "preflight_request");
       if (mode === "tool") return existsSync(join(project, "tool-started"));
@@ -176,7 +176,7 @@ async function steeringScenario(
     }
     const blockedImages = options.failedImage ? Array.from({ length: 99 }, (_, i) => join(events, "core-steering", "current", `session-img-${i + 1}.png`)) : [];
     for (const file of blockedImages) writeFileSync(file, "occupied");
-    submitInput(lines.join("\n") + "\n");
+    if (lines.length > 0) submitInput(lines.join("\n") + "\n");
     await waitFor(() => rows(sidecarFile).filter(row => row.t === "steer_input").length >= Math.min(lines.length, 16));
     allowPreflight = true;
     if (mode === "server" && !options.failedServer) {
@@ -329,6 +329,25 @@ describe("interactive conversation steering", () => {
     });
   });
 
+  it("publishes prose from an immediate /plan turn without detecting a task list", async () => {
+    await steeringScenario("final", [], ({ requests, messages, events }) => {
+      expectOneRun(events);
+      expect(requests).toHaveLength(1);
+      expect(JSON.stringify(requests[0].input)).toContain("Write a Plan Board list. Do not implement.");
+      expect(JSON.stringify(requests[0].input)).toContain("clarify scope");
+      expect(JSON.stringify(messages)).not.toContain("/plan clarify scope");
+      expect(events.filter(row => row.t === "plan").map(row => row.text)).toEqual(["finished"]);
+    }, { initialLine: "/plan clarify scope" });
+  });
+
+  it("does not publish ordinary assistant replies as plan events", async () => {
+    await steeringScenario("final", [], ({ requests, events }) => {
+      expectOneRun(events);
+      expect(requests).toHaveLength(1);
+      expect(events.filter(row => row.t === "plan")).toEqual([]);
+    });
+  });
+
   it("keeps queued slash-command expansion and does not let later text jump ahead", async () => {
     await steeringScenario("final", ["/plan revised approach", "include tests"], ({ requests, messages, events }) => {
       expect(events.filter(row => row.t === "agent_start")).toHaveLength(2);
@@ -338,8 +357,9 @@ describe("interactive conversation steering", () => {
       expect(request).toContain("revised approach");
       expect(request.indexOf("revised approach")).toBeLessThan(request.indexOf("include tests"));
       expect(JSON.stringify(messages)).not.toContain("/plan revised approach");
-      expect(events.some(row => row.t === "plan")).toBe(true);
+      expect(events.filter(row => row.t === "plan").map(row => row.text)).toEqual(["finished"]);
       const secondStart = events.map(row => row.t).lastIndexOf("agent_start");
+      expect(events.slice(0, secondStart).some(row => row.t === "plan")).toBe(false);
       expect(events.slice(secondStart + 1).some(row => row.t === "steer_input")).toBe(true);
     }, { expectedRuns: 2 });
   });
@@ -387,10 +407,16 @@ describe("interactive conversation steering", () => {
   });
 
   it.each(["typed", "overflow"] as const)("preserves the %s draft when queued admission fails", async (draftCase) => {
-    await steeringScenario("final", ["/plan queued plan"], ({ requests }) => {
+    await steeringScenario("final", ["/plan queued plan"], ({ requests, messages, events }) => {
       expect(requests).toHaveLength(2);
       expect(JSON.stringify(requests[1])).toContain("queued plan");
       expect(JSON.stringify(requests[1])).not.toContain("new unsubmitted draft");
+      const planPrompts = messages.filter(message => message.role === "user"
+        && JSON.stringify(message.content).includes("Write a Plan Board list. Do not implement."));
+      expect(planPrompts).toHaveLength(1);
+      expect(JSON.stringify(planPrompts[0])).not.toContain("/plan queued plan");
+      expect(events.filter(row => row.t === "preflight_request")).toHaveLength(3);
+      expect(events.filter(row => row.t === "plan").map(row => row.text)).toEqual(["finished"]);
     }, { failQueuedAdmission: true, draftCase, expectedRuns: 2 });
   });
 
