@@ -333,16 +333,18 @@ footprint, not these numbers.
   Lock-wait expiration rejects the spawn instead of killing a child the parent
   already counted on. Cancellation aborts pending admission, and launch
   rechecks the run and parent after lock waits.
-- Subagents are a fan-out: a turn that would start the only live child is
-  refused. Issue at least two `spawn_subagent` calls in that turn, or add a
-  sibling while another run is already active. A single subtask stays on the
-  main agent.
 
 ### Delegation and waiting policy
 
 These defaults are policy choices, separate from the admission and cancellation
 safety guarantees above:
 
+- One subagent is a normal delegation. More children are useful only for
+  independent work; there is no minimum fan-out or rollback when only one
+  sibling is admitted. The four-run cap and one-level depth limit still apply.
+- Child assistant comments can reach the parent while the child works. Tool-name
+  summaries and intermediate tool traces are not injected into the parent.
+  The final result is delivered when the run settles.
 - Retention-lock waiters allow up to 12 seconds for a live owner and 5 seconds
   for an unreadable lock. The parent's subagent-admission budget is 30 seconds
   (the live-owner budget plus 18 seconds). These are latency budgets, not

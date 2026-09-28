@@ -36,8 +36,6 @@ import {
   type EffortLevel,
 } from "./models/capabilities.ts";
 
-/** A lone child is overhead: fan out at least two, or do the work on the parent. */
-export const MIN_SUBAGENT_RUNS = 2;
 /** Anthropic rule adopted by the plan: at most 4 parallel runs. The model cannot raise it. */
 export const MAX_SUBAGENT_RUNS = 4;
 /** Children never receive the spawn tool: max spawn depth 1. */
@@ -146,7 +144,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
   {
     name: "spawn_subagent",
     description:
-      "Spawn a background subagent for one independent subtask. Never spawn a single child: issue at least two spawn_subagent calls in the same turn for parallel work; a lone subtask belongs on this agent. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id only after the host admits the child; a rejection is an error, not a run id. At most 4 runs at once; this tool cannot raise that cap. This run stays open while children are active. Each finished child turn arrives here as a user message; use message_subagent to redirect a live run. When the child settles, the result is delivered into this session. Summarize that result and never poll the finished run. Siblings never share a subtask; pass paths to reserve them. Writes to a sibling claim are refused. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up.",
+      "Spawn a background subagent for one independent subtask. One child is enough; spawn more in the same turn only when the work is actually parallel. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id only after the host admits the child; a rejection is an error, not a run id. At most 4 runs at once; this tool cannot raise that cap. This run stays open while children are active. Use message_subagent to redirect a live run. Intermediate tool traces are not injected. When the child settles, the result is delivered into this session. Summarize that result and never poll the finished run. Siblings never share a subtask; pass paths to reserve them. Writes to a sibling claim are refused. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -191,22 +189,6 @@ export const WORLDLINE_CANDIDATE_ENV = "TERMINA_WORLDLINE_CANDIDATE";
 /** True when this core runs inside a sandboxed worldline candidate. */
 export function isWorldlineCandidateEnv(env: NodeJS.ProcessEnv = process.env): boolean {
   return env[WORLDLINE_CANDIDATE_ENV] === "1";
-}
-
-/** Refuse a turn that would start the only live child. `batchSpawnCount` is
- *  distinct executable spawn_subagent calls in this assistant message (invalid
- *  args and duplicate-action entries do not count). Adding a sibling while
- *  another run is already active is allowed. */
-export function admitSubagentFanout(
-  activeCount: number,
-  batchSpawnCount: number,
-): { ok: true } | { ok: false; error: string } {
-  if (batchSpawnCount <= 0) return { ok: true };
-  if (activeCount + batchSpawnCount >= MIN_SUBAGENT_RUNS) return { ok: true };
-  return {
-    ok: false,
-    error: `spawn at least ${MIN_SUBAGENT_RUNS} subagents in the same turn for parallel work; a single subtask belongs on the main agent`,
-  };
 }
 
 /** Children never receive `spawn_subagent` (max depth 1); main.ts spreads this into TOOLS. */
@@ -768,14 +750,6 @@ export function removeSubagentMarker(eventsDir: string, name: string | null): vo
   } catch {
     /* Already gone. */
   }
-}
-
-/**
- * A turn that tried to fan out must not leave a single new child when nothing
- * was already running. Adding one sibling to an existing run is allowed.
- */
-export function loneSubagentRollback(activeBefore: number, attempted: number, admitted: number): boolean {
-  return activeBefore === 0 && attempted >= MIN_SUBAGENT_RUNS && admitted === 1;
 }
 
 // ---- Phase 2 slice 2a: child result framing (engine stdout → host) ----

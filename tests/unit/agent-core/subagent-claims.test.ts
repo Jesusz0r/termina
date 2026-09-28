@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   commitSubagentAdmission,
-  loneSubagentRollback,
   readSubagentDecisionFile,
   rewindSubagentInboxMessage,
   appendSubagentInboxMessage,
@@ -76,12 +75,5 @@ describe("subagent claim enforcement", () => {
       commitSubagentAdmission(dir, "term-7", "bg-1", 99, { admitted: false, error: "this boot" }),
     );
     expect(replacement).toEqual({ ok: true, value: { admitted: false, error: "this boot" } });
-  });
-
-  it("rolls back only a fan-out that collapsed to one new child", () => {
-    expect(loneSubagentRollback(0, 2, 1)).toBe(true);
-    expect(loneSubagentRollback(1, 2, 1)).toBe(false);
-    expect(loneSubagentRollback(0, 2, 2)).toBe(false);
-    expect(loneSubagentRollback(0, 1, 1)).toBe(false);
   });
 });

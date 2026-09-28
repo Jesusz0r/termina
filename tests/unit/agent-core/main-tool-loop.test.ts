@@ -328,14 +328,14 @@ describe("real tool loop regressions", () => {
     });
   });
 
-  it("refuses a lone spawn_subagent and admits a same-turn pair", async () => {
+  it("admits a lone spawn_subagent and a same-turn pair", async () => {
     await scenario(`if (turn === 1) return [{ name: "spawn_subagent", input: { task: "solo job" } }];
       return [];`, (result) => {
       const results = toolResults(result.messages);
       expect(results).toHaveLength(1);
-      expect(results[0]?.is_error).toBe(true);
-      expect(results[0]?.content).toMatch(/at least 2/);
-      expect(result.events.some((row) => row.t === "subagent_spawn")).toBe(false);
+      expect(results[0]?.is_error).not.toBe(true);
+      expect(JSON.parse(results[0]!.content).runId).toBe("bg-1");
+      expect(result.events.filter((row) => row.t === "subagent_spawn")).toHaveLength(1);
       expectPaired(result.messages);
     });
     await scenario(`if (turn === 1) return [

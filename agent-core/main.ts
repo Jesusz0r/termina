@@ -248,7 +248,6 @@ import {
   isApprovalAnswer,
   isLiveSubagentRun,
   isWorldlineCandidateEnv,
-  loneSubagentRollback,
   parseSubagentApprovalName,
   parseSubagentTaskFile,
   readSubagentApprovalRequest,
@@ -259,7 +258,6 @@ import {
   reconcileSubagentRuns,
   resolveSubagentPermissionMode,
   SUBAGENT_APPROVAL_POLL_MS,
-  admitSubagentFanout,
   subagentApprovalTimeoutMs,
   subagentBashSandbox,
   subagentCancelFileName,
@@ -1479,39 +1477,6 @@ async function waitForSubagentDecision(
   return locked.value;
 }
 
-async function rollbackLoneSubagentFanout(
-  uses: Array<{ name: string }>,
-  outcomes: Array<{ isError: boolean; result: { content?: string } }>,
-  activeBefore: number,
-  attempted: number,
-): Promise<void> {
-  const admitted = outcomes.filter((outcome, index) => uses[index]?.name === "spawn_subagent" && !outcome.isError);
-  if (!loneSubagentRollback(activeBefore, attempted, admitted.length)) return;
-  const outcome = admitted[0];
-  if (!outcome) return;
-  let runId = "";
-  try {
-    const parsed = JSON.parse(String(outcome.result.content ?? "")) as { runId?: string };
-    runId = typeof parsed.runId === "string" ? parsed.runId : "";
-  } catch {
-    runId = "";
-  }
-  if (!runId) return;
-  cancelSubagentRun(runId, "fan-out collapsed to one child; the run was not kept");
-  const deadline = Date.now() + SUBAGENT_ADMISSION_TIMEOUT_MS;
-  while (eventsDir && terminalId && Date.now() < deadline) {
-    const result = readSubagentResultFile(eventsDir, terminalId, runId);
-    if (result.status === "ok") {
-      subagentRegistry.markResultDelivered(runId);
-      consumeSubagentResultFile(eventsDir, terminalId, runId);
-      break;
-    }
-    await sleep(50);
-  }
-  outcome.isError = true;
-  outcome.result.content = "error: spawn at least 2 subagents; the other spawn in this turn failed, so this child was not kept";
-}
-
 function cancelSubagentRun(runId: string, reason: string): void {
   if (!eventsDir || !terminalId) return;
   writeSubagentMarker(eventsDir, subagentCancelFileName(terminalId, runId));
@@ -1653,12 +1618,11 @@ function drainSubagentInbox(): boolean {
 /** Child → parent after a finished model turn. Same events-dir file the parent drains live. */
 const subagentOutboxSeen = new Map<string, number>();
 
-function reportSubagentTurn(text: string, tools: string[]): void {
+/** A child comment the parent can steer on. Tool names are not a comment. */
+function reportSubagentTurn(text: string): void {
   const run = activeSubagent;
   if (!run || !eventsDir) return;
-  const parts = [text.trim()];
-  if (tools.length > 0) parts.push(`Tools: ${tools.join(", ")}`);
-  let body = parts.filter(Boolean).join("\n");
+  let body = text.trim();
   if (!body) return;
   if (body.length > MAX_SUBAGENT_MESSAGE_CHARS) body = body.slice(0, MAX_SUBAGENT_MESSAGE_CHARS);
   appendSubagentOutboxMessage(eventsDir, run.task.parentTerminalId, run.task.runId, body);
@@ -4599,7 +4563,7 @@ async function runPrompt(
           resumePaused = true;
           continue;
         }
-        if (!interrupted) reportSubagentTurn(assistantText, []);
+        if (!interrupted) reportSubagentTurn(assistantText);
         if (!interrupted && !pendingServerTools && hasQueuedSteering()) continue;
         // message_subagent already reported delivery. A note that landed
         // during this generation is still unread; settling here would drop it.
@@ -4613,13 +4577,6 @@ async function runPrompt(
       const pendingOutcomes = new Map<number, Promise<ToolOutcome>>();
       const inputErrors = uses.map((use) => toolInputError(use, clientTools));
       const waves = toolExecutionWaves(uses);
-      const subagentActiveBefore = subagentRegistry.activeRuns().length;
-      const spawnAttempts = waves.flat().filter((entry) =>
-        uses[entry.index]!.name === "spawn_subagent"
-        && !inputErrors[entry.index]
-        && entry.duplicateOf === undefined
-      ).length;
-      const spawnFanout = admitSubagentFanout(subagentActiveBefore, spawnAttempts);
       try {
       for (const wave of waves) {
         if (interrupted || hasQueuedSteering()) break;
@@ -4644,9 +4601,6 @@ async function runPrompt(
               if (!entry.reuseResult) return done(use, "error: duplicate action in the same batch was not executed again. Inspect the first result before deciding whether another action is needed.", true);
               const original = await pendingOutcomes.get(entry.duplicateOf)!;
               return { ...original, result: { ...original.result, tool_use_id: use.id } };
-            }
-            if (use.name === "spawn_subagent" && !spawnFanout.ok) {
-              return done(use, `error: ${spawnFanout.error}`, true);
             }
             return executeTool(use, isTruncatedStopReason(result.stopReason));
           })();
@@ -4690,7 +4644,6 @@ async function runPrompt(
       } finally {
         surface?.cancelPendingTools();
       }
-      if (!interrupted) await rollbackLoneSubagentFanout(uses, outcomes, subagentActiveBefore, spawnAttempts);
       // Pair all calls before appending steering. Tools in a completed wave
       // keep their real results; later waves have not executed.
       const answered = outcomes.length;
@@ -4746,7 +4699,7 @@ async function runPrompt(
         out(`\n(${taskFailure})\n`);
         break;
       }
-      if (!interrupted) reportSubagentTurn(assistantText, uses.map((use) => use.name));
+      if (!interrupted) reportSubagentTurn(assistantText);
       out("\n");
     }
   } catch (err) {

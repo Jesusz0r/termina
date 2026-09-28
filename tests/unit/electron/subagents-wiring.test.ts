@@ -41,7 +41,7 @@ describe("Subagent Wiring Invariants", () => {
     assert.match(agentMain, /function syncSubagentChrome/);
     assert.match(agentMain, /surface\?\.setSubagentCount\(subagentRegistry\.activeRuns\(\)\.length\)/);
     assert.match(agentMain, /syncSubagentChrome\(\);\s*pollSubagentApprovals\(\)/);
-    assert.match(agentMain, /admitSubagentFanout\(/);
+    assert.doesNotMatch(agentMain, /admitSubagentFanout\(/);
     assert.match(host, /this\.sinks\.admitSession\(/);
   });
 
@@ -88,8 +88,8 @@ describe("Subagent Wiring Invariants", () => {
 
   it("depth stays 1 with no child-to-child channels", () => {
     assert.match(kernel, /MAX_SUBAGENT_DEPTH = 1/);
-    assert.match(kernel, /MIN_SUBAGENT_RUNS = 2/);
-    assert.match(kernel, /function admitSubagentFanout/);
+    assert.doesNotMatch(kernel, /MIN_SUBAGENT_RUNS/);
+    assert.doesNotMatch(kernel, /function admitSubagentFanout/);
     assert.match(kernel, /visibleSubagentTools/);
   });
 
