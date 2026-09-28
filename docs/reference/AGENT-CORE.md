@@ -445,10 +445,18 @@ Shell terminals do not attach image bytes; a drop inserts
 POSIX-quoted absolute paths through xterm paste and does not submit them.
 
 The TUI transcript keeps assistant, thinking, tool, and error entries.
-Provider-visible thinking is shown by default. `CmdOrCtrl+Shift+H` toggles
-it. Encrypted reasoning is never shown. Tools render one status box.
-Resume paints stored messages into that transcript. Scroll position and
-pending tool widgets are not restored from session JSONL.
+Provider-visible thinking is enabled by default. `CmdOrCtrl+Shift+H` toggles
+its visibility; encrypted reasoning is never shown. Thinking starts expanded
+while streaming and collapses when finished unless explicitly opened.
+Click a thinking or tool header to expand/collapse that entry without
+submitting or changing the composer. Tools start collapsed; expanded results
+include bounded output, with Before/After snippets for successful edits and
+written content for successful file writes. These are tool-input previews,
+not reconstructed file diffs. Empty Enter toggles a visible entry, except
+when an idle retained queue needs retry. Drag-selection and copy still work;
+file and web links keep their Cmd/Ctrl-click behavior.
+Resume paints stored messages into that transcript. Scroll position, fold
+choices, and pending tool widgets are not restored from session JSONL.
 
 MCP is a stdio client, not a plugin surface. Servers come from the user-owned
 `~/.termina/agent/mcp.json`. The kernel does not execute project-owned MCP

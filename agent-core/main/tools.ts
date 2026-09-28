@@ -226,9 +226,21 @@ export function displayToolOutput(content: string): string {
   return `${capDisplay(content, TOOL_DISPLAY_BYTES)}\n${TOOL_TRUNCATION_HINT}`;
 }
 
-export function toolTranscriptOutput(outcome: ToolOutcome): string {
+export function toolTranscriptOutput(use: ToolUse, outcome: ToolOutcome): string {
   const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
-  return displayToolOutput(content);
+  const output = displayToolOutput(content);
+  if (outcome.isError || outcome.executed === false) return output;
+  // Display the applied input, not a reconstructed file diff. Each side is
+  // bounded independently so a large replacement cannot hide the outcome.
+  const preview = (text: string): string => {
+    const shown = capDisplay(text, TOOL_DISPLAY_BYTES);
+    return shown === text ? text : `…[preview truncated]\n${shown}`;
+  };
+  if (use.name === "edit") {
+    return `${output}\n\nBefore:\n${preview(use.input.old_text ?? "")}\n\nAfter:\n${preview(use.input.new_text ?? "")}`;
+  }
+  if (use.name === "write_file") return `${output}\n\nWritten content:\n${preview(use.input.content ?? "")}`;
+  return output;
 }
 
 export type PermissionMode = "always" | "dangerous" | "ask";

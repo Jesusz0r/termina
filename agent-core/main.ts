@@ -4664,7 +4664,7 @@ async function runPrompt(
               surface?.finishTool(
                 handles[ci]!,
                 outcome.isError ? "error" : "success",
-                toolTranscriptOutput(outcome),
+                toolTranscriptOutput(chunk[ci]!, outcome),
               );
             } else {
               const follow = formatToolFollowup(chunk[ci]!, outcome);

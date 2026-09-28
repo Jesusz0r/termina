@@ -1,4 +1,10 @@
-/** Private thinking-visibility controls for core terminals. */
+/** Private transcript controls for core terminals. */
+import { isTerminalTranscriptEntryId } from "./terminal-link.ts";
+
+export function toggleTranscriptEntryControl(entryId: number): string {
+  if (!isTerminalTranscriptEntryId(entryId)) throw new RangeError("Invalid transcript entry id");
+  return `\x1b[?9002;${entryId}h`;
+}
 
 export const SHOW_THINKING_CSI = "\x1b[?9001h";
 export const HIDE_THINKING_CSI = "\x1b[?9001l";

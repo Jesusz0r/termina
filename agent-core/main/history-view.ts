@@ -3,7 +3,7 @@
  * plain stdout). Pure over its inputs plus the passed surface.
  */
 import type { AgentTui, TranscriptHandle } from "../tui.ts";
-import { displayToolOutput, formatToolAnnounce, toolTranscriptDetail, type ToolUse } from "./tools.ts";
+import { displayToolOutput, formatToolAnnounce, toolTranscriptDetail, toolTranscriptOutput, type ToolUse } from "./tools.ts";
 
 export type ContentBlock = Record<string, unknown> & {
   type: string;
@@ -33,10 +33,6 @@ function blockBodyText(value: unknown): string {
   return parts.join("\n");
 }
 
-function replayToolOutput(text: string): string {
-  return displayToolOutput(text);
-}
-
 function replayToolState(block: ContentBlock, text: string): "success" | "error" {
   if (block.is_error === true || block.isError === true) return "error";
   if (text.startsWith("error:")) return "error";
@@ -60,7 +56,7 @@ export function renderHistoryTranscript(
   messages: Array<{ role: "user" | "assistant"; content: string | ContentBlock[] }>,
   tui: AgentTui | null,
 ): void {
-  const pending: Array<{ id: string; handle: TranscriptHandle | null }> = [];
+  const pending: Array<{ use: ToolUse; handle: TranscriptHandle | null }> = [];
 
   const writeFollowup = (state: "success" | "error" | "cancelled", output?: string): void => {
     const label = state === "error" ? "failed" : state === "cancelled" ? "cancelled" : "done";
@@ -73,24 +69,28 @@ export function renderHistoryTranscript(
   };
 
   const finish = (id: string, state: "success" | "error" | "cancelled", output?: string): void => {
-    let idx = pending.findIndex((item) => item.id === id);
+    let idx = pending.findIndex((item) => item.use.id === id);
     if (idx < 0 && !id) idx = 0;
     if (idx < 0 || idx >= pending.length) {
+      const shown = output === undefined ? undefined : displayToolOutput(output);
       if (tui) {
         const handle = tui.startTool("tool", "");
-        tui.finishTool(handle, state, output);
-      } else writeFollowup(state, output);
+        tui.finishTool(handle, state, shown);
+      } else writeFollowup(state, shown);
       return;
     }
     const rec = pending.splice(idx, 1)[0]!;
-    finishHandle(rec.handle, state, output);
+    const shown = output === undefined ? undefined : toolTranscriptOutput(rec.use, {
+      result: { content: output }, isError: state !== "success",
+    });
+    finishHandle(rec.handle, state, shown);
   };
 
-  const start = (id: string, name: string, detail: string, announce: string): void => {
-    if (tui) pending.push({ id, handle: tui.startTool(name, detail) });
+  const start = (use: ToolUse): void => {
+    if (tui) pending.push({ use, handle: tui.startTool(use.name, toolTranscriptDetail(use)) });
     else {
-      process.stdout.write(`\n${announce}\n`);
-      pending.push({ id, handle: null });
+      process.stdout.write(`\n${formatToolAnnounce(use)}\n`);
+      pending.push({ use, handle: null });
     }
   };
 
@@ -132,12 +132,12 @@ export function renderHistoryTranscript(
       if (block.type === "tool_use" || block.type === "server_tool_use") {
         const name = String(block.name ?? (block.type === "server_tool_use" ? "web_search" : "tool"));
         const use: ToolUse = { id: String(block.id ?? ""), name, input: blockInput(block) };
-        start(use.id, name, toolTranscriptDetail(use), formatToolAnnounce(use));
+        start(use);
         continue;
       }
       if (block.type === "tool_result" || block.type === "web_search_tool_result") {
         const id = String(block.tool_use_id ?? block.toolUseId ?? "");
-        const text = replayToolOutput(blockBodyText(block.content));
+        const text = blockBodyText(block.content);
         const err =
           block.type === "web_search_tool_result" &&
           Boolean(block.content) &&

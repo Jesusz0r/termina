@@ -4,11 +4,13 @@
  * Owns the AgentTui input/render/event lifecycle. Split from
  * agent-core/tui.ts (issue #38).
  */
-import { EMPTY_STATE_TEXT, SLASH_COMMANDS, applyFileMention, cellWidth, completeFileMention, completeSlashLine, effortCommandRows, fileMentionAt, formatPickerRow, formatToolSummary, matchingSlashCommands, splitGraphemes, truncateMiddle, wrapText, type SlashCommand } from "../tui-text.ts";
+import { EMPTY_STATE_TEXT, SLASH_COMMANDS, applyFileMention, cellWidth, completeFileMention, completeSlashLine, effortCommandRows, fileMentionAt, formatPickerRow, matchingSlashCommands, splitGraphemes, truncateMiddle, wrapText, type SlashCommand } from "../tui-text.ts";
 import { normalizeCopiedTerminalText } from "../../shared/terminal-control.ts";
 import { INPUT_PREFIX, boxBorderRow, boxContentRow, clip, displayBudget, inputWrapWidth, layoutHeights, paintBoxContentRow, paintHighlightRow, paintRow, sourceTail, tailSpans, wrapInput, wrapSpans } from "./layout.ts";
-import { HANDLE_ERROR, MAX_CSI, MAX_HISTORY, MAX_TRANSCRIPT, MAX_TRANSCRIPT_ENTRIES, SPIN, TRANSCRIPT_TRIM_TARGET, TRUNCATION_MARKER, closeSanitize, entryChars, freshMarkdownBoundary, freshSanitizer, parseMarkdown, sanitizeText, toolStatusLabel, transcriptHandleBrand } from "./transcript.ts";
+import { HANDLE_ERROR, MAX_CSI, MAX_HISTORY, MAX_TRANSCRIPT, MAX_TRANSCRIPT_ENTRIES, SPIN, TRANSCRIPT_TRIM_TARGET, TRUNCATION_MARKER, closeSanitize, entryChars, freshMarkdownBoundary, freshSanitizer, parseMarkdown, sanitizeText, transcriptHandleBrand } from "./transcript.ts";
 import type { StyledSpan, ToolTranscriptState, TranscriptEntry, TranscriptHandle, TuiIO, TuiInput } from "./transcript.ts";
+import { isTranscriptExpanded, toolTranscriptSpans, transcriptFoldHeader } from "./folding.ts";
+import { isTerminalTranscriptEntryId } from "../../shared/terminal-link.ts";
 
 /** Composer draft bound: every keystroke re-scans the draft, so cap it. */
 const MAX_DRAFT_BYTES = 256 * 1024;
@@ -227,7 +229,10 @@ export class AgentTui {
     if (this.busy === busy) return;
     this.busy = busy;
     if (busy) this.startSpin();
-    else this.stopSpin();
+    else {
+      this.stopSpin();
+      this.closeStream();
+    }
     this.schedule();
   }
 
@@ -354,13 +359,17 @@ export class AgentTui {
       this.appendPlain(HANDLE_ERROR);
       return;
     }
-    const measure = !this.follow;
-    const cols = this.size().cols;
+    const { cols, rows } = this.size();
+    const anchor = this.follow ? null : this.topVisibleEntryId(
+      cols, this.composerLayout(cols, rows, this.matches().length).transcript, this.scroll,
+    );
+    // Output above the viewport does not change the rows hidden below it.
+    const measure = anchor !== null && entry.id >= anchor;
     const beforeRows = measure ? this.paintedRowCount(entry, cols) : 0;
     this.transcriptChars -= entryChars(entry);
     entry.toolState = state === "success" ? "success" : state === "cancelled" ? "cancelled" : "error";
     entry.settled = true;
-    entry.expanded = false;
+    entry.expanded ??= false;
     entry.text = closeSanitize(output ?? "", freshSanitizer());
     entry.revision += 1;
     this.resetMarkdown(entry);
@@ -389,8 +398,15 @@ export class AgentTui {
   private closeStream(): void {
     if (!this.activeStream) return;
     if (this.activeEntry) {
-      this.activeEntry.settled = true;
-      this.activeEntry.sanitizer = freshSanitizer();
+      const entry = this.activeEntry;
+      const measure = !this.follow && this.thinkingVisible && entry.kind === "thinking";
+      const cols = this.size().cols;
+      const beforeRows = measure ? this.paintedRowCount(entry, cols) : 0;
+      entry.settled = true;
+      entry.sanitizer = freshSanitizer();
+      entry.revision += 1;
+      entry.cache = null;
+      this.detachScroll(measure ? this.paintedRowCount(entry, cols) - beforeRows : 0);
     }
     this.activeStream = null;
     this.activeEntry = null;
@@ -398,7 +414,8 @@ export class AgentTui {
 
   private pushStream(kind: "assistant" | "thinking", text: string): void {
     if (!text) return;
-    if (!this.activeEntry || this.activeStream?.kind !== kind) {
+    const continuing = this.activeEntry !== null && this.activeStream?.kind === kind;
+    if (!continuing) {
       this.closeStream();
       const id = this.nextEntryId++;
       const entry: TranscriptEntry = {
@@ -423,7 +440,8 @@ export class AgentTui {
     const hiddenThinking = kind === "thinking" && !this.thinkingVisible;
     const measure = !this.follow && !hiddenThinking;
     const cols = this.size().cols;
-    const beforeRows = measure ? this.paintedRowCount(entry, cols) : 0;
+    // A new entry contributes all its rows, including its fold header.
+    const beforeRows = measure && continuing ? this.paintedRowCount(entry, cols) : 0;
     const next = sanitizeText(text, entry.sanitizer);
     entry.sanitizer = next.state;
     const appendAt = entry.text.length;
@@ -494,18 +512,6 @@ export class AgentTui {
   }
 
   private entrySpans(entry: TranscriptEntry): StyledSpan[] {
-    if (entry.kind === "tool") {
-      const status = toolStatusLabel(entry.toolState);
-      const title = formatToolSummary(entry.toolName || "", entry.toolDetail, status);
-      const spans: StyledSpan[] = [{ text: title, style: 4 }];
-      if (entry.text && (!entry.settled || entry.expanded)) {
-        spans.push({ text: `\n${entry.text}`, style: 0 });
-      }
-      return spans;
-    }
-    if (entry.kind !== "assistant" && entry.kind !== "thinking") {
-      return entry.text ? [{ text: entry.text, style: 0 }] : [];
-    }
     return this.entryTailSpans(entry, Number.MAX_SAFE_INTEGER).spans;
   }
 
@@ -576,7 +582,16 @@ export class AgentTui {
   }
 
   private entryTailSpans(entry: TranscriptEntry, maxChars: number): { spans: StyledSpan[]; complete: boolean } {
-    if (entry.kind === "tool") return { spans: this.entrySpans(entry), complete: true };
+    if (entry.kind === "tool") return { spans: toolTranscriptSpans(entry), complete: true };
+    if (entry.kind === "thinking" && !isTranscriptExpanded(entry)) {
+      return { spans: [transcriptFoldHeader(entry)], complete: true };
+    }
+    const body = this.entryBodyTailSpans(entry, maxChars);
+    if (entry.kind !== "thinking" || !body.complete) return body;
+    return { spans: [transcriptFoldHeader(entry), { text: "\n", style: 0 }, ...body.spans], complete: true };
+  }
+
+  private entryBodyTailSpans(entry: TranscriptEntry, maxChars: number): { spans: StyledSpan[]; complete: boolean } {
     if (entry.kind !== "assistant" && entry.kind !== "thinking") {
       const tail = sourceTail(entry.text, maxChars);
       return {
@@ -667,15 +682,24 @@ export class AgentTui {
     const rows: string[] = [];
     const painted: string[] = [];
     const ids: number[] = [];
+    const pieces: Array<{ id: number; rendered: ReturnType<AgentTui["renderedEntry"]> }> = [];
     for (let i = this.entries.length - 1; i >= 0 && stillNeed > 0; i--) {
       const entry = this.entries[i]!;
       if (!this.thinkingVisible && entry.kind === "thinking") continue;
       const rendered = this.renderedEntry(entry, cols, stillNeed);
-      rows.unshift(...rendered.rows);
-      painted.unshift(...rendered.painted);
-      for (let r = 0; r < rendered.rows.length; r++) ids.unshift(entry.id);
+      pieces.push({ id: entry.id, rendered });
       if (!rendered.complete) break;
       stillNeed -= rendered.rows.length;
+    }
+    // A clicked fold can expose a large result. Append once, rather than
+    // repeatedly shifting rows or spreading an unbounded argument list.
+    for (let i = pieces.length - 1; i >= 0; i--) {
+      const { id, rendered } = pieces[i]!;
+      for (let r = 0; r < rendered.rows.length; r++) {
+        rows.push(rendered.rows[r]!);
+        painted.push(rendered.painted[r]!);
+        ids.push(id);
+      }
     }
     const end = Math.max(0, rows.length - scroll);
     const start = Math.max(0, end - rowCount);
@@ -713,17 +737,12 @@ export class AgentTui {
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const entry = this.entries[i]!;
       if (!this.thinkingVisible && entry.kind === "thinking") continue;
+      const count = this.paintedRowCount(entry, cols);
       if (entry.id === id) {
-        const piece = this.renderedEntry(entry, cols, after + rowCount);
-        if (!piece.complete) {
-          this.scroll = after;
-          return;
-        }
-        this.scroll = Math.max(0, after + piece.rows.length - rowCount);
+        this.scroll = Math.max(0, after + count - rowCount);
         return;
       }
-      const newer = this.renderedEntry(entry, cols, 4096);
-      after += newer.complete ? newer.rows.length : 4096;
+      after += count;
     }
     this.scroll = 0;
   }
@@ -748,7 +767,11 @@ export class AgentTui {
     // the host terminal. Wheel still reaches applyCsi as SGR 64/65 when
     // the host forwards it.
     this.out.write("\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?7l");
-    this.onResize = () => this.render();
+    this.onResize = () => {
+      // Reflow can shorten the transcript below the current scroll offset.
+      if (!this.follow) this.scrollLines(0);
+      this.render();
+    };
     this.onData = (chunk) => {
       try {
         const text = typeof chunk === "string" ? chunk : this.decoder.decode(chunk, { stream: true });
@@ -918,33 +941,32 @@ export class AgentTui {
     };
   }
 
-  private visibleFoldableTools(): TranscriptEntry[] {
+  private visibleFoldableEntries(): TranscriptEntry[] {
     const { cols, rows } = this.size();
     const layout = this.composerLayout(cols, rows, this.matches().length);
-    const ids = this.visibleSlice(cols, layout.transcript, this.scroll).ids;
-    const tools: TranscriptEntry[] = [];
-    const seen = new Set<number>();
-    for (const id of ids) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const entry = this.entries.find((item) => item.id === id);
-      if (entry?.kind === "tool" && entry.settled && entry.text) tools.push(entry);
-    }
-    return tools;
+    const ids = new Set(this.visibleSlice(cols, layout.transcript, this.scroll).ids);
+    return this.entries.filter(entry => ids.has(entry.id) && entry.text
+      && (entry.kind === "thinking" || (entry.kind === "tool" && entry.settled)));
   }
 
-  /** Enter on an empty composer toggles the tool row in view (no new chrome). */
-  private toggleVisibleToolFold(): boolean {
-    const tools = this.visibleFoldableTools();
-    if (tools.length === 0) return false;
-    const entry = this.scroll > 0 ? tools[0]! : tools[tools.length - 1]!;
-    const measure = !this.follow;
-    const cols = this.size().cols;
-    const beforeRows = measure ? this.paintedRowCount(entry, cols) : 0;
-    entry.expanded = !entry.expanded;
+  /** Empty Enter is the keyboard equivalent; queued retry keeps precedence. */
+  private toggleVisibleFold(): boolean {
+    const entries = this.visibleFoldableEntries();
+    const entry = this.scroll > 0 ? entries[0] : entries[entries.length - 1];
+    return entry ? this.toggleEntryFold(entry.id) : false;
+  }
+
+  private toggleEntryFold(id: number): boolean {
+    const entry = this.entries.find(item => item.id === id);
+    if (!entry || (entry.kind !== "tool" && entry.kind !== "thinking")) return false;
+    if (entry.kind === "thinking" && !this.thinkingVisible) return false;
+    entry.expanded = !isTranscriptExpanded(entry);
     entry.revision += 1;
     entry.cache = null;
-    this.detachScroll(measure ? this.paintedRowCount(entry, cols) - beforeRows : 0);
+    const { cols, rows } = this.size();
+    const layout = this.composerLayout(cols, rows, this.matches().length);
+    this.scrollEntryToTop(id, cols, layout.transcript);
+    this.follow = this.scroll === 0;
     this.schedule();
     return true;
   }
@@ -1039,7 +1061,7 @@ export class AgentTui {
       }
     }
     // An idle queue needs empty Enter for retry after failed admission.
-    if (!line && (!this.queued || this.busy) && !wasChoice && !this.rawInput && this.toggleVisibleToolFold()) {
+    if (!line && (!this.queued || this.busy) && !wasChoice && !this.rawInput && this.toggleVisibleFold()) {
       return;
     }
     this.chars = [];
@@ -1112,8 +1134,11 @@ export class AgentTui {
         return;
       }
       if (this.csi.startsWith("?")) {
-        if (this.csi.length <= MAX_CSI && this.csi === "?9001" && (ch === "h" || ch === "l")) {
-          this.setThinkingVisible(ch === "h");
+        if (this.csi.length <= MAX_CSI && !this.paste) {
+          if (this.csi === "?9001" && (ch === "h" || ch === "l")) this.setThinkingVisible(ch === "h");
+          const fold = /^\?9002;([1-9][0-9]*)$/.exec(this.csi);
+          const id = Number(fold?.[1]);
+          if (ch === "h" && fold && isTerminalTranscriptEntryId(id)) this.toggleEntryFold(id);
         }
         this.esc = 0;
         this.csi = "";

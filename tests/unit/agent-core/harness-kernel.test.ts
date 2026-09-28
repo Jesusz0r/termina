@@ -26,6 +26,7 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import { createCheckReporter } from "../../test-support.ts";
 import type { RequestMessage } from "../../../agent-core/request-projection.ts";
 
@@ -4797,6 +4798,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     semanticTui.appendAssistant("hello ");
     semanticTui.appendThinking("reason");
     semanticTui.appendAssistant("world");
+    semanticTui.feed("\r"); // Expand settled thinking before checking its position.
     semanticTui.appendPlain("note\n");
     semanticTui.appendError("boom\n");
     const h1 = semanticTui.startTool("read_file", "a.ts");
@@ -4847,6 +4849,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     hideTui.appendAssistant("A1");
     hideTui.appendThinking("secret-think");
     hideTui.appendAssistant("A2");
+    hideTui.feed("\r"); // Global visibility must preserve the entry's expanded choice.
     hideTui.setThinkingVisible(false);
     check("hidden thinking leaves assistant text", hideTui.frame().includes("A1") && hideTui.frame().includes("A2") && !hideTui.frame().includes("secret-think"));
     hideTui.setThinkingVisible(true);
@@ -4885,13 +4888,17 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         resumeFrame.includes("done") &&
         !resumeFrame.includes("ok file") &&
         resumeFrame.includes("done reading") &&
-        resumeFrame.includes("resume-think") &&
+        resumeFrame.includes("▸ Thinking") &&
+        !resumeFrame.includes("resume-think") &&
         !resumeFrame.includes("hidden-working-set") &&
         !resumeFrame.includes("hidden-encrypted") &&
         !resumeFrame.includes("resumed 4 messages"),
     );
     resumeTui.feed("\r");
     check("resume folded tool expands on Enter", resumeTui.frame().includes("ok file"));
+    const resumedThinking = resumeTui.paintedFrame().find(row => row.includes("Thinking"))?.match(/termina-transcript:([1-9][0-9]*)/);
+    if (resumedThinking) resumeTui.feed(terminalControl.toggleTranscriptEntryControl(Number(resumedThinking[1])));
+    check("resume folded thinking expands from its header", resumeTui.frame().includes("resume-think"));
     resumeTui.setThinkingVisible(false);
     check(
       "resume keeps thinking hideable",
@@ -5008,7 +5015,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("successful tool uses index 17", donePaint.includes("\x1b[48;5;17m") && donePaint.includes("done"));
     check(
       "successful tool folds payload to one summary line",
-      donePaint.includes("◆ bash  ls  done") && !donePaint.includes("UNIQUE_DONE_TOOL_PAYLOAD"),
+      stripVTControlCharacters(donePaint).includes("▸ ◆ bash  ls  done") && !donePaint.includes("UNIQUE_DONE_TOOL_PAYLOAD"),
     );
     const failedPaint = paintCapture((tui) => {
       tui.finishTool(tui.startTool("bash", "ls"), "error", "UNIQUE_FAILED_TOOL_PAYLOAD");
@@ -5016,7 +5023,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("failed tool uses index 18", failedPaint.includes("\x1b[48;5;18m") && failedPaint.includes("failed"));
     check(
       "failed tool folds payload to one summary line",
-      failedPaint.includes("◆ bash  ls  failed") && !failedPaint.includes("UNIQUE_FAILED_TOOL_PAYLOAD"),
+      stripVTControlCharacters(failedPaint).includes("▸ ◆ bash  ls  failed") && !failedPaint.includes("UNIQUE_FAILED_TOOL_PAYLOAD"),
     );
     const cancelledPaint = paintCapture((tui) => {
       tui.startTool("bash", "ls");
@@ -5036,6 +5043,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     csiTui.appendAssistant("visible-a");
     csiTui.appendThinking("hidden-think");
     csiTui.appendAssistant("visible-b");
+    csiTui.feed("\r");
     csiTui.setDraft("keep-draft");
     const hideSeq = terminalControl.HIDE_THINKING_CSI;
     let hideOk = true;
@@ -5050,6 +5058,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       split.appendAssistant("visible-a");
       split.appendThinking("hidden-think");
       split.appendAssistant("visible-b");
+      split.feed("\r");
       split.setDraft("keep-draft");
       split.feed(hideSeq.slice(0, i));
       split.feed(hideSeq.slice(i));

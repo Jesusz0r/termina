@@ -9,6 +9,7 @@ import {
   BRACKETED_PASTE_DISABLE_CSI,
   BRACKETED_PASTE_ENABLE_CSI,
   normalizeCopiedTerminalText,
+  toggleTranscriptEntryControl,
 } from "../shared/terminal-control";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
@@ -16,7 +17,7 @@ import { terminalTheme } from "./terminal-themes";
 import { isMacPlatform } from "./settings-shortcuts";
 import { toast } from "./components/modals";
 import { createTerminalLinkProvider, isTerminalLinkClick, parseTerminalFileLinks } from "./terminal-links";
-import { terminalOscFileTarget, terminalWebUrl } from "../shared/terminal-link";
+import { terminalOscFileTarget, terminalTranscriptEntryId, terminalWebUrl } from "../shared/terminal-link";
 import { shellLineEdit } from "./terminal-keys";
 
 export class PtyView {
@@ -158,8 +159,16 @@ export class PtyView {
     }
   }
 
-  /** OSC 8 from the agent: http(s) opens in the browser, a painted file target opens in the editor. */
+  /** Internal headers toggle folds; file and web links require the platform modifier. */
   private openOscLink(event: MouseEvent, uri: string): void {
+    const entryId = terminalTranscriptEntryId(uri);
+    if (entryId !== null) {
+      if (this.disposed || this.engine !== "core" || this.term.buffer.active.type !== "alternate") return;
+      if (event.button !== 0 || event.detail !== 1 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (this.term.hasSelection()) return;
+      this.sendInput(toggleTranscriptEntryControl(entryId));
+      return;
+    }
     if (!isTerminalLinkClick(event)) return;
     const fileTarget = terminalOscFileTarget(uri);
     if (fileTarget) {
