@@ -9,7 +9,11 @@
  *
  * Engine notes: ripgrep additionally honors .ignore/.rgignore files, which
  * the scan does not read; both always honor .gitignore. Dotfiles stay
- * excluded on both engines (no --hidden).
+ * excluded on both engines (no --hidden). Ripgrep is started with
+ * --no-config so a host config cannot change globs or run a preprocessor,
+ * and --crlf so a trailing CR does not hide an end-anchored match. In-project
+ * symlinks are searched by the scan (the walk follows ones that stay inside
+ * the root) but not by ripgrep: --follow would also leave the project.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
@@ -52,9 +56,136 @@ const CONTENT_SEARCH_BUDGET_MS = 5000;
 /** Ripgrep stdout cap: --json is verbose, the hit cap usually fires first. */
 const RG_STDOUT_CAP = 1024 * 1024;
 
-function previewLine(text: string): string {
-  const line = text.replace(/[\r\n]+$/, "");
-  return line.length > MAX_CONTENT_PREVIEW ? line.slice(0, MAX_CONTENT_PREVIEW) + "…" : line;
+const PREVIEW_ELLIPSIS = "…";
+
+function isLowSurrogate(text: string, index: number): boolean {
+  const code = text.charCodeAt(index);
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/** Index of the code point before `index`, or 0. */
+function prevBoundary(text: string, index: number): number {
+  if (index <= 0) return 0;
+  return isLowSurrogate(text, index - 1) ? Math.max(0, index - 2) : index - 1;
+}
+
+/** Index of the code point after `index`, or the string length. */
+function nextBoundary(text: string, index: number): number {
+  if (index >= text.length) return text.length;
+  return index + 1 < text.length && isLowSurrogate(text, index + 1) ? index + 2 : index + 1;
+}
+
+/** Snap an index off a low surrogate so a slice does not split a pair. */
+function clampIndex(text: string, index: number): number {
+  if (index <= 0) return 0;
+  if (index >= text.length) return text.length;
+  return isLowSurrogate(text, index) ? index - 1 : index;
+}
+
+/**
+ * Window a line around a match so the preview shows the match, not only the
+ * line start. `omittedBefore` / `omittedAfter` count characters the caller
+ * already cut off (a worker slice of a huge line). The returned offset and
+ * length address `text`, which never splits a surrogate pair.
+ */
+export function contentPreview(
+  raw: string,
+  matchIndex: number,
+  matchLength: number,
+  omittedBefore = 0,
+  omittedAfter = 0,
+): { text: string; matchOffset: number; matchLength: number } {
+  const line = raw.replace(/[\r\n]+$/, "");
+  const start = clampIndex(line, Math.max(0, Math.min(matchIndex, line.length)));
+  const end = clampIndex(line, Math.max(start, Math.min(start + Math.max(0, matchLength), line.length)));
+  const matchedLen = end - start;
+  if (omittedBefore === 0 && omittedAfter === 0 && line.length <= MAX_CONTENT_PREVIEW) {
+    return { text: line, matchOffset: start, matchLength: matchedLen };
+  }
+  const needsLead = (from: number): boolean => omittedBefore > 0 || from > 0;
+  const needsTrail = (to: number): boolean => omittedAfter > 0 || to < line.length;
+  const decoratedLength = (from: number, to: number): number =>
+    (needsLead(from) ? PREVIEW_ELLIPSIS.length : 0) + (to - from) + (needsTrail(to) ? PREVIEW_ELLIPSIS.length : 0);
+
+  // The match itself does not fit: show its start, with an ellipsis.
+  if (decoratedLength(start, end) > MAX_CONTENT_PREVIEW) {
+    const lead = needsLead(start) ? PREVIEW_ELLIPSIS : "";
+    let bodyEnd = start;
+    let room = MAX_CONTENT_PREVIEW - lead.length - PREVIEW_ELLIPSIS.length;
+    while (room > 0 && bodyEnd < end) {
+      const next = nextBoundary(line, bodyEnd);
+      const size = next - bodyEnd;
+      if (next === bodyEnd || size > room || next > end) break;
+      bodyEnd = next;
+      room -= size;
+    }
+    const body = line.slice(start, bodyEnd);
+    return { text: lead + body + PREVIEW_ELLIPSIS, matchOffset: lead.length, matchLength: body.length };
+  }
+
+  let from = start;
+  let to = end;
+  for (let step = 0; step < MAX_CONTENT_PREVIEW + 4; step++) {
+    if (decoratedLength(from, to) >= MAX_CONTENT_PREVIEW) break;
+    const leftGap = start - from;
+    const rightGap = to - end;
+    if (from > 0 && (leftGap <= rightGap || to >= line.length)) {
+      const next = prevBoundary(line, from);
+      if (next === from) break;
+      from = next;
+      continue;
+    }
+    if (to < line.length) {
+      const next = nextBoundary(line, to);
+      if (next === to) break;
+      to = next;
+      continue;
+    }
+    break;
+  }
+  while (decoratedLength(from, to) > MAX_CONTENT_PREVIEW && (from < start || to > end)) {
+    if (from < start && start - from >= to - end) {
+      const next = nextBoundary(line, from);
+      if (next === from || next > start) break;
+      from = next;
+    } else if (to > end) {
+      const next = prevBoundary(line, to);
+      if (next === to || next < end) break;
+      to = next;
+    } else break;
+  }
+  const lead = needsLead(from) ? PREVIEW_ELLIPSIS : "";
+  const trail = needsTrail(to) ? PREVIEW_ELLIPSIS : "";
+  return {
+    text: lead + line.slice(from, to) + trail,
+    matchOffset: lead.length + (start - from),
+    matchLength: matchedLen,
+  };
+}
+
+/**
+ * Decode a UTF-8 chunk, holding back an incomplete trailing sequence so the
+ * next chunk can finish it. A split multibyte character must not become
+ * U+FFFD in the middle of an `rg --json` line.
+ */
+export function takeCompleteUtf8(buffer: Buffer): { text: string; rest: Buffer } {
+  if (buffer.length === 0) return { text: "", rest: Buffer.alloc(0) };
+  let end = buffer.length;
+  const maxBack = Math.min(4, buffer.length);
+  for (let back = 1; back <= maxBack; back++) {
+    const index = buffer.length - back;
+    const byte = buffer[index]!;
+    if ((byte & 0xc0) === 0x80) continue;
+    const need = byte < 0x80 ? 1 : byte < 0xe0 ? 2 : byte < 0xf0 ? 3 : byte < 0xf8 ? 4 : 1;
+    if (back < need) end = index;
+    break;
+  }
+  return { text: buffer.subarray(0, end).toString("utf8"), rest: Buffer.from(buffer.subarray(end)) };
+}
+
+function presentMatch(relPath: string, line: number, column: number, raw: string, matchIndex: number, matchLength: number, omittedBefore = 0, omittedAfter = 0): ContentHit {
+  const preview = contentPreview(raw, matchIndex, matchLength, omittedBefore, omittedAfter);
+  return { relPath, line, column, text: preview.text, matchOffset: preview.matchOffset, matchLength: preview.matchLength };
 }
 
 /**
@@ -96,15 +227,16 @@ export function parseRipgrepJsonLine(line: string, root: string): ContentHit | n
   const lineNumber = typeof data.line_number === "number" ? data.line_number : 0;
   if (!pathText || lineText === null || !Number.isInteger(lineNumber) || lineNumber < 1) return null;
   const submatches = Array.isArray(data.submatches) ? data.submatches : [];
-  const first = submatches.length > 0 && isRecord(submatches[0]) && typeof submatches[0].start === "number"
-    ? submatches[0].start
-    : 0;
-  const column = byteOffsetToColumn(lineText, first);
+  const first = submatches.length > 0 && isRecord(submatches[0]) ? submatches[0] : null;
+  const startByte = first && typeof first.start === "number" ? first.start : 0;
+  const column = byteOffsetToColumn(lineText, startByte);
   if (column === null) return null;
+  const endColumn = first && typeof first.end === "number" ? byteOffsetToColumn(lineText, first.end) : null;
+  const matchLength = endColumn !== null && endColumn >= column ? endColumn - column : 0;
   const abs = isAbsolute(pathText) ? pathText : join(root, pathText);
   const rel = relative(root, abs);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
-  return { relPath: rel, line: lineNumber, column, text: previewLine(lineText) };
+  return presentMatch(rel, lineNumber, column, lineText, column - 1, matchLength);
 }
 
 /**
@@ -165,8 +297,11 @@ function ripgrepArgs(pattern: string): string[] {
   const args = [
     "--json",
     "--color=never",
+    "--no-config",
+    "--crlf",
     "--no-require-git",
-    `--max-count=${MAX_CONTENT_HITS_PER_FILE}`,
+    // One past the cap so an exact per-file count is not reported as truncated.
+    `--max-count=${MAX_CONTENT_HITS_PER_FILE + 1}`,
     "--max-filesize=1M",
   ];
   for (const name of IGNORED_SEGMENTS) args.push("-g", `!**/${name}`, "-g", `!**/${name}/**`);
@@ -188,6 +323,8 @@ function ripgrepContentSearch(
     let stdoutBytes = 0;
     let hitBytes = 0;
     let tail = "";
+    let pendingUtf8: Buffer = Buffer.alloc(0);
+    const perFile = new Map<string, number>();
     let child: ChildProcess;
     try {
       child = spawn(rg, ripgrepArgs(pattern), { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
@@ -224,14 +361,30 @@ function ripgrepContentSearch(
         if (!line) continue;
         const hit = parseRipgrepJsonLine(line, root);
         if (!hit) continue;
+        const seen = perFile.get(hit.relPath) ?? 0;
+        if (seen >= MAX_CONTENT_HITS_PER_FILE) {
+          truncated = true;
+          continue;
+        }
+        perFile.set(hit.relPath, seen + 1);
         hits.push(hit);
         hitBytes += Buffer.byteLength(hit.text, "utf8");
-        if (hits.length >= MAX_CONTENT_HITS || hitBytes > MAX_CONTENT_BYTES) {
+        if (hitBytes > MAX_CONTENT_BYTES || hits.length > MAX_CONTENT_HITS) {
+          if (hits.length > MAX_CONTENT_HITS) hits.pop();
           truncated = true;
           kill();
           return;
         }
       }
+    };
+    const pushText = (text: string): void => {
+      if (!text) return;
+      tail += text;
+      const cut = tail.lastIndexOf("\n");
+      if (cut === -1) return;
+      const complete = tail.slice(0, cut);
+      tail = tail.slice(cut + 1);
+      ingest(complete);
     };
     child.stdout?.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.byteLength;
@@ -240,12 +393,10 @@ function ripgrepContentSearch(
         kill();
         return;
       }
-      tail += chunk.toString("utf8");
-      const cut = tail.lastIndexOf("\n");
-      if (cut === -1) return;
-      const complete = tail.slice(0, cut);
-      tail = tail.slice(cut + 1);
-      ingest(complete);
+      const merged = pendingUtf8.length > 0 ? Buffer.concat([pendingUtf8, chunk]) : chunk;
+      const decoded = takeCompleteUtf8(merged);
+      pendingUtf8 = decoded.rest;
+      pushText(decoded.text);
     });
     // Drained and discarded: a full stderr pipe would stall the child.
     child.stderr?.on("data", () => {});
@@ -256,6 +407,8 @@ function ripgrepContentSearch(
         done({ ok: true, hits: [], truncated: false });
         return;
       }
+      if (pendingUtf8.length > 0) tail += pendingUtf8.toString("utf8");
+      pendingUtf8 = Buffer.alloc(0);
       if (tail) ingest(tail);
       if (code === 2) {
         done({ ok: false, hits: [], truncated: false });
@@ -321,10 +474,25 @@ async function scanContentSearch(
         break;
       }
       if (content.includes("\0")) continue;
-      const matches = await matcher.match(content, Math.min(MAX_CONTENT_HITS_PER_FILE, MAX_CONTENT_HITS - hits.length), MAX_CONTENT_PREVIEW);
+      const room = MAX_CONTENT_HITS - hits.length;
+      // One past the cap distinguishes "exactly 50" from "50 and more".
+      const probe = Math.min(MAX_CONTENT_HITS_PER_FILE + 1, room + 1);
+      const matches = await matcher.match(content, probe, MAX_CONTENT_PREVIEW);
       if (matcher.stopped) return { hits: matcher.timedOut ? hits : [], truncated: matcher.timedOut };
-      for (const match of matches) hits.push({ relPath: rel, ...match, text: previewLine(match.text) });
-      if (matches.length >= MAX_CONTENT_HITS_PER_FILE) truncated = true;
+      const keep = Math.min(matches.length, MAX_CONTENT_HITS_PER_FILE, room);
+      if (matches.length > keep) truncated = true;
+      for (const match of matches.slice(0, keep)) {
+        hits.push(presentMatch(
+          rel,
+          match.line,
+          match.column,
+          match.text,
+          match.column - 1 - match.sliceStart,
+          match.matchLength,
+          match.sliceStart,
+          Math.max(0, match.lineLength - match.sliceStart - match.text.length),
+        ));
+      }
       if (hits.length >= MAX_CONTENT_HITS) { truncated = true; break; }
     }
     return { hits, truncated };

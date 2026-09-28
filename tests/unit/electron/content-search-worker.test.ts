@@ -28,7 +28,16 @@ describe("fallback regex worker lifecycle", () => {
       expect(matcher.timedOut).toBe(false);
     } finally { await matcher.dispose(); }
     const next = new ContentLineMatcher("needle", () => false, 5000);
-    try { expect(await next.match("é needle", 50, 240)).toEqual([{line: 1, column: 3, text: "é needle"}]); }
+    try {
+      expect(await next.match("é needle", 50, 240)).toEqual([{
+        line: 1,
+        column: 3,
+        matchLength: 6,
+        text: "é needle",
+        sliceStart: 0,
+        lineLength: "é needle".length,
+      }]);
+    }
     finally { await next.dispose(); }
   });
 });

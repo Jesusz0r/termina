@@ -1,13 +1,16 @@
 import { describe, expect, it, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
+  contentPreview,
   findRipgrep,
   parseRipgrepJsonLine,
   searchProjectContent,
+  takeCompleteUtf8,
 } from "../../../electron/content-search.ts";
+import { validateGrepPattern } from "../../../shared/grep-pattern.ts";
 
 describe("content-search parseRipgrepJsonLine", () => {
   const root = join(tmpdir(), "termina-content-root");
@@ -26,7 +29,7 @@ describe("content-search parseRipgrepJsonLine", () => {
       }),
       root,
     );
-    expect(hit).toEqual({ relPath: join("sub", "a.txt"), line: 3, column: 3, text: "a needle in hay" });
+    expect(hit).toEqual({ relPath: join("sub", "a.txt"), line: 3, column: 3, text: "a needle in hay", matchOffset: 2, matchLength: 6 });
   });
 
   it("rejects non-match, malformed, binary, and escaping records", () => {
@@ -71,6 +74,8 @@ describe("content-search parseRipgrepJsonLine", () => {
       line: 1,
       column: 4,
       text: "éé needle",
+      matchOffset: 3,
+      matchLength: 6,
     });
     // ASCII control: bytes and columns agree.
     expect(parseRipgrepJsonLine(match("a needle\n", 2), root)?.column).toBe(3);
@@ -93,7 +98,7 @@ describe("content-search parseRipgrepJsonLine", () => {
         rg: null,
         candidates: { paths: ["unicode.txt"], truncated: false },
       });
-      expect(scanned.hits).toEqual([{ relPath: "unicode.txt", line: 1, column: 4, text: "éé needle" }]);
+      expect(scanned.hits).toEqual([{ relPath: "unicode.txt", line: 1, column: 4, text: "éé needle", matchOffset: 3, matchLength: 6 }]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -116,8 +121,50 @@ describe("content-search parseRipgrepJsonLine", () => {
     );
     expect(hit?.relPath).toBe(join("deep", "b.txt"));
     expect(hit?.column).toBe(1);
-    expect(hit?.text.length).toBeLessThanOrEqual(241);
+    expect(hit?.text.length).toBeLessThanOrEqual(240);
     expect(hit?.text.endsWith("…")).toBe(true);
+    expect(hit?.text.startsWith("needle")).toBe(true);
+  });
+
+  it("keeps a match that starts past the preview cap inside the preview", () => {
+    const line = `${"x".repeat(400)}needle${"y".repeat(80)}`;
+    const preview = contentPreview(line, 400, 6);
+    expect(preview.text).toContain("needle");
+    expect(preview.text.length).toBeLessThanOrEqual(240);
+    expect(preview.text.slice(preview.matchOffset, preview.matchOffset + preview.matchLength)).toBe("needle");
+  });
+
+  it("does not split an emoji when windowing a preview", () => {
+    const line = `${"😀".repeat(200)}needle`;
+    const index = line.indexOf("needle");
+    const preview = contentPreview(line, index, 6);
+    expect(preview.text).toContain("needle");
+    for (let i = 0; i < preview.text.length; i++) {
+      const code = preview.text.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff) expect(preview.text.charCodeAt(i + 1)).toBeGreaterThanOrEqual(0xdc00);
+      if (code >= 0xdc00 && code <= 0xdfff) expect(preview.text.charCodeAt(i - 1)).toBeLessThanOrEqual(0xdbff);
+    }
+    expect(preview.text.length).toBeLessThanOrEqual(240);
+  });
+
+  it("decodes a JSON line split inside a multibyte character", () => {
+    const record = JSON.stringify({
+      type: "match",
+      data: {
+        path: { text: "./unicode.txt" },
+        lines: { text: "éé needle\n" },
+        line_number: 1,
+        absolute_offset: 0,
+        submatches: [{ match: { text: "needle" }, start: 5, end: 11 }],
+      },
+    }) + "\n";
+    const bytes = Buffer.from(record, "utf8");
+    const split = bytes.indexOf(0xc3) + 1;
+    const head = takeCompleteUtf8(bytes.subarray(0, split));
+    expect(head.rest.length).toBeGreaterThan(0);
+    const tail = takeCompleteUtf8(Buffer.concat([head.rest, bytes.subarray(split)]));
+    const hit = parseRipgrepJsonLine((head.text + tail.text).trim(), root);
+    expect(hit).toEqual({ relPath: "unicode.txt", line: 1, column: 4, text: "éé needle", matchOffset: 3, matchLength: 6 });
   });
 });
 
@@ -225,8 +272,8 @@ describe("content-search scan engine", () => {
       candidates: { paths: ["a.txt", join("sub", "b.txt")], truncated: false },
     });
     expect(truncated).toBe(false);
-    expect(hits).toContainEqual({ relPath: "a.txt", line: 2, column: 3, text: "a needle in hay" });
-    expect(hits).toContainEqual({ relPath: join("sub", "b.txt"), line: 2, column: 1, text: "needle at start" });
+    expect(hits).toContainEqual({ relPath: "a.txt", line: 2, column: 3, text: "a needle in hay", matchOffset: 2, matchLength: 6 });
+    expect(hits).toContainEqual({ relPath: join("sub", "b.txt"), line: 2, column: 1, text: "needle at start", matchOffset: 0, matchLength: 6 });
   });
 
   it("respects root and nested gitignore files", async () => {
@@ -264,6 +311,68 @@ describe("content-search scan engine", () => {
     expect(truncated).toBe(true);
   });
 
+  it("rejects patterns that compile-fail after the structural screen", () => {
+    expect(validateGrepPattern("*")).toMatch(/invalid regular expression/);
+    expect(validateGrepPattern("\\")).toMatch(/invalid regular expression/);
+    expect(validateGrepPattern("a{2,1}")).toMatch(/invalid regular expression/);
+    expect(validateGrepPattern("needle")).toBeNull();
+    expect(validateGrepPattern("a+")).toBeNull();
+  });
+
+  it("matches an end anchor on a CRLF line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "termina-content-crlf-"));
+    try {
+      writeFileSync(join(dir, "crlf.txt"), "needle\r\n");
+      const scanned = await searchProjectContent(dir, "needle$", {
+        rg: null,
+        candidates: { paths: ["crlf.txt"], truncated: false },
+      });
+      expect(scanned.hits).toEqual([{ relPath: "crlf.txt", line: 1, column: 1, text: "needle", matchOffset: 0, matchLength: 6 }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not report truncation when a file has exactly the per-file cap", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "termina-content-exact-"));
+    try {
+      writeFileSync(join(dir, "exact.txt"), "needle\n".repeat(50));
+      const exact = await searchProjectContent(dir, "needle", {
+        rg: null,
+        candidates: { paths: ["exact.txt"], truncated: false },
+      });
+      expect(exact.hits).toHaveLength(50);
+      expect(exact.truncated).toBe(false);
+      writeFileSync(join(dir, "over.txt"), "needle\n".repeat(51));
+      const over = await searchProjectContent(dir, "needle", {
+        rg: null,
+        candidates: { paths: ["over.txt"], truncated: false },
+      });
+      expect(over.hits).toHaveLength(50);
+      expect(over.truncated).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("windows a match that sits past the first 240 characters", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "termina-content-window-"));
+    try {
+      const line = `${"x".repeat(400)}needle\n`;
+      writeFileSync(join(dir, "long.txt"), line);
+      const scanned = await searchProjectContent(dir, "needle", {
+        rg: null,
+        candidates: { paths: ["long.txt"], truncated: false },
+      });
+      expect(scanned.hits).toHaveLength(1);
+      expect(scanned.hits[0]?.column).toBe(401);
+      expect(scanned.hits[0]?.text).toContain("needle");
+      expect(scanned.hits[0]?.text.startsWith("x".repeat(240))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("treats uncompilable patterns as no hits without throwing", async () => {
     const { hits, truncated } = await searchProjectContent(root, "(unclosed", { rg: null });
     expect(hits).toEqual([]);
@@ -293,7 +402,7 @@ describe("content-search scan engine", () => {
         searchProjectContent(dir, "needle", { rg: null, candidates: { paths: ["a.txt"], truncated: false } }),
         new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("fallback blocked on FIFO")), 5000)),
       ]);
-      expect(result.hits).toContainEqual({ relPath: "a.txt", line: 1, column: 3, text: "a needle in hay" });
+      expect(result.hits).toContainEqual({ relPath: "a.txt", line: 1, column: 3, text: "a needle in hay", matchOffset: 2, matchLength: 6 });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -332,7 +441,7 @@ describe("content-search ripgrep engine", () => {
   it("streams structured hits from rg --json", async () => {
     const { hits, truncated } = await searchProjectContent(root, "needle", { rg: join(binDir, "rg-ok") });
     expect(truncated).toBe(false);
-    expect(hits).toEqual([{ relPath: "canned.txt", line: 7, column: 1, text: "needle via ripgrep" }]);
+    expect(hits).toEqual([{ relPath: "canned.txt", line: 7, column: 1, text: "needle via ripgrep", matchOffset: 0, matchLength: 6 }]);
   });
 
   it("treats rg exit 1 as a clean no-match", async () => {
@@ -346,7 +455,38 @@ describe("content-search ripgrep engine", () => {
     for (const rg of [join(binDir, "rg-fail"), join(binDir, "rg-missing")]) {
       const { hits, truncated } = await searchProjectContent(root, "needle", { rg });
       expect(truncated).toBe(false);
-      expect(hits).toEqual([{ relPath: "real.txt", line: 2, column: 1, text: "needle via scan" }]);
+      expect(hits).toEqual([{ relPath: "real.txt", line: 2, column: 1, text: "needle via scan", matchOffset: 0, matchLength: 6 }]);
     }
+  });
+
+  it("starts rg with --no-config and --crlf", async () => {
+    const argsFile = join(binDir, "rg-args-out");
+    const script = join(binDir, "rg-args");
+    writeFileSync(script, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsFile}'\nexit 1\n`);
+    chmodSync(script, 0o755);
+    await searchProjectContent(root, "needle", { rg: script });
+    const args = readFileSync(argsFile, "utf8");
+    expect(args).toContain("--no-config");
+    expect(args).toContain("--crlf");
+    expect(args).toContain("--max-count=51");
+  });
+
+  it("reports truncation when one file exceeds the per-file cap", async () => {
+    const script = join(binDir, "rg-many");
+    const line = JSON.stringify({
+      type: "match",
+      data: {
+        path: { text: "./many.txt" },
+        lines: { text: "needle\n" },
+        line_number: 1,
+        absolute_offset: 0,
+        submatches: [{ match: { text: "needle" }, start: 0, end: 6 }],
+      },
+    });
+    writeFileSync(script, `#!/bin/sh\ni=0\nwhile [ "$i" -lt 51 ]; do\n  printf '%s\\n' '${line}'\n  i=$((i+1))\ndone\n`);
+    chmodSync(script, 0o755);
+    const { hits, truncated } = await searchProjectContent(root, "needle", { rg: script });
+    expect(hits).toHaveLength(50);
+    expect(truncated).toBe(true);
   });
 });

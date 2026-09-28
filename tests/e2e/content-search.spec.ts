@@ -46,7 +46,7 @@ test.describe("Content Search", () => {
 
     // The listing persists after the modal closes; clicking a hit jumps too.
     await expect(listing).toBeVisible();
-    await page.locator('.explorer-content-hit[title="src/index.ts:1"]').click();
+    await page.locator('.explorer-content-hit[title="src/index.ts:1:1"]').click();
     await expect(page.locator(".editor-tab").getByText("index.ts").first()).toBeVisible();
     await expect.poll(cursorLine, { timeout: 10_000 }).toBe(1);
 
@@ -65,6 +65,6 @@ test.describe("Content Search", () => {
     const modal = page.locator(".search-modal");
     await expect(modal).toBeVisible();
     await modal.locator(".search-input").fill("(a+)+");
-    await expect(modal.locator(".search-empty")).toContainText("unsafe regular expression", { timeout: 15_000 });
+    await expect(modal.locator(".search-status")).toContainText("Unsafe regular expression", { timeout: 15_000 });
   });
 });

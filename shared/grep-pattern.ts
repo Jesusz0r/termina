@@ -49,5 +49,13 @@ export function validateGrepPattern(pattern: string): string | null {
     i++;
   }
   if (inClass) return "error: invalid regular expression";
+  // Structural checks miss "nothing to repeat", a trailing escape, and
+  // out-of-order braces. Those still compile-fail; surface that instead of
+  // letting a search report no matches.
+  try {
+    new RegExp(pattern);
+  } catch {
+    return "error: invalid regular expression";
+  }
   return null;
 }

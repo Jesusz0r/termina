@@ -104,6 +104,10 @@ export class Explorer {
       }
       // Down/Up leave the box for the tree, matching the filter-then-navigate flow.
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (e.key === "ArrowDown" && this.content.focusFirstHit()) {
+          e.preventDefault();
+          return;
+        }
         const row = this.keyboard.currentRow(this.keyboard.visibleRows());
         if (!row) return;
         e.preventDefault();
@@ -155,6 +159,7 @@ export class Explorer {
     this.treeEl.addEventListener("focusout", () => this.keyboard.storeFocusedRow());
     this.content = new ExplorerContent(container, {
       onContentHit: (relPath, line, column) => this.onContentHit(relPath, line, column),
+      focusFilter: () => this.filterInput?.focus(),
     });
     void this.tree.renderRoot();
   }
@@ -182,8 +187,13 @@ export class Explorer {
     await this.tree.refresh(changedPaths);
   }
 
-  showContentResults(pattern: string, hits: ContentHit[], truncated: boolean): void {
-    this.content.showContentResults(pattern, hits, truncated);
+  showContentResults(pattern: string, hits: ContentHit[], truncated: boolean, error?: string): void {
+    this.content.showContentResults(pattern, hits, truncated, error);
+  }
+
+  /** Generation for an in-flight modal search. Clear invalidates older deliveries. */
+  contentGeneration(): number {
+    return this.content.contentGeneration();
   }
 
   clearContentResults(): void {

@@ -2820,6 +2820,7 @@ body.tab-reordering * {
 .search-modal .modal {
   width: 640px;
   max-width: 90vw;
+  overflow: hidden;
 }
 
 .search-input {
@@ -2834,13 +2835,34 @@ body.tab-reordering * {
   outline: none;
 }
 
+.search-modal .search-input {
+  width: auto;
+  align-self: stretch;
+  min-width: 0;
+  margin: 12px 16px 0;
+}
+
 .search-input:focus {
   border-color: var(--accent);
 }
 
+.search-status {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin: 8px 16px 0;
+  min-width: 0;
+}
+
+.search-status:empty {
+  display: none;
+  margin: 0;
+}
+
 .search-results {
-  margin-top: 8px;
-  max-height: 340px;
+  margin: 8px 8px 12px;
+  padding: 0 8px;
+  max-height: min(340px, 50vh);
+  min-width: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -2857,10 +2879,17 @@ body.tab-reordering * {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  min-width: 0;
   font-size: 12px;
   padding: 4px 6px;
   border-radius: 4px;
   border: 1px solid transparent;
+}
+
+.search-modal .modal.search-content .search-hit {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
 }
 
 .search-hit.clickable:hover {
@@ -2886,6 +2915,7 @@ body.tab-reordering * {
 
 .search-text {
   flex: 1 1 auto;
+  min-width: 0;
   font-family: var(--font-chrome);
   white-space: nowrap;
   overflow: hidden;
@@ -2893,10 +2923,20 @@ body.tab-reordering * {
 }
 
 .search-path {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  max-width: 50%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--accent);
   font-family: var(--font-chrome);
   font-size: 11px;
+}
+
+.search-modal .modal.search-content .search-path {
+  max-width: 100%;
+  order: -1;
 }
 
 .search-no-file {
@@ -2908,7 +2948,8 @@ body.tab-reordering * {
 }
 
 .search-text mark,
-.search-path mark {
+.search-path mark,
+.explorer-content-text mark {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
   color: inherit;
   border-radius: 2px;
@@ -3897,9 +3938,15 @@ button.toast:focus-visible {
   border-radius: 0;
 }
 
-.explorer-content-btn:hover {
+.explorer-content-btn:hover,
+.explorer-content-btn:focus-visible {
   color: var(--text);
   background: var(--bg-hover);
+}
+
+.explorer-content-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 0;
 }
 
 #explorer-content-results {
@@ -3930,8 +3977,14 @@ button.toast:focus-visible {
   border-radius: 0;
 }
 
-.explorer-content-hit:hover {
+.explorer-content-hit:hover,
+.explorer-content-hit:focus-visible {
   background: var(--bg-hover);
+}
+
+.explorer-content-hit:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .explorer-content-line {

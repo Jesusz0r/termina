@@ -301,7 +301,14 @@ function placeEditorToggle(projectId: string | null): void {
 
 function setActiveProject(projectId: string | null): void {
   const view = projectId ? projectViews.get(projectId) : undefined;
-  activeProjectId = view ? projectId : null;
+  const nextId = view ? projectId : null;
+  // Search results are project-relative. A switch under an open modal would
+  // open the old hit in the new tree.
+  if (nextId !== activeProjectId) {
+    quickOpen.close();
+    sessionSearch.close();
+  }
+  activeProjectId = nextId;
   if (view) ensureProjectEditor(view);
   activeProjectGeneration++;
   const baseChrome = document.getElementById("editor-chrome")!;
@@ -1819,6 +1826,16 @@ for (let i = 1; i <= 9; i++) {
 // accelerators consume their keys first, so this path never double-fires.
 // While settings is open its shortcut recorder owns the keys, and the menu
 // accelerators are blank; the bridge must not fire behind the modal.
+
+/** True when a search or confirm modal is covering the window. */
+function searchModalOpen(): boolean {
+  for (const node of document.querySelectorAll("#modal-root .modal-backdrop")) {
+    if (!(node instanceof HTMLElement)) continue;
+    if (node.hidden || node.style.display === "none") continue;
+    return true;
+  }
+  return false;
+}
 function normalizeShortcut(value: string): string {
   return value.replace("CmdOrCtrl", isMacPlatform() ? "Cmd" : "Ctrl");
 }
@@ -1848,7 +1865,9 @@ document.addEventListener("focusout", syncTerminalFocusScope);
 window.addEventListener(
   "keydown",
   (e) => {
-    if (prefs.settingsView.isOpen) return;
+    // A visible modal owns the keyboard. Hidden search backdrops stay mounted
+    // with display:none and must not block shortcuts.
+    if (prefs.settingsView.isOpen || searchModalOpen()) return;
     const computed = shortcutForEvent(e);
     if (!computed) return;
     const target = normalizeShortcut(computed);
@@ -1914,7 +1933,8 @@ quickOpen.bind({
       void explorer.reveal(relPath);
     }),
   onOpenContentHit: (relPath, line, column) => openContentHit(relPath, line, column),
-  onContentResults: (pattern, hits, truncated) => explorer.showContentResults(pattern, hits, truncated),
+  onContentResults: (pattern, hits, truncated, error) => explorer.showContentResults(pattern, hits, truncated, error),
+  contentGeneration: () => explorer.contentGeneration(),
   onExecuteCommand: (command) => commands.execute(command),
   getShortcut: (command) => prefs.current.shortcuts[command] ?? "",
 });

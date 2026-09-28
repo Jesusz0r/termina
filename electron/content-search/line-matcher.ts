@@ -1,7 +1,17 @@
 /** One bounded worker per fallback search; at most one file is in flight. */
 import { Worker } from "node:worker_threads";
 
-export interface LineMatch { line: number; column: number; text: string }
+export interface LineMatch {
+  line: number;
+  column: number;
+  matchLength: number;
+  /** Slice of the line containing the match, not necessarily the whole line. */
+  text: string;
+  /** UTF-16 index of `text` in the line. */
+  sliceStart: number;
+  /** Length of the line after a trailing CR is stripped. */
+  lineLength: number;
+}
 
 export class ContentLineMatcher {
   private readonly worker: Worker;

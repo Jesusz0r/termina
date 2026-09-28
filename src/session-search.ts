@@ -112,6 +112,12 @@ export class SessionSearch {
     this.render(res.hits, query, res.error);
   }
 
+  /** Drop an in-flight search and hide. Project switch must not keep stale hits. */
+  close(): void {
+    this.searchSeq++;
+    this.hide();
+  }
+
   /** Hide the modal, cancelling any debounced search. Shared by the
    *  backdrop/Escape/Enter handlers and row clicks. */
   private hide(): void {
@@ -176,6 +182,7 @@ export class SessionSearch {
         const path = document.createElement("span");
         path.className = "search-path";
         path.textContent = hit.filePath;
+        path.title = hit.filePath;
         row.appendChild(path);
         row.addEventListener("click", () => {
           this.selected = i;

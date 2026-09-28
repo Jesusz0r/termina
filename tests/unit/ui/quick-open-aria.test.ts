@@ -85,7 +85,7 @@ describe("Quick Open combobox ARIA (refs #304)", () => {
     if (!input || !results) throw new Error("Quick Open did not render the combobox");
 
     expect(results.querySelectorAll('[role="option"]').length).toBe(0);
-    expect(results.querySelector(".search-empty")?.textContent).toBe("Type to search file contents.");
+    expect(fake.modalRoot.querySelector(".search-status")?.textContent).toBe("Type a regular expression to search file contents.");
     expect(input.getAttribute("aria-expanded")).toBe("false");
     expect(input.getAttribute("aria-activedescendant")).toBeNull();
   });

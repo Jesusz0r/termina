@@ -264,7 +264,7 @@ scope for #331.
 | `src/activity-tabs.ts` | `tests/unit/ui/activity-tabs.test.ts` |
 | `src/commands.ts` | none |
 | `src/components/context-menu.ts` | none |
-| `src/components/explorer-content.ts` | none |
+| `src/components/explorer-content.ts` | `tests/unit/ui/explorer-content.test.ts` |
 | `src/components/explorer-filter.ts` | none |
 | `src/components/explorer-keyboard.ts` | none |
 | `src/components/explorer-refresh.ts` | none |
@@ -282,7 +282,7 @@ scope for #331.
 | `src/preferences-boot.ts` | `tests/unit/ui/preferences-boot.test.ts` |
 | `src/pty-sequence-ledger.ts` | `tests/unit/electron/pty-egress.test.ts` |
 | `src/pty-view.ts` | none |
-| `src/quick-open.ts` | `tests/unit/ui/quick-open-aria.test.ts` |
+| `src/quick-open.ts` | `tests/unit/ui/quick-open-aria.test.ts`, `tests/unit/ui/content-search-modal.test.ts` |
 | `src/review.ts` | `tests/unit/ui/review-accept.test.ts` |
 | `src/session-search.ts` | none |
 | `src/settings-shortcuts.ts` | `tests/unit/ui/chrome-ux.test.ts` |

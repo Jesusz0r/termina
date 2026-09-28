@@ -255,6 +255,11 @@ export class FakeDocument {
     el.document = this;
     return el;
   }
+  createTextNode(text: string): FakeEl {
+    const el = this.createElement("#text");
+    el.textContent = text;
+    return el;
+  }
   getElementById(id: string): FakeEl | null {
     return this.byId.get(id) ?? null;
   }

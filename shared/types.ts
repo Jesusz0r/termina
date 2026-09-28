@@ -601,7 +601,12 @@ export interface ContentHit {
   relPath: string;
   line: number;
   column: number;
+  /** Windowed line preview. The match is inside this string, not always at the start. */
   text: string;
+  /** UTF-16 offset of the match inside `text`. */
+  matchOffset: number;
+  /** UTF-16 length of the visible match inside `text`. */
+  matchLength: number;
 }
 
 export interface TerminaBridge {
