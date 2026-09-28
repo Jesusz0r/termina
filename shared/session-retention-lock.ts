@@ -329,25 +329,44 @@ function recoverLock(lock: string, stale: SessionRetentionLockState): boolean {
   return cleanupLockTransition(lock, transition);
 }
 
-class SessionRetentionPendingError extends Error {}
+type LockWaitReason = "live-owner" | "unreadable";
+
+class SessionRetentionPendingError extends Error {
+  readonly reason: LockWaitReason;
+
+  constructor(reason: LockWaitReason) {
+    super(reason === "unreadable" ? "retained session admission lock is unreadable" : "retained session root is busy");
+    this.reason = reason;
+  }
+}
 
 /** A lock directory can be observed between mkdir and owner publication, or
  * during release. Wait boundedly for that generation to become inspectable or
  * free; never delete an unreadable lock. Permanent corruption still fails closed.
- * Yield between attempts so concurrent child startup never blocks the host.
- * All acquisition and stale-owner recovery still belong to the sync owner. */
+ * Yield between attempts. Acquisition and stale-owner recovery still perform
+ * synchronous filesystem work through the canonical owner.
+ * A live owner may be scanning or publishing. Corrupt locks have a shorter bound.
+ * The parent admission timeout must stay longer than the live-owner wait. */
+export const LIVE_OWNER_WAIT_MS = 12_000;
+const UNREADABLE_LOCK_WAIT_MS = 5_000;
+
 export async function acquireSessionRetentionLockAsync(
   root: string,
   signal?: AbortSignal,
 ): Promise<SessionRetentionLock> {
-  const deadline = performance.now() + 5_000;
+  const started = performance.now();
   for (;;) {
     signal?.throwIfAborted();
     try {
       return acquireSessionRetentionLock(root);
     } catch (error) {
-      if (!(error instanceof SessionRetentionPendingError) || performance.now() >= deadline) throw error;
-      await delay(25, undefined, { signal });
+      if (!(error instanceof SessionRetentionPendingError)) throw error;
+      const elapsed = performance.now() - started;
+      const waitMs = error.reason === "unreadable" ? UNREADABLE_LOCK_WAIT_MS : LIVE_OWNER_WAIT_MS;
+      if (elapsed >= waitMs) throw error;
+      await delay(Math.min(25, waitMs - elapsed), undefined, { signal });
+      // A delayed timer must not allow a new acquisition after the wait expires.
+      if (performance.now() - started >= waitMs) throw error;
     }
   }
 }
@@ -367,10 +386,10 @@ export function acquireSessionRetentionLock(root: string): SessionRetentionLock 
       const inspected = inspectLock(path);
       if (inspected === null) {
         if (resumeLock(path)) continue;
-        throw new SessionRetentionPendingError("retained session admission lock is unreadable");
+        throw new SessionRetentionPendingError("unreadable");
       }
       if (inspected.owner.pid === process.pid || processAlive(inspected.owner.pid)) {
-        throw new SessionRetentionPendingError("retained session root is busy");
+        throw new SessionRetentionPendingError("live-owner");
       }
       if (!recoverLock(path, inspected)) throw new Error("retained session root is busy");
       continue;

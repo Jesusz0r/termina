@@ -20,6 +20,7 @@ import { utf8TextPrefix } from "./tool-output.ts";
 
 export { utf8TextPrefix as truncateUtf8, utf8TextSuffix } from "./tool-output.ts";
 import { readBoundedRegularFile } from "./main/files.ts";
+import { LIVE_OWNER_WAIT_MS } from "../shared/session-retention-lock.ts";
 import {
   isSupportedProvider,
   parseModelRef,
@@ -49,8 +50,10 @@ export const MAX_SUBAGENT_BRIEF_CHARS = 12_000;
 export const MAX_SUBAGENT_TOUCHED = 200;
 /** Bound one parent-to-child message, in string length. */
 export const MAX_SUBAGENT_MESSAGE_CHARS = 8_000;
-/** How long the parent waits for the host to admit or reject a spawn. */
-export const SUBAGENT_ADMISSION_TIMEOUT_MS = 15_000;
+/** How long the parent waits for the host to admit or reject a spawn.
+ * Longer than a live retained-session owner wait, so the parent does not
+ * reject a spawn the host is still admitting. */
+export const SUBAGENT_ADMISSION_TIMEOUT_MS = LIVE_OWNER_WAIT_MS + 18_000;
 /** Bound one child result held for parent fan-in, in UTF-8 bytes on both sides of the host boundary (the host clamps identically; the suffix is historical). */
 export const MAX_SUBAGENT_RESULT_CHARS = 32_000;
 /** Bound one child failure diagnostic held for parent fan-in, in UTF-8 bytes on both sides of the host boundary (the host clamps identically; the suffix is historical). */

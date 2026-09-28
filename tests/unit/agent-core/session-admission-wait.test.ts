@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -84,6 +84,82 @@ it("cancels after immediate acquisition without publishing an empty bundle", asy
   releaseSessionRetentionLock(lock);
 });
 
+it("does not acquire a free lock when already aborted", async () => {
+  const { root } = fixture();
+  const abort = new AbortController();
+  abort.abort();
+  await expect(acquireSessionRetentionLockAsync(root, abort.signal)).rejects.toThrow();
+  const lock = acquireSessionRetentionLock(root);
+  releaseSessionRetentionLock(lock);
+});
+
+it("recovers a proven dead owner through the async waiter", async () => {
+  const { root } = fixture();
+  const stale = acquireSessionRetentionLock(root);
+  const pid = 2_147_483_647;
+  writeFileSync(stale.ownerPath, JSON.stringify({ ...stale.owner, pid }));
+  const kill = vi.spyOn(process, "kill").mockImplementation((ownerPid) => {
+    expect(ownerPid).toBe(pid);
+    throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+  });
+  try {
+    const acquired = await acquireSessionRetentionLockAsync(root);
+    expect(acquired.owner.token).not.toBe(stale.owner.token);
+    expect(existsSync(stale.ownerPath)).toBe(false);
+    releaseSessionRetentionLock(stale);
+    expect(existsSync(acquired.ownerPath)).toBe(true);
+    releaseSessionRetentionLock(acquired);
+  } finally {
+    kill.mockRestore();
+  }
+});
+
+it("preserves an owner whose liveness check is denied while waiting for cancellation", async () => {
+  const { root } = fixture();
+  const lock = acquireSessionRetentionLock(root);
+  writeFileSync(lock.ownerPath, JSON.stringify({ ...lock.owner, pid: 2_147_483_647 }));
+  const ownerBytes = readFileSync(lock.ownerPath);
+  const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+    throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+  });
+  const abort = new AbortController();
+  try {
+    const waiting = acquireSessionRetentionLockAsync(root, abort.signal);
+    const rejected = expect(waiting).rejects.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    abort.abort();
+    await rejected;
+    expect(kill).toHaveBeenCalled();
+    expect(readFileSync(lock.ownerPath)).toEqual(ownerBytes);
+    expect(existsSync(lock.guardPath)).toBe(true);
+  } finally {
+    abort.abort();
+    kill.mockRestore();
+  }
+});
+
+it.each([
+  { reason: "live-owner", message: "retained session root is busy" },
+  { reason: "unreadable", message: "retained session admission lock is unreadable" },
+])("reports the $reason wait reason separately from its diagnostic", ({ reason, message }) => {
+  const { root } = fixture();
+  const lock = acquireSessionRetentionLock(root);
+  if (reason === "unreadable") rmSync(lock.ownerPath);
+  expect(() => acquireSessionRetentionLock(root)).toThrowError(expect.objectContaining({ reason, message }));
+  expect(existsSync(lock.path)).toBe(true);
+  expect(existsSync(lock.guardPath)).toBe(true);
+});
+
+it("waits out a live owner instead of failing at five seconds", async () => {
+  const { root } = fixture();
+  const lock = acquireSessionRetentionLock(root);
+  const pending = acquireSessionRetentionLockAsync(root);
+  await new Promise((resolve) => setTimeout(resolve, 6_000));
+  releaseSessionRetentionLock(lock);
+  const acquired = await pending;
+  releaseSessionRetentionLock(acquired);
+}, 15_000);
+
 it("bounds waiting for corrupt locks and never deletes them", async () => {
   const { root } = fixture();
   const lock = acquireSessionRetentionLock(root);
@@ -91,6 +167,29 @@ it("bounds waiting for corrupt locks and never deletes them", async () => {
   await expect(acquireSessionRetentionLockAsync(root)).rejects.toThrow("unreadable");
   expect(existsSync(lock.path)).toBe(true);
 }, 10_000);
+
+it.each([
+  { unreadable: false, deadline: 12_000, message: "busy" },
+  { unreadable: true, deadline: 5_000, message: "unreadable" },
+])("does not acquire after the $deadline ms deadline when a delayed retry finds the lock free", async ({ unreadable, deadline, message }) => {
+  const { root } = fixture();
+  const lock = acquireSessionRetentionLock(root);
+  const ownerBytes = readFileSync(lock.ownerPath);
+  if (unreadable) rmSync(lock.ownerPath);
+  let now = 0;
+  const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+  try {
+    const pending = acquireSessionRetentionLockAsync(root);
+    const rejected = expect(pending).rejects.toThrow(message);
+    now = deadline + 1;
+    if (unreadable) writeFileSync(lock.ownerPath, ownerBytes);
+    releaseSessionRetentionLock(lock);
+    await rejected;
+    expect(existsSync(lock.path)).toBe(false);
+  } finally {
+    clock.mockRestore();
+  }
+});
 
 it("coordinates independent child processes against the same admission root", async () => {
   const { root, project } = fixture();

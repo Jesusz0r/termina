@@ -299,9 +299,10 @@ footprint, not these numbers.
   Packaged releases include checksum-pinned ripgrep; the resolver prefers that
   executable over trusted PATH locations. The bounded JavaScript fallback remains
   available when no trusted ripgrep can be resolved.
-- First-turn session admission waits asynchronously for up to five seconds on
-  the shared retention lock. Cancellation and permanent lock corruption fail
-  closed; waiting never bypasses capacity checks or deletes unreadable locks.
+- First-turn session admission waits asynchronously on the shared retention
+  lock. Cancellation and permanent lock corruption fail closed; waiting never
+  bypasses capacity checks or deletes unreadable locks. The wait reason is
+  explicit lock state, not inferred from diagnostic wording.
 - Only consecutive `read_file`, `read_files`, `grep`, `glob`, and `fetch` calls run concurrently
   (at most four). Writes, bash, subagents, and unknown/MCP tools are ordering
   barriers. Identical reads share an execution only inside an uninterrupted
@@ -332,9 +333,20 @@ footprint, not these numbers.
   sibling while another run is already active. A single subtask stays on the
   main agent.
 
+### Delegation and waiting policy
+
+These defaults are policy choices, separate from the admission and cancellation
+safety guarantees above:
+
+- Retention-lock waiters allow up to 12 seconds for a live owner and 5 seconds
+  for an unreadable lock. The parent's subagent-admission budget is 30 seconds
+  (the live-owner budget plus 18 seconds). These are latency budgets, not
+  evidence that admission will succeed or permission to bypass a lock. Expired
+  waits fail closed; cancellation remains available during the wait.
+
 Regression coverage: `stall-tracker.test.ts`, `tool-dispatch.test.ts`,
 `main-tool-loop.test.ts`, `main-steering.test.ts`, `plan-slash.test.ts`,
-`provider-tool-args.test.ts`, and
+`session-admission-wait.test.ts`, `provider-tool-args.test.ts`, and
 `tests/unit/electron/subagents-host.test.ts`. Main-loop tests use real local
 execution with mocked provider streams and isolated projects/HOME/session roots.
 These are execution guarantees, not a claim that a model will never propose
