@@ -85,9 +85,21 @@ export async function writeBoundOwnedFile(options: {
   content: Buffer;
   mode?: number;
   maxBytes?: number;
+  /** Leave an existing leaf untouched only when its content and mode match.
+   * Context refreshes then preserve mtime without skipping permission changes. */
+  skipIfUnchanged?: boolean;
   testHook?: { stage: string; readyPath: string; releasePath: string };
 }): Promise<BoundPromotionExpectedLeaf> {
   const expected = await expectedDestinationForBoundWrite(options);
+  if (
+    options.skipIfUnchanged &&
+    "identity" in expected &&
+    expected.state.type === "file" &&
+    expected.state.mode === (options.mode ?? 0o600) &&
+    expected.state.sha256 === createHash("sha256").update(options.content).digest("hex")
+  ) {
+    return expected;
+  }
   return boundPromotionWriteFile({
     root: options.root,
     rootIdentity: options.rootIdentity,
