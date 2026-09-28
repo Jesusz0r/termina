@@ -1,6 +1,6 @@
 # Documentation
 
-These describe the product and architecture as they exist today. They are not implementation backlogs.
+Current reference describes the product and architecture as they exist today. It is not an implementation backlog. Plans are proposed work. Do not cite a plan as shipped behavior.
 
 ## Current reference
 
@@ -16,3 +16,9 @@ These describe the product and architecture as they exist today. They are not im
 - [`reference/MODULE-TEST-MATRIX.md`](reference/MODULE-TEST-MATRIX.md) — heuristic production module → unit-test inventory (issue #331)
 
 Images used by the repository README are kept in [`assets/`](assets/).
+
+## Plans
+
+Not current behavior.
+
+- [`plans/computer-use.md`](plans/computer-use.md) — proposed Termina-owned browser tool. Not implemented.
