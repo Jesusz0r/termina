@@ -45,6 +45,9 @@ describe("Diagnostics Invariants", () => {
     check("context file and map stay bounded",
       diagnostics.includes("components: [`diagnostics-${inst.id}.md`],")
       && diagnostics.includes("MAX_DIAGNOSTICS_WORKSPACES"));
+    check("diagnostics context omits the clock and skips an unchanged result",
+      diagnostics.includes("skipIfUnchanged: true")
+      && !diagnostics.includes("toISOString"));
     // Lowest priority in the shared bounded channel.
     check("host reads diagnostics last",
       host.includes('const CONTEXT_FILES = ["verify", "edits", "mailbox", "project", "diagnostics"] as const;'));

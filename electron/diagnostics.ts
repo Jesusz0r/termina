@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { terminateSandboxProcessGroup } from "./sandbox.js";
 import { writeBoundOwnedFile, type PromotionFsIdentity } from "./worldline-git.js";
 import { evictOldest } from "../shared/evict-oldest.js";
+import { utf8TextPrefix, utf8TextSuffix } from "../agent-core/tool-output.js";
 
 /** Bound for one diagnostics run's captured output. */
 const MAX_DIAGNOSTICS_OUTPUT = 32 * 1024;
@@ -95,15 +96,19 @@ export class DiagnosticsRunner {
     if (last && last.generation >= startGeneration) return;
     if (last && Date.now() - last.atMs < MIN_DIAGNOSTICS_INTERVAL_MS) return;
     const cwd = ws.root;
+    // Reserve the workspace before detection yields to another settle.
+    this.diagnosticsRuns.add(ws.id);
     let tc: { command: string; args: string[]; label: string } | null;
     try {
       tc = await detectDiagnosticsCommand(cwd);
     } catch {
+      this.diagnosticsRuns.delete(ws.id);
       return;
     }
-    if (!tc) return;
-    if (!this.host.isTerminalCurrent(inst) || this.host.isDisposed()) return;
-    this.diagnosticsRuns.add(ws.id);
+    if (!tc || !this.host.isTerminalCurrent(inst) || this.host.isDisposed()) {
+      this.diagnosticsRuns.delete(ws.id);
+      return;
+    }
     // Refresh recency: re-setting a Map key keeps its original position.
     this.lastDiagnostics.delete(ws.id);
     this.lastDiagnostics.set(ws.id, { generation: last?.generation ?? -1, atMs: Date.now() });
@@ -125,9 +130,11 @@ export class DiagnosticsRunner {
         const current = this.lastDiagnostics.get(ws.id);
         this.lastDiagnostics.set(ws.id, { generation: startGeneration, atMs: current?.atMs ?? Date.now() });
       }
-      const body = output.trim().slice(-MAX_DIAGNOSTICS_CONTEXT_BYTES);
+      const body = utf8TextSuffix(output.trim(), MAX_DIAGNOSTICS_CONTEXT_BYTES);
+      // No clock. A clean re-run must not change the overlay bytes; this file
+      // sits in the cached prefix, and a timestamp-only rewrite misses it.
       const md =
-        `## Diagnostics — \`${tc.label}\` — ${new Date().toISOString()}\n\n` +
+        `## Diagnostics — \`${tc.label}\`\n\n` +
         `**Status:** ${pass ? "✅ clean" : timedOut ? "⏰ timed out" : "❌ errors"}\n\n` +
         (body && !pass ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
       const target = this.host.eventsTarget(inst.id);
@@ -140,6 +147,7 @@ export class DiagnosticsRunner {
         content: Buffer.from(md, "utf8"),
         mode: 0o600,
         maxBytes: MAX_DIAGNOSTICS_CONTEXT_BYTES + 1024,
+        skipIfUnchanged: true,
       }).catch((err) => {
         console.warn(`[main] could not write diagnostics context: ${String(err)}`);
       });
@@ -167,12 +175,14 @@ export class DiagnosticsRunner {
       this.diagnosticsRuns.delete(ws.id);
       return;
     }
-    child.stdout?.on("data", (data: Buffer | string) => {
-      if (output.length < MAX_DIAGNOSTICS_OUTPUT) output += data.toString().slice(0, MAX_DIAGNOSTICS_OUTPUT - output.length);
-    });
-    child.stderr?.on("data", (data: Buffer | string) => {
-      if (output.length < MAX_DIAGNOSTICS_OUTPUT) output += data.toString().slice(0, MAX_DIAGNOSTICS_OUTPUT - output.length);
-    });
+    let outputBytes = 0;
+    const onOutput = (data: string): void => {
+      if (outputBytes >= MAX_DIAGNOSTICS_OUTPUT) return;
+      output += utf8TextPrefix(data, MAX_DIAGNOSTICS_OUTPUT - outputBytes);
+      outputBytes += Buffer.byteLength(data);
+    };
+    child.stdout?.setEncoding("utf8").on("data", onOutput);
+    child.stderr?.setEncoding("utf8").on("data", onOutput);
     child.once("error", () => finish(null, false));
     child.once("close", (code) => finish(code, false));
   }
