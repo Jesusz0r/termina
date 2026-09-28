@@ -17,7 +17,7 @@ import { rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, isAbsolute, join, relative } from "node:path";
 import { sameUserPath } from "./main/project-workspace.js";
-import { coreSessionFile, parseSessionBundlePath, sessionBundleExists } from "../agent-core/session.js";
+import { coreSessionFile, parseSessionBundlePath, sessionBundleExists, type SessionResult } from "../agent-core/session.js";
 import { evictOldest } from "../shared/evict-oldest.js";
 import { subagentViewerId } from "./terminal-runtime.js";
 import {
@@ -71,6 +71,8 @@ export interface SubagentHostSinks {
   coreBinary(): string;
   /** Project session root for a cwd (child bundles live beside parents'). */
   sessionRootFor(cwd: string): Promise<string>;
+  /** Admit or recover the bundle off the main thread before acknowledging spawn. */
+  admitSession(sessionFile: string, signal: AbortSignal): Promise<SessionResult>;
   /** Existing owner-mailbox path. The host never writes mailbox files itself. */
   appendMailboxNote(terminalId: string, note: string): void;
   /** Tail a child sidecar stream on the shared tailer. */
@@ -139,6 +141,8 @@ interface HostRun {
   stdoutTruncated: boolean;
   stderr: string;
   settled: boolean;
+  /** Cancels session admission when this run ends before a child starts. */
+  admissionAbort: AbortController;
   /** Latest attempt's session bundle, retained after settle for resume. */
   sessionFile: string | null;
   /** Absolute touched paths from tailed tool events (merge evidence). */
@@ -522,6 +526,7 @@ export class SubagentHost {
       stdoutTruncated: false,
       stderr: "",
       settled: false,
+      admissionAbort: new AbortController(),
       sessionFile: null,
       touched: new Set<string>(),
       eventsDir: dir,
@@ -620,7 +625,7 @@ export class SubagentHost {
       }
       resumeFile = usable;
     }
-    const sessionId = `core-${randomUUID()}`;
+    let sessionId = `core-${randomUUID()}`;
     let sessionFile: string;
     let resumeSessionId: string | null = null;
     if (resumeFile) {
@@ -638,6 +643,11 @@ export class SubagentHost {
         );
         return;
       }
+    } else if (run.sessionFile && sessionBundleExists(run.sessionFile)) {
+      // A launch retry must not admit a second empty bundle or change the
+      // session id the first attempt already published.
+      sessionFile = run.sessionFile;
+      sessionId = parseSessionBundlePath(sessionFile)?.sessionId ?? sessionId;
     } else {
       try {
         const root = await this.sinks.sessionRootFor(run.task.cwd);
@@ -695,9 +705,31 @@ export class SubagentHost {
         stream.booted = false;
         stream.lastActivityAt = this.now();
       }
-      const admitted = await withSubagentCommitLock(dir, run.parentTerminalId, run.runId, () =>
-        commitSubagentAdmission(dir, run.parentTerminalId, run.runId, run.task.createdAt, { admitted: true }),
-      );
+      // The parent must not see a run id until this child's session exists.
+      // Otherwise a busy retained-session lock kills the child after admission.
+      // The worker owns admission's synchronous scanning and durable writes.
+      const bundle = await this.sinks.admitSession(sessionFile, run.admissionAbort.signal);
+      if (run.settled || run.stop !== null || this.runs.get(run.key) !== run) return;
+      if (!bundle.ok) {
+        await this.finishFailed(run.parentTerminalId, run.runId, run.task, `subagent session unavailable: ${bundle.error}`);
+        return;
+      }
+      const admitted = await withSubagentCommitLock(dir, run.parentTerminalId, run.runId, () => {
+        // Waiting for either lock yields: cancellation or parent teardown can
+        // win before this critical section, even after the bundle is ready.
+        if (run.settled || run.stop !== null || this.runs.get(run.key) !== run) {
+          return { admitted: false, error: "subagent cancelled before launch" } as const;
+        }
+        if (this.sinks.eventsDirFor(run.parentTerminalId) !== dir) {
+          return { admitted: false, error: "parent events directory is gone" } as const;
+        }
+        return commitSubagentAdmission(dir, run.parentTerminalId, run.runId, run.task.createdAt, { admitted: true });
+      });
+      if (run.settled || run.stop !== null || this.runs.get(run.key) !== run) return;
+      if (this.sinks.eventsDirFor(run.parentTerminalId) !== dir) {
+        await this.finishFailed(run.parentTerminalId, run.runId, run.task, "parent events directory is gone");
+        return;
+      }
       let admissionError = "host rejected the subagent";
       if (!admitted.ok) admissionError = admitted.error;
       else if (!admitted.value.admitted) admissionError = admitted.value.error;
@@ -819,6 +851,7 @@ export class SubagentHost {
   ): Promise<void> {
     if (run.settled) return;
     run.settled = true;
+    run.admissionAbort.abort();
     writeSubagentMarker(run.eventsDir, subagentSettlingFileName(run.parentTerminalId, run.runId));
     await withSubagentCommitLock(run.eventsDir, run.parentTerminalId, run.runId, () => {
       commitSubagentAdmission(run.eventsDir, run.parentTerminalId, run.runId, run.task.createdAt, {

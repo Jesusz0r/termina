@@ -324,10 +324,15 @@ footprint, not these numbers.
   admission. Recovery is appended after results, or nested inside a result when
   a server tool is unresolved, preserving the provider's continuation rules.
 - A spawned subagent is never automatically restarted after failure, crash, or
-  cancellation: it may already have changed files. Only synchronous pre-child
-  launch failures retry (three attempts total). Explicit resume retains the
+  cancellation: it may already have changed files. Only failures before a
+  child launches may retry (three attempts total). Explicit resume retains the
   prior session. Cancellation escalates from SIGTERM to SIGKILL after five
   seconds; claims remain held until the child has closed.
+- The host creates a child's session through the session worker before it
+  admits the run, so retained-session scanning stays off Electron's main thread.
+  Lock-wait expiration rejects the spawn instead of killing a child the parent
+  already counted on. Cancellation aborts pending admission, and launch
+  rechecks the run and parent after lock waits.
 - Subagents are a fan-out: a turn that would start the only live child is
   refused. Issue at least two `spawn_subagent` calls in that turn, or add a
   sibling while another run is already active. A single subtask stays on the
@@ -346,7 +351,8 @@ safety guarantees above:
 
 Regression coverage: `stall-tracker.test.ts`, `tool-dispatch.test.ts`,
 `main-tool-loop.test.ts`, `main-steering.test.ts`, `plan-slash.test.ts`,
-`session-admission-wait.test.ts`, `provider-tool-args.test.ts`, and
+`session-admission-wait.test.ts`, `provider-tool-args.test.ts`,
+`tests/unit/electron/session-admission-worker.test.ts`, and
 `tests/unit/electron/subagents-host.test.ts`. Main-loop tests use real local
 execution with mocked provider streams and isolated projects/HOME/session roots.
 These are execution guarantees, not a claim that a model will never propose

@@ -30,6 +30,14 @@ export interface CoreSessionForkOpts {
   retentionLease?: SessionRetentionLock;
 }
 
+type CoreSessionAdmissionResult = { ok: true } | { ok: false; error: string };
+
+export interface CoreSessionAdmissionRequest {
+  op: "admit-core";
+  requestId: string;
+  sessionFile: string;
+}
+
 interface CoreSessionDiscardOpts {
   sessionFile: string;
 }
@@ -128,7 +136,7 @@ interface SessionWorkerShutdownRequest {
   op: "shutdown";
 }
 
-export type SessionWorkerRequest = CoreSessionForkRequest | CoreSessionDiscardRequest | SessionSearchRequest | ExportPatchRequest | LineDiffRequest | ReadPromptRequest | SessionForkCancelRequest | SessionWorkerShutdownRequest;
+export type SessionWorkerRequest = CoreSessionAdmissionRequest | CoreSessionForkRequest | CoreSessionDiscardRequest | SessionSearchRequest | ExportPatchRequest | LineDiffRequest | ReadPromptRequest | SessionForkCancelRequest | SessionWorkerShutdownRequest;
 
 type SessionForkFailure = {
   requestId: string;
@@ -137,6 +145,8 @@ type SessionForkFailure = {
 };
 
 export type SessionForkReply =
+  | { op: "admit-core-result"; requestId: string; ok: true }
+  | (SessionForkFailure & { op: "admit-core-result" })
   | { op: "fork-core-result"; requestId: string; ok: true; sessionFile: string; kept: number }
   | (SessionForkFailure & { op: "fork-core-result" })
   | { op: "discard-core-empty-result"; requestId: string; ok: true; removed: boolean }
@@ -156,7 +166,7 @@ export type SessionForkCallOptions = {
 };
 
 type PendingRequest = {
-  kind: "fork-core" | "discard-core-empty" | "search-sessions" | "export-patch" | "line-diff" | "read-prompt";
+  kind: "admit-core" | "fork-core" | "discard-core-empty" | "search-sessions" | "export-patch" | "line-diff" | "read-prompt";
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   removeAbortListener?: () => void;
@@ -185,6 +195,17 @@ export class SessionForkClient {
       if (callOptions?.signal?.aborted) throw abortError();
       return this.dispatchCore(opts, callOptions?.signal);
     });
+  }
+
+  /** Admission waits outside the fork queue: a queued fork can own its retention lease.
+   * The canonical admission lock serializes publication inside the worker. */
+  admitCoreSession(sessionFile: string, callOptions?: SessionForkCallOptions): Promise<CoreSessionAdmissionResult> {
+    if (this.disposed) return Promise.reject(new Error("session worker disposed"));
+    if (callOptions?.signal?.aborted) return Promise.reject(abortError());
+    if (this.pending.size >= SESSION_WORKER_QUEUE_HIGH_WATER) {
+      return Promise.reject(new Error("session worker queue is at its high-water mark; retry after pending work drains"));
+    }
+    return this.dispatchAdmission(sessionFile, callOptions?.signal);
   }
 
   /** Reclaim an empty core-session bundle through native bound cleanup. */
@@ -288,6 +309,35 @@ export class SessionForkClient {
       try {
         const msg: CoreSessionForkRequest = { ...payload, op: "fork-core", requestId };
         worker.postMessage(msg);
+        if (signal?.aborted) cancel();
+      } catch (err) {
+        this.takePending(requestId);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  private dispatchAdmission(sessionFile: string, signal?: AbortSignal): Promise<CoreSessionAdmissionResult> {
+    return new Promise((resolve, reject) => {
+      const requestId = `admit-core-${++this.seq}`;
+      const worker = this.ensure();
+      const cancel = (): void => {
+        if (!this.pending.has(requestId) || this.worker !== worker) return;
+        try {
+          worker.postMessage({ op: "cancel", requestId } satisfies SessionForkCancelRequest);
+        } catch {
+          // Worker exit reconciliation owns the pending request.
+        }
+      };
+      this.pending.set(requestId, {
+        kind: "admit-core",
+        resolve: (value) => resolve(value as CoreSessionAdmissionResult),
+        reject,
+        ...(signal ? { removeAbortListener: () => signal.removeEventListener("abort", cancel) } : {}),
+      });
+      signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        worker.postMessage({ op: "admit-core", requestId, sessionFile } satisfies CoreSessionAdmissionRequest);
         if (signal?.aborted) cancel();
       } catch (err) {
         this.takePending(requestId);
@@ -425,6 +475,7 @@ export class SessionForkClient {
       const pending = this.pending.get(msg.requestId);
       if (!pending) return;
       const matches =
+        (pending.kind === "admit-core" && msg.op === "admit-core-result") ||
         (pending.kind === "fork-core" && msg.op === "fork-core-result") ||
         (pending.kind === "discard-core-empty" && msg.op === "discard-core-empty-result") ||
         (pending.kind === "search-sessions" && msg.op === "search-sessions-result") ||
@@ -442,7 +493,7 @@ export class SessionForkClient {
           error: msg.error.message,
         } satisfies CoreSessionForkResult);
       } else if (msg.error.code === "cancelled") pending.reject(abortError(msg.error.message));
-      else if (pending.kind === "discard-core-empty") pending.resolve({ ok: false, error: msg.error.message });
+      else if (pending.kind === "discard-core-empty" || pending.kind === "admit-core") pending.resolve({ ok: false, error: msg.error.message });
       else pending.reject(new Error(msg.error.message));
     });
     const fail = (error: Error): void => {

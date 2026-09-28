@@ -636,6 +636,7 @@ class TerminaApp {
       await this.reclaimUnusedEmptyCoreSessions(dir);
       return dir;
     },
+    admitSession: (sessionFile, signal) => this.sessionFork.admitCoreSession(sessionFile, { signal }),
     appendMailboxNote: (terminalId, note) => this.appendMailboxNote(terminalId, note),
     watchStream: (terminalId) => this.runtime.watchSidecar(terminalId),
     releaseStream: (terminalId) => {

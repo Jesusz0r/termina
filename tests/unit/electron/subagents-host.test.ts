@@ -10,7 +10,9 @@ import {
   type SubagentChild,
   type SubagentLauncher,
 } from "../../../electron/subagents.ts";
-import { parseSubagentResultFile } from "../../../agent-core/subagents.ts";
+import { parseSubagentResultFile, withSubagentCommitLock } from "../../../agent-core/subagents.ts";
+import { acquireSessionRetentionLock, releaseSessionRetentionLock } from "../../../shared/session-retention-lock.ts";
+import { admitSessionBundle } from "../../../agent-core/session.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -122,7 +124,11 @@ function setup(opts: {
       eventsDirFor: eventsDirFor ?? (() => dir),
       baseEnv: () => ({}),
       coreBinary: () => "/fake/agent-core.mjs",
-      sessionRootFor: sessionRootFor ?? (async (cwd) => join(dir, "sessions", Buffer.from(cwd).toString("hex").slice(0, 16))),
+      sessionRootFor: sessionRootFor ?? (async (cwd) => {
+        mkdirSync(join(dir, "sessions"), { recursive: true });
+        return join(dir, "sessions", Buffer.from(cwd).toString("hex").slice(0, 16));
+      }),
+      admitSession: admitSessionBundle,
       appendMailboxNote: (terminalId, note) => { notes.push({ terminalId, note }); },
       watchStream: (id) => { watched.push(id); },
       releaseStream: (id) => { unwatched.push(id); },
@@ -171,6 +177,75 @@ describe("SubagentHost", () => {
     expect(s.procs.length).toBe(0);
     expect(existsSync(s.resultFile)).toBe(false);
     expect(s.notes[0]?.note ?? "").toMatch(/events directory is gone/);
+  });
+
+  it.each([false, true])("cancels waiting session admission without publishing or replacing the killed result (obstructed: %s)", async (obstructed) => {
+    const root = tmp();
+    const project = join(root, "project");
+    const lock = acquireSessionRetentionLock(root);
+    const s = setup({ sessionRootFor: async () => project });
+    s.writeTask();
+    const pending = s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    try {
+      await until(() => s.watched.length === 1);
+      expect(s.procs).toHaveLength(0);
+      expect(s.host.kill("term-7", "bg-1", "cancelled while admitting")).toBe(true);
+      await until(() => existsSync(s.resultFile));
+      expect(s.readResult().outcome).toBe("killed");
+      if (obstructed) writeFileSync(project, "not a session directory");
+    } finally {
+      releaseSessionRetentionLock(lock);
+      await pending;
+    }
+    expect(s.readResult().outcome).toBe("killed");
+    expect(s.notes).toHaveLength(1);
+    expect(s.procs).toHaveLength(0);
+    expect(s.host.activeCount()).toBe(0);
+    if (!obstructed) expect(existsSync(project)).toBe(false);
+  });
+
+  it("does not admit or launch after cancellation while the admission commit lock is held", async () => {
+    const s = setup();
+    s.writeTask();
+    let unlock!: () => void;
+    const lock = withSubagentCommitLock(s.dir, "term-7", "bg-1", () => new Promise<void>(resolve => { unlock = resolve; }));
+    const pending = s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    try {
+      await until(() => s.watched.length === 1);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(s.procs).toHaveLength(0);
+      expect(s.host.kill("term-7", "bg-1", "cancelled before commit")).toBe(true);
+    } finally {
+      unlock();
+      await lock;
+      await pending;
+    }
+    await until(() => existsSync(s.resultFile));
+    expect(s.procs).toHaveLength(0);
+    expect(s.readResult().outcome).toBe("killed");
+    expect(s.notes).toHaveLength(1);
+  });
+
+  it("does not launch if the parent disappears while session admission waits", async () => {
+    const root = tmp();
+    const lock = acquireSessionRetentionLock(root);
+    let alive = true;
+    let eventsDir = "";
+    const s = setup({ sessionRootFor: async () => join(root, "project"), eventsDirFor: () => alive ? eventsDir : null });
+    eventsDir = s.dir;
+    s.writeTask();
+    const pending = s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    try {
+      await until(() => s.watched.length === 1);
+      alive = false;
+    } finally {
+      releaseSessionRetentionLock(lock);
+      await pending;
+    }
+    expect(s.procs).toHaveLength(0);
+    expect(s.readResult().outcome).toBe("failed");
+    expect(s.readResult().error).toContain("parent events directory is gone");
+    expect(s.host.activeCount()).toBe(0);
   });
 
   it("fails closed on parent mismatch and malformed shapes", async () => {
@@ -342,16 +417,20 @@ describe("SubagentHost", () => {
 
   it("runs a real engine child to a failed result", async () => {
     const dir = tmp();
+    const home = join(dir, "home");
+    mkdirSync(home);
     const notes: string[] = [];
+    let launched = false;
     const { spawn } = await import("node:child_process");
     const engineTs = new URL("../../../agent-core/main.ts", import.meta.url).pathname;
     const name = "subagent-term-7-bg-1.task.json";
     const realHost = new SubagentHost(
       {
         eventsDirFor: () => dir,
-        baseEnv: () => ({ PATH: process.env.PATH, HOME: process.env.HOME, TERMINA_CORE_TEST: "1" }),
+        baseEnv: () => ({ PATH: process.env.PATH, HOME: home, TERMINA_CORE_TEST: "1" }),
         coreBinary: () => "unused",
         sessionRootFor: async () => join(dir, "sessions"),
+        admitSession: admitSessionBundle,
         appendMailboxNote: (_t, note) => { notes.push(note); },
         watchStream: () => {},
         releaseStream: () => {},
@@ -366,10 +445,11 @@ describe("SubagentHost", () => {
       {
         maxAttempts: 1,
         launch: (_cmd, _args, opts) => {
+          launched = true;
           const child = spawn(
             process.execPath,
             ["--experimental-strip-types", "--no-warnings", engineTs, "--subagent-task", join(dir, name)],
-            { cwd: opts.cwd, env: { ...process.env, ...opts.env }, stdio: ["ignore", "pipe", "pipe"] },
+            { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"] },
           );
           const wrap = (stream: { on(e: string, cb: (d: Buffer) => void): void } | null) => ({
             onData: (cb: (d: Buffer) => void) => { stream?.on("data", cb); },
@@ -378,7 +458,7 @@ describe("SubagentHost", () => {
             pid: child.pid,
             stdout: wrap(child.stdout),
             stderr: wrap(child.stderr),
-            onExit: (cb) => { child.on("exit", (c, sig) => cb(c, sig)); },
+            onExit: (cb) => { child.on("close", (c, sig) => cb(c, sig)); },
             killChild: (sig) => { try { child.kill(sig); } catch { /* exited */ } },
             killGroup: (sig) => { try { child.kill(sig); } catch { /* exited */ } },
           };
@@ -390,6 +470,7 @@ describe("SubagentHost", () => {
     await realHost.handleSpawn("term-7", "bg-1", name);
     await until(() => existsSync(join(dir, "subagent-term-7-bg-1.result.json")), 45000);
     const body = JSON.parse(readFileSync(join(dir, "subagent-term-7-bg-1.result.json"), "utf8"));
+    expect(launched).toBe(true);
     expect(body.outcome).toBe("failed");
     expect(notes.length).toBe(1);
   }, 60000);

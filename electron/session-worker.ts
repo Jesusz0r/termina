@@ -10,12 +10,14 @@
  * client (and nested Worker) inside this thread.
  */
 import { parentPort } from "node:worker_threads";
-import { lstatSync, realpathSync, statSync } from "node:fs";
+import { mkdirSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { stat, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { changedLinesInAfter } from "../shared/line-diff.js";
 import { parsePromptPayload } from "./prompt-payload.js";
 import {
+  admitSessionBundle,
+  parseSessionBundlePath,
   inspectEmptySessionBundle,
   writeForkedSession,
 } from "../agent-core/session.js";
@@ -34,6 +36,7 @@ import {
   disposeWorldlineGitCore,
 } from "./worldline-git.js";
 import type {
+  CoreSessionAdmissionRequest,
   CoreSessionForkRequest,
   CoreSessionDiscardRequest,
   ExportPatchRequest,
@@ -48,6 +51,7 @@ function post(msg: SessionForkReply): void {
   parentPort?.postMessage(msg);
 }
 
+const activeAdmissions = new Map<string, AbortController>();
 const activeCoreForks = new Map<string, AbortController>();
 /** Live session searches by request id (read-only; run outside the fork queue). */
 const activeSearches = new Map<string, AbortController>();
@@ -339,6 +343,34 @@ async function discardCoreEmptySession(msg: CoreSessionDiscardRequest): Promise<
   }
 }
 
+async function admitCoreSession(msg: CoreSessionAdmissionRequest, controller: AbortController): Promise<void> {
+  try {
+    controller.signal.throwIfAborted();
+    const path = msg.sessionFile;
+    if (typeof path !== "string" || !path || path.length > 4096 || path.includes("\0") || !isAbsolute(path)) {
+      throw new Error("invalid session path");
+    }
+    const parsed = parseSessionBundlePath(path);
+    if (!parsed) throw new Error("session path is not a core session bundle");
+    mkdirSync(dirname(parsed.projectDir), { recursive: true, mode: 0o700 });
+    const result = await admitSessionBundle(path, controller.signal);
+    if (!result.ok) throw new Error(result.error);
+    post({ op: "admit-core-result", requestId: msg.requestId, ok: true });
+  } catch (err) {
+    post({
+      op: "admit-core-result",
+      requestId: msg.requestId,
+      ok: false,
+      error: {
+        code: controller.signal.aborted ? "cancelled" : "failed",
+        message: err instanceof Error ? err.message : String(err),
+      },
+    });
+  } finally {
+    activeAdmissions.delete(msg.requestId);
+  }
+}
+
 async function forkCoreSession(msg: CoreSessionForkRequest): Promise<void> {
   const controller = new AbortController();
   activeCoreForks.set(msg.requestId, controller);
@@ -401,8 +433,17 @@ parentPort?.on("message", (msg: SessionWorkerRequest) => {
     return;
   }
   if (msg.op === "cancel") {
+    activeAdmissions.get(msg.requestId)?.abort();
     activeCoreForks.get(msg.requestId)?.abort();
     activeSearches.get(msg.requestId)?.abort();
+    return;
+  }
+  if (msg.op === "admit-core") {
+    const controller = new AbortController();
+    activeAdmissions.set(msg.requestId, controller);
+    // Register before yielding so cancellation is retained while awaiting dispatch.
+    // Do not block lease-backed forks behind an admission waiting for that lease.
+    setImmediate(() => void admitCoreSession(msg, controller));
     return;
   }
   if (msg.op === "discard-core-empty") {

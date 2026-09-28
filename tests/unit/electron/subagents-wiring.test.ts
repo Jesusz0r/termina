@@ -42,6 +42,14 @@ describe("Subagent Wiring Invariants", () => {
     assert.match(agentMain, /surface\?\.setSubagentCount\(subagentRegistry\.activeRuns\(\)\.length\)/);
     assert.match(agentMain, /syncSubagentChrome\(\);\s*pollSubagentApprovals\(\)/);
     assert.match(agentMain, /admitSubagentFanout\(/);
+    assert.match(host, /this\.sinks\.admitSession\(/);
+  });
+
+  it("session admission runs through the existing worker, never on Electron main", () => {
+    const worker = readFileSync(new URL("../../../electron/session-worker.ts", import.meta.url), "utf8");
+    assert.match(main, /admitSession: \(sessionFile, signal\) => this\.sessionFork\.admitCoreSession\(sessionFile, \{ signal \}\)/);
+    assert.doesNotMatch(host, /admitSessionBundle|mkdirSync/);
+    assert.match(worker, /await admitSessionBundle\(path, controller\.signal\)/);
   });
 
   it("clear and close terminate owner runs", () => {

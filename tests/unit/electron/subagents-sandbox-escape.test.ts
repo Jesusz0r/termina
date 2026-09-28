@@ -1,9 +1,10 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SubagentHost, type SubagentChild, type SubagentLauncher } from "../../../electron/subagents.ts";
 import { isWorldlineCandidateEnv } from "../../../agent-core/subagents.ts";
+import { admitSessionBundle } from "../../../agent-core/session.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -68,7 +69,11 @@ function setup(opts: {
       eventsDirFor: () => dir,
       baseEnv: () => ({}),
       coreBinary: () => "/fake/agent-core.mjs",
-      sessionRootFor: async (cwd) => join(dir, "sessions", Buffer.from(cwd).toString("hex").slice(0, 16)),
+      sessionRootFor: async (cwd) => {
+        mkdirSync(join(dir, "sessions"), { recursive: true });
+        return join(dir, "sessions", Buffer.from(cwd).toString("hex").slice(0, 16));
+      },
+      admitSession: admitSessionBundle,
       appendMailboxNote: (_t, note) => { notes.push(note); },
       watchStream: () => {},
       releaseStream: () => {},
