@@ -77,6 +77,15 @@ pub(crate) fn loose_path(repo: &Repository, oid: Oid) -> Option<PathBuf> {
     Some(repo.path().join("objects").join(&hex[0..2]).join(&hex[2..]))
 }
 
+/// True when the store already owns the loose object for `oid`. The check
+/// intentionally ignores alternates and packs: only a canonical loose file
+/// proves local ownership, matching the transaction write path.
+pub(crate) fn store_owns_oid(repo: &Repository, oid: Oid) -> bool {
+    loose_path(repo, oid).is_some_and(|path| {
+        std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file())
+    })
+}
+
 /// Decode a Git path that must be valid UTF-8. Non-UTF8 paths fail the
 /// operation instead of being dropped or forged as empty.
 pub(crate) fn require_utf8_git_path<E>(

@@ -16,7 +16,7 @@ use git2::{IndexEntry, Oid, Repository, StatusOptions};
 use serde_json::{Value, json};
 
 use crate::test_hooks::pause_at_hook;
-use crate::util::{has_git_segment, is_safe_relative, now_ms, oid_ext};
+use crate::util::{has_git_segment, is_safe_relative, now_ms, oid_ext, store_owns_oid};
 use crate::{FileIdentity, StoreObjectTransaction, TREE_MAP_CACHE_SIZE, write_blob};
 
 use super::binding::{BoundSourceRepository, CaptureRoot, preload_cached_blobs};
@@ -25,7 +25,7 @@ use super::ops_capture::stat_cached_entry;
 use super::refs::{commit_tree, fail_before_state_ref, update_state_ref};
 use super::tree_cache::cache_tree_map;
 use super::trees::{FlatEntry, delta_directories, write_nested_tree, write_tree_delta};
-use super::walk::{TreeLookupKind, tree_lookup};
+use super::walk::{TreeLookupKind, git_blob_size_bounded, tree_lookup};
 
 const CACHE_FILE: &str = "capture-stat-cache";
 const FILE_MODE: u32 = 0o100644;
@@ -180,7 +180,16 @@ pub(crate) fn try_parent_status_delta(input: ParentDelta<'_>) -> Result<Value, S
         }
     }
     let cached_oids: HashSet<Oid> = accepted.iter().map(|(_, _, oid)| *oid).collect();
-    let cached_blobs = preload_cached_blobs(source, capture_fs, &cached_oids, store)?;
+    let mut owned_oids: HashSet<Oid> = HashSet::new();
+    let mut preload_oids: HashSet<Oid> = HashSet::new();
+    for oid in cached_oids {
+        if store_owns_oid(store, oid) {
+            owned_oids.insert(oid);
+        } else {
+            preload_oids.insert(oid);
+        }
+    }
+    let cached_blobs = preload_cached_blobs(source, capture_fs, &preload_oids, store)?;
     source.verify(capture_fs)?;
 
     let mut object_transaction = StoreObjectTransaction::new(store_dir, req);
@@ -188,6 +197,16 @@ pub(crate) fn try_parent_status_delta(input: ParentDelta<'_>) -> Result<Value, S
     let mut fresh: HashMap<String, CacheEntry> = HashMap::new();
     let recorded_at = now_pair();
     for (path, mode, oid) in accepted {
+        if owned_oids.contains(&oid) {
+            git_blob_size_bounded(
+                store,
+                oid,
+                max_file_bytes,
+                &format!("cached store blob {path}"),
+            )?;
+            flat.insert(path, (mode, oid));
+            continue;
+        }
         let blob = cached_blobs
             .get(&oid)
             .ok_or_else(|| format!("cached source blob {oid} was not preloaded"))?;

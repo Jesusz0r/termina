@@ -453,9 +453,12 @@ fn promotion_write_entry(
         }
         _ => unreachable!("materialized mode was validated before reading"),
     }
-    parent
-        .sync_all()
-        .map_err(|error| format!("sync materialized parent failed for {rel_path}: {error}"))?;
+    // The parent directory sync is batched by the caller: paths are written
+    // in sorted order and every desired directory is synced once after the
+    // loop, instead of once per file. File bytes above are already durable
+    // per file; the batched parent syncs make the directory entries durable
+    // on the success path. A mid-materialize crash leaves fewer entries
+    // durable, but materialization is idempotent and re-runnable.
     Ok(())
 }
 
@@ -485,6 +488,18 @@ pub(crate) fn materialize_state_bound(
     paths.sort_by(|(left, _), (right, _)| left.cmp(right));
     for (rel_path, (mode, oid)) in paths {
         promotion_write_entry(repo, target, rel_path, *mode, *oid, req)?;
+    }
+    // One parent sync per desired directory covers every entry created
+    // above. The target-root sync below covers top-level entries.
+    let mut directories: Vec<&String> = desired_directories.iter().collect();
+    directories.sort();
+    for dir in directories {
+        let path = std::path::Path::new(dir);
+        let dir_file = crate::util::open_relative_directory(target, path, "materialize parent")
+            .map_err(|error| format!("sync materialized parent failed for {dir}: {error}"))?;
+        dir_file
+            .sync_all()
+            .map_err(|error| format!("sync materialized parent failed for {dir}: {error}"))?;
     }
     target
         .sync_all()

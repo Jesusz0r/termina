@@ -247,7 +247,10 @@ pub(crate) fn staging_directory_identity(store_dir: &Path) -> Result<StoreStagin
     })
 }
 
-pub(crate) fn cleanup_transaction_temps(store_dir: &Path, repo: &Repository) -> Result<(), String> {
+/// Remove stale journal temp files in the store directory. Returns true when
+/// at least one temp was removed (crash evidence for the fanout scan).
+fn cleanup_journal_temps(store_dir: &Path) -> bool {
+    let mut removed = false;
     if let Ok(entries) = fs::read_dir(store_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -257,10 +260,14 @@ pub(crate) fn cleanup_transaction_temps(store_dir: &Path, repo: &Repository) -> 
             if name.starts_with(&format!(".{STORE_TRANSACTION_FILE}.tmp-"))
                 && entry.file_type().is_ok_and(|kind| kind.is_file())
             {
-                let _ = fs::remove_file(entry.path());
+                removed |= fs::remove_file(entry.path()).is_ok();
             }
         }
     }
+    removed
+}
+
+fn cleanup_object_temps(repo: &Repository) -> Result<(), String> {
     let objects = repo.path().join("objects");
     let Ok(fanouts) = fs::read_dir(&objects) else {
         return Ok(());
@@ -306,25 +313,32 @@ pub(crate) fn recover_store_transaction(store_dir: &Path, repo: &Repository) -> 
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let stage_dir = transaction_dir(store_dir);
-            match fs::symlink_metadata(&stage_dir) {
+            let had_staging = match fs::symlink_metadata(&stage_dir) {
                 Ok(metadata) if metadata.file_type().is_dir() => {
                     fs::remove_dir_all(&stage_dir)
                         .map_err(|e| format!("remove stale transaction staging failed: {e}"))?;
                     sync_directory(store_dir)?;
+                    true
                 }
                 Ok(_) => {
                     fs::remove_file(&stage_dir)
                         .map_err(|e| format!("remove invalid stale staging path failed: {e}"))?;
                     sync_directory(store_dir)?;
+                    true
                 }
-                Err(stage_error) if stage_error.kind() == io::ErrorKind::NotFound => {}
+                Err(stage_error) if stage_error.kind() == io::ErrorKind::NotFound => false,
                 Err(stage_error) => {
                     return Err(format!(
                         "inspect stale transaction staging failed: {stage_error}"
                     ));
                 }
+            };
+            let journal_temps = cleanup_journal_temps(store_dir);
+            // Stale staging proves an interrupted request even without a
+            // journal, so keep the fanout scan thorough in that case.
+            if had_staging || journal_temps {
+                cleanup_object_temps(repo)?;
             }
-            cleanup_transaction_temps(store_dir, repo)?;
             return Ok(());
         }
         Err(error) => return Err(format!("inspect store transaction journal failed: {error}")),
@@ -384,7 +398,12 @@ pub(crate) fn recover_store_transaction(store_dir: &Path, repo: &Repository) -> 
         }
     }
     clear_store_transaction(store_dir)?;
-    cleanup_transaction_temps(store_dir, repo)
+    cleanup_journal_temps(store_dir);
+    // Post-crash recovery stays thorough: a journal proves the previous
+    // request was interrupted mid-transaction, so scan fanouts even without
+    // fresh journal-temp evidence.
+    cleanup_object_temps(repo)?;
+    Ok(())
 }
 
 /// Objects created by one store request. The durable journal and hard-linked
@@ -481,12 +500,13 @@ impl StoreObjectTransaction {
         let objects_dir = repo.path().join("objects");
         ensure_real_directory(&objects_dir, 0o755)?;
         let mut changed_directories = HashSet::new();
+        let mut fanout_created = false;
         for pending in &self.pending {
             let parent = pending
                 .canonical
                 .parent()
                 .ok_or("loose object path has no parent")?;
-            ensure_real_directory(parent, 0o755)?;
+            fanout_created |= ensure_real_directory(parent, 0o755)?;
             match fs::hard_link(&pending.stage, &pending.canonical) {
                 Ok(()) => {
                     self.metrics.published_objects += 1;
@@ -500,8 +520,13 @@ impl StoreObjectTransaction {
             sync_directory_nofollow(&directory)?;
             self.metrics.canonical_directory_syncs += 1;
         }
-        sync_directory_nofollow(&objects_dir)?;
-        self.metrics.canonical_directory_syncs += 1;
+        // The objects directory only gains entries when a new fanout is
+        // created. Steady-state publishes land in existing fanouts whose own
+        // syncs already cover the new hard links.
+        if fanout_created {
+            sync_directory_nofollow(&objects_dir)?;
+            self.metrics.canonical_directory_syncs += 1;
+        }
         self.pending.clear();
         Ok(())
     }

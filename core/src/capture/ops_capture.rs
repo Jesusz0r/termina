@@ -7,7 +7,7 @@ use std::time::UNIX_EPOCH;
 use crate::test_hooks::pause_at_hook;
 use crate::util::{
     has_git_segment, is_safe_relative, now_ms, oid_ext, open_at, opt_s, require_utf8_git_path,
-    require_utf8_path_bytes, s, stat_at, stat_file,
+    require_utf8_path_bytes, s, stat_at, stat_file, store_owns_oid,
 };
 use crate::{BUDGET_MAX_FILE_BYTES, BUDGET_MAX_NEW_BLOB_BYTES, BUDGET_MAX_PATHS};
 use crate::{
@@ -27,6 +27,7 @@ use super::parent_delta::{
 };
 use super::refs::{commit_tree, fail_before_state_ref, update_state_ref};
 use super::tree_cache::{cache_tree_map, collect_tree_map_cached};
+use super::walk::git_blob_size_bounded;
 use super::trees::{
     FlatEntry, apply_flat_delta, nested_from_flat, write_nested_tree, write_tree_delta,
 };
@@ -314,7 +315,25 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
             ));
         }
     }
-    let cached_blobs = preload_cached_blobs(&source, &capture_fs, &cached_oids, &store)?;
+    // Blobs the store already owns need no source read, rehash, or copy:
+    // the stat cache already ties the live file to the index oid, and the
+    // tree can reference the owned oid directly. Only preload the remainder.
+    // After-cache hooks rewrite the worktree, so keep those on the slow path.
+    let skip_preload = cache_hooks.is_empty();
+    let mut owned_oids: HashSet<Oid> = HashSet::new();
+    let mut preload_oids: HashSet<Oid> = HashSet::new();
+    if skip_preload {
+        for oid in cached_oids {
+            if store_owns_oid(&store, oid) {
+                owned_oids.insert(oid);
+            } else {
+                preload_oids.insert(oid);
+            }
+        }
+    } else {
+        preload_oids = cached_oids;
+    }
+    let cached_blobs = preload_cached_blobs(&source, &capture_fs, &preload_oids, &store)?;
     source.verify(&capture_fs)?;
 
     // No source Git operation occurs after this point.  Delay transaction
@@ -346,50 +365,71 @@ pub(crate) fn op_capture(req: &Value) -> Result<Value, String> {
         } else {
             match cached {
                 Some((mode, oid)) => {
-                    let blob = cached_blobs
-                        .get(&oid)
-                        .ok_or_else(|| format!("cached source blob {oid} was not preloaded"))?;
-                    let cached_len = u64::try_from(blob.len())
-                        .map_err(|_| format!("cached source blob {oid} size does not fit u64"))?;
-                    if cached_len != path.identity.len {
-                        return Err(format!(
-                            "cached source blob {oid} size {cached_len} does not match live/index size {} for {rel_path}",
-                            path.identity.len
-                        ));
+                    if owned_oids.contains(&oid) {
+                        let owned_len = git_blob_size_bounded(
+                            &store,
+                            oid,
+                            max_file_bytes,
+                            &format!("cached store blob {rel_path}"),
+                        )?;
+                        if owned_len != path.identity.len {
+                            return Err(format!(
+                                "cached store blob {oid} size {owned_len} does not match live/index size {} for {rel_path}",
+                                path.identity.len
+                            ));
+                        }
+                        let after = stat_at(path.parent.as_raw_fd(), &path.leaf)
+                            .map_err(|_| format!("file vanished while captured: {rel_path}"))?;
+                        if path.identity != after {
+                            return Err(format!("file changed while captured: {rel_path}"));
+                        }
+                        Some((mode, oid, 0u64))
+                    } else {
+                        let blob = cached_blobs
+                            .get(&oid)
+                            .ok_or_else(|| format!("cached source blob {oid} was not preloaded"))?;
+                        let cached_len = u64::try_from(blob.len())
+                            .map_err(|_| format!("cached source blob {oid} size does not fit u64"))?;
+                        if cached_len != path.identity.len {
+                            return Err(format!(
+                                "cached source blob {oid} size {cached_len} does not match live/index size {} for {rel_path}",
+                                path.identity.len
+                            ));
+                        }
+                        if cached_len > max_file_bytes {
+                            return Err(format!(
+                                "cached source blob {oid} exceeds the {max_file_bytes} file byte budget"
+                            ));
+                        }
+                        ensure_blob_budget(
+                            &object_transaction,
+                            &store,
+                            oid,
+                            cached_len,
+                            new_blob_bytes,
+                            max_new_blob_bytes,
+                        )?;
+                        apply_rewrite_hooks(&path, &cache_hooks, None)?;
+                        let (owned_oid, new_bytes) = write_blob(
+                            &mut object_transaction,
+                            &store,
+                            blob,
+                            new_blob_bytes,
+                            max_new_blob_bytes,
+                            Some(oid),
+                        )?;
+                        if owned_oid != oid {
+                            return Err(format!(
+                                "cached source blob oid mismatch: expected {oid}, wrote {owned_oid}"
+                            ));
+                        }
+                        let after = stat_at(path.parent.as_raw_fd(), &path.leaf)
+                            .map_err(|_| format!("file vanished while captured: {rel_path}"))?;
+                        if path.identity != after {
+                            return Err(format!("file changed while captured: {rel_path}"));
+                        }
+                        Some((mode, owned_oid, new_bytes))
                     }
-                    if cached_len > max_file_bytes {
-                        return Err(format!(
-                            "cached source blob {oid} exceeds the {max_file_bytes} file byte budget"
-                        ));
-                    }
-                    ensure_blob_budget(
-                        &object_transaction,
-                        &store,
-                        oid,
-                        cached_len,
-                        new_blob_bytes,
-                        max_new_blob_bytes,
-                    )?;
-                    apply_rewrite_hooks(&path, &cache_hooks, None)?;
-                    let (owned_oid, new_bytes) = write_blob(
-                        &mut object_transaction,
-                        &store,
-                        blob,
-                        new_blob_bytes,
-                        max_new_blob_bytes,
-                        Some(oid),
-                    )?;
-                    if owned_oid != oid {
-                        return Err(format!(
-                            "cached source blob oid mismatch: expected {oid}, wrote {owned_oid}"
-                        ));
-                    }
-                    let after = stat_at(path.parent.as_raw_fd(), &path.leaf)
-                        .map_err(|_| format!("file vanished while captured: {rel_path}"))?;
-                    if path.identity != after {
-                        return Err(format!("file changed while captured: {rel_path}"));
-                    }
-                    Some((mode, owned_oid, new_bytes))
                 }
                 None => hash_path(
                     &mut object_transaction,

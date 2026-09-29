@@ -64,7 +64,7 @@ pub(crate) fn prepare_transaction_ref_path(
     repo: &Repository,
     name: &str,
     target: Oid,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, bool), String> {
     validate_transaction_ref(repo, name, &target.to_string())?;
     let git_dir = repo.path();
     if !fs::symlink_metadata(git_dir)
@@ -81,10 +81,11 @@ pub(crate) fn prepare_transaction_ref_path(
     } else {
         termina.join("merge")
     };
-    ensure_real_directory(&refs, 0o755)?;
-    ensure_real_directory(&termina, 0o755)?;
-    ensure_real_directory(&namespace, 0o755)?;
-    Ok(git_dir.join(name))
+    let mut created = false;
+    created |= ensure_real_directory(&refs, 0o755)?;
+    created |= ensure_real_directory(&termina, 0o755)?;
+    created |= ensure_real_directory(&namespace, 0o755)?;
+    Ok((git_dir.join(name), created))
 }
 
 /// Make an exact loose transaction ref and every ancestor directory durable,
@@ -95,7 +96,7 @@ pub(crate) fn sync_exact_transaction_ref(
     name: &str,
     target: Oid,
 ) -> Result<u64, String> {
-    let ref_path = prepare_transaction_ref_path(repo, name, target)?;
+    let (ref_path, ancestors_created) = prepare_transaction_ref_path(repo, name, target)?;
     if exact_ref_target(repo, name) != Some(target) {
         return Err(format!(
             "transaction ref is not visible at exact target: {name}"
@@ -126,12 +127,18 @@ pub(crate) fn sync_exact_transaction_ref(
         .parent()
         .ok_or("transaction ref has no parent directory")?;
     let mut directory_count = 0u64;
+    // The leaf parent always gains the new ref file and must be synced.
+    // Ancestors only gain entries when they were just created; in steady
+    // state their contents are already durable.
+    let leaf_parent = current;
     loop {
         if !current.starts_with(git_dir) {
             return Err("transaction ref escaped the store git directory".to_string());
         }
-        sync_directory_nofollow(current)?;
-        directory_count += 1;
+        if ancestors_created || current == leaf_parent {
+            sync_directory_nofollow(current)?;
+            directory_count += 1;
+        }
         if current == git_dir {
             break;
         }
@@ -163,7 +170,7 @@ pub(crate) fn publish_transaction_ref(
     if !transaction.pending.is_empty() {
         return Err("cannot publish a transaction ref with pending objects".to_string());
     }
-    prepare_transaction_ref_path(repo, name, target)?;
+    prepare_transaction_ref_path(repo, name, target).map(|_| ())?;
     let mut publication = repo
         .reference(name, target, true, "")
         .map(|_| ())
