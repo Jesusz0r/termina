@@ -8,6 +8,8 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isRecord } from "../../../shared/guards.ts";
+import { parseTraceRecord } from "../../../agent-core/trace/normalize.ts";
 
 // This is deliberately the only estimator used by the calibration report.
 // Provider usage remains authoritative; this script never supplies a tokenizer.
@@ -29,10 +31,6 @@ const CLASS_RANK: Map<string, number> = new Map(CONTENT_CLASSES.map((name, index
 const MAX_SAMPLE_ID_LENGTH = 128;
 const SAMPLE_ID_PATTERN = /^[^\u0000-\u001f\u007f]+$/;
 const TRACE_FILE_PATTERN = /^turn-(\d+)\.json$/;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function isKnownTokenCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -309,8 +307,7 @@ function extractSamples(value: unknown, source: string, { requireCalibrationReco
   if (requireCalibrationRecord && (!isRecord(value) || value.recordType !== CALIBRATION_RECORD_TYPE)) {
     throw new Error(`${source} must be a calibration-sample record; trace-v2 provider records are not calibration evidence`);
   }
-  if (isRecord(value) && value.schemaVersion === 2 &&
-    (value.recordType === "attempt" || value.recordType === "task-settled")) {
+  if (parseTraceRecord(value) !== null) {
     throw new Error(`${source} is a trace-v2 provider record; raw calibration sample content is required`);
   }
   if (Array.isArray(value)) return value;

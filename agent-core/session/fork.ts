@@ -3,7 +3,6 @@
  *
  * Owns forked-session materialization and install. Split from agent-core/session.ts (issue #38).
  */
-import { isRecord } from "../../shared/guards.ts";
 import { closeSync, mkdirSync } from "node:fs";
 import { rename } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -11,7 +10,8 @@ import { retainUnboundCleanup } from "./bundles.ts";
 import { anchoredChildPath, fsyncDirectoryDescriptor, openDirectoryAnchor } from "./descriptors.ts";
 import { SessionWriter } from "./lifecycle.ts";
 import { CURRENT_DIR, MAX_RETAINED_TEMP_BYTES, YIELD_EVERY_RECORDS, cancellation, cloneJson, errMsg, inspectEntry, parseSessionBundlePath, recoveryKey, sessionBundleLimit, yieldToEventLoop } from "./primitives.ts";
-import type { ForkSessionResult, ReplayContent, ReplayMessage, ReplayRecovery, ReplayState, SessionBundlePaths, SessionOperationOptions, SessionReclaimReceiptTarget, SessionResult } from "./primitives.ts";
+import type { ForkSessionResult, ReplayRecovery, ReplayState, SessionBundlePaths, SessionOperationOptions, SessionReclaimReceiptTarget, SessionResult } from "./primitives.ts";
+import type { ReplayContent, ReplayMessage } from "./messages.ts";
 import { recoverSessionBlocks, replaySessionBundle } from "./replay.ts";
 import { closeTempBundle, copyReferencedImages, createSecureTempBundle, referencedImageNames, releaseTempRetentionLock, removeEmptyAppOwnedClaim, retainedTempUsage, validateCommittedDestination, validateForkDestination, validateTempBundle } from "./temp-bundles.ts";
 import type { TempBundle } from "./temp-bundles.ts";
@@ -175,7 +175,7 @@ async function materializeVisibleFork(
                 }
                 content.splice(recovery.blockIndex, 0, restored);
               } else {
-                if (recovery.blockIndex >= content.length || !isRecord(content[recovery.blockIndex])) {
+                if (recovery.blockIndex >= content.length) {
                   opened.writer?.close();
                   return { ok: false, error: "stale recovery target" };
                 }

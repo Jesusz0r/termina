@@ -1,15 +1,16 @@
 /**
  * Uncertain-comparison recovery evidence (`electron/worldlines/`).
- * Manifest parsing, tree measurement, usage ledgers, and the admission
+ * Manifest reads, tree measurement, usage ledgers, and the admission
  * owner that bounds recovery evidence per worlds root. Never auto-deletes.
  */
-import { errorCode, isRecord } from "../../shared/guards.js";
+import { errorCode } from "../../shared/guards.js";
+import { parseComparisonManifest } from "./comparison-manifest.js";
 
 import { randomUUID, createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { lstat as lstatPath, opendir, readFile } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { boundPromotionWriteJsonFile } from "../worldline-git.js";
 import { promotionIdentityOf, refreshBoundPromotionDirectory } from "./bindings.js";
 import {
@@ -33,9 +34,6 @@ import {
 import type {
   BoundPromotionDirectory,
   ComparisonManifest,
-  ComparisonManifestCandidate,
-  ComparisonManifestStatus,
-  ComparisonState,
   UncertainComparisonAdmissionOwnerResult,
   UncertainComparisonIdentity,
   UncertainComparisonLedgerEntry,
@@ -45,64 +43,6 @@ import type {
   UncertainComparisonUsage,
   UncertainComparisonUsageLedger,
 } from "./types.js";
-
-/** Parse only a complete manifest shape; null is deliberately fail-closed. */
-export function parseComparisonManifest(value: unknown): ComparisonManifest | null {
-  if (!isRecord(value)) return null;
-  const record = value;
-  if (typeof record.id !== "string" || record.id.length === 0 || typeof record.sourceRunId !== "string" || record.sourceRunId.length === 0) return null;
-  if (typeof record.createdAt !== "number" || !Number.isFinite(record.createdAt) || record.createdAt <= 0) return null;
-  if (record.status !== "creating" && record.status !== "complete" && record.status !== "uncertain") return null;
-  if (record.expectedCandidates !== 1 && record.expectedCandidates !== 2) return null;
-  if (!isRecord(record.candidates)) return null;
-  const candidatesRecord = record.candidates;
-  const candidates: Record<string, ComparisonManifestCandidate> = {};
-  for (const [label, rawCandidate] of Object.entries(candidatesRecord)) {
-    if (label !== "A" && label !== "B") return null;
-    if (!isRecord(rawCandidate)) return null;
-    const candidate = rawCandidate;
-    if ((typeof candidate.pid !== "number" && candidate.pid !== null) || (typeof candidate.pid === "number" && (!Number.isInteger(candidate.pid) || candidate.pid < 0))) return null;
-    if (typeof candidate.lstart !== "string" && candidate.lstart !== null) return null;
-    if (!Array.isArray(candidate.paths) || candidate.paths.length === 0 || candidate.paths.some((path) => typeof path !== "string" || !isAbsolute(path))) return null;
-    candidates[label] = { pid: candidate.pid as number | null, lstart: candidate.lstart as string | null, paths: [...candidate.paths] as string[] };
-  }
-  if (Object.keys(candidates).length > record.expectedCandidates) return null;
-  if (!Array.isArray(record.uncertainSessionArtifacts)) return null;
-  const uncertainSessionArtifacts: Array<{ path: string; error: string }> = [];
-  for (const rawArtifact of record.uncertainSessionArtifacts) {
-    if (!isRecord(rawArtifact)) return null;
-    const artifact = rawArtifact;
-    if (typeof artifact.path !== "string" || !isAbsolute(artifact.path) || artifact.path.length === 0 || typeof artifact.error !== "string" || artifact.error.length === 0) return null;
-    uncertainSessionArtifacts.push({ path: artifact.path, error: artifact.error });
-  }
-  if (record.status === "complete" && (Object.keys(candidates).length !== record.expectedCandidates || uncertainSessionArtifacts.length > 0)) return null;
-  if (record.status === "uncertain" && uncertainSessionArtifacts.length === 0) return null;
-  return {
-    id: record.id,
-    sourceRunId: record.sourceRunId,
-    createdAt: record.createdAt,
-    status: record.status,
-    expectedCandidates: record.expectedCandidates,
-    candidates,
-    uncertainSessionArtifacts,
-  };
-}
-
-export function comparisonManifestFor(cmp: ComparisonState, status: ComparisonManifestStatus = "creating"): ComparisonManifest {
-  const candidates: Record<string, ComparisonManifestCandidate> = {};
-  for (const [label, cand] of cmp.candidates) {
-    candidates[label] = { pid: cand.pid, lstart: cand.lstart, paths: [cand.dir, cand.supportDir] };
-  }
-  return {
-    id: cmp.id,
-    sourceRunId: cmp.sourceRunId,
-    createdAt: cmp.createdAt,
-    status,
-    expectedCandidates: cmp.expectedCandidates,
-    candidates,
-    uncertainSessionArtifacts: [...cmp.uncertainSessionArtifacts],
-  };
-}
 
 function readComparisonManifest(dir: string): Promise<ComparisonManifest | null> {
   return readFile(join(dir, "manifest.json"), "utf8").then(

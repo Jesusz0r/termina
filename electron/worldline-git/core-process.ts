@@ -382,10 +382,12 @@ export function decodeTrustHashes(response: unknown): Record<string, string> {
   }
   const hashes = response.hashes;
   if (!isRecord(hashes)) throw new Error("trust hashes returned an invalid response");
-  for (const value of Object.values(hashes)) {
+  const entries: Array<[string, string]> = [];
+  for (const [key, value] of Object.entries(hashes)) {
     if (typeof value !== "string") throw new Error("trust hashes returned an invalid response");
+    entries.push([key, value]);
   }
-  return hashes as Record<string, string>;
+  return Object.fromEntries(entries);
 }
 
 /** The shared core process for the whole app. */

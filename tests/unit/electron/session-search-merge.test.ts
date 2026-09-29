@@ -316,7 +316,8 @@ describe("parseSessionMessageLine reclaim and errors (#452)", () => {
         sseq: 4,
         blockIndex: 0,
         action: "stub",
-        original: { type: "tool_result", chars: 80, bytes: 80, sha256: "abc" },
+        original: { type: "tool_result", chars: 80, bytes: 80, sha256: "a".repeat(64) },
+        revisionId: "rev-1",
         reclaimedTokens: 20,
         tool: "bash",
         repro: "bash 'pnpm run test:unit'",
@@ -401,7 +402,7 @@ describe("parseSessionMessageLine reclaim and errors (#452)", () => {
     expect(parseSessionMessageLine(line)).toBeNull();
   });
 
-  it("ignores malformed prune targets and negative seq fields", () => {
+  it("rejects malformed prune targets and negative seq fields in the session parser", () => {
     const line = JSON.stringify({
       storageSeq: 6,
       type: "revision",
@@ -422,10 +423,7 @@ describe("parseSessionMessageLine reclaim and errors (#452)", () => {
         },
       ],
     });
-    const parsed = parseSessionMessageLine(line);
-    expect(parsed?.text).toContain("reproduce: grep 'needle-token'");
-    expect(parsed?.text).toContain("storageSeq 0");
-    expect(parsed?.text).toContain("cleared: 0 chars");
+    expect(parseSessionMessageLine(line)).toBeNull();
   });
 });
 
@@ -467,7 +465,8 @@ describe("searchSessionFiles reclaim coverage (#452)", () => {
             sseq: 4,
             blockIndex: 0,
             action: "stub",
-            original: { type: "tool_result", chars: 40, bytes: 40, sha256: "abc" },
+            original: { type: "tool_result", chars: 40, bytes: 40, sha256: "a".repeat(64) },
+            revisionId: "rev-1",
             reclaimedTokens: 10,
             tool: "bash",
             repro: "bash 'pnpm run test:unit'",

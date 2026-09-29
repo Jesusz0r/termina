@@ -6,11 +6,11 @@
  */
 import { DurableAtomicWriteError, durableAtomicWrite } from "../../shared/durable-write.ts";
 import { syncDirectoryAsync } from "../../shared/fsync.ts";
-import { errorCode, isRecord } from "../../shared/guards.ts";
+import { errorCode } from "../../shared/guards.ts";
 import { mkdir, open as openFile, readFile, readdir, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { freezeDeep } from "./normalize.ts";
-import { compositeKey, countTurnFiles, createAttemptRecord, createTaskSettledRecord, emptyExistingScan, emptyManifestLinkIndex, freezeManifest, inspectExisting, newestTurnFiles, nonnegativeCounter, normalizeNamespace, processAlive, retryableFailureKind, stableError, taskKey, timestamp, traceTurnFromName, validPriorManifest, validTraceLinkIndex } from "./records.ts";
+import { freezeDeep, parseTraceLinkIndex, parseTraceLockOwner, parseTraceManifest } from "./normalize.ts";
+import { compositeKey, countTurnFiles, createAttemptRecord, createTaskSettledRecord, emptyExistingScan, emptyManifestLinkIndex, freezeManifest, inspectExisting, newestTurnFiles, normalizeNamespace, processAlive, retryableFailureKind, stableError, taskKey, timestamp, traceTurnFromName } from "./records.ts";
 import type { ExistingScan } from "./records.ts";
 import { DEFAULT_TRACE_MAX_RECORD_BYTES, DEFAULT_TRACE_MAX_SCAN_FILES, DEFAULT_TRACE_RETENTION_CAP, LINK_INDEX_FILE, MANIFEST_FILE, MAX_TRACE_INDEX_BYTES, MAX_TRACE_INDEX_ENTRIES, MAX_TRACE_MANIFEST_BYTES, TRACE_SCHEMA_VERSION } from "./schema.ts";
 import type { ExistingTraceRole, FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptIndexEntry, TraceAttemptInput, TraceLinkIndex, TraceManifest, TraceManifestOutcome, TraceManifestReset, TraceRole, TraceRuntimeOptions, TraceSettlementIndexEntry, TraceStartupResult, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailure, TraceWriteFailureKind, TraceWriteOutcome } from "./schema.ts";
@@ -372,9 +372,9 @@ export class TraceRuntime {
       const info = await stat(this.manifestPath);
       if (!info.isFile()) return { manifest: null, error: "trace manifest path is not a file" };
       if (info.size > MAX_TRACE_MANIFEST_BYTES) return { manifest: null, error: `trace manifest exceeds ${MAX_TRACE_MANIFEST_BYTES} bytes` };
-      const value = JSON.parse(await readFile(this.manifestPath, "utf8")) as unknown;
-      return validPriorManifest(value)
-        ? { manifest: value, error: null }
+      const manifest = parseTraceManifest(JSON.parse(await readFile(this.manifestPath, "utf8")));
+      return manifest
+        ? { manifest, error: null }
         : { manifest: null, error: "trace manifest failed schema validation" };
     } catch (error) {
       if (errorCode(error) === "ENOENT") return { manifest: null, error: null };
@@ -459,7 +459,7 @@ export class TraceRuntime {
     } catch {
       return { ok: false, error: "trace directory is already locked" };
     }
-    const ownerPid = isRecord(lockOwner) && nonnegativeCounter(lockOwner.pid) && lockOwner.pid > 0 ? lockOwner.pid : null;
+    const ownerPid = parseTraceLockOwner(lockOwner)?.pid ?? null;
     if (ownerPid === null || ownerPid === process.pid || processAlive(ownerPid)) {
       return { ok: false, error: "trace directory is already locked" };
     }
@@ -478,8 +478,8 @@ export class TraceRuntime {
     this.lockHandle = null;
     let ownsPath = false;
     try {
-      const owner = JSON.parse(await readFile(this.lockPath, "utf8")) as unknown;
-      ownsPath = isRecord(owner) && owner.token === this.lockToken;
+      const owner = parseTraceLockOwner(JSON.parse(await readFile(this.lockPath, "utf8")));
+      ownsPath = owner?.token === this.lockToken;
     } catch {
       /* The path may already have been removed; closing our handle is enough. */
     }
@@ -621,9 +621,9 @@ export class TraceRuntime {
       const info = await stat(this.indexPath);
       if (!info.isFile()) return { index: null, error: "trace link index path is not a file" };
       if (info.size > MAX_TRACE_INDEX_BYTES) return { index: null, error: `trace link index exceeds ${MAX_TRACE_INDEX_BYTES} bytes` };
-      const value = JSON.parse(await readFile(this.indexPath, "utf8")) as unknown;
-      return validTraceLinkIndex(value)
-        ? { index: value, error: null }
+      const index = parseTraceLinkIndex(JSON.parse(await readFile(this.indexPath, "utf8")));
+      return index
+        ? { index, error: null }
         : { index: null, error: "trace link index failed schema validation" };
     } catch (error) {
       if (errorCode(error) === "ENOENT") return { index: null, error: null };

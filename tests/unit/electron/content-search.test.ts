@@ -32,6 +32,14 @@ describe("content-search parseRipgrepJsonLine", () => {
     expect(hit).toEqual({ relPath: join("sub", "a.txt"), line: 3, column: 3, text: "a needle in hay", matchOffset: 2, matchLength: 6 });
   });
 
+  it("rejects non-object lines, array data and matches without a path at the parser boundary", () => {
+    for (const value of [null, 42, "match", [], { type: "match", data: [] }, {
+      type: "match", data: { lines: { text: "needle\n" }, line_number: 1, submatches: [] },
+    }]) {
+      expect(parseRipgrepJsonLine(JSON.stringify(value), root)).toBeNull();
+    }
+  });
+
   it("rejects non-match, malformed, binary, and escaping records", () => {
     const match = (overrides: Record<string, unknown>): string =>
       JSON.stringify({

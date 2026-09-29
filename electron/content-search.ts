@@ -222,16 +222,18 @@ export function parseRipgrepJsonLine(line: string, root: string): ContentHit | n
   if (!isRecord(rec) || rec.type !== "match") return null;
   const data = rec.data;
   if (!isRecord(data)) return null;
-  const pathText = isRecord(data.path) && typeof data.path.text === "string" ? data.path.text : null;
-  const lineText = isRecord(data.lines) && typeof data.lines.text === "string" ? data.lines.text : null;
-  const lineNumber = typeof data.line_number === "number" ? data.line_number : 0;
-  if (!pathText || lineText === null || !Number.isInteger(lineNumber) || lineNumber < 1) return null;
-  const submatches = Array.isArray(data.submatches) ? data.submatches : [];
-  const first = submatches.length > 0 && isRecord(submatches[0]) ? submatches[0] : null;
-  const startByte = first && typeof first.start === "number" ? first.start : 0;
+  const { path, lines, line_number: lineNumber, submatches } = data;
+  if (!isRecord(path) || !isRecord(lines)) return null;
+  const pathText = path.text;
+  const lineText = lines.text;
+  if (typeof pathText !== "string" || !pathText || typeof lineText !== "string"
+    || typeof lineNumber !== "number" || !Number.isInteger(lineNumber) || lineNumber < 1) return null;
+  const first: unknown = Array.isArray(submatches) ? submatches[0] : undefined;
+  const { start, end } = isRecord(first) ? first : {};
+  const startByte = typeof start === "number" ? start : 0;
   const column = byteOffsetToColumn(lineText, startByte);
   if (column === null) return null;
-  const endColumn = first && typeof first.end === "number" ? byteOffsetToColumn(lineText, first.end) : null;
+  const endColumn = typeof end === "number" ? byteOffsetToColumn(lineText, end) : null;
   const matchLength = endColumn !== null && endColumn >= column ? endColumn - column : 0;
   const abs = isAbsolute(pathText) ? pathText : join(root, pathText);
   const rel = relative(root, abs);

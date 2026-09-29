@@ -335,6 +335,25 @@ export interface TraceTaskSettled {
 }
 
 
+/** Read views preserve unknown metadata in partial on-disk traces. New records stay complete. */
+export type StoredTraceAttempt = Omit<TraceAttempt, "role" | "provider" | "protocol" | "model" | "status"> & {
+  readonly role: ExistingTraceRole | null;
+  readonly provider: string | null;
+  readonly protocol: string | null;
+  readonly model: string | null;
+  readonly status: string | null;
+  /** Existing report metadata; this read view does not add it to written records. */
+  readonly sessionLengthBucket: string | null;
+};
+
+export type StoredTraceTaskSettled = Omit<TraceTaskSettled, "attemptCount" | "attemptIds" | "summaryAttemptIds"> & {
+  readonly attemptCount: number | null;
+  readonly attemptIds: readonly string[] | null;
+  readonly summaryAttemptIds: readonly string[] | null;
+};
+
+export type StoredTraceRecord = StoredTraceAttempt | StoredTraceTaskSettled;
+
 export type FrozenTraceAttempt = Readonly<TraceAttempt>;
 
 export type FrozenTraceTaskSettled = Readonly<TraceTaskSettled>;

@@ -5,8 +5,8 @@
  * inputs. Split from agent-core/trace.ts (issue #38).
  */
 import { isRecord } from "../../shared/guards.ts";
-import { MAX_ARRAY_ITEMS, MAX_CACHE_MARKER_POSITIONS, MAX_HOST_CONTEXT_FILES, MAX_ID_CHARS, MAX_RECLAIM_TARGETS, MAX_STRING_CHARS, MAX_TOOL_OUTCOMES, NO_QUIET_WINS_CLASS } from "./schema.ts";
-import type { TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceHostContext, TraceHostContextFile, TraceReclaimEvidence, TraceReclaimTarget, TraceRevisions, TraceRevisionsInput, TraceToolOutcome, TraceUsage, TraceUsageInput } from "./schema.ts";
+import { MAX_ARRAY_ITEMS, MAX_CACHE_MARKER_POSITIONS, MAX_HOST_CONTEXT_FILES, MAX_ID_CHARS, MAX_RECLAIM_TARGETS, MAX_STRING_CHARS, MAX_TOOL_OUTCOMES, MAX_TRACE_INDEX_ENTRIES, NO_QUIET_WINS_CLASS, TRACE_SCHEMA_VERSION } from "./schema.ts";
+import type { ExistingTraceRole, StoredTraceRecord, TraceLinkIndex, TraceManifest, TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceHostContext, TraceHostContextFile, TraceReclaimEvidence, TraceReclaimTarget, TraceRevisions, TraceRevisionsInput, TraceToolOutcome, TraceUsage, TraceUsageInput } from "./schema.ts";
 
 
 export function freezeDeep<T>(value: T): T {
@@ -79,7 +79,7 @@ export function optionalText(value: unknown, name: string): string | null {
 }
 
 
-export function stringArray(value: readonly unknown[] | null | undefined, name: string): string[] {
+export function stringArray(value: unknown, name: string): string[] {
   if (value === null || value === undefined) return [];
   if (!Array.isArray(value)) throw new Error(`${name} must be an array`);
   if (value.length > MAX_ARRAY_ITEMS) throw new Error(`${name} exceeds ${MAX_ARRAY_ITEMS} items`);
@@ -154,13 +154,13 @@ function missAttribution(value: TraceCacheInput["missAttribution"] | null | unde
   // discard an otherwise valid missingFields list (or vice versa).
   let contributing: string[] = [];
   try {
-    contributing = stringArray(value.contributing as readonly unknown[] | null | undefined, "cache miss contributing");
+    contributing = stringArray(value.contributing, "cache miss contributing");
   } catch {
     /* Unknown provider diagnostics remain empty rather than breaking the trace. */
   }
   let missingFields: string[] = [];
   try {
-    missingFields = stringArray(value.missingFields as readonly unknown[] | null | undefined, "cache miss missingFields");
+    missingFields = stringArray(value.missingFields, "cache miss missingFields");
   } catch {
     /* Unknown provider diagnostics remain empty rather than breaking the trace. */
   }
@@ -177,7 +177,10 @@ function missAttribution(value: TraceCacheInput["missAttribution"] | null | unde
 
 
 function boundedToolOutput(value: unknown): TraceBoundedToolOutput | null {
-  if (!isRecord(value)) return null;
+  return isRecord(value) ? boundedToolOutputFields(value) : null;
+}
+
+function boundedToolOutputFields(value: Record<string, unknown>): TraceBoundedToolOutput {
   return freezeDeep({
     state: optionalText(value.state, "tool output state"),
     direction: optionalText(value.direction, "tool output direction"),
@@ -206,9 +209,7 @@ function hostContextFile(value: unknown): TraceHostContextFile | null {
 
 function hostContext(value: unknown): TraceHostContext | null {
   if (!isRecord(value)) return null;
-  // boundedToolOutput only returns null for non-records, which the guard above
-  // already excluded.
-  const bounded = boundedToolOutput(value)!;
+  const bounded = boundedToolOutputFields(value);
   const files = Array.isArray(value.files)
     ? value.files.slice(0, MAX_HOST_CONTEXT_FILES)
       .map((item) => hostContextFile(item))
@@ -230,6 +231,10 @@ function continuation(value: unknown): TraceContinuation | null {
 
 function toolOutcome(value: unknown): TraceToolOutcome | null {
   if (!isRecord(value)) return null;
+  const exitCode = value.exitCode;
+  if (exitCode !== undefined && exitCode !== null && (typeof exitCode !== "number" || !Number.isSafeInteger(exitCode))) {
+    throw new TypeError("tool outcome exitCode must be an integer, null, or absent");
+  }
   return freezeDeep({
     toolName: optionalText(value.toolName, "tool outcome name"),
     toolCallId: optionalText(value.toolCallId, "tool outcome call id"),
@@ -240,13 +245,13 @@ function toolOutcome(value: unknown): TraceToolOutcome | null {
     repro: optionalText(value.repro, "tool reproduction"),
     stdout: boundedToolOutput(value.stdout),
     stderr: boundedToolOutput(value.stderr),
-    exitCode: nullableInteger(value.exitCode),
+    exitCode: typeof exitCode === "number" ? exitCode : null,
     signal: optionalText(value.signal, "tool signal"),
   });
 }
 
 
-export function toolOutcomes(value: readonly unknown[] | null | undefined): TraceToolOutcome[] {
+export function toolOutcomes(value: unknown): TraceToolOutcome[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, MAX_TOOL_OUTCOMES)
     .map((item) => toolOutcome(item))
@@ -305,7 +310,7 @@ export function reclaimEvidence(value: unknown): TraceReclaimEvidence | null {
 }
 
 
-export function pair(value: readonly [unknown, unknown] | null | undefined, name: string): [number, number] | null {
+export function pair(value: unknown, name: string): [number, number] | null {
   if (value === null || value === undefined) return null;
   if (!Array.isArray(value) || value.length !== 2) throw new Error(`${name} must contain two integers`);
   const first = requiredInteger(value[0], `${name}[0]`);
@@ -403,4 +408,196 @@ export function criticalClass(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (value !== NO_QUIET_WINS_CLASS) throw new Error("criticalClass must be No Quiet Wins or null");
   return NO_QUIET_WINS_CLASS;
+}
+
+function isExistingTraceRole(value: unknown): value is ExistingTraceRole {
+  return value === "main" || value === "summary" || value === "critic";
+}
+
+function existingStringArray(value: unknown): { valid: boolean; values: string[] } {
+  if (!Array.isArray(value) || value.length > MAX_ARRAY_ITEMS) return { valid: false, values: [] };
+  const values: string[] = [];
+  for (const item of value) {
+    if (!validExistingId(item)) return { valid: false, values: [] };
+    values.push(item);
+  }
+  return { valid: true, values };
+}
+
+function validTraceTurn(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isSafeInteger(value) && value > 0);
+}
+
+function validTraceLinkIndex(value: unknown): value is TraceLinkIndex {
+  if (!isRecord(value) || value.schemaVersion !== TRACE_SCHEMA_VERSION || value.kind !== "trace-link-index" ||
+    typeof value.complete !== "boolean" || !validExistingId(value.updatedAt) ||
+    !Array.isArray(value.attempts) || !Array.isArray(value.settlements) ||
+    value.attempts.length > MAX_TRACE_INDEX_ENTRIES || value.settlements.length > MAX_TRACE_INDEX_ENTRIES ||
+    value.attempts.length + value.settlements.length > MAX_TRACE_INDEX_ENTRIES) return false;
+  const attemptKeys = new Set<string>();
+  const retainedTurns = new Set<number>();
+  for (const item of value.attempts) {
+    if (!isRecord(item) || !validExistingId(item.runId) || !validExistingId(item.taskId) || !validExistingId(item.attemptId) ||
+      !isExistingTraceRole(item.role) || typeof item.retained !== "boolean" ||
+      !validTraceTurn(item.traceTurn) || typeof item.unknown !== "boolean") return false;
+    const key = JSON.stringify([item.runId, item.attemptId]);
+    if (attemptKeys.has(key)) return false;
+    attemptKeys.add(key);
+    // One turn file holds one record: duplicate retained turns would collide
+    // in recordsByTurn and resurrect ghost retained entries.
+    if (item.retained && item.traceTurn !== null) {
+      if (retainedTurns.has(item.traceTurn)) return false;
+      retainedTurns.add(item.traceTurn);
+    }
+  }
+  const settlementKeys = new Set<string>();
+  for (const item of value.settlements) {
+    if (!isRecord(item)) return false;
+    const attemptIds = existingStringArray(item.attemptIds);
+    const summaryAttemptIds = existingStringArray(item.summaryAttemptIds);
+    if (!validExistingId(item.runId) || !validExistingId(item.taskId) ||
+      !attemptIds.valid || !summaryAttemptIds.valid ||
+      (item.finalAttemptId !== null && item.finalAttemptId !== undefined && !validExistingId(item.finalAttemptId)) ||
+      typeof item.retained !== "boolean" || !validTraceTurn(item.traceTurn) || typeof item.unknown !== "boolean") return false;
+    if (new Set(attemptIds.values).size !== attemptIds.values.length ||
+      new Set(summaryAttemptIds.values).size !== summaryAttemptIds.values.length ||
+      summaryAttemptIds.values.some((idValue) => !attemptIds.values.includes(idValue)) ||
+      (item.finalAttemptId !== null && item.finalAttemptId !== undefined && !attemptIds.values.includes(item.finalAttemptId))) return false;
+    const key = JSON.stringify([item.runId, item.taskId]);
+    if (settlementKeys.has(key)) return false;
+    settlementKeys.add(key);
+    if (item.retained && item.traceTurn !== null) {
+      if (retainedTurns.has(item.traceTurn)) return false;
+      retainedTurns.add(item.traceTurn);
+    }
+  }
+  return true;
+}
+
+export function validExistingId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_ID_CHARS &&
+    ![...value].some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+    });
+}
+
+export function nonnegativeCounter(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function validPriorManifest(value: unknown): value is TraceManifest {
+  if (!isRecord(value) || value.schemaVersion !== TRACE_SCHEMA_VERSION || value.kind !== "trace-manifest") return false;
+  for (const field of [
+    "retainedRecords",
+    "omittedRecords",
+    "writeFailures",
+    "malformedRecords",
+    "partialRecords",
+    "scanOmittedRecords",
+    "manifestErrors",
+    "retentionFailures",
+    "manifestWriteFailures",
+    "indexWriteFailures",
+    "lastTraceTurn",
+  ]) {
+    if (!nonnegativeCounter(value[field])) return false;
+  }
+  if (!validExistingId(value.updatedAt)) return false;
+  if (!isRecord(value.startup) || !validExistingId(value.startup.namespace) ||
+    !validExistingId(value.startup.startedAt) || !isRecord(value.startup.reset) ||
+    typeof value.startup.reset.requested !== "boolean" || typeof value.startup.reset.applied !== "boolean" ||
+    !nonnegativeCounter(value.startup.reset.omittedRecords) || !nonnegativeCounter(value.startup.reset.failedRecords) ||
+    !nonnegativeCounter(value.startup.preexistingRecords) ||
+    !nonnegativeCounter(value.startup.preexistingMalformedRecords) ||
+    !nonnegativeCounter(value.startup.preexistingPartialRecords) ||
+    !nonnegativeCounter(value.startup.preexistingScanOmittedRecords) ||
+    (value.startup.error !== null && typeof value.startup.error !== "string")) return false;
+  if (!isRecord(value.linkIndex) || typeof value.linkIndex.path !== "string" || value.linkIndex.path.length === 0 ||
+    typeof value.linkIndex.complete !== "boolean" || !nonnegativeCounter(value.linkIndex.attempts) ||
+    !nonnegativeCounter(value.linkIndex.settlements) || !nonnegativeCounter(value.linkIndex.unknown) ||
+    !nonnegativeCounter(value.linkIndex.writeFailures) ||
+    (value.linkIndex.error !== null && typeof value.linkIndex.error !== "string")) return false;
+  return true;
+}
+
+export function parseTraceManifest(value: unknown): TraceManifest | null {
+  return validPriorManifest(value) ? freezeDeep(value) : null;
+}
+
+export function parseTraceLinkIndex(value: unknown): TraceLinkIndex | null {
+  if (!validTraceLinkIndex(value)) return null;
+  return freezeDeep({ ...value, settlements: value.settlements.map((entry) => ({ ...entry, finalAttemptId: entry.finalAttemptId ?? null })) });
+}
+
+/** Trace lock metadata has its own shape, not an attempt or a settlement. */
+export function parseTraceLockOwner(value: unknown): { pid: number | null; token: string | null } | null {
+  if (!isRecord(value)) return null;
+  const { pid, token } = value;
+  return {
+    pid: nonnegativeCounter(pid) && pid > 0 ? pid : null,
+    token: typeof token === "string" ? token : null,
+  };
+}
+
+function storedLink(value: unknown): string | null | undefined {
+  return value === null || value === undefined ? null : validExistingId(value) ? value : undefined;
+}
+
+/** Parse the existing on-disk read shape. Missing metadata remains unknown. */
+export function parseTraceRecord(value: unknown): StoredTraceRecord | null {
+  if (!isRecord(value) || value.schemaVersion !== TRACE_SCHEMA_VERSION
+    || !validExistingId(value.runId) || !validExistingId(value.taskId)) return null;
+  const { runId, taskId, recordType } = value;
+  try {
+    if (recordType === "attempt") {
+      if (!validExistingId(value.attemptId)) return null;
+      const rawToolOutcomes = value.toolOutcomes;
+      // Stored evidence must be complete. The write-side cap cannot truncate it.
+      if (Array.isArray(rawToolOutcomes) && rawToolOutcomes.length > MAX_TOOL_OUTCOMES) return null;
+      const role = value.role === undefined || value.role === null ? null : isExistingTraceRole(value.role) ? value.role : undefined;
+      const parentAttemptId = storedLink(value.parentAttemptId);
+      const retryOfAttemptId = storedLink(value.retryOfAttemptId);
+      if (role === undefined || parentAttemptId === undefined || retryOfAttemptId === undefined) return null;
+      const usageValue = isRecord(value.usage) ? value.usage : {};
+      const costValue = isRecord(value.cost) ? value.cost : {};
+      // Corrupt counters are not unknown evidence. Do not include them in reports.
+      const counters = [usageValue.input, usageValue.cacheRead, usageValue.cacheWrite, usageValue.output, usageValue.reasoning, costValue.usd];
+      if (counters.some((counter) => typeof counter === "number" && nullableNumber(counter) === null)) return null;
+      const cacheValue = isRecord(value.cache) ? value.cache : {};
+      const revisionsValue = isRecord(value.revisions) ? value.revisions : {};
+      return freezeDeep({
+        schemaVersion: TRACE_SCHEMA_VERSION, recordType, runId, taskId, attemptId: value.attemptId,
+        parentAttemptId, retryOfAttemptId, role,
+        provider: optionalText(value.provider, "provider"), protocol: optionalText(value.protocol, "protocol"),
+        route: optionalText(value.route, "route"), model: optionalText(value.model, "model"),
+        taskClass: optionalText(value.taskClass, "taskClass"), requestedEffort: optionalText(value.requestedEffort, "requestedEffort"),
+        effectiveEffort: optionalText(value.effectiveEffort, "effectiveEffort"), status: optionalText(value.status, "status"),
+        retryCount: nullableInteger(value.retryCount), fallbackReason: optionalText(value.fallbackReason, "fallbackReason"),
+        storageSeqRange: pair(value.storageSeqRange, "storageSeqRange"), toolNames: stringArray(value.toolNames, "toolNames"),
+        startedAtMs: nullableNumber(value.startedAtMs), endedAtMs: nullableNumber(value.endedAtMs),
+        ttftMs: nullableNumber(value.ttftMs), turnMs: nullableNumber(value.turnMs),
+        usage: usage(usageValue), cost: cost(costValue), cache: cache(cacheValue),
+        toolOutcomes: toolOutcomes(rawToolOutcomes), reclaimEvidence: reclaimEvidence(value.reclaimEvidence),
+        revisions: revisions(revisionsValue), wasteTokens: nullableNumber(value.wasteTokens),
+        wasteCause: optionalText(value.wasteCause, "wasteCause"), providerError: optionalText(value.providerError, "providerError"),
+        sessionLengthBucket: optionalText(value.sessionLengthBucket, "sessionLengthBucket"),
+      });
+    }
+    if (recordType !== "task-settled") return null;
+    const finalAttemptId = storedLink(value.finalAttemptId);
+    if (finalAttemptId === undefined) return null;
+    const attemptIds = value.attemptIds == null ? null : stringArray(value.attemptIds, "attemptIds");
+    const summaryAttemptIds = value.summaryAttemptIds == null ? null : stringArray(value.summaryAttemptIds, "summaryAttemptIds");
+    const outcome = isRecord(value.outcome) ? value.outcome : {};
+    return freezeDeep({
+      schemaVersion: TRACE_SCHEMA_VERSION, recordType, runId, taskId,
+      taskClass: optionalText(value.taskClass, "taskClass"), attemptCount: nullableInteger(value.attemptCount),
+      finalAttemptId, attemptIds, summaryAttemptIds,
+      outcome: { status: optionalText(outcome.status, "outcome status"), criteriaHash: optionalText(outcome.criteriaHash, "outcome criteria hash") },
+      criticalClass: criticalClass(value.criticalClass),
+    });
+  } catch {
+    return null;
+  }
 }

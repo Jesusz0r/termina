@@ -103,13 +103,22 @@ describe("Agent Core Reclaim Contract", () => {
         role: "assistant",
         sseq: 60,
         tokens: 8_500,
-        content: [{ type: "text", text: "keep" }, null, { ...sourceBlock }],
+        content: [{ type: "text", text: "keep" }, { type: "text", text: "also keep" }, { ...sourceBlock }],
       },
       { role: "user", sseq: 61, tokens: 100, content: "recent one" },
       { role: "user", sseq: 62, tokens: 100, content: "recent two" },
     ] as any, { systemTokens: 0, usable: 10_000, protectTokens: 0 });
     expect(target[0]?.sseq).toBe(60);
     expect(target[0]?.blockIndex).toBe(2);
+  });
+
+  it("rejects malformed message blocks instead of filtering them and shifting source indexes", () => {
+    const target = planPruneStubs([
+      { role: "assistant", sseq: 60, tokens: 8_500, content: [null, { ...sourceBlock }] },
+      { role: "user", sseq: 61, tokens: 100, content: "recent one" },
+      { role: "user", sseq: 62, tokens: 100, content: "recent two" },
+    ], { systemTokens: 0, usable: 10_000, protectTokens: 0 });
+    expect(target).toEqual([]);
   });
 
   it("handles redacted_thinking as a droppable block", () => {

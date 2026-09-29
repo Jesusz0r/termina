@@ -216,6 +216,8 @@ describe("decodeTrustHashes", () => {
     expect(() => decodeTrustHashes(null)).toThrow("trust hashes returned an invalid response");
     expect(() => decodeTrustHashes({ hashes: null, complete: true }))
       .toThrow("trust hashes returned an invalid response");
+    expect(() => decodeTrustHashes({ hashes: [], complete: true }))
+      .toThrow("trust hashes returned an invalid response");
     expect(() => decodeTrustHashes({ hashes: { "agent/skills/a.md": 42 }, complete: true }))
       .toThrow("trust hashes returned an invalid response");
   });

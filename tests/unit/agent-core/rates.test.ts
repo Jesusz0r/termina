@@ -1,4 +1,4 @@
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 /**
  * Focused tests for the deterministic agent-core rate/cost seam.
  * No network, provider credentials, or main.ts boot required.
@@ -53,6 +53,14 @@ describe("Agent Core Rates Accounting Invariants", () => {
       storage: "usd_per_gib_second",
     };
     
+    for (const value of [null, "snapshot", 42, []]) {
+      expect(validateRateSnapshot(value)).toEqual({ ok: false, value: null, errors: ["snapshot"] });
+    }
+    expect(validateRateSnapshot({ units: tokenUnits, rates: {} })).toEqual({ ok: false, value: null, errors: ["scope"] });
+    expect(validateRateSnapshot({ scope: [], units: [], rates: [] })).toEqual({
+      ok: false, value: null, errors: ["scope", "units", "rates"],
+    });
+
     const completeSnapshot = {
       scope: { ...mainScope, role: "main" },
       reasoningBilling: "separate",

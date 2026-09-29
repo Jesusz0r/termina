@@ -28,7 +28,8 @@
  *   node --experimental-strip-types --no-warnings scripts/laziness-metrics.ts <trace-dir>
  */
 
-import { isRecord } from "../shared/guards.ts";
+import { parseTraceRecord } from "../agent-core/trace/normalize.ts";
+import type { StoredTraceRecord, TraceToolOutcome } from "../agent-core/trace/schema.ts";
 
 export interface LazinessOptions {
   readonly maxFiles: number;
@@ -45,7 +46,6 @@ export const DEFAULT_LAZINESS_OPTIONS: LazinessOptions = {
 };
 
 const TURN_FILE_PATTERN = /^turn-(\d+)\.json$/;
-const TRACE_SCHEMA_VERSION = 2;
 const EDIT_TOOLS = new Set(["edit", "write_file"]);
 const CHECK_TOOL = "bash";
 
@@ -63,38 +63,17 @@ function isSuccessOutcome(status: string | null): boolean {
   return status !== null && status.toLowerCase() === "success";
 }
 
-function isAttemptRecord(value: Record<string, unknown>): boolean {
-  return (
-    value["recordType"] === "attempt" &&
-    value["schemaVersion"] === TRACE_SCHEMA_VERSION &&
-    asString(value["runId"]) !== null &&
-    asString(value["taskId"]) !== null &&
-    asString(value["attemptId"]) !== null
-  );
-}
-
-function isSettlementRecord(value: Record<string, unknown>): boolean {
-  return (
-    value["recordType"] === "task-settled" &&
-    value["schemaVersion"] === TRACE_SCHEMA_VERSION &&
-    asString(value["runId"]) !== null &&
-    asString(value["taskId"]) !== null
-  );
-}
-
 interface ToolSignal {
   readonly edits: number;
   readonly checks: number;
   readonly calls: number;
 }
 
-function toolSignals(outcomes: unknown): ToolSignal {
-  const list = Array.isArray(outcomes) ? outcomes : [];
+function toolSignals(outcomes: readonly TraceToolOutcome[]): ToolSignal {
   let edits = 0;
   let checks = 0;
   let calls = 0;
-  for (const entry of list) {
-    if (!isRecord(entry)) continue;
+  for (const entry of outcomes) {
     calls += 1;
     const name = asString(entry["toolName"]);
     if (name !== null && EDIT_TOOLS.has(name)) edits += 1;
@@ -235,9 +214,9 @@ async function readLaziness(dir: string, options: LazinessOptions): Promise<Lazi
       integrity.oversizedFiles += 1;
       continue;
     }
-    let parsed: unknown;
+    let parsed: StoredTraceRecord | null;
     try {
-      parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      parsed = parseTraceRecord(JSON.parse(fs.readFileSync(filePath, "utf8")));
     } catch {
       integrity.malformedFiles += 1;
       continue;
@@ -247,7 +226,7 @@ async function readLaziness(dir: string, options: LazinessOptions): Promise<Lazi
       integrity.recordCapOmitted += 1;
       continue;
     }
-    if (!isRecord(parsed) || (!isAttemptRecord(parsed) && !isSettlementRecord(parsed))) {
+    if (parsed === null) {
       integrity.partialRecords += 1;
       continue;
     }
@@ -274,8 +253,7 @@ async function readLaziness(dir: string, options: LazinessOptions): Promise<Lazi
     } else {
       task.settled = true;
       if (task.settleTurn === null) task.settleTurn = file.turn;
-      const outcome = isRecord(parsed["outcome"]) ? parsed["outcome"] : {};
-      const status = asString(outcome["status"]);
+      const status = parsed.outcome.status;
       if (status !== null) task.outcomeStatus = status;
       const cls = asString(parsed["taskClass"]);
       if (cls !== null && task.taskClass === null) task.taskClass = cls;

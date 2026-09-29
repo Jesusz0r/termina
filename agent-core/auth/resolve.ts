@@ -4,7 +4,6 @@
  * Owns model-ref parsing, stored/env credential lookup, and auth
  * resolution. Split from agent-core/auth.ts (issue #38).
  */
-import { isRecord } from "../../shared/guards.ts";
 import { modelLooksClaude } from "../models/families/anthropic.ts";
 import { modelLooksGemma, modelLooksGemini } from "../models/families/google.ts";
 import { modelLooksOpenAI } from "../models/families/openai.ts";
@@ -15,13 +14,7 @@ import { SUPPORTED_PROVIDERS, type ProviderId } from "./providers/types.ts";
 import { AUTH_PROVIDER_ORDER, baseUrl, isSupportedProvider, maskSecret, needsRefresh, requestHeaders, validateCopilotApiUrl } from "./endpoints.ts";
 import { AUTH_REQUEST_CANCELLED } from "./http.ts";
 import { refreshOauth } from "./oauth.ts";
-import { readAuth } from "./store.ts";
-
-
-function extraApiUrl(entry: Record<string, unknown>): string | null {
-  const raw = typeof entry.apiUrl === "string" ? entry.apiUrl.trim() : "";
-  return raw ? validateCopilotApiUrl(raw) : null;
-}
+import { parseStoredCredential, readAuth, type StoredCredential } from "./store.ts";
 
 
 export type ResolvedAuth =
@@ -86,7 +79,7 @@ export function hasStoredCredential(id: string): boolean {
   if (!isSupportedProvider(id)) return false;
   const got = readAuth();
   if (!got.ok) return false;
-  const stored = fromStored(id, got.data[id]);
+  const stored = fromStored(id, parseStoredCredential(got.data[id]));
   if (!stored) return false;
   if ("needsOauthRefresh" in stored) return true;
   return stored.ok;
@@ -112,20 +105,19 @@ export function firstAuthenticatedProvider(): ProviderId | null {
 }
 
 
-function unsupportedAnthropicOauth(id: ProviderId, entry: unknown): boolean {
-  return id === "anthropic" && isRecord(entry) && entry.type === "oauth";
+function unsupportedAnthropicOauth(id: ProviderId, entry: StoredCredential | null): boolean {
+  return id === "anthropic" && entry?.type === "oauth";
 }
 
 
 function fromStored(
   id: ProviderId,
-  entry: unknown,
-): ResolvedAuth | { needsOauthRefresh: true; refresh: string; extra: Record<string, unknown> } | null {
-  if (!isRecord(entry) || typeof entry.type !== "string") return null;
+  entry: StoredCredential | null,
+): ResolvedAuth | { needsOauthRefresh: true } | null {
+  if (!entry) return null;
   if (unsupportedAnthropicOauth(id, entry)) return null;
   if (entry.type === "api_key") {
-    const key = typeof entry.key === "string" ? entry.key.trim() : "";
-    if (!key) return null;
+    const key = entry.key;
     return {
       ok: true,
       providerId: id,
@@ -133,15 +125,14 @@ function fromStored(
       kind: "api_key",
       source: "api_key",
       baseUrl: baseUrl(id),
-      headers: requestHeaders(id, key, entry),
+      headers: requestHeaders(id, key, entry.extra),
     };
   }
   if (entry.type === "oauth") {
-    const access = typeof entry.access === "string" ? entry.access : "";
-    const refresh = typeof entry.refresh === "string" ? entry.refresh : "";
+    const { access, refresh } = entry;
     if (!access || !refresh) return null;
-    if (needsRefresh(entry.expires)) return { needsOauthRefresh: true, refresh, extra: entry };
-    const storedBase = extraApiUrl(entry);
+    if (needsRefresh(entry.expires)) return { needsOauthRefresh: true };
+    const storedBase = validateCopilotApiUrl(entry.apiUrl?.trim() ?? "");
     return {
       ok: true,
       providerId: id,
@@ -149,7 +140,7 @@ function fromStored(
       kind: "oauth",
       source: "oauth",
       baseUrl: storedBase || baseUrl(id),
-      headers: requestHeaders(id, access, entry),
+      headers: requestHeaders(id, access, entry.extra),
     };
   }
   return null;
@@ -178,14 +169,15 @@ export async function resolveAuth(providerId: string = "anthropic", signal?: Abo
   if (!isSupportedProvider(providerId)) return { ok: false, error: `unsupported provider: ${providerId}` };
   if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
   const got = readAuth();
+  const entry = got.ok ? parseStoredCredential(got.data[providerId]) : null;
   if (got.ok) {
-    const stored = fromStored(providerId, got.data[providerId]);
+    const stored = fromStored(providerId, entry);
     if (stored && "needsOauthRefresh" in stored) {
       const refreshed = await refreshOauth(providerId, signal);
       if (!refreshed.ok) return { ok: false, error: refreshed.error };
       const again = readAuth();
       if (again.ok) {
-        const next = fromStored(providerId, again.data[providerId]);
+        const next = fromStored(providerId, parseStoredCredential(again.data[providerId]));
         if (next && !("needsOauthRefresh" in next) && next.ok) return next;
       }
       return { ok: false, error: "auth expired — run /login" };
@@ -207,7 +199,7 @@ export async function resolveAuth(providerId: string = "anthropic", signal?: Abo
       headers: requestHeaders(providerId, env.token, { envName: env.envName }),
     };
   }
-  if (got.ok && unsupportedAnthropicOauth(providerId, got.data[providerId])) {
+  if (unsupportedAnthropicOauth(providerId, entry)) {
     return { ok: false, error: ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED };
   }
   return { ok: false, error: missingCredentialError(providerId) };

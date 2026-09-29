@@ -8,7 +8,7 @@ import { boundPromotionReadFile, boundPromotionWriteFile, type BoundPromotionExp
 import { promotionIdentityOf } from "../bindings.js";
 import { MARKER, MAX_WORLDLINE_FILE_BYTES } from "../limits.js";
 import { type BoundPromotionDirectory, type ComparisonManifest } from "../types.js";
-import { parseComparisonManifest } from "../uncertain-comparison.js";
+import { parseComparisonManifest } from "../comparison-manifest.js";
 import { randomUUID } from "node:crypto";
 import { sha256Hex } from "./primitives.js";
 

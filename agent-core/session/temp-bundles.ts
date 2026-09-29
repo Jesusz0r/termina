@@ -6,14 +6,14 @@
  */
 import { acquireSessionRetentionLock, releaseSessionRetentionLock, validateSessionRetentionLease, type SessionRetentionLock } from "../../shared/session-retention-lock.ts";
 import { randomBytes } from "node:crypto";
-import { isRecord } from "../../shared/guards.ts";
 import { closeSync, constants as fsConstants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, opendirSync, readSync, writeSync, type BigIntStats } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { retainUnboundCleanup } from "./bundles.ts";
 import { anchoredChildPath, fsyncDirectoryDescriptor, noFollowFlags, openDirectoryAnchor, sameVersion, statIdentity, validateDirectoryAnchor, validateReopenedDirectoryIdentity } from "./descriptors.ts";
 import type { DirectoryAnchor } from "./descriptors.ts";
 import { ACTIVE_NAME, CURRENT_DIR, MAX_RETAINED_TEMP_BUNDLES, MAX_RETAINED_TEMP_BYTES, MAX_RETAINED_TEMP_ROOT_ENTRIES, MAX_RETAINED_TEMP_SCAN_DEPTH, MAX_RETAINED_TEMP_SCAN_ENTRIES, MAX_RETAINED_TEMP_SCAN_PENDING, MAX_RETAINED_TEMP_SCAN_WORK_BYTES, READ_CHUNK, RETAINED_TEMP_ADMISSION_RESERVATION_BYTES, TEMP_BUNDLE_NAME, cancellation, errMsg, inspectEntry, isSafeImageName } from "./primitives.ts";
-import type { ReplayMessage, SessionBundlePaths, SessionOperationOptions, SessionResult } from "./primitives.ts";
+import type { SessionBundlePaths, SessionOperationOptions, SessionResult } from "./primitives.ts";
+import { sessionContentParts, type ReplayMessage } from "./messages.ts";
 
 
 export function referencedImageNames(messages: ReplayMessage[]): SessionResult<{ names: string[] }> {
@@ -21,11 +21,9 @@ export function referencedImageNames(messages: ReplayMessage[]): SessionResult<{
   for (const m of messages) {
     if (typeof m.content === "string") continue;
     for (const block of m.content) {
-      const parts = block.type === "tool_result" && Array.isArray(block.content) ? block.content : [block];
-      for (const part of parts) {
-        if (!isRecord(part) || part.type !== "image" || !isRecord(part.source)) continue;
+      for (const part of sessionContentParts(block)) {
+        if (part.type !== "image" || !part.source) continue;
         const src = part.source;
-        if (src.type !== "file") continue;
         if (typeof src.name !== "string" || !isSafeImageName(src.name)) return { ok: false, error: `unsafe image name: ${String(src.name)}` };
         names.add(src.name);
       }

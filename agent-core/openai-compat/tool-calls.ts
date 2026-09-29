@@ -4,8 +4,6 @@
  * Owns tool-call identity/index/argument validation. Split from
  * agent-core/openai-compat.ts (issue #38).
  */
-import { isRecord } from "../../shared/guards.ts";
-
 
 export const TOOL_CALL_ARGUMENT_ERROR = "provider protocol error: tool call arguments must be a JSON object";
 
@@ -29,21 +27,4 @@ export function toolCallIndex(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_TOOL_CALL_INDEX
     ? value
     : null;
-}
-
-
-export function decodeToolCallArguments(
-  raw: unknown,
-  jsonEncoded: boolean,
-): { input: Record<string, unknown>; error?: undefined } | { input?: undefined; error: string } {
-  let parsed = raw;
-  if (jsonEncoded) {
-    if (typeof raw !== "string") return { error: TOOL_CALL_ARGUMENT_ERROR };
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return { error: TOOL_CALL_ARGUMENT_ERROR };
-    }
-  }
-  return isRecord(parsed) ? { input: parsed } : { error: TOOL_CALL_ARGUMENT_ERROR };
 }

@@ -7,6 +7,8 @@
  */
 import {
   MAX_SESSION_RECORD_BYTES,
+  parseSessionBlock,
+  parseSessionMessage,
   sessionBlockBytes,
   sessionBlockChars,
   sessionBlockHash,
@@ -17,6 +19,8 @@ import type {
   SessionReclaimReceipt,
   SessionReclaimReceiptTarget,
   SessionReclaimRecovery,
+  ReplayMessage,
+  SessionBlock as Block,
 } from "./session.ts";
 
 import { HIGH_WATER, LOW_WATER, PROTECT_TURNS, isUserPrompt } from "./compaction.ts";
@@ -70,12 +74,7 @@ type RecoveryPlan = {
   repro: string | null;
 };
 
-type Block = Record<string, unknown> & { type?: unknown };
-type IndexedMessage = ReclaimMessage & { inputIndex: number; messageTokens: number };
-
-function isSafeInteger(value: unknown, min = 0): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= min;
-}
+type IndexedMessage = ReplayMessage & { inputIndex: number; messageTokens: number };
 
 function isFiniteNonNegative(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -122,9 +121,10 @@ function payloadText(block: Block): string | null {
 
 function visualTokens(value: unknown): number {
   if (Array.isArray(value)) return value.reduce((sum, part) => sum + visualTokens(part), 0);
-  if (!isRecord(value)) return 0;
-  if (value.type === "image") return 2_000;
-  return value.type === "tool_result" ? visualTokens(value.content) : 0;
+  const block = parseSessionBlock(value);
+  if (!block) return 0;
+  if (block.type === "image") return 2_000;
+  return block.type === "tool_result" ? visualTokens(block.content) : 0;
 }
 
 /** Conservative local estimate; provider usage remains authoritative.
@@ -147,11 +147,11 @@ function normalizeMessages(messages: unknown): IndexedMessage[] | null {
   const seen = new Set<number>();
   const normalized: IndexedMessage[] = [];
   for (let inputIndex = 0; inputIndex < messages.length; inputIndex++) {
-    const message = messages[inputIndex];
-    if (!isRecord(message) || typeof message.role !== "string" || !isSafeInteger(message.sseq, 1)) return null;
+    const parsed = parseSessionMessage(messages[inputIndex]);
+    if (!parsed.ok) return null;
+    const message = parsed.message;
     if (seen.has(message.sseq)) return null;
     seen.add(message.sseq);
-    if (message.tokens !== undefined && !isFiniteNonNegative(message.tokens)) return null;
     const messageTokens = message.tokens === undefined
       ? estimateReclaimTokens(message.content)
       : Math.ceil(message.tokens);
@@ -224,17 +224,15 @@ export function planPruneStubs(messages: ReclaimMessage[], opts: ReclaimPlanOpti
   for (let messageIndex = 0; messageIndex < normalized.length && reclaimed < quota; messageIndex++) {
     if (protectedIndexes.has(messageIndex)) continue;
     const message = normalized[messageIndex]!;
-    if (!Array.isArray(message.content)) continue;
-    const blocks = message.content as unknown[];
+    if (typeof message.content === "string") continue;
+    const blocks = message.content;
     for (let blockIndex = 0; blockIndex < blocks.length && reclaimed < quota; blockIndex++) {
       if (dropSelectedByMessage.has(message.sseq)) break;
-      const rawBlock = blocks[blockIndex];
-      if (!isRecord(rawBlock)) continue;
-      const block = rawBlock as Block;
+      const block = blocks[blockIndex]!;
       const type = block.type;
       if (type !== "tool_result" && !isThinkingBlock(block)) continue;
       if (type === "tool_result" && block.stubbed) continue;
-      if (isThinkingBlock(block) && !blocks.some((candidate) => isRecord(candidate) && !isThinkingBlock(candidate))) continue;
+      if (isThinkingBlock(block) && !blocks.some((candidate) => !isThinkingBlock(candidate))) continue;
       const payload = payloadText(block);
       if (payload === null || (sessionBlockChars(block) < PRUNE_MIN_CHARS && visualTokens(block) === 0)) continue;
       const originalBytes = sessionBlockBytes(block);

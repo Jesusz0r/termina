@@ -12,9 +12,21 @@ import { basename, dirname, join, resolve } from "node:path";
 import { authPath } from "./endpoints.ts";
 import { authDirectoryOpenFlags, authLockNoFollowFlags, authLockOwnerAlive, authPathBinding, authPathDirectoryIdentity, inspectAuthLock, recoverAuthLock, releaseAuthLock, resumeAuthLock, sameAuthPathIdentity, tryAcquireAuthLock, validateAuthPathBinding } from "./lock.ts";
 import type { AuthPathBinding, AuthPathIdentity } from "./lock.ts";
+import { parseStoredOauth, type StoredOauthEntry } from "./oauth-payload.ts";
 
 
 type AuthFile = Record<string, unknown>;
+
+export type StoredCredential = StoredOauthEntry | { type: "api_key"; key: string; extra: Record<string, unknown> };
+
+/** Preserve raw entries on disk; only credential consumers use this typed view. */
+export function parseStoredCredential(value: unknown): StoredCredential | null {
+  const oauth = parseStoredOauth(value);
+  if (oauth) return oauth;
+  if (!isRecord(value) || value.type !== "api_key") return null;
+  const key = typeof value.key === "string" ? value.key.trim() : "";
+  return key ? { type: "api_key", key, extra: value } : null;
+}
 
 
 let cached: { path: string; mtimeMs: number; data: AuthFile } | null = null;
@@ -402,7 +414,7 @@ export type AuthWriteOpts = {
 
 export function modifyProvider(
   id: string,
-  fn: (current: unknown) => unknown | null,
+  fn: (current: Record<string, unknown> | null) => unknown | null,
   opts?: AuthWriteOpts,
 ): { discardedCorrupt: boolean } {
   return withLock((binding) => {
@@ -417,7 +429,8 @@ export function modifyProvider(
       discardedCorrupt = true;
     }
     const data: AuthFile = got.ok ? { ...got.data } : {};
-    const next = fn(data[id]);
+    const current = data[id];
+    const next = fn(isRecord(current) ? current : null);
     if (next === null) delete data[id];
     else data[id] = next;
     writeAuth(data, binding);

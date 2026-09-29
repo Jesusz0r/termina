@@ -22,6 +22,7 @@ import { resolve } from "node:path";
 import * as auth from "../../../agent-core/auth.ts";
 import * as compat from "../../../agent-core/openai-compat.ts";
 import * as trace from "../../../agent-core/trace.ts";
+import { isRecord } from "../../../shared/guards.ts";
 import type {
   CacheIdentity,
   ProviderId,
@@ -321,10 +322,6 @@ export class ProbeConfigurationError extends Error {
     this.name = "ProbeConfigurationError";
     this.code = code;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function nonempty(value: unknown): string | null {
