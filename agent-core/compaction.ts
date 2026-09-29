@@ -67,6 +67,24 @@ export function isUserPrompt(m: { role: string; content: unknown }): boolean {
   return sawPromptBlock;
 }
 
+/**
+ * Pressure for a compaction decision. The local estimate undercounts some
+ * tokenizers, so a provider bill is the baseline for the history it measured.
+ * Messages appended after that bill are not in it. max(estimate, bill) hides
+ * them whenever the bill is still larger than the estimate of the whole
+ * history. Add their estimates on top of the bill. A null bill means the
+ * request changed; the estimate is then the only figure.
+ */
+export function compactionPressure(
+  estimatedTokens: number,
+  billedTokens: number | null,
+  tokensSinceBill: number,
+): number {
+  if (billedTokens === null) return estimatedTokens;
+  const since = tokensSinceBill > 0 ? tokensSinceBill : 0;
+  return Math.max(estimatedTokens, billedTokens + since);
+}
+
 export function shouldCompactForCacheCost(
   billedTokens: number | null,
   cacheReadShare: number | null,

@@ -134,6 +134,7 @@ import {
   planSummary,
   restoreHandoffAfterCut,
   serializeForSummary,
+  compactionPressure,
   shouldCompactForCacheCost,
   summaryPrompt,
   truncateCut,
@@ -2148,6 +2149,8 @@ type RevisionKind = "prune" | "summarize" | "truncate";
 let revisions = 0;
 let revisionKinds: RevisionKind[] = [];
 let lastBilledTokens: number | null = null;
+/** history.length when lastBilledTokens was recorded. Later messages were not in that bill. */
+let billedHistoryLength = 0;
 let lastCacheReadShare: number | null = null;
 let lastRequestFollowedRevision = false;
 let pendingReclaimEvidence: Record<string, unknown> | null = null;
@@ -2162,6 +2165,7 @@ function recordRevision(kind: RevisionKind): void {
   // Every durable revision changes the billed request, including pruning.
   // Reusing that stale pressure can immediately trigger a second revision.
   lastBilledTokens = null;
+  billedHistoryLength = 0;
   lastCacheReadShare = null;
 }
 
@@ -2310,7 +2314,7 @@ async function reclaim(ignoreCooldown = false): Promise<number> {
     // Must-fit always proceeds so pacing can never force an overflow.
     const current = totalTokens();
     const margin = Math.ceil(usable * (HIGH_WATER - LOW_WATER));
-    if (Math.max(current, lastBilledTokens ?? 0) < usable &&
+    if (effectiveTotalTokens() < usable &&
         pruneCooldownHolds(pruneCooldown, current, margin)) {
       pendingReclaimEvidence = {
         attempted: false,
@@ -2405,7 +2409,7 @@ async function reclaim(ignoreCooldown = false): Promise<number> {
  *  handoff already exists. */
 function truncate(protectTurns: number = PROTECT_TURNS): boolean {
   const estimate = totalTokens();
-  const effective = Math.max(estimate, lastBilledTokens ?? 0);
+  const effective = effectiveTotalTokens();
   if (effective < usableTokens()) return false;
   // Walk in one scale: billed truth and the byte heuristic disagree by a
   // ratio, so decrement each message's estimate share scaled to the effective
@@ -2443,15 +2447,24 @@ function totalTokens(): number {
   return estimateReclaimTokens(frontMatter.systemPrompt()) + toolSchemaTokens() + activeOverlayTokens() + history.reduce((s, m) => s + m.tokens, 0);
 }
 
+/** Estimates of messages appended after the bill. The bill does not include them. */
+function tokensSinceBill(): number {
+  if (lastBilledTokens === null || billedHistoryLength >= history.length) return 0;
+  let sum = 0;
+  for (let i = billedHistoryLength; i < history.length; i++) sum += history[i]!.tokens;
+  return sum;
+}
+
 /**
  * Compaction decisions use billed truth when the provider reported it: the
  * local bytes/4 heuristic undercounts some tokenizers, so gating only on the
  * estimate lets a 507k-token request pass an 80% high-water check and then
- * fail with `maximum prompt length`. Take the larger of estimate and last
- * billed total; display paths keep using totalTokens().
+ * fail with `maximum prompt length`. Messages appended after that bill are
+ * added on top of it, so a later tool result is not hidden while the bill is
+ * still the larger figure. Display paths keep using totalTokens().
  */
 function effectiveTotalTokens(): number {
-  return Math.max(totalTokens(), lastBilledTokens ?? 0);
+  return compactionPressure(totalTokens(), lastBilledTokens, tokensSinceBill());
 }
 
 /** Collapse old turns into one handoff message. Runs on the cheap lane,
@@ -3886,6 +3899,7 @@ let cacheFlipTally: CacheFlipTally = emptyCacheFlipTally();
 function resetUsageContinuity(): void {
   previousCacheAttempt = null;
   lastBilledTokens = null;
+  billedHistoryLength = 0;
   lastCacheReadShare = null;
   lastRequestFollowedRevision = false;
   pruneCooldown = null;
@@ -4059,6 +4073,7 @@ function reportUsage(
   postRevision = false;
   previousCacheAttempt = { ...snapshot, diagnostics: traceCache };
   lastBilledTokens = cur;
+  billedHistoryLength = cur === null ? 0 : history.length;
   lastCacheReadShare = cur !== null && cur > 0 && usage.cacheRead !== null ? usage.cacheRead / cur : null;
   // Keep one cost calculation and its provenance. In particular, a catalog
   // miss must not turn a reported zero-token request into an artificial

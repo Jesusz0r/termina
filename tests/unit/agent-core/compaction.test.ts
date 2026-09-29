@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   CACHE_MISS_COMPACT_TOKENS,
   COMPACT_COST_REFERENCE_WINDOW,
+  compactionPressure,
   compactCostTokenThreshold,
   PROTECT_TURNS,
   evictionBoundary,
@@ -236,6 +237,14 @@ describe("compaction planning", () => {
     expect(summaryPrompt(null, "body")).toContain("<session-to-compress>\nbody\n</session-to-compress>");
     expect(summaryPrompt(null, "body")).not.toContain("previous-handoff");
     expect(summaryPrompt("old", "body")).toContain("<previous-handoff>\nold\n</previous-handoff>");
+  });
+
+  it("keeps messages appended after a bill in the compaction pressure", () => {
+    expect(compactionPressure(400_000, null, 20_000)).toBe(400_000);
+    expect(compactionPressure(420_000, 507_000, 0)).toBe(507_000);
+    expect(compactionPressure(420_000, 507_000, 40_000)).toBe(547_000);
+    expect(compactionPressure(600_000, 507_000, 40_000)).toBe(600_000);
+    expect(compactionPressure(420_000, 507_000, -1)).toBe(507_000);
   });
 
   it("gates cost-driven compaction on expensive misses", () => {
