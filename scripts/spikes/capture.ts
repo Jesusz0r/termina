@@ -325,12 +325,12 @@ export default async function run(log: (msg: string) => void) {
     }
     return true;
   };
-  const rawMaterialize = async (target: string, extra: Record<string, unknown> = {}) => {
+  const rawMaterialize = async (targetStore: SnapshotStore, stateCommit: string, target: string, extra: Record<string, unknown> = {}) => {
     // The payload carries the opened binding, like the typed client: the
     // core authenticates the target descriptor, never the pathname.
     const binding = await boundPromotionOpenDirectory({ path: target, expectedIdentity: promotionIdentity(target) });
-    return startCoreRequest(corePayload(store, "materialize", {
-      stateId: state.commit,
+    return startCoreRequest(corePayload(targetStore, "materialize", {
+      stateId: stateCommit,
       targetDir: target,
       boundRootIdentity: JSON.parse(JSON.stringify(binding)),
       ...extra,
@@ -342,7 +342,7 @@ export default async function run(log: (msg: string) => void) {
   mkdirSync(killZero, { recursive: true, mode: 0o700 });
   const killZeroReady = join(work, "mat-kill-zero-ready");
   const killZeroRelease = join(work, "mat-kill-zero-release");
-  const zeroReq = await rawMaterialize(killZero, {
+  const zeroReq = await rawMaterialize(store, state.commit, killZero, {
     testHook: { stage: "promotion-materialize-root-open", readyPath: killZeroReady, releasePath: killZeroRelease },
   });
   const zeroOutcome = zeroReq.settled.then(
@@ -363,7 +363,7 @@ export default async function run(log: (msg: string) => void) {
   writeFileSync(join(killStale, "tracked.txt"), "wrong\n");
   const killStaleReady = join(work, "mat-kill-stale-ready");
   const killStaleRelease = join(work, "mat-kill-stale-release");
-  const staleReq = await rawMaterialize(killStale, {
+  const staleReq = await rawMaterialize(store, state.commit, killStale, {
     testHook: { stage: "promotion-materialize-leaf-validated", readyPath: killStaleReady, releasePath: killStaleRelease },
   });
   const staleOutcome = staleReq.settled.then(
@@ -380,20 +380,62 @@ export default async function run(log: (msg: string) => void) {
   );
 
   // Kill mid-write: no pause hook exists in the write loop, so land a timed
-  // kill and prove it landed mid-write (a strict partial target) before the
-  // retry. Bounded attempts with fresh targets; failing to land one is a
-  // loud failure, never a silent pass.
-  const countPresent = (target: string) =>
-    Object.keys(expected).filter((rel) => existsSync(join(target, rel))).length;
+  // kill against a dedicated 100-file state. Its write window is ~1s on any
+  // disk; the 10-file main state above finishes in tens of milliseconds on
+  // fast storage, below any reliable kill delay. Prove the kill landed
+  // mid-write with a strict partial target before the retry. Bounded
+  // adaptive attempts with fresh targets; failing to land one is a loud
+  // failure, never a silent pass.
+  const timedRepo = join(work, "materialize-kill-mid-repo");
+  mkdirSync(timedRepo);
+  git(["init", "-q"], timedRepo);
+  git(["config", "user.email", "t@t"], timedRepo);
+  git(["config", "user.name", "t"], timedRepo);
+  const timedExpected: Record<string, { mode: string; bytes?: Buffer; symlink?: string }> = {};
+  for (let i = 0; i < 100; i++) {
+    const bytes = Buffer.from(`timed file ${i}\n`);
+    writeFileSync(join(timedRepo, `t-${i}.txt`), bytes);
+    timedExpected[`t-${i}.txt`] = { mode: "100644", bytes };
+  }
+  writeFileSync(join(timedRepo, "run.sh"), "#!/bin/sh\necho timed\n");
+  chmodSync(join(timedRepo, "run.sh"), 0o755);
+  timedExpected["run.sh"] = { mode: "100755", bytes: Buffer.from("#!/bin/sh\necho timed\n") };
+  symlinkSync("t-0.txt", join(timedRepo, "link.txt"));
+  timedExpected["link.txt"] = { mode: "120000", symlink: "t-0.txt" };
+  git(["add", "-A"], timedRepo);
+  git(["commit", "-qm", "timed base"], timedRepo);
+  const timedStore = await SnapshotStore.create(join(work, "store-mat-kill-mid"), timedRepo, join(timedRepo, ".git"), fmt);
+  stores.push(timedStore);
+  const timedState = await timedStore.capture(await gitHead(timedRepo), null);
+  const timedRels = Object.keys(timedExpected);
+  const verifyTimed = (target: string): boolean => {
+    for (const [rel, exp] of Object.entries(timedExpected)) {
+      let st;
+      try {
+        st = lstatSync(join(target, rel));
+      } catch {
+        return false;
+      }
+      if (exp.symlink !== undefined) {
+        if (!st.isSymbolicLink() || readlinkSync(join(target, rel)) !== exp.symlink) return false;
+        continue;
+      }
+      if (st.isSymbolicLink() || !st.isFile()) return false;
+      const modeOk = exp.mode === "100755" ? (st.mode & 0o111) !== 0 : (st.mode & 0o111) === 0;
+      if (!modeOk || (exp.bytes !== undefined && !readFileSync(join(target, rel)).equals(exp.bytes))) return false;
+    }
+    return true;
+  };
+  const countTimedPresent = (target: string) => timedRels.filter((rel) => existsSync(join(target, rel))).length;
   let midWriteTarget: string | null = null;
   // Adaptive delay: overshoot (completed) halves it, undershoot (nothing
   // written yet) doubles it. The partial-target proof below is what makes
   // a landed kill count, not the delay value.
-  let delayMs = 100;
+  let delayMs = 200;
   for (let attempt = 0; attempt < 7 && !midWriteTarget; attempt++) {
     const candidate = join(work, `materialize-kill-mid-${attempt}`);
     mkdirSync(candidate, { recursive: true, mode: 0o700 });
-    const req = await rawMaterialize(candidate);
+    const req = await rawMaterialize(timedStore, timedState.commit, candidate);
     const outcome = req.settled.then(
       () => "completed",
       () => "killed",
@@ -401,19 +443,19 @@ export default async function run(log: (msg: string) => void) {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     req.child.kill("SIGKILL");
     const result = await outcome;
-    const present = countPresent(candidate);
-    if (result === "killed" && present > 0 && present < Object.keys(expected).length) {
+    const present = countTimedPresent(candidate);
+    if (result === "killed" && present > 0 && present < timedRels.length) {
       midWriteTarget = candidate;
     } else {
       rmSync(candidate, { recursive: true, force: true });
-      delayMs = result === "completed" ? Math.max(10, Math.floor(delayMs / 2)) : Math.min(1000, delayMs * 2);
+      delayMs = result === "completed" ? Math.max(10, Math.floor(delayMs / 2)) : Math.min(2000, delayMs * 2);
     }
   }
   check("a timed kill landed mid-write (strict partial target)", midWriteTarget !== null);
   if (midWriteTarget) {
-    check("the mid-write kill interrupted convergence (not byte-exact)", !verifyMaterialized(midWriteTarget));
-    await materializeState(store, state.commit, midWriteTarget);
-    check("retry after a mid-write kill converges byte-exact", verifyMaterialized(midWriteTarget));
+    check("the mid-write kill interrupted convergence (not byte-exact)", !verifyTimed(midWriteTarget));
+    await materializeState(timedStore, timedState.commit, midWriteTarget);
+    check("retry after a mid-write kill converges byte-exact", verifyTimed(midWriteTarget));
   }
 
   // ------------------------------------------------------------ blob dedupe
