@@ -3,7 +3,22 @@ import { createHash } from "node:crypto";
 import { isRecord } from "../shared/guards.ts";
 
 type ToolCall = { name: string; input: unknown };
-type Schema = Record<string, unknown>;
+/** Trusted built-in definitions, not server-owned JSON Schema. */
+type Schema = {
+  type?: string;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+  additionalProperties?: boolean;
+  required?: readonly string[];
+  properties?: Record<string, Schema>;
+  items?: Schema;
+  [key: string]: unknown;
+};
 type ToolExecutionEntry = { index: number; duplicateOf?: number; reuseResult?: boolean };
 const TOOL_CONCURRENCY = 4;
 // Only these built-ins are known to be observational. MCP annotations are not
@@ -14,7 +29,8 @@ export const READ_TOOLS = new Set(["read_file", "read_files", "grep", "glob", "f
  * MCP schemas remain owned by the server; this is not a general JSON Schema engine. */
 function inputError(value: unknown, schema: Schema, path: string): string | null {
   const type = schema.type;
-  const valid = type === "object" ? isRecord(value)
+  const object = type === "object" && isRecord(value) ? value : null;
+  const valid = type === "object" ? object !== null
     : type === "array" ? Array.isArray(value)
     : type === "number" ? typeof value === "number" && Number.isFinite(value)
     : type === "integer" ? typeof value === "number" && Number.isSafeInteger(value)
@@ -31,26 +47,23 @@ function inputError(value: unknown, schema: Schema, path: string): string | null
   if (Array.isArray(value)) {
     if (typeof schema.minItems === "number" && value.length < schema.minItems) return `${path} must contain at least ${schema.minItems} items`;
     if (typeof schema.maxItems === "number" && value.length > schema.maxItems) return `${path} must contain at most ${schema.maxItems} items`;
-    if (schema.uniqueItems === true && isRecord(schema.items) && schema.items.type === "string" && new Set(value).size !== value.length) return `${path} must contain distinct items`;
+    if (schema.uniqueItems === true && schema.items?.type === "string" && new Set(value).size !== value.length) return `${path} must contain distinct items`;
   }
-  if (type === "object" && isRecord(value)) {
-    const properties = isRecord(schema.properties) ? schema.properties : {};
-    const required = Array.isArray(schema.required) ? schema.required : [];
-    for (const key of required) {
-      if (typeof key === "string" && !Object.hasOwn(value, key)) return `${path}.${key} is required`;
+  if (object) {
+    const properties = schema.properties ?? {};
+    for (const key of schema.required ?? []) {
+      if (!Object.hasOwn(object, key)) return `${path}.${key} is required`;
     }
-    for (const [key, entry] of Object.entries(value)) {
+    for (const [key, entry] of Object.entries(object)) {
       if (!Object.hasOwn(properties, key)) {
         if (schema.additionalProperties === false) return `${path}.${key} is not a supported argument`;
         continue;
       }
-      const child = properties[key];
-      if (!isRecord(child)) continue;
-      const error = inputError(entry, child, `${path}.${key}`);
+      const error = inputError(entry, properties[key]!, `${path}.${key}`);
       if (error) return error;
     }
   }
-  if (Array.isArray(value) && isRecord(schema.items)) {
+  if (Array.isArray(value) && schema.items) {
     for (let i = 0; i < value.length; i++) {
       const error = inputError(value[i], schema.items, `${path}[${i}]`);
       if (error) return error;
@@ -81,9 +94,9 @@ export function providerToolAdmissionError(blocks: readonly Record<string, unkno
   return null;
 }
 
-export function toolInputError(call: ToolCall, definitions: readonly Record<string, unknown>[]): string | null {
+export function toolInputError(call: ToolCall, definitions: readonly { name?: string; input_schema?: Schema }[]): string | null {
   const definition = definitions.find((tool) => tool.name === call.name);
-  if (!definition || !isRecord(definition.input_schema)) return null;
+  if (!definition?.input_schema) return null;
   const error = inputError(call.input, definition.input_schema, call.name);
   return error ? `error: invalid tool arguments: ${error}. Use the declared tool schema; nothing was executed.` : null;
 }

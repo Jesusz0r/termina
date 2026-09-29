@@ -21,7 +21,8 @@ export type { CacheCapabilityFeature, CacheCapabilityObservation, CacheCapabilit
 export { CACHE_KEY_MAX_LENGTH, cacheIdentityFor, cacheRouteDomain, cacheSessionHeaders, cacheSessionSeed, deriveCacheIdentityKey } from "./auth/cache-identity.ts";
 export type { CacheIdentity } from "./auth/cache-identity.ts";
 export { modifyProvider, readAuth, resetAuthCache } from "./auth/store.ts";
-export { exchangeGithubCopilotToken, parseOauthToken, refreshOauth, requestGithubDeviceCode, requestXaiDeviceCode } from "./auth/oauth.ts";
+export { parseOauthToken } from "./auth/oauth-payload.ts";
+export { exchangeGithubCopilotToken, refreshOauth, requestGithubDeviceCode, requestXaiDeviceCode } from "./auth/oauth.ts";
 export { DEFAULT_MODELS, authBanner, firstAuthenticatedProvider, hasEnvCredential, hasStoredCredential, parseModelRef, resolveAuth } from "./auth/resolve.ts";
 export type { ResolvedAuth } from "./auth/resolve.ts";
 export { browserOpenArgs, canOpenBrowser, loginPickerItems, parseAuthCommand, runLogin, runLogout } from "./auth/login.ts";

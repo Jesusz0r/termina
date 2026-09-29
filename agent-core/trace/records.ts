@@ -4,12 +4,12 @@
  * Owns attempt/settlement factories, link-index validation, and existing-file
  * scanning. Split from agent-core/trace.ts (issue #38).
  */
-import { errorCode, isRecord } from "../../shared/guards.ts";
+import { errorCode } from "../../shared/guards.ts";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { cache, cost, criticalClass, freezeDeep, id, nullableInteger, nullableNumber, optionalText, pair, reclaimEvidence, revisions, stringArray, toolOutcomes, usage } from "./normalize.ts";
-import { MAX_ARRAY_ITEMS, MAX_ID_CHARS, MAX_TRACE_INDEX_ENTRIES, TRACE_FILE_PATTERN, TRACE_SCHEMA_VERSION } from "./schema.ts";
-import type { ExistingTraceRole, FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptInput, TraceLinkIndex, TraceManifest, TraceManifestLinkIndex, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailureKind } from "./schema.ts";
+import { cache, cost, criticalClass, freezeDeep, id, nullableInteger, nullableNumber, optionalText, pair, reclaimEvidence, revisions, stringArray, toolOutcomes, usage, parseTraceRecord, validExistingId } from "./normalize.ts";
+import { TRACE_FILE_PATTERN, TRACE_SCHEMA_VERSION } from "./schema.ts";
+import type { ExistingTraceRole, FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptInput, TraceManifest, TraceManifestLinkIndex, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailureKind } from "./schema.ts";
 
 
 /**
@@ -187,11 +187,6 @@ type ExistingFileInfo = {
 };
 
 
-function isExistingTraceRole(value: unknown): value is ExistingTraceRole {
-  return value === "main" || value === "summary" || value === "critic";
-}
-
-
 type ExistingAttempt = {
   readonly turn: number;
   readonly runId: string;
@@ -217,68 +212,6 @@ export type ExistingScan = ExistingFileInfo & {
   readonly attempts: readonly ExistingAttempt[];
   readonly settlements: readonly ExistingSettlement[];
 };
-
-
-function existingStringArray(value: unknown): { valid: boolean; values: string[] } {
-  if (!Array.isArray(value) || value.length > MAX_ARRAY_ITEMS) return { valid: false, values: [] };
-  const values: string[] = [];
-  for (const item of value) {
-    if (!validExistingId(item)) return { valid: false, values: [] };
-    values.push(item);
-  }
-  return { valid: true, values };
-}
-
-
-function validTraceTurn(value: unknown): value is number | null {
-  return value === null || (typeof value === "number" && Number.isSafeInteger(value) && value > 0);
-}
-
-
-export function validTraceLinkIndex(value: unknown): value is TraceLinkIndex {
-  if (!isRecord(value) || value.schemaVersion !== TRACE_SCHEMA_VERSION || value.kind !== "trace-link-index" ||
-    typeof value.complete !== "boolean" || !validExistingId(value.updatedAt) ||
-    !Array.isArray(value.attempts) || !Array.isArray(value.settlements) ||
-    value.attempts.length > MAX_TRACE_INDEX_ENTRIES || value.settlements.length > MAX_TRACE_INDEX_ENTRIES ||
-    value.attempts.length + value.settlements.length > MAX_TRACE_INDEX_ENTRIES) return false;
-  const attemptKeys = new Set<string>();
-  const retainedTurns = new Set<number>();
-  for (const item of value.attempts) {
-    if (!isRecord(item) || !validExistingId(item.runId) || !validExistingId(item.taskId) || !validExistingId(item.attemptId) ||
-      !isExistingTraceRole(item.role) || typeof item.retained !== "boolean" ||
-      !validTraceTurn(item.traceTurn) || typeof item.unknown !== "boolean") return false;
-    const key = compositeKey(item.runId, item.attemptId);
-    if (attemptKeys.has(key)) return false;
-    attemptKeys.add(key);
-    // One turn file holds one record: duplicate retained turns would collide
-    // in recordsByTurn and resurrect ghost retained entries.
-    if (item.retained && item.traceTurn !== null) {
-      if (retainedTurns.has(item.traceTurn)) return false;
-      retainedTurns.add(item.traceTurn);
-    }
-  }
-  const settlementKeys = new Set<string>();
-  for (const item of value.settlements) {
-    const attemptIds = existingStringArray(item && isRecord(item) ? item.attemptIds : undefined);
-    const summaryAttemptIds = existingStringArray(item && isRecord(item) ? item.summaryAttemptIds : undefined);
-    if (!isRecord(item) || !validExistingId(item.runId) || !validExistingId(item.taskId) ||
-      !attemptIds.valid || !summaryAttemptIds.valid ||
-      (item.finalAttemptId !== null && item.finalAttemptId !== undefined && !validExistingId(item.finalAttemptId)) ||
-      typeof item.retained !== "boolean" || !validTraceTurn(item.traceTurn) || typeof item.unknown !== "boolean") return false;
-    if (new Set(attemptIds.values).size !== attemptIds.values.length ||
-      new Set(summaryAttemptIds.values).size !== summaryAttemptIds.values.length ||
-      summaryAttemptIds.values.some((idValue) => !attemptIds.values.includes(idValue)) ||
-      (item.finalAttemptId !== null && item.finalAttemptId !== undefined && !attemptIds.values.includes(item.finalAttemptId))) return false;
-    const key = taskKey(item.runId, item.taskId);
-    if (settlementKeys.has(key)) return false;
-    settlementKeys.add(key);
-    if (item.retained && item.traceTurn !== null) {
-      if (retainedTurns.has(item.traceTurn)) return false;
-      retainedTurns.add(item.traceTurn);
-    }
-  }
-  return true;
-}
 
 
 export async function inspectExisting(directory: string, maxScanFiles: number, maxRecordBytes: number): Promise<ExistingScan> {
@@ -307,53 +240,32 @@ export async function inspectExisting(directory: string, maxScanFiles: number, m
         continue;
       }
       const textValue = await readFile(file, "utf8");
-      const value = JSON.parse(textValue) as unknown;
-      if (!isRecord(value) || value.schemaVersion !== TRACE_SCHEMA_VERSION ||
-        (value.recordType !== "attempt" && value.recordType !== "task-settled") ||
-        !validExistingId(value.runId) || !validExistingId(value.taskId)) {
+      const value = parseTraceRecord(JSON.parse(textValue));
+      if (value === null) {
         malformedRecords++;
         continue;
       }
       if (value.recordType === "attempt") {
-        const parentAttemptId = value.parentAttemptId === null || value.parentAttemptId === undefined
-          ? null
-          : validExistingId(value.parentAttemptId) ? value.parentAttemptId : undefined;
-        const retryOfAttemptId = value.retryOfAttemptId === null || value.retryOfAttemptId === undefined
-          ? null
-          : validExistingId(value.retryOfAttemptId) ? value.retryOfAttemptId : undefined;
-        if (!validExistingId(value.attemptId) || !isExistingTraceRole(value.role) ||
-          parentAttemptId === undefined || retryOfAttemptId === undefined) {
+        if (value.role === null) {
           malformedRecords++;
           continue;
         }
         validRecords++;
         attempts.push({
-          turn: traceTurnFromName(name)!,
-          runId: value.runId,
-          taskId: value.taskId,
-          attemptId: value.attemptId,
-          role: value.role,
-          parentAttemptId,
-          retryOfAttemptId,
+          turn: traceTurnFromName(name)!, runId: value.runId, taskId: value.taskId,
+          attemptId: value.attemptId, role: value.role,
+          parentAttemptId: value.parentAttemptId, retryOfAttemptId: value.retryOfAttemptId,
         });
       } else {
-        const attemptIds = existingStringArray(value.attemptIds);
-        const summaryAttemptIds = existingStringArray(value.summaryAttemptIds);
-        const finalAttemptId = value.finalAttemptId === null || value.finalAttemptId === undefined
-          ? null
-          : validExistingId(value.finalAttemptId) ? value.finalAttemptId : undefined;
-        if (!attemptIds.valid || !summaryAttemptIds.valid || finalAttemptId === undefined) {
+        if (value.attemptIds === null || value.summaryAttemptIds === null) {
           malformedRecords++;
           continue;
         }
         validRecords++;
         settlements.push({
-          turn: traceTurnFromName(name)!,
-          runId: value.runId,
-          taskId: value.taskId,
-          attemptIds: attemptIds.values,
-          summaryAttemptIds: summaryAttemptIds.values,
-          finalAttemptId,
+          turn: traceTurnFromName(name)!, runId: value.runId, taskId: value.taskId,
+          attemptIds: value.attemptIds, summaryAttemptIds: value.summaryAttemptIds,
+          finalAttemptId: value.finalAttemptId,
         });
       }
     } catch (error) {
@@ -461,54 +373,4 @@ export function processAlive(pid: number): boolean {
   } catch (error) {
     return errorCode(error) === "EPERM";
   }
-}
-
-
-function validExistingId(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= MAX_ID_CHARS &&
-    ![...value].some((character) => {
-      const code = character.codePointAt(0) ?? 0;
-      return code < 0x20 || (code >= 0x7f && code <= 0x9f);
-    });
-}
-
-
-export function nonnegativeCounter(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-
-export function validPriorManifest(value: unknown): value is TraceManifest {
-  if (!isRecord(value) || value.schemaVersion !== TRACE_SCHEMA_VERSION || value.kind !== "trace-manifest") return false;
-  for (const field of [
-    "retainedRecords",
-    "omittedRecords",
-    "writeFailures",
-    "malformedRecords",
-    "partialRecords",
-    "scanOmittedRecords",
-    "manifestErrors",
-    "retentionFailures",
-    "manifestWriteFailures",
-    "indexWriteFailures",
-    "lastTraceTurn",
-  ]) {
-    if (!nonnegativeCounter(value[field])) return false;
-  }
-  if (!validExistingId(value.updatedAt)) return false;
-  if (!isRecord(value.startup) || !validExistingId(value.startup.namespace) ||
-    !validExistingId(value.startup.startedAt) || !isRecord(value.startup.reset) ||
-    typeof value.startup.reset.requested !== "boolean" || typeof value.startup.reset.applied !== "boolean" ||
-    !nonnegativeCounter(value.startup.reset.omittedRecords) || !nonnegativeCounter(value.startup.reset.failedRecords) ||
-    !nonnegativeCounter(value.startup.preexistingRecords) ||
-    !nonnegativeCounter(value.startup.preexistingMalformedRecords) ||
-    !nonnegativeCounter(value.startup.preexistingPartialRecords) ||
-    !nonnegativeCounter(value.startup.preexistingScanOmittedRecords) ||
-    (value.startup.error !== null && typeof value.startup.error !== "string")) return false;
-  if (!isRecord(value.linkIndex) || typeof value.linkIndex.path !== "string" || value.linkIndex.path.length === 0 ||
-    typeof value.linkIndex.complete !== "boolean" || !nonnegativeCounter(value.linkIndex.attempts) ||
-    !nonnegativeCounter(value.linkIndex.settlements) || !nonnegativeCounter(value.linkIndex.unknown) ||
-    !nonnegativeCounter(value.linkIndex.writeFailures) ||
-    (value.linkIndex.error !== null && typeof value.linkIndex.error !== "string")) return false;
-  return true;
 }

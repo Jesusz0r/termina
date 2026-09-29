@@ -20,9 +20,7 @@
  *
  *   node --experimental-strip-types --no-warnings scripts/trace-baseline.ts <trace-dir>
  */
-import { TRACE_SCHEMA_VERSION } from "../agent-core/trace/schema.ts";
-import { nullableNumber } from "../agent-core/trace/normalize.ts";
-import { isRecord } from "../shared/guards.ts";
+import { nullableNumber, parseTraceManifest, parseTraceRecord } from "../agent-core/trace/normalize.ts";
 
 export interface BaselineOptions {
   readonly maxFiles: number;
@@ -45,11 +43,6 @@ function asString(value: unknown): string | null {
 
 function asNumber(value: unknown): number | null {
   return nullableNumber(value);
-}
-
-/** A present-but-invalid counter (negative or non-finite number) fails the record. */
-function hasInvalidCounter(values: readonly unknown[]): boolean {
-  return values.some((value) => typeof value === "number" && nullableNumber(value) === null);
 }
 
 /**
@@ -245,25 +238,6 @@ function emptyReport(): BaselineReport {
   };
 }
 
-function isAttemptRecord(value: Record<string, unknown>): boolean {
-  return (
-    value["recordType"] === "attempt" &&
-    value["schemaVersion"] === TRACE_SCHEMA_VERSION &&
-    asString(value["runId"]) !== null &&
-    asString(value["taskId"]) !== null &&
-    asString(value["attemptId"]) !== null
-  );
-}
-
-function isSettlementRecord(value: Record<string, unknown>): boolean {
-  return (
-    value["recordType"] === "task-settled" &&
-    value["schemaVersion"] === TRACE_SCHEMA_VERSION &&
-    asString(value["runId"]) !== null &&
-    asString(value["taskId"]) !== null
-  );
-}
-
 function taskKey(runId: string, taskId: string): string {
   return `${runId}\u0000${taskId}`;
 }
@@ -299,8 +273,8 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
 
   const manifestPath = path.join(dir, MANIFEST_FILE);
   const manifestRead = readBoundedJsonFile(fs, manifestPath, options.maxFileBytes);
-  if (manifestRead.ok && isRecord(manifestRead.value)) {
-    const manifest = manifestRead.value;
+  const manifest = manifestRead.ok ? parseTraceManifest(manifestRead.value) : null;
+  if (manifest) {
     const w = report.integrity as unknown as Record<string, number | null>;
     for (const key of [
       "retainedRecords",
@@ -347,35 +321,15 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
       (report.integrity as unknown as Record<string, number>)[bounded.reason === "oversized" ? "oversizedFiles" : "malformedFiles"] += 1;
       continue;
     }
-    const parsed: unknown = bounded.value;
+    const parsed = parseTraceRecord(bounded.value);
     (report.integrity as unknown as Record<string, number>)["filesScanned"] += 1;
     if (recordsSeen >= options.maxRecords) {
       (report.integrity as unknown as Record<string, number>)["recordCapOmitted"] += 1;
       continue;
     }
-    if (!isRecord(parsed) || (!isAttemptRecord(parsed) && !isSettlementRecord(parsed))) {
+    if (parsed === null) {
       (report.integrity as unknown as Record<string, number>)["partialRecords"] += 1;
       continue;
-    }
-    if (parsed["recordType"] === "attempt") {
-      // Negative or non-finite counters fail the record: corrupt evidence
-      // must land in integrity, never in the totals. Missing or mistyped
-      // fields stay unknown and are preserved downstream, not zeroed.
-      const usageCheck = isRecord(parsed["usage"]) ? parsed["usage"] : {};
-      const costCheck = isRecord(parsed["cost"]) ? parsed["cost"] : {};
-      if (
-        hasInvalidCounter([
-          usageCheck["input"],
-          usageCheck["cacheRead"],
-          usageCheck["cacheWrite"],
-          usageCheck["output"],
-          usageCheck["reasoning"],
-          costCheck["usd"],
-        ])
-      ) {
-        (report.integrity as unknown as Record<string, number>)["partialRecords"] += 1;
-        continue;
-      }
     }
     recordsSeen += 1;
     const runId = asString(parsed["runId"]) ?? "";
@@ -401,7 +355,7 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
       countKey(byModel, asString(parsed["model"]) ?? "unknown");
       countKey(byStatus, asString(parsed["status"]) ?? "unknown");
 
-      const usage = isRecord(parsed["usage"]) ? parsed["usage"] : {};
+      const usage = parsed.usage;
       const u = report.usage;
       tallyUsage(u.input, usage["input"]);
       tallyUsage(u.cacheRead, usage["cacheRead"]);
@@ -415,16 +369,15 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
       else if (cacheRead > 0) c["hits"] += 1;
       else c["explicitZeroRead"] += 1;
 
-      const cache = isRecord(parsed["cache"]) ? parsed["cache"] : {};
-      const requested = isRecord(cache["requested"]) ? (cache["requested"] as Record<string, unknown>) : {};
-      const effective = isRecord(cache["effective"]) ? (cache["effective"] as Record<string, unknown>) : {};
+      const { cache } = parsed;
+      const { requested, effective } = cache;
       if (asString(requested["mode"]) !== asString(effective["mode"])) c["requestedVsEffectiveMismatch"] += 1;
-      const miss = isRecord(cache["missAttribution"]) ? (cache["missAttribution"] as Record<string, unknown>) : {};
+      const miss = cache.missAttribution;
       const primary = asString(miss["primary"]);
       if (primary !== null) countKey(byMissCause, primary);
       else if (cacheRead !== null && cacheRead === 0) c["unattributedWithRead"] += 1;
 
-      const cost = isRecord(parsed["cost"]) ? parsed["cost"] : {};
+      const cost = parsed.cost;
       const usd = asNumber(cost["usd"]);
       const co = report.cost as unknown as Record<string, number>;
       if (usd === null) co["unknownCount"] += 1;
@@ -438,8 +391,7 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
     } else {
       r.records.settlements += 1;
       task.settled = true;
-      const outcome = isRecord(parsed["outcome"]) ? (parsed["outcome"] as Record<string, unknown>) : {};
-      const status = asString(outcome["status"]);
+      const status = parsed.outcome.status;
       if (status !== null) task.outcomeStatus = status;
       const cls = asString(parsed["taskClass"]);
       if (cls !== null && task.taskClass === null) task.taskClass = cls;

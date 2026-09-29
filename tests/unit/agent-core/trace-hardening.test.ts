@@ -8,7 +8,7 @@ import {
   createTaskSettledRecord,
   createTraceRuntime,
   sanitizeProviderError,
-  validTraceLinkIndex,
+  parseTraceLinkIndex,
 } from "../../../agent-core/trace.ts";
 import type { TraceAttemptInput } from "../../../agent-core/trace.ts";
 
@@ -133,18 +133,18 @@ describe("trace validation hardening (#227)", () => {
       updatedAt: "2026-01-01T00:00:00.000Z",
       settlements: [],
     } as const;
-    expect(validTraceLinkIndex({ ...base, attempts: [attempt("a1", 1), attempt("a2", 2)] })).toBe(true);
-    expect(validTraceLinkIndex({ ...base, attempts: [{ ...attempt("c1", 3), role: "critic" }] })).toBe(true);
-    expect(validTraceLinkIndex({ ...base, attempts: [attempt("a1", 1), attempt("a2", 1)] })).toBe(false);
+    expect(parseTraceLinkIndex({ ...base, attempts: [attempt("a1", 1), attempt("a2", 2)] }) !== null).toBe(true);
+    expect(parseTraceLinkIndex({ ...base, attempts: [{ ...attempt("c1", 3), role: "critic" }] }) !== null).toBe(true);
+    expect(parseTraceLinkIndex({ ...base, attempts: [attempt("a1", 1), attempt("a2", 1)] }) !== null).toBe(false);
     // Unretained entries share no turn file, so nulls never collide.
     expect(
-      validTraceLinkIndex({
+      parseTraceLinkIndex({
         ...base,
         attempts: [
           { ...attempt("a1", null), retained: false },
           { ...attempt("a2", null), retained: false },
         ],
-      }),
+      }) !== null,
     ).toBe(true);
   });
 

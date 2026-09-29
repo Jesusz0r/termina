@@ -176,8 +176,6 @@ export interface TraceCostResult {
   readonly components: Readonly<Record<RateField, number | null>>;
 }
 
-type RecordLike = Record<string, unknown>;
-
 const MAX_METADATA_CHARS = 256;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
 const UNKNOWN_FIELD_ORDER: readonly TraceUnknownField[] = [
@@ -324,20 +322,16 @@ export function validateRateSnapshot(value: unknown): RateSnapshotValidation {
     errors,
   );
 
-  let ratesValue: unknown = value.rates;
-  if (ratesValue === undefined) ratesValue = value;
-  if (!isRecord(ratesValue)) {
-    errors.push("rates");
-    ratesValue = {};
-  }
-  const rateObject = ratesValue as RecordLike;
+  const rawRates = value.rates;
+  const rateObject = rawRates === undefined ? value : isRecord(rawRates) ? rawRates : null;
+  if (rateObject === null) errors.push("rates");
   const rates = {
-    input: nullableRate(rateObject.input, "input", errors),
-    cacheRead: nullableRate(rateObject.cacheRead, "cacheRead", errors),
-    cacheWrite: nullableRate(rateObject.cacheWrite, "cacheWrite", errors),
-    output: nullableRate(rateObject.output, "output", errors),
-    reasoning: nullableRate(rateObject.reasoning, "reasoning", errors),
-    storage: nullableRate(rateObject.storage, "storage", errors),
+    input: nullableRate(rateObject?.input, "input", errors),
+    cacheRead: nullableRate(rateObject?.cacheRead, "cacheRead", errors),
+    cacheWrite: nullableRate(rateObject?.cacheWrite, "cacheWrite", errors),
+    output: nullableRate(rateObject?.output, "output", errors),
+    reasoning: nullableRate(rateObject?.reasoning, "reasoning", errors),
+    storage: nullableRate(rateObject?.storage, "storage", errors),
   } satisfies RateCard;
 
   if (errors.length > 0 || scope === null || units === null) return { ok: false, value: null, errors };

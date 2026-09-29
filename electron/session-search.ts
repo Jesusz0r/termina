@@ -2,7 +2,7 @@
  * Session Search parse and walk.
  *
  * Main supplies the jsonl paths for this project (core dir, live and
- * roster files). This module is the only JSONL parser for search hits.
+ * roster files). The session owner parses records; this module extracts search hits.
  */
 import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
@@ -10,8 +10,8 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
 import { cleanPlanPathToken, looksLikePath } from "./plan-board.ts";
-import { formatStub, isCoreSessionId, listCurrentSegments, listLogicalSessions } from "../agent-core/session.ts";
-import { errorCode, isErrno, isRecord } from "../shared/guards.ts";
+import { formatStub, isCoreSessionId, listCurrentSegments, listLogicalSessions, parseStoredSessionRecord, sessionContentParts, sessionToolInputs, type ReplayMessage, type SessionBlock, type SessionReclaimReceipt } from "../agent-core/session.ts";
+import { errorCode, isErrno } from "../shared/guards.ts";
 import type { CanonicalizePath, SessionHit } from "../shared/types.ts";
 
 const MAX_SESSION_SEARCH_FILES = 50;
@@ -39,9 +39,9 @@ function stringArgPaths(value: unknown, paths: string[]): void {
   for (const item of Object.values(value as Record<string, unknown>)) stringArgPaths(item, paths);
 }
 
-function pushToolPaths(block: Record<string, unknown>, paths: string[]): void {
-  if (block.arguments && typeof block.arguments === "object") stringArgPaths(block.arguments, paths);
-  if (block.input && typeof block.input === "object") stringArgPaths(block.input, paths);
+function pushToolPaths(inputs: ReturnType<typeof sessionToolInputs>, paths: string[]): void {
+  if (inputs.arguments) stringArgPaths(inputs.arguments, paths);
+  if (inputs.input) stringArgPaths(inputs.input, paths);
 }
 
 const TOOL_SEARCH_KEYS = ["command", "pattern", "query", "url", "path"] as const;
@@ -52,18 +52,7 @@ function capFragment(value: string): string {
   return value.length <= SEARCH_FRAGMENT_CHARS ? value : value.slice(0, SEARCH_FRAGMENT_CHARS);
 }
 
-function nonNegInt(value: unknown): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-
-function toolInputRecord(block: Record<string, unknown>): Record<string, unknown> | null {
-  if (isRecord(block.input)) return block.input;
-  if (isRecord(block.arguments)) return block.arguments;
-  return null;
-}
-
-function pushToolSearchText(block: Record<string, unknown>, texts: string[]): void {
-  const src = toolInputRecord(block);
+function pushToolSearchText(src: Record<string, unknown> | null, texts: string[]): void {
   if (!src) return;
   for (const key of TOOL_SEARCH_KEYS) {
     const value = src[key];
@@ -71,15 +60,13 @@ function pushToolSearchText(block: Record<string, unknown>, texts: string[]): vo
   }
 }
 
-function pushToolResultText(block: Record<string, unknown>, texts: string[]): void {
+function pushToolResultText(block: SessionBlock, texts: string[]): void {
   const before = texts.length;
   if (typeof block.content === "string") {
     if (block.content) texts.push(capFragment(block.content));
   } else if (Array.isArray(block.content)) {
-    for (const part of block.content) {
-      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
-        texts.push(capFragment((part as { text: string }).text));
-      }
+    for (const part of sessionContentParts(block)) {
+      if (part.text !== null) texts.push(capFragment(part.text));
     }
   }
   if (typeof block.error === "string" && block.error) texts.push(capFragment(block.error));
@@ -93,28 +80,23 @@ function joinSearchTexts(texts: string[]): string | null {
   return text || null;
 }
 
-function parseMessagePayload(message: {
-  role?: string;
-  content?: string | Array<Record<string, unknown>>;
-}): SessionMessageParse | null {
-  const role = message.role ?? "message";
-  if (role !== "user" && role !== "assistant") return null;
-  const content = message.content;
+function messageSearchText(message: ReplayMessage): SessionMessageParse | null {
+  const { role, content } = message;
   const texts: string[] = [];
   const paths: string[] = [];
   if (typeof content === "string") {
     texts.push(content);
   } else if (Array.isArray(content)) {
     for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const type = typeof block.type === "string" ? block.type : "";
+      const type = block.type;
       if (type === "thinking" || type === "redacted_thinking" || type === "reasoning") continue;
       if (type === "text" && typeof block.text === "string") {
         texts.push(block.text);
       } else if (type === "tool_use" && typeof block.name === "string") {
         texts.push(`[${block.name}]`);
-        pushToolPaths(block, paths);
-        pushToolSearchText(block, texts);
+        const inputs = sessionToolInputs(block);
+        pushToolPaths(inputs, paths);
+        pushToolSearchText(inputs.input ?? inputs.arguments, texts);
       } else if (type === "tool_result") {
         pushToolResultText(block, texts);
       }
@@ -125,25 +107,15 @@ function parseMessagePayload(message: {
   return { role, text, paths };
 }
 
-function parsePruneRevision(entry: Record<string, unknown>): SessionMessageParse | null {
-  const targets = Array.isArray(entry.targets) ? entry.targets : [];
+function pruneSearchText(receipt: SessionReclaimReceipt): SessionMessageParse | null {
   const texts: string[] = [];
-  for (const raw of targets) {
-    if (!isRecord(raw)) continue;
-    const recovery = isRecord(raw.recovery) ? raw.recovery : null;
-    const repro =
-      (typeof raw.repro === "string" && raw.repro) ||
-      (typeof recovery?.repro === "string" && recovery.repro) ||
-      "";
-    const tool =
-      (typeof raw.tool === "string" && raw.tool) ||
-      (typeof recovery?.tool === "string" && recovery.tool) ||
-      "tool";
-    const sseq = nonNegInt(raw.sseq);
-    const original = isRecord(raw.original) ? raw.original : null;
-    const chars = nonNegInt(original?.chars);
+  for (const target of receipt.targets) {
+    const repro = target.repro || target.recovery.repro || "";
+    const tool = target.tool || target.recovery.tool;
+    const sseq = target.sseq;
+    const chars = target.original.chars;
     const clippedRepro = repro ? capFragment(repro) : "";
-    if (raw.action === "stub") {
+    if (target.action === "stub") {
       texts.push(formatStub({ chars, tool: capFragment(tool), sseq, repro: clippedRepro || undefined }));
     } else if (clippedRepro) {
       texts.push(`reproduce: ${clippedRepro}`);
@@ -164,16 +136,15 @@ export function parseSessionMessageLine(line: string): SessionMessageParse | nul
   if (!line) return null;
   if (!line.includes('"message"') && !line.includes('"revision"')) return null;
   try {
-    const entry = JSON.parse(line) as Record<string, unknown>;
+    const parsed = parseStoredSessionRecord(JSON.parse(line));
+    if (!parsed.ok || !parsed.record) return null;
+    const entry = parsed.record;
     if (entry.type === "revision") {
-      if (entry.kind === "prune") return parsePruneRevision(entry);
-      if (entry.kind === "summarize" && isRecord(entry.message)) {
-        return parseMessagePayload(entry.message as { role?: string; content?: string | Array<Record<string, unknown>> });
-      }
+      if (entry.kind === "prune") return pruneSearchText(entry.receipt);
+      if (entry.kind === "summarize") return messageSearchText(entry.message);
       return null;
     }
-    if (entry.type !== "message" || !isRecord(entry.message)) return null;
-    return parseMessagePayload(entry.message as { role?: string; content?: string | Array<Record<string, unknown>> });
+    return entry.type === "message" ? messageSearchText(entry.message) : null;
   } catch {
     return null;
   }

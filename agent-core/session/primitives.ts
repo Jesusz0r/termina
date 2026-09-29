@@ -7,6 +7,7 @@
  */
 import { isRecord } from "../../shared/guards.ts";
 import { type SessionRetentionLock } from "../../shared/session-retention-lock.ts";
+import type { ReplayMessage } from "./messages.ts";
 import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -142,16 +143,6 @@ export type ForkSessionResult =
 
 export type ReplaySessionBundleOptions = SessionOperationOptions & {
   throughSeq?: number;
-};
-
-
-export type ReplayContent = string | Array<Record<string, unknown>>;
-
-
-export type ReplayMessage = {
-  role: "user" | "assistant";
-  content: ReplayContent;
-  sseq: number;
 };
 
 

@@ -10,16 +10,9 @@ import { readSync } from "node:fs";
 import { combinedSegmentFingerprint, enforceSessionBundleLimit, fingerprintOpenSessionBundle, listCurrentSegments, openStableSessionBundle, recoverActiveSegment, validateOpenSegmentAccess } from "./bundles.ts";
 import { closeOpenSessionBundle } from "./descriptors.ts";
 import type { OpenSessionBundle, OpenSessionSegment } from "./descriptors.ts";
-import { MAX_SESSION_RECORD_BYTES, READ_CHUNK, RECEIPT_ID, UTF8_DECODER, YIELD_EVERY_BYTES, YIELD_EVERY_RECORDS, cancellation, cloneJson, formatStub, inspectEntry, integerAtLeast, isSessionBudgetExceeded, parseSessionBundlePath, recoveryKey, sessionBlockBytes, sessionBlockChars, sessionBlockHash, sessionBudgetExceeded, sessionBundleLimit, validateSessionReclaimReceipt, yieldToEventLoop } from "./primitives.ts";
-import type { ReplayContent, ReplayMessage, ReplayRecovery, ReplaySessionBundleOptions, ReplayState, SessionOperationOptions, SessionReclaimReceipt, SessionReclaimReceiptTarget, SessionResult } from "./primitives.ts";
-
-
-function isReplayContent(content: unknown): content is ReplayContent {
-  if (typeof content === "string") return true;
-  return Array.isArray(content) && content.every((block) => {
-    return Boolean(block) && typeof block === "object" && !Array.isArray(block) && typeof (block as { type?: unknown }).type === "string";
-  });
-}
+import { MAX_SESSION_RECORD_BYTES, READ_CHUNK, RECEIPT_ID, UTF8_DECODER, YIELD_EVERY_BYTES, YIELD_EVERY_RECORDS, cancellation, cloneJson, formatStub, inspectEntry, integerAtLeast, isSessionBudgetExceeded, parseSessionBundlePath, recoveryKey, sessionBlockBytes, sessionBlockChars, sessionBlockHash, sessionBudgetExceeded, sessionBundleLimit, yieldToEventLoop } from "./primitives.ts";
+import type { ReplayRecovery, ReplaySessionBundleOptions, ReplayState, SessionOperationOptions, SessionReclaimReceipt, SessionReclaimReceiptTarget, SessionResult } from "./primitives.ts";
+import { parseStoredSessionRecord, type ReplayMessage, type SessionBlock, type StoredSessionRecord } from "./messages.ts";
 
 
 function isThinkingBlock(b: { type?: string }): boolean {
@@ -55,52 +48,6 @@ function commitSequence(state: ReplayState, storageSeq: number): void {
 }
 
 
-function normalizePruneTargets(value: unknown): SessionResult<{ targets: PruneTarget[] }> {
-  if (!Array.isArray(value)) return { ok: false, error: "invalid prune targets" };
-  const targets: PruneTarget[] = [];
-  const seen = new Set<string>();
-  for (const raw of value) {
-    if (!isRecord(raw) || !integerAtLeast(raw.sseq, 1) || !integerAtLeast(raw.blockIndex, 0) || (raw.action !== "drop" && raw.action !== "stub")) {
-      return { ok: false, error: "invalid prune target" };
-    }
-    const target: PruneTarget = { sseq: raw.sseq, blockIndex: raw.blockIndex, action: raw.action };
-    const key = `${target.sseq}:${target.blockIndex}`;
-    if (seen.has(key)) return { ok: false, error: "duplicate prune target" };
-    seen.add(key);
-    targets.push(target);
-  }
-  targets.sort((a, b) => a.sseq - b.sseq || b.blockIndex - a.blockIndex);
-  return { ok: true, targets };
-}
-
-
-function samePruneTargets(left: readonly PruneTarget[], right: readonly SessionReclaimReceiptTarget[]): boolean {
-  if (left.length !== right.length) return false;
-  const a = left.slice().sort((x, y) => x.sseq - y.sseq || x.blockIndex - y.blockIndex);
-  const b = right.slice().sort((x, y) => x.sseq - y.sseq || x.blockIndex - y.blockIndex);
-  return a.every((target, index) => {
-    const receiptTarget = b[index]!;
-    return target.sseq === receiptTarget.sseq && target.blockIndex === receiptTarget.blockIndex && target.action === receiptTarget.action;
-  });
-}
-
-
-function receiptForPruneRevision(e: {
-  targets?: unknown;
-  revisionId?: unknown;
-}): SessionResult<{ targets: PruneTarget[]; receipt: SessionReclaimReceipt }> {
-  const rawTargets = e.targets;
-  if (!Array.isArray(rawTargets)) return { ok: false, error: "invalid prune targets" };
-  if (typeof e.revisionId !== "string") return { ok: false, error: "invalid recovery receipt revision" };
-  const checked = validateSessionReclaimReceipt({ revisionId: e.revisionId, targets: rawTargets });
-  if (!checked.ok) return { ok: false, error: "error" in checked ? checked.error : "invalid recovery receipt" };
-  const targets = normalizePruneTargets(checked.receipt.targets);
-  if (!targets.ok) return { ok: false, error: "error" in targets ? targets.error : "invalid prune targets" };
-  if (!samePruneTargets(targets.targets, checked.receipt.targets)) return { ok: false, error: "recovery receipt target mismatch" };
-  return { ok: true, targets: targets.targets, receipt: checked.receipt };
-}
-
-
 function applyReceiptPrune(
   state: ReplayState,
   storageSeq: number,
@@ -110,7 +57,7 @@ function applyReceiptPrune(
   if (state.receiptRevisionIds.has(receipt.revisionId)) return { ok: false, error: "duplicate recovery revision" };
   const receiptByTarget = new Map<string, SessionReclaimReceiptTarget>();
   for (const target of receipt.targets) receiptByTarget.set(`${target.sseq}:${target.blockIndex}`, target);
-  const working = new Map<number, Record<string, unknown>[]>();
+  const working = new Map<number, SessionBlock[]>();
   const pendingRecoveries: ReplayRecovery[] = [];
 
   for (const target of targets) {
@@ -124,7 +71,7 @@ function applyReceiptPrune(
       working.set(target.sseq, blocks);
     }
     const block = blocks[target.blockIndex];
-    if (!isRecord(block)) return { ok: false, error: "stale recovery target" };
+    if (!block) return { ok: false, error: "stale recovery target" };
     const originalBytes = sessionBlockBytes(block);
     const originalHash = sessionBlockHash(block);
     if (
@@ -142,7 +89,7 @@ function applyReceiptPrune(
         sseq: message.sseq,
         repro: receiptTarget.recovery.repro ?? undefined,
       });
-      const stub: Record<string, unknown> = { ...block, content: stubText, chars: stubText.length, stubbed: true };
+      const stub: SessionBlock = { ...block, content: stubText, chars: stubText.length, stubbed: true };
       blocks[target.blockIndex] = stub;
     } else {
       if (!isThinkingBlock(block)) return { ok: false, error: "stale recovery target" };
@@ -172,111 +119,40 @@ function applyReceiptPrune(
 }
 
 
-/** provider/model without whitespace or control characters. */
-export function isSessionModel(value: string): boolean {
-  if (value.length < 3 || value.length > 200 || /[\x00-\x1f\x7f\s]/.test(value)) return false;
-  const cut = value.indexOf("/");
-  return cut > 0 && cut < value.length - 1;
+export function applySessionRecord(state: ReplayState, value: unknown): SessionResult {
+  const parsed = parseStoredSessionRecord(value);
+  if (!parsed.ok) return parsed;
+  if (!parsed.record) return { ok: false, error: "malformed session record" };
+  return applyParsedSessionRecord(state, parsed.record);
 }
 
-
-export function applySessionRecord(state: ReplayState, rec: unknown): SessionResult {
-  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return { ok: false, error: "malformed session record" };
-  const e = rec as {
-    storageSeq?: unknown;
-    type?: unknown;
-    message?: { role?: unknown; content?: unknown };
-    kind?: unknown;
-    targets?: unknown;
-    revisionId?: unknown;
-    dropped?: unknown;
-    evicted?: unknown;
-    summarySseq?: unknown;
-    effort?: unknown;
-    model?: unknown;
-  };
-  if (typeof e.storageSeq !== "number" || !Number.isInteger(e.storageSeq) || e.storageSeq < 1) {
-    return { ok: false, error: "invalid storageSeq" };
+function applyParsedSessionRecord(state: ReplayState, record: StoredSessionRecord): SessionResult {
+  const { storageSeq } = record;
+  if (storageSeq <= state.lastSeq) {
+    return { ok: false, error: storageSeq === state.lastSeq ? "duplicate storageSeq" : "decreasing storageSeq" };
   }
-  if (e.storageSeq <= state.lastSeq) {
-    return { ok: false, error: e.storageSeq === state.lastSeq ? "duplicate storageSeq" : "decreasing storageSeq" };
-  }
-  if (e.type === "checkpoint") {
-    if ("message" in e) return { ok: false, error: "checkpoint contains a message" };
-    commitSequence(state, e.storageSeq);
-    return { ok: true };
-  }
-  if (e.type === "settings") {
-    // Opaque kernel setting; the owner validates the value on apply.
-    // Bound the string so a corrupt bundle cannot smuggle bulk data here.
-    if ("message" in e) return { ok: false, error: "settings contains a message" };
-    if (typeof e.effort !== "string" || e.effort.length < 1 || e.effort.length > 64) {
-      return { ok: false, error: "invalid settings effort" };
+  if (record.type === "settings") {
+    state.effort = record.effort;
+    if (record.model !== undefined) state.model = record.model;
+  } else if (record.type === "message") {
+    state.messages.push(record.message);
+    state.bySeq.set(storageSeq, record.message);
+  } else if (record.type === "revision") {
+    if (record.kind === "prune") {
+      const targets = record.receipt.targets.slice().sort((a, b) => a.sseq - b.sseq || b.blockIndex - a.blockIndex);
+      return applyReceiptPrune(state, storageSeq, targets, record.receipt);
     }
-    state.effort = e.effort;
-    if ("model" in e) {
-      if (typeof e.model !== "string" || !isSessionModel(e.model)) {
-        return { ok: false, error: "invalid settings model" };
-      }
-      state.model = e.model;
+    const dropped = record.kind === "truncate" ? record.dropped : record.evicted;
+    if (dropped > state.messages.length) return { ok: false, error: `invalid ${record.kind} revision` };
+    const removed = state.messages.splice(0, dropped);
+    for (const message of removed) dropIndexedMessage(state, message);
+    if (record.message) {
+      state.messages.unshift(record.message);
+      state.bySeq.set(storageSeq, record.message);
     }
-    commitSequence(state, e.storageSeq);
-    return { ok: true };
   }
-  if (e.type === "message") {
-    const role = e.message?.role;
-    if (role !== "user" && role !== "assistant") return { ok: false, error: "invalid message role" };
-    if (!e.message || !isReplayContent(e.message.content)) return { ok: false, error: "invalid message content" };
-    const m: ReplayMessage = { role, content: e.message.content, sseq: e.storageSeq };
-    state.messages.push(m);
-    state.bySeq.set(m.sseq, m);
-    commitSequence(state, e.storageSeq);
-    return { ok: true };
-  }
-  if (e.type === "revision" && e.kind === "prune") {
-    const parsed = receiptForPruneRevision(e);
-    if (!parsed.ok) return parsed;
-    return applyReceiptPrune(state, e.storageSeq, parsed.targets, parsed.receipt);
-  }
-  if (e.type === "revision" && e.kind === "truncate" && typeof e.dropped === "number") {
-    if (!Number.isInteger(e.dropped) || e.dropped < 0 || e.dropped > state.messages.length) {
-      return { ok: false, error: "invalid truncate revision" };
-    }
-    const removed = state.messages.splice(0, e.dropped);
-    for (const m of removed) dropIndexedMessage(state, m);
-    if (e.message) {
-      if (e.summarySseq !== e.storageSeq) {
-        return { ok: false, error: "invalid truncate revision" };
-      }
-      if (e.message.role !== "user" || !isReplayContent(e.message.content)) {
-        return { ok: false, error: "invalid truncate handoff" };
-      }
-      const handoff: ReplayMessage = { role: "user", content: e.message.content, sseq: e.storageSeq };
-      state.messages.unshift(handoff);
-      state.bySeq.set(handoff.sseq, handoff);
-    }
-    commitSequence(state, e.storageSeq);
-    return { ok: true };
-  }
-  if (e.type === "revision" && e.kind === "summarize") {
-    if (e.summarySseq !== e.storageSeq) {
-      return { ok: false, error: "invalid summarize revision" };
-    }
-    if (typeof e.evicted !== "number" || !Number.isInteger(e.evicted) || e.evicted < 0 || e.evicted > state.messages.length) {
-      return { ok: false, error: "invalid summarize revision" };
-    }
-    if (e.message?.role !== "user" || !isReplayContent(e.message.content)) {
-      return { ok: false, error: "invalid summarize handoff" };
-    }
-    const removed = state.messages.splice(0, e.evicted);
-    for (const m of removed) dropIndexedMessage(state, m);
-    const handoff: ReplayMessage = { role: "user", content: e.message.content, sseq: e.storageSeq };
-    state.messages.unshift(handoff);
-    state.bySeq.set(handoff.sseq, handoff);
-    commitSequence(state, e.storageSeq);
-    return { ok: true };
-  }
-  return { ok: false, error: "unknown session record type" };
+  commitSequence(state, storageSeq);
+  return { ok: true };
 }
 
 
@@ -339,7 +215,7 @@ async function readSegmentIntoState(
   readBudget: { remaining: number },
   state: ReplayState | null,
   throughSeq?: number,
-  onRecord?: (record: unknown) => void,
+  onRecord?: (record: StoredSessionRecord) => void,
   signal?: AbortSignal,
   hash?: Hash,
   skipRecords = false,
@@ -412,15 +288,17 @@ async function readSegmentIntoState(
         if (taken.done) break;
         continue;
       }
-      const rec = (parsed as { rec: unknown }).rec;
-      const seq = rec && typeof rec === "object" && !Array.isArray(rec) ? (rec as { storageSeq?: unknown }).storageSeq : undefined;
-      if (typeof throughSeq === "number" && typeof seq === "number" && seq > throughSeq) {
+      if (!("rec" in parsed)) continue;
+      const decoded = parseStoredSessionRecord(parsed.rec, throughSeq);
+      if (!decoded.ok) return decoded;
+      const rec = decoded.record;
+      if (rec === null) {
         stop = true;
         break;
       }
       onRecord?.(rec);
       if (state) {
-        const applied = applySessionRecord(state, rec);
+        const applied = applyParsedSessionRecord(state, rec);
         if (!applied.ok) return applied;
       }
       records += 1;
@@ -601,7 +479,7 @@ function validRecoveryTarget(value: unknown): value is SessionRecoveryTarget {
 }
 
 
-type RecoveryScanResult = SessionResult<{ blocks: Map<string, Record<string, unknown>> }>;
+type RecoveryScanResult = SessionResult<{ blocks: Map<string, SessionBlock> }>;
 
 
 /**
@@ -623,7 +501,7 @@ export async function recoverSessionBlocks(
   expectedFingerprint?: string,
   options?: SessionOperationOptions,
 ): Promise<RecoveryScanResult> {
-  const blocks = new Map<string, Record<string, unknown>>();
+  const blocks = new Map<string, SessionBlock>();
   if (targets.length === 0) return { ok: true, blocks };
   const limit = sessionBundleLimit(options);
   if (!limit.ok) return limit;
@@ -662,8 +540,7 @@ export async function recoverSessionBlocks(
   }
   // Pre-revision working views, released as soon as a message's last target
   // resolves so a many-receipt fork never retains the whole session.
-  const working = new Map<number, unknown[]>();
-  let malformedRevision = false;
+  const working = new Map<number, SessionBlock[]>();
   try {
     const readBudget = { remaining: limit.limit };
     for (const segment of opened.bundle.segments) {
@@ -674,20 +551,14 @@ export async function recoverSessionBlocks(
         null,
         maxNeeded,
         (record) => {
-          if (!isRecord(record) || typeof record.storageSeq !== "number") return;
-          if (record.type === "revision" && (record as { kind?: unknown }).kind === "prune") {
-            const revision = parseRecoveryPruneRevision(record);
-            if (!revision) {
-              malformedRevision = true;
-              return;
-            }
+          if (record.type === "revision" && record.kind === "prune") {
             // Resolve first: pending receipts address this pre-revision view.
-            const pending = pendingByRevision.get(revision.revisionSeq);
+            const pending = pendingByRevision.get(record.storageSeq);
             if (pending) {
               for (const entry of pending) {
                 const view = working.get(entry.target.sseq);
                 const block = view?.[entry.target.blockIndex];
-                if (isRecord(block)) blocks.set(entry.key, cloneJson(block));
+                if (block) blocks.set(entry.key, cloneJson(block));
                 const remaining = (remainingBySseq.get(entry.target.sseq) ?? 1) - 1;
                 if (remaining <= 0) {
                   remainingBySseq.delete(entry.target.sseq);
@@ -696,11 +567,11 @@ export async function recoverSessionBlocks(
                   remainingBySseq.set(entry.target.sseq, remaining);
                 }
               }
-              pendingByRevision.delete(revision.revisionSeq);
+              pendingByRevision.delete(record.storageSeq);
             }
             // Then replay drops for receipts addressed to later revisions,
             // descending per message exactly like canonical application.
-            const drops = revision.targets
+            const drops = record.receipt.targets
               .filter((target) => target.action === "drop")
               .sort((a, b) => a.sseq - b.sseq || b.blockIndex - a.blockIndex);
             for (const drop of drops) {
@@ -712,13 +583,12 @@ export async function recoverSessionBlocks(
           if (record.type !== "message") return;
           if (!wantedSseqs.has(record.storageSeq) || working.has(record.storageSeq)) return;
           const message = record.message;
-          if (!isRecord(message) || !Array.isArray(message.content)) return;
+          if (typeof message.content === "string") return;
           working.set(record.storageSeq, message.content.map((block) => cloneJson(block)));
         },
         options?.signal,
       );
       if (!scanned.ok) return scanned;
-      if (malformedRevision) return { ok: false, error: "invalid prune targets" };
       if (scanned.stop) break;
     }
     const afterFingerprint = fingerprintOpenSessionBundle(opened.bundle, limit.limit);
@@ -745,27 +615,6 @@ export async function recoverSessionBlocks(
   return { ok: true, blocks };
 }
 
-function parseRecoveryPruneRevision(record: Record<string, unknown>): {
-  revisionSeq: number;
-  targets: Array<{ sseq: number; blockIndex: number; action: "drop" | "stub" }>;
-} | null {
-  if (typeof record.storageSeq !== "number" || !Number.isInteger(record.storageSeq) || record.storageSeq < 1) return null;
-  if (!Array.isArray(record.targets)) return null;
-  const targets: Array<{ sseq: number; blockIndex: number; action: "drop" | "stub" }> = [];
-  for (const raw of record.targets) {
-    if (!isRecord(raw)) return null;
-    const sseq = raw.sseq;
-    const blockIndex = raw.blockIndex;
-    const action = raw.action;
-    if (typeof sseq !== "number" || !Number.isInteger(sseq) || sseq < 1) return null;
-    if (typeof blockIndex !== "number" || !Number.isInteger(blockIndex) || blockIndex < 0) return null;
-    if (action !== "drop" && action !== "stub") return null;
-    targets.push({ sseq, blockIndex, action });
-  }
-  return { revisionSeq: record.storageSeq, targets };
-}
-
-
 /**
  * Recover one pruned block from the original durable message record.
  *
@@ -776,7 +625,7 @@ function parseRecoveryPruneRevision(record: Record<string, unknown>): {
 export async function recoverSessionBlock(
   sessionFile: string,
   target: unknown,
-): Promise<SessionResult<{ block: Record<string, unknown>; recoveredFrom: "source-record"; receipt: ReplayRecovery }>> {
+): Promise<SessionResult<{ block: SessionBlock; recoveredFrom: "source-record"; receipt: ReplayRecovery }>> {
   if (!validRecoveryTarget(target)) return { ok: false, error: "invalid recovery target" };
   const replayed = await replaySessionBundle(sessionFile);
   if (!replayed.ok) return replayed;

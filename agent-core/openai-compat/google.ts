@@ -4,9 +4,8 @@
  * Owns contents mapping, the generate body, and Google streaming results.
  * Split from agent-core/openai-compat.ts (issue #38).
  */
-import { isRecord } from "../../shared/guards.ts";
 import { blockText, imageDataUrl } from "./completions.ts";
-import { TOOL_CALL_SHAPE_ERROR, decodeToolCallArguments, toolCallIdentityError } from "./tool-calls.ts";
+import { parseGoogleStreamEvent } from "./parsers.ts";
 import type { CallResultLike, CompletionsOpts, KernelMessage, ToolDef } from "./types.ts";
 import { mergeUsageRecords, tokenCount, uncachedInput } from "./usage.ts";
 
@@ -149,32 +148,16 @@ function usageFromGoogle(u: Record<string, unknown> | undefined): CallResultLike
 }
 
 
-function googleParts(event: Record<string, unknown>): Array<Record<string, unknown>> {
-  const candidates = event.candidates;
-  if (!Array.isArray(candidates) || !candidates[0] || typeof candidates[0] !== "object") return [];
-  const content = (candidates[0] as { content?: { parts?: unknown } }).content;
-  const parts = content && typeof content === "object" ? content.parts : undefined;
-  return Array.isArray(parts) ? (parts.filter((p) => p && typeof p === "object") as Array<Record<string, unknown>>) : [];
-}
-
-
 export function googleLiveDelta(
-  event: Record<string, unknown>,
+  event: unknown,
 ): { text: string; thinking: string } | null {
-  let text = "";
-  let thinking = "";
-  for (const part of googleParts(event)) {
-    const value = typeof part.text === "string" ? part.text : "";
-    if (!value) continue;
-    if (part.thought === true) thinking += value;
-    else text += value;
-  }
+  const { text, thinking } = parseGoogleStreamEvent(event);
   return text || thinking ? { text, thinking } : null;
 }
 
 
 export function googleResultFromEvents(
-  events: Array<Record<string, unknown>>,
+  events: readonly unknown[],
   onText: (text: string) => void,
   started: number,
 ): CallResultLike {
@@ -188,67 +171,46 @@ export function googleResultFromEvents(
   let rawUsage: Record<string, unknown> | undefined;
   let ttftMs: number | null = null;
   let stopReason: string | null = null;
-  for (const ev of events) {
-    if (ev.usageMetadata && typeof ev.usageMetadata === "object" && !Array.isArray(ev.usageMetadata)) {
-      rawUsage = mergeUsageRecords(rawUsage, ev.usageMetadata as Record<string, unknown>);
+  for (const raw of events) {
+    const ev = parseGoogleStreamEvent(raw);
+    if (ev.usage) {
+      rawUsage = mergeUsageRecords(rawUsage, ev.usage);
       usage = usageFromGoogle(rawUsage);
     }
-    const candidates = ev.candidates;
-    if (Array.isArray(candidates) && candidates[0] && typeof candidates[0] === "object") {
-      const finish = (candidates[0] as { finishReason?: unknown }).finishReason;
-      if (typeof finish === "string" && finish) stopReason = finish;
-    }
-    const live = googleLiveDelta(ev);
+    if (ev.finishReason) stopReason = ev.finishReason;
+    const live = ev;
     if (live?.text) {
       if (ttftMs === null) ttftMs = Date.now() - started;
       text += live.text;
       onText(live.text);
     }
     if (live?.thinking && ttftMs === null) ttftMs = Date.now() - started;
-    for (const part of googleParts(ev)) {
-      if (part.thought === true) {
-        const signature = typeof part.thoughtSignature === "string" ? part.thoughtSignature : "";
-        const thinking = typeof part.text === "string" ? part.text : "";
+    for (const part of ev.parts) {
+      if (part.thought) {
+        const { signature, text: thinking } = part;
         if (!signature) continue;
         if (thoughtKeys.has(signature)) continue;
         thoughtKeys.add(signature);
         thoughts.push({ thinking, signature });
         continue;
       }
-      if (!("functionCall" in part)) continue;
-      const call = part.functionCall;
-      if (!isRecord(call)) {
-        toolError ??= TOOL_CALL_SHAPE_ERROR;
+      const call = part.call;
+      if (!call) continue;
+      if ("error" in call) {
+        toolError ??= call.error;
         continue;
       }
-      const fn = call as { name?: unknown; args?: unknown; id?: unknown };
-      const name = typeof fn.name === "string" ? fn.name : "";
-      // functionCall.id is guaranteed only on Gemini 3; older leaves on this
-      // route may omit it. A missing id falls back to a generated one, kept
-      // consistent through replay, instead of failing the turn — fail-closed
-      // here would break tool use on id-less models whose calls still
-      // resolve through name matching.
-      const providerId = typeof fn.id === "string" && fn.id.trim() ? fn.id : "";
+      const { name, providerId, input } = call;
+      // Older models omit functionCall.id. Keep the generated id through replay.
       const id = providerId || `call_${calls.length + 1}`;
-      const identityError = toolCallIdentityError(id, name);
-      if (identityError) {
-        toolError ??= identityError;
-        continue;
-      }
-      const args = decodeToolCallArguments(fn.args, false);
-      if ("error" in args) {
-        toolError ??= args.error;
-        continue;
-      }
       // Streaming snapshot repeats resend the full parts list per event; the
       // provider id (not name+args) identifies a repeat. Distinct parallel
       // calls share a name but carry different ids. Id-less calls fall back
       // to the name+args signature so their repeats still collapse.
-      const key = providerId ? `id:${providerId}` : `sig:${name}:${JSON.stringify(args.input)}`;
+      const key = providerId ? `id:${providerId}` : `sig:${name}:${JSON.stringify(input)}`;
       if (callKeys.has(key)) continue;
       callKeys.add(key);
-      const thoughtSignature = typeof part.thoughtSignature === "string" ? part.thoughtSignature : "";
-      calls.push({ id, name, input: args.input, ...(thoughtSignature ? { thought_signature: thoughtSignature } : {}) });
+      calls.push({ id, name, input, ...(part.signature ? { thought_signature: part.signature } : {}) });
     }
   }
   const blocks: Array<Record<string, unknown>> = [];

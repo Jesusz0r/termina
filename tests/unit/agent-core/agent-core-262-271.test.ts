@@ -52,7 +52,7 @@ describe("agent-core #262–#271 / #256", () => {
     expect(acceptedContextWindow(Number.NaN)).toBeUndefined();
     expect(acceptedContextWindow(-1)).toBeUndefined();
     expect(acceptedContextWindow(0.9)).toBeUndefined();
-    expect(parseModelsPayload([{ id: "qwen-tiny", context_length: 4096 }], "opencode-go")).toEqual([
+    expect(parseModelsPayload({ data: [{ id: "qwen-tiny", context_length: 4096 }] }, "opencode-go")).toEqual([
       { id: "qwen-tiny", context: 4096 },
     ]);
   });

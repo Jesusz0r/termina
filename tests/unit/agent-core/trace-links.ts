@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   TRACE_SCHEMA_VERSION,
-  validTraceLinkIndex,
+  parseTraceLinkIndex,
   type TraceAttemptIndexEntry,
   type TraceLinkIndex,
 } from "../../../agent-core/trace.ts";
@@ -59,9 +59,8 @@ function readTombstones(
   if (existsSync(file)) {
     try {
       if (statSync(file).size > 1024 * 1024) throw new Error("trace link index exceeds 1 MiB");
-      const value: unknown = JSON.parse(readFileSync(file, "utf8"));
-      if (!validTraceLinkIndex(value)) throw new Error("invalid trace link index");
-      index = value;
+      index = parseTraceLinkIndex(JSON.parse(readFileSync(file, "utf8")));
+      if (!index) throw new Error("invalid trace link index");
       const observedKeys = new Set(records.filter((r) => r.recordType === "attempt")
         .map((r) => v2CompositeKey(r.runId, r.attemptId)));
       for (const entry of index.attempts) {

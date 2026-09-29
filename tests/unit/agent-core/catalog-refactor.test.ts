@@ -21,6 +21,14 @@ describe("catalogHeaders denylist", () => {
 });
 
 describe("catalog provider policy composition", () => {
+  it.each(["openai", "anthropic", "openai-codex", "google", "xai", "openrouter", "github-copilot", "opencode-go", "opencode-zen"] as const)(
+    "rejects malformed %s envelopes and id-less rows in the parser", (provider) => {
+      for (const value of [null, [], [{ id: "fixture" }], {}, { data: {} }, { models: {} }, { data: [{}] }, { models: [{}] }, { data: [null] }, { models: [[]] }]) {
+        expect(() => parseModelsPayload(value, provider)).toThrow("models: invalid response");
+      }
+    },
+  );
+
   it("keeps the official OpenAI catalog on OpenAI ids", () => {
     expect(parseModelsPayload({ data: [
       { id: "gpt-5.6-sol" },
@@ -47,11 +55,11 @@ describe("catalog provider policy composition", () => {
       capabilities: { limits: { max_context_window_tokens: 128000, max_prompt_tokens: 120000 } },
       supported_endpoints: ["/v1/messages", "/unknown", "/responses", "/responses"],
     };
-    expect(parseModelsPayload([row], "github-copilot")).toEqual([
+    expect(parseModelsPayload({ data: [row] }, "github-copilot")).toEqual([
       { id: row.id, context: 96000, supportedEndpoints: ["/responses", "/v1/messages"] },
     ]);
-    expect(parseModelsPayload([row], "anthropic")).toEqual([{ id: row.id, context: 96000 }]);
-    expect(parseModelsPayload([{
+    expect(parseModelsPayload({ data: [row] }, "anthropic")).toEqual([{ id: row.id, context: 96000 }]);
+    expect(parseModelsPayload({ data: [{
       id: "claude-opus-9",
       capabilities: {
         effort: {
@@ -63,21 +71,21 @@ describe("catalog provider policy composition", () => {
           max: { supported: true },
         },
       },
-    }], "anthropic")).toEqual([
+    }] }, "anthropic")).toEqual([
       { id: "claude-opus-9", reasoningLevels: ["low", "high", "max"] },
     ]);
-    expect(parseModelsPayload([{
+    expect(parseModelsPayload({ data: [{
       id: "claude-haiku-4-5",
       capabilities: { effort: { supported: false, low: { supported: true } } },
-    }], "anthropic")).toEqual([{ id: "claude-haiku-4-5" }]);
+    }] }, "anthropic")).toEqual([{ id: "claude-haiku-4-5" }]);
   });
 
   it("keeps empty advertised endpoints distinct from absent metadata", () => {
-    expect(parseModelsPayload([
+    expect(parseModelsPayload({ data: [
       { id: "gpt-empty", supported_endpoints: ["/unknown"] },
       { id: "gpt-absent", capabilities: [] },
       { id: "gpt-prompt", capabilities: { limits: { max_prompt_tokens: 32000 } } },
-    ], "github-copilot")).toEqual([
+    ] }, "github-copilot")).toEqual([
       { id: "gpt-empty", supportedEndpoints: [] }, { id: "gpt-absent" },
       { id: "gpt-prompt", context: 32000 },
     ]);
@@ -91,7 +99,7 @@ describe("catalog provider policy composition", () => {
       top_provider: { context_length: 128000, max_completion_tokens: 64000, is_moderated: false },
       supported_parameters: ["tools", "temperature", "reasoning"],
     };
-    expect(parseModelsPayload([openrouter], "openrouter")).toEqual([
+    expect(parseModelsPayload({ data: [openrouter] }, "openrouter")).toEqual([
       {
         id: "deepseek/deepseek-r1",
         name: "DeepSeek R1",
@@ -108,7 +116,7 @@ describe("catalog provider policy composition", () => {
         { effort: 42, description: "junk" },
       ],
     };
-    expect(parseModelsPayload([codex], "openai-codex")).toEqual([
+    expect(parseModelsPayload({ data: [codex] }, "openai-codex")).toEqual([
       { id: "gpt-5.6", reasoningLevels: ["low", "medium"] },
     ]);
     const grok = {
@@ -125,7 +133,7 @@ describe("catalog provider policy composition", () => {
         reasoningLevels: ["low", "high", "xhigh"],
       },
     ]);
-    expect(parseModelsPayload([{ id: "grok-4.20-0309-reasoning", capabilities: {} }], "xai")).toEqual([
+    expect(parseModelsPayload({ data: [{ id: "grok-4.20-0309-reasoning", capabilities: {} }] }, "xai")).toEqual([
       { id: "grok-4.20-0309-reasoning" },
     ]);
     const listed = parseModelsPayload({ data: [grok] }, "xai");
@@ -195,19 +203,19 @@ describe("catalog provider policy composition", () => {
   });
 
   it("keeps documented small context windows and rejects garbage", () => {
-    expect(parseModelsPayload([{ id: "qwen-tiny", context_length: 4096 }], "opencode-go")).toEqual([
+    expect(parseModelsPayload({ data: [{ id: "qwen-tiny", context_length: 4096 }] }, "opencode-go")).toEqual([
       { id: "qwen-tiny", context: 4096 },
     ]);
-    expect(parseModelsPayload([{ id: "qwen-zero", context_length: 0 }], "opencode-go")).toEqual([
+    expect(parseModelsPayload({ data: [{ id: "qwen-zero", context_length: 0 }] }, "opencode-go")).toEqual([
       { id: "qwen-zero" },
     ]);
-    expect(parseModelsPayload([{ id: "qwen-nan", context_length: Number.NaN }], "opencode-go")).toEqual([
+    expect(parseModelsPayload({ data: [{ id: "qwen-nan", context_length: Number.NaN }] }, "opencode-go")).toEqual([
       { id: "qwen-nan" },
     ]);
   });
 
   it("applies generic filtering, duplicate handling and caps with permissive provider policies", () => {
-    const rows = [null, [], { id: "text-embedding-3-small" }, { id: "big-pickle" },
+    const rows = [{ id: "text-embedding-3-small" }, { id: "big-pickle" },
       { id: "big-pickle" }, { id: "x".repeat(201) },
       ...Array.from({ length: MODEL_LIST_CAP + 5 }, (_, i) => ({ id: `custom-${i}` })),
     ];

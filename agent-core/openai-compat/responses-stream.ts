@@ -4,7 +4,8 @@
  * Owns live deltas, terminal results, and payload text. Split from
  * agent-core/openai-compat.ts (issue #38).
  */
-import { TOOL_CALL_ARGUMENT_ERROR, TOOL_CALL_IDENTITY_ERROR, TOOL_CALL_INDEX_ERROR, decodeToolCallArguments, toolCallIdentityError, toolCallIndex } from "./tool-calls.ts";
+import { TOOL_CALL_ARGUMENT_ERROR, TOOL_CALL_IDENTITY_ERROR, TOOL_CALL_INDEX_ERROR, toolCallIdentityError, toolCallIndex } from "./tool-calls.ts";
+import { decodeToolCallArguments } from "./parsers.ts";
 import type { CallResultLike } from "./types.ts";
 import { mergeUsageRecords, usageFromOpenAI } from "./usage.ts";
 

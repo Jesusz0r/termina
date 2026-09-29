@@ -21,4 +21,6 @@ export { SessionWriter, admitSessionBundle, clearSessionBundle, inspectEmptySess
 export { MAX_RETAINED_EMPTY_SESSION_BUNDLES, MAX_RETAINED_TEMP_BUNDLES, MAX_RETAINED_TEMP_BYTES, MAX_SESSION_BUNDLE_BYTES, MAX_SESSION_RECORD_BYTES, MAX_SESSION_SEGMENT_BYTES, RETAINED_STAGING_OWNER_NAME, STORED_IMAGE_NAME, coreSessionFile, formatStub, isCoreSessionBundleFile, isCoreSessionId, isSessionBudgetExceeded, parseSessionBundlePath, resolveSessionFile, sessionBlockBytes, sessionBlockChars, sessionBlockHash, sessionBudgetExceeded, sessionRotateStamp, validateSessionReclaimReceipt } from "./session/primitives.ts";
 export type { SessionReclaimOriginal, SessionReclaimReceipt, SessionReclaimReceiptTarget, SessionReclaimRecovery, SessionResult } from "./session/primitives.ts";
 export { ACTIVE_NAME as SESSION_ACTIVE_NAME, CURRENT_DIR as SESSION_CURRENT_DIR } from "./session/primitives.ts";
-export { applySessionRecord, createReplayState, isSessionModel, recoverSessionBlock, replaySessionBundle, replaySessionRecords } from "./session/replay.ts";
+export { applySessionRecord, createReplayState, recoverSessionBlock, replaySessionBundle, replaySessionRecords } from "./session/replay.ts";
+export { isSessionModel, parseSessionBlock, parseSessionMessage, parseStoredSessionRecord, sessionContentParts, sessionToolInputs } from "./session/messages.ts";
+export type { ReplayContent, ReplayMessage, SessionBlock, StoredSessionRecord } from "./session/messages.ts";

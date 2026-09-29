@@ -8,8 +8,8 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isRecord } from "../../shared/guards.ts";
-import { NO_QUIET_WINS_CLASS, TRACE_FILE_PATTERN } from "./schema.ts";
+import { parseTraceRecord } from "./normalize.ts";
+import { NO_QUIET_WINS_CLASS, TRACE_FILE_PATTERN, type TraceToolOutcome } from "./schema.ts";
 
 const EDIT_TOOLS = new Set(["edit", "write_file"]);
 const CHECK_TOOL = "bash";
@@ -19,20 +19,15 @@ interface QuietWinsSettle {
   readonly criticalClass: string | null;
 }
 
-function toolName(entry: Record<string, unknown>): string | null {
-  return typeof entry.toolName === "string" ? entry.toolName : null;
-}
-
 /** Same success mapping as the laziness-metrics outcome classifier. */
 function isSuccessClaim(status: string): boolean {
   return status.toLowerCase() === "success";
 }
 
 /** True when a succeeding bash outcome is already on the run. */
-export function hasObservedCheck(outcomes: readonly unknown[]): boolean {
+export function hasObservedCheck(outcomes: readonly TraceToolOutcome[]): boolean {
   for (const entry of outcomes) {
-    if (!isRecord(entry)) continue;
-    if (toolName(entry) !== CHECK_TOOL) continue;
+    if (entry.toolName !== CHECK_TOOL) continue;
     if (entry.isError === true) continue;
     const exitCode = entry.exitCode;
     if (exitCode === 0 || exitCode === null || exitCode === undefined) return true;
@@ -41,10 +36,9 @@ export function hasObservedCheck(outcomes: readonly unknown[]): boolean {
 }
 
 /** True when the run recorded an edit or write_file outcome. */
-export function hasFileEdits(outcomes: readonly unknown[]): boolean {
+export function hasFileEdits(outcomes: readonly TraceToolOutcome[]): boolean {
   for (const entry of outcomes) {
-    if (!isRecord(entry)) continue;
-    const name = toolName(entry);
+    const name = entry.toolName;
     if (name !== null && EDIT_TOOLS.has(name)) return true;
   }
   return false;
@@ -56,7 +50,7 @@ export function hasFileEdits(outcomes: readonly unknown[]): boolean {
  * claim then fails closed because the check fact is unobserved.
  * Non-success statuses and read-only successes pass through unchanged.
  */
-export function applyNoQuietWins(status: string, outcomes: readonly unknown[] | null): QuietWinsSettle {
+export function applyNoQuietWins(status: string, outcomes: readonly TraceToolOutcome[] | null): QuietWinsSettle {
   if (!isSuccessClaim(status)) return { status, criticalClass: null };
   if (outcomes === null) return { status: "failure", criticalClass: NO_QUIET_WINS_CLASS };
   if (hasObservedCheck(outcomes)) return { status, criticalClass: null };
@@ -66,7 +60,7 @@ export function applyNoQuietWins(status: string, outcomes: readonly unknown[] | 
 
 interface CollectedTaskOutcomes {
   readonly readable: boolean;
-  readonly outcomes: readonly unknown[];
+  readonly outcomes: readonly TraceToolOutcome[];
 }
 
 /** Collect tool outcomes already written for one task in a trace directory. */
@@ -77,21 +71,20 @@ export function collectTaskToolOutcomes(directory: string, runId: string, taskId
   } catch {
     return { readable: false, outcomes: [] };
   }
-  const outcomes: unknown[] = [];
+  const outcomes: TraceToolOutcome[] = [];
   for (const name of names) {
     if (!TRACE_FILE_PATTERN.test(name)) continue;
-    let parsed: unknown;
+    let parsed;
     try {
-      parsed = JSON.parse(readFileSync(join(directory, name), "utf8"));
+      parsed = parseTraceRecord(JSON.parse(readFileSync(join(directory, name), "utf8")));
     } catch {
       // A turn file we cannot read is an unobserved check fact, not an empty run.
       return { readable: false, outcomes: [] };
     }
-    if (!isRecord(parsed)) return { readable: false, outcomes: [] };
+    if (!parsed) return { readable: false, outcomes: [] };
     if (parsed.recordType !== "attempt") continue;
     if (parsed.runId !== runId || parsed.taskId !== taskId) continue;
-    const raw = parsed.toolOutcomes;
-    if (Array.isArray(raw)) outcomes.push(...raw);
+    outcomes.push(...parsed.toolOutcomes);
   }
   return { readable: true, outcomes };
 }

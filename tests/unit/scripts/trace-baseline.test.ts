@@ -84,7 +84,20 @@ describe("trace-baseline consumer", () => {
     writeFileSync(join(dir, "turn-5.json"), JSON.stringify({ recordType: "attempt", broken: true }));
     writeFileSync(
       join(dir, "trace-manifest.json"),
-      JSON.stringify({ kind: "trace-manifest", retainedRecords: 4, omittedRecords: 2, writeFailures: 1, malformedRecords: 0, partialRecords: 0 }),
+      JSON.stringify({
+        schemaVersion: 2, kind: "trace-manifest",
+        startup: {
+          namespace: "fixture", startedAt: "2026-01-01T00:00:00.000Z",
+          reset: { requested: false, applied: false, omittedRecords: 0, failedRecords: 0 },
+          preexistingRecords: 4, preexistingMalformedRecords: 0, preexistingPartialRecords: 0,
+          preexistingScanOmittedRecords: 0, error: null,
+        },
+        retainedRecords: 4, omittedRecords: 2, writeFailures: 1, malformedRecords: 0, partialRecords: 0,
+        scanOmittedRecords: 0, manifestErrors: 0, retentionFailures: 0, manifestWriteFailures: 0,
+        indexWriteFailures: 0, lastTraceTurn: 4,
+        linkIndex: { path: "trace-index.json", complete: true, attempts: 3, settlements: 1, unknown: 0, writeFailures: 0, error: null },
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
     );
 
     const first = await readBaseline(dir, DEFAULT_BASELINE_OPTIONS);

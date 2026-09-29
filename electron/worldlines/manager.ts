@@ -71,11 +71,10 @@ import {
 import {
   UncertainComparisonAdmissionOwner,
   boundedWorldlineEntries,
-  comparisonManifestFor,
-  parseComparisonManifest,
   releaseUncertainComparisonAdmissionOwner,
   uncertainComparisonAdmissionOwnerFor,
 } from "./uncertain-comparison.js";
+import { comparisonManifestFor, parseComparisonManifest } from "./comparison-manifest.js";
 import {
   PromotionJournalAdmissionOwner,
   createPromotionOperationBudget,

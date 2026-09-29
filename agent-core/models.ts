@@ -19,6 +19,7 @@ import { testLoopbackOverride } from "./auth/endpoints.ts";
 import { BoundedUtf8Error, readBoundedUtf8 } from "./auth/http.ts";
 import { providerDefinition } from "./auth/providers/index.ts";
 import { acceptedContextWindow, acceptedOutputLimit } from "./models/capabilities.ts";
+import type { CatalogRow } from "./models/catalog/types.ts";
 import { subsequenceSpread } from "./tui-text.ts";
 import { isRecord } from "../shared/guards.ts";
 
@@ -121,26 +122,21 @@ function stripModelsPrefix(id: string): string {
   return id.startsWith("models/") ? id.slice("models/".length) : id;
 }
 
-function requireAnthropicModelsEnvelope(payload: unknown): Record<string, unknown> {
-  if (!isRecord(payload) || !Array.isArray(payload.data) || typeof payload.has_more !== "boolean") {
-    throw new Error("models: invalid response");
-  }
-  return payload;
-}
-
 /** Codex `context_window` is the operating window. `max_context_window` is only
  *  a higher ceiling the backend still accepts.
  *  https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs */
-function codexContext(row: Record<string, unknown>): { window?: number; ceiling?: number } {
-  const base = acceptedContextWindow(row.context_window);
-  const max = acceptedContextWindow(row.max_context_window);
+function codexContext(window: number | undefined, ceiling: number | undefined): { window?: number; ceiling?: number } {
+  const base = window;
+  const max = ceiling;
   return {
     window: base ?? max,
     ceiling: base !== undefined && max !== undefined && max > base ? max : undefined,
   };
 }
 
-function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | null {
+function parseModelRow(value: unknown, provider: ProviderId): ModelInfo | null {
+  if (!isRecord(value)) throw new Error("models: invalid response");
+  const row = value;
   const raw =
     typeof row.id === "string"
       ? row.id
@@ -152,7 +148,7 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
             ? row.model
             : "";
   const id = stripModelsPrefix(raw.trim());
-  if (!id) return null;
+  if (!id) throw new Error("models: invalid response");
   const name =
     typeof row.display_name === "string"
       ? row.display_name
@@ -162,13 +158,23 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
           ? row.name
           : undefined;
   const policy = providerDefinition(provider).catalog;
-  const codex = provider === "openai-codex" ? codexContext(row) : null;
+  const capabilities = isRecord(row.capabilities) ? row.capabilities : undefined;
+  const limits = isRecord(capabilities?.limits) ? capabilities.limits : undefined;
+  const policyRow: CatalogRow = {
+    visibility: typeof row.visibility === "string" ? row.visibility : undefined,
+    copilotContext: acceptedContextWindow(Number(limits?.max_context_window_tokens ?? limits?.max_prompt_tokens)),
+    supportedEndpoints: Array.isArray(row.supported_endpoints)
+      ? row.supported_endpoints.filter((endpoint): endpoint is string => typeof endpoint === "string") : undefined,
+  };
+  if (policy.acceptsRow?.(policyRow) === false) return null;
+  const codex = provider === "openai-codex"
+    ? codexContext(acceptedContextWindow(row.context_window), acceptedContextWindow(row.max_context_window)) : null;
   const genericContext = row.context_length ?? row.context_window ?? row.max_input_tokens ?? row.context
-    ?? policy.contextFallback?.(row);
+    ?? policy.contextFallback?.(policyRow);
   const contextRaw = Number(codex?.window ?? genericContext);
   const context = acceptedContextWindow(contextRaw);
   const contextCeiling = codex?.ceiling;
-  const supportedEndpoints = policy.supportedEndpoints?.(row);
+  const supportedEndpoints = policy.supportedEndpoints?.(policyRow);
   // Doc-confirmed metadata only: OpenRouter `top_provider.max_completion_tokens`
   // and `supported_parameters` (https://openrouter.ai/docs/guides/overview/models.md);
   // Codex `supported_reasoning_levels[].effort`
@@ -177,13 +183,13 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
   // (https://docs.x.ai/developers/rest-api-reference/inference/models);
   // Anthropic `capabilities.effort`
   // (https://platform.claude.com/docs/en/api/models/list).
-  // Anthropic's docs page is a JS shell with no extractable schema, so no
-  // Anthropic-specific keys are read here.
   const topProvider = isRecord(row.top_provider) ? row.top_provider : undefined;
   const outputRaw = Number(topProvider?.max_completion_tokens);
   const outputLimit = acceptedOutputLimit(outputRaw);
-  const reasoningLevels = catalogReasoningLevels(row, provider);
-  const aliases = provider === "xai" ? catalogAliases(row, id) : undefined;
+  const reasoningLevels = provider === "anthropic" ? anthropicEffortLevels(capabilities?.effort)
+    : catalogReasoningLevels(provider === "openai-codex" ? row.supported_reasoning_levels
+      : provider === "xai" ? capabilities?.reasoning_effort : undefined);
+  const aliases = provider === "xai" ? catalogAliases(row.aliases, id) : undefined;
   const supportedParameters = Array.isArray(row.supported_parameters)
     ? row.supported_parameters.filter((param): param is string => typeof param === "string")
     : undefined;
@@ -207,21 +213,14 @@ function supportedFlag(value: unknown): boolean {
 }
 
 /** Anthropic lists each effort as `{ supported }` rather than a string array. */
-function anthropicEffortLevels(row: Record<string, unknown>): string[] | undefined {
-  const capabilities = isRecord(row.capabilities) ? row.capabilities : undefined;
-  const effort = isRecord(capabilities?.effort) ? capabilities.effort : undefined;
-  if (!effort || effort.supported !== true) return undefined;
+function anthropicEffortLevels(value: unknown): string[] | undefined {
+  if (!isRecord(value) || value.supported !== true) return undefined;
+  const effort = value;
   const levels = ANTHROPIC_EFFORT_KEYS.filter((level) => supportedFlag(effort[level]));
   return levels.length > 0 ? levels : undefined;
 }
 
-function catalogReasoningLevels(row: Record<string, unknown>, provider: ProviderId): string[] | undefined {
-  if (provider === "anthropic") return anthropicEffortLevels(row);
-  const raw = provider === "openai-codex"
-    ? row.supported_reasoning_levels
-    : provider === "xai"
-      ? (isRecord(row.capabilities) ? row.capabilities.reasoning_effort : undefined)
-      : undefined;
+function catalogReasoningLevels(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const levels = raw
     .map((preset) => {
@@ -233,9 +232,9 @@ function catalogReasoningLevels(row: Record<string, unknown>, provider: Provider
   return levels.length > 0 ? levels : undefined;
 }
 
-function catalogAliases(row: Record<string, unknown>, id: string): string[] | undefined {
-  if (!Array.isArray(row.aliases)) return undefined;
-  const aliases = row.aliases
+function catalogAliases(value: unknown, id: string): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const aliases = value
     .filter((alias): alias is string => typeof alias === "string")
     .map((alias) => alias.trim())
     .filter((alias) => alias.length > 0 && alias !== id);
@@ -250,29 +249,32 @@ export function findCatalogModel(models: readonly ModelInfo[] | undefined, id: s
   return models.find((entry) => entry.aliases?.includes(id));
 }
 
-export function parseModelsPayload(payload: unknown, provider: ProviderId): ModelInfo[] {
-  const rec = isRecord(payload) ? payload : undefined;
-  const rawList = rec
-    ? Array.isArray(rec.data)
-      ? rec.data
-      : Array.isArray(rec.models)
-        ? rec.models
-        : []
-    : Array.isArray(payload)
-      ? payload
-      : [];
+type ModelsPage = { models: ModelInfo[]; hasMore: boolean; lastId: string };
+
+/** Decode both rows and pagination before catalog loading uses the response. */
+function parseModelsPage(payload: unknown, provider: ProviderId, anthropicPagination = false): ModelsPage {
+  if (!isRecord(payload)) throw new Error("models: invalid response");
+  const rawList = Array.isArray(payload.data) ? payload.data : payload.models;
+  if (!Array.isArray(rawList) || (anthropicPagination && (!Array.isArray(payload.data) || typeof payload.has_more !== "boolean"))) {
+    throw new Error("models: invalid response");
+  }
+  const hasMore = anthropicPagination && payload.has_more === true;
+  const lastId = typeof payload.last_id === "string" ? payload.last_id.trim() : "";
+  if (hasMore && !lastId) throw new Error("models: invalid pagination");
   const seen = new Set<string>();
-  const out: ModelInfo[] = [];
+  const models: ModelInfo[] = [];
   for (const item of rawList) {
-    if (!isRecord(item)) continue;
-    if (providerDefinition(provider).catalog.acceptsRow?.(item) === false) continue;
-    const parsed = rowId(item, provider);
+    const parsed = parseModelRow(item, provider);
     if (!parsed || seen.has(parsed.id) || !isChatModel(parsed.id, provider)) continue;
     seen.add(parsed.id);
-    out.push(parsed);
-    if (out.length >= MODEL_LIST_CAP) break;
+    models.push(parsed);
+    if (models.length >= MODEL_LIST_CAP) break;
   }
-  return out;
+  return { models, hasMore, lastId };
+}
+
+export function parseModelsPayload(payload: unknown, provider: ProviderId): ModelInfo[] {
+  return parseModelsPage(payload, provider).models;
 }
 
 export function pickDefaultModel(models: ModelInfo[], preferred?: string): string | null {
@@ -492,15 +494,8 @@ export async function loadProviderModels(
         return { ok: false, error: "models: invalid JSON" };
       }
       const anthropic = providerProtocol(providerId) === "anthropic-messages";
-      const rec = anthropic
-        ? requireAnthropicModelsEnvelope(payload)
-        : isRecord(payload) ? payload : undefined;
-      let models = parseModelsPayload(payload, providerId);
-      const lastId = typeof rec?.last_id === "string" ? rec.last_id.trim() : "";
-      if (anthropic && rec?.has_more === true && !lastId) {
-        return { ok: false, error: "models: invalid pagination" };
-      }
-      const needsMore = anthropic && rec?.has_more === true && models.length < MODEL_LIST_CAP;
+      const { models, hasMore, lastId } = parseModelsPage(payload, providerId, anthropic);
+      const needsMore = hasMore && models.length < MODEL_LIST_CAP;
       if (needsMore && testModelsUrl() === null) {
         const seen = new Set(models.map((model) => model.id));
         const more = await loadAnthropicPages(
@@ -548,14 +543,9 @@ async function loadAnthropicPages(
     } catch {
       throw new Error("models: invalid JSON");
     }
-    const rec = requireAnthropicModelsEnvelope(payload);
-    const hasMore = rec.has_more === true;
-    const next = typeof rec.last_id === "string" ? rec.last_id.trim() : "";
-    if (hasMore && (!next || seenCursors.has(next))) {
-      throw new Error("models: invalid pagination");
-    }
-    const page = parseModelsPayload(payload, "anthropic");
-    for (const model of page) {
+    const { models, hasMore, lastId: next } = parseModelsPage(payload, "anthropic", true);
+    if (hasMore && seenCursors.has(next)) throw new Error("models: invalid pagination");
+    for (const model of models) {
       if (seenModelIds.has(model.id)) continue;
       seenModelIds.add(model.id);
       out.push(model);

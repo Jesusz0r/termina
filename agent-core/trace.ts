@@ -11,7 +11,9 @@
 // Split into ./trace/ modules (issue #38). This entry re-exports the public surface.
 export { DEFAULT_TRACE_RETENTION_CAP, TRACE_SCHEMA_VERSION } from "./trace/schema.ts";
 export type { TraceAttemptIndexEntry, TraceAttemptInput, TraceCacheInput, TraceCostInput, TraceLinkIndex, TraceRole, TraceWriteFailure, TraceWriteOutcome } from "./trace/schema.ts";
-export { createAttemptRecord, createTaskSettledRecord, sanitizeProviderError, validTraceLinkIndex } from "./trace/records.ts";
+export { createAttemptRecord, createTaskSettledRecord, sanitizeProviderError } from "./trace/records.ts";
+export { parseTraceLinkIndex, parseTraceManifest, parseTraceRecord } from "./trace/normalize.ts";
+export type { StoredTraceAttempt, StoredTraceRecord, StoredTraceTaskSettled, TraceToolOutcome } from "./trace/schema.ts";
 export { TraceRuntime, createTraceRuntime } from "./trace/runtime.ts";
 export {
   isRetriableProviderTermination,

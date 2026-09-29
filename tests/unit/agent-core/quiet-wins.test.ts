@@ -13,6 +13,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createTaskSettledRecord } from "../../../agent-core/trace.ts";
 import { NO_QUIET_WINS_CLASS } from "../../../agent-core/trace/schema.ts";
+import { toolOutcomes } from "../../../agent-core/trace/normalize.ts";
 import {
   applyNoQuietWins,
   collectTaskToolOutcomes,
@@ -46,34 +47,39 @@ describe("No Quiet Wins class (#237)", () => {
   });
 
   it("fails a success claim after edits with no check", () => {
-    const gated = applyNoQuietWins("success", [
+    const gated = applyNoQuietWins("success", toolOutcomes([
       { toolName: "edit", isError: false },
-    ]);
+    ]));
     expect(gated).toEqual({ status: "failure", criticalClass: "No Quiet Wins" });
   });
 
   it("passes when a succeeding bash check is already on the run", () => {
-    expect(applyNoQuietWins("success", [
+    expect(applyNoQuietWins("success", toolOutcomes([
       { toolName: "edit", isError: false },
       { toolName: "bash", isError: false, exitCode: 0 },
-    ])).toEqual({ status: "success", criticalClass: null });
+    ]))).toEqual({ status: "success", criticalClass: null });
   });
 
   it("treats an absent bash exit code as an observed check", () => {
-    expect(hasObservedCheck([{ toolName: "bash", isError: false }])).toBe(true);
-    expect(applyNoQuietWins("success", [
+    expect(hasObservedCheck(toolOutcomes([{ toolName: "bash", isError: false }]))).toBe(true);
+    expect(applyNoQuietWins("success", toolOutcomes([
       { toolName: "edit", isError: false },
       { toolName: "bash", isError: false },
-    ]).criticalClass).toBeNull();
+    ])).criticalClass).toBeNull();
   });
 
   it("does not treat a failed or errored bash as a check", () => {
-    expect(hasObservedCheck([{ toolName: "bash", isError: false, exitCode: 1 }])).toBe(false);
-    expect(hasObservedCheck([{ toolName: "bash", isError: true, exitCode: 0 }])).toBe(false);
-    expect(applyNoQuietWins("success", [
+    expect(hasObservedCheck(toolOutcomes([{ toolName: "bash", isError: false, exitCode: 1 }]))).toBe(false);
+    expect(hasObservedCheck(toolOutcomes([{ toolName: "bash", isError: true, exitCode: 0 }]))).toBe(false);
+    expect(applyNoQuietWins("success", toolOutcomes([
       { toolName: "edit", isError: false },
       { toolName: "bash", isError: false, exitCode: 1 },
-    ]).criticalClass).toBe("No Quiet Wins");
+    ])).criticalClass).toBe("No Quiet Wins");
+  });
+
+  it("does not observe a check from malformed or negative exit metadata", () => {
+    expect(() => toolOutcomes([{ toolName: "bash", exitCode: "bad" }])).toThrow(/exitCode/);
+    expect(hasObservedCheck(toolOutcomes([{ toolName: "bash", exitCode: -1 }]))).toBe(false);
   });
 
   it("fails a success claim when the trace directory is unreadable", () => {
@@ -85,17 +91,17 @@ describe("No Quiet Wins class (#237)", () => {
   });
 
   it("does not fail a read-only or already-failed settle", () => {
-    expect(hasFileEdits([{ toolName: "read_file", isError: false }])).toBe(false);
-    expect(applyNoQuietWins("success", [])).toEqual({ status: "success", criticalClass: null });
-    expect(applyNoQuietWins("success", [{ toolName: "read_file", isError: false }])).toEqual({
+    expect(hasFileEdits(toolOutcomes([{ toolName: "read_file", isError: false }]))).toBe(false);
+    expect(applyNoQuietWins("success", toolOutcomes([]))).toEqual({ status: "success", criticalClass: null });
+    expect(applyNoQuietWins("success", toolOutcomes([{ toolName: "read_file", isError: false }]))).toEqual({
       status: "success",
       criticalClass: null,
     });
-    expect(applyNoQuietWins("failure", [{ toolName: "edit", isError: false }])).toEqual({
+    expect(applyNoQuietWins("failure", toolOutcomes([{ toolName: "edit", isError: false }]))).toEqual({
       status: "failure",
       criticalClass: null,
     });
-    expect(applyNoQuietWins("interrupted", [{ toolName: "edit", isError: false }])).toEqual({
+    expect(applyNoQuietWins("interrupted", toolOutcomes([{ toolName: "edit", isError: false }]))).toEqual({
       status: "interrupted",
       criticalClass: null,
     });
@@ -105,34 +111,41 @@ describe("No Quiet Wins class (#237)", () => {
     const root = mkdtempSync(join(tmpdir(), "termina-quiet-wins-"));
     try {
       writeFileSync(join(root, "turn-1.json"), JSON.stringify({
+        schemaVersion: 2,
         recordType: "attempt",
+        attemptId: "fixture-1",
         runId: "run-a",
         taskId: "task-a",
         toolOutcomes: [{ toolName: "edit", isError: false }],
       }));
       writeFileSync(join(root, "turn-2.json"), JSON.stringify({
+        schemaVersion: 2,
         recordType: "attempt",
+        attemptId: "fixture-2",
         runId: "run-a",
         taskId: "task-a",
         toolOutcomes: [{ toolName: "bash", isError: false, exitCode: 0 }],
       }));
       writeFileSync(join(root, "turn-3.json"), JSON.stringify({
+        schemaVersion: 2,
         recordType: "attempt",
+        attemptId: "fixture-3",
         runId: "run-a",
         taskId: "other",
         toolOutcomes: [{ toolName: "write_file", isError: false }],
       }));
       writeFileSync(join(root, "turn-4.json"), JSON.stringify({
+        schemaVersion: 2,
         recordType: "task-settled",
         runId: "run-a",
         taskId: "task-a",
       }));
       const collected = collectTaskToolOutcomes(root, "run-a", "task-a");
       expect(collected.readable).toBe(true);
-      expect(collected.outcomes).toEqual([
+      expect(collected.outcomes).toEqual(toolOutcomes([
         { toolName: "edit", isError: false },
         { toolName: "bash", isError: false, exitCode: 0 },
-      ]);
+      ]));
       expect(collectTaskToolOutcomes(join(root, "missing"), "run-a", "task-a")).toEqual({
         readable: false,
         outcomes: [],
@@ -143,6 +156,23 @@ describe("No Quiet Wins class (#237)", () => {
       expect(applyNoQuietWins("success", corrupt.readable ? corrupt.outcomes : null)).toEqual({
         status: "failure",
         criticalClass: "No Quiet Wins",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when malformed exit metadata would hide an edit", () => {
+    const root = mkdtempSync(join(tmpdir(), "termina-quiet-wins-malformed-exit-"));
+    try {
+      writeFileSync(join(root, "turn-1.json"), JSON.stringify({
+        schemaVersion: 2, recordType: "attempt", attemptId: "fixture-1", runId: "run-a", taskId: "task-a",
+        toolOutcomes: [{ toolName: "edit", isError: false, exitCode: "bad" }],
+      }));
+      const collected = collectTaskToolOutcomes(root, "run-a", "task-a");
+      expect(collected).toEqual({ readable: false, outcomes: [] });
+      expect(applyNoQuietWins("success", collected.readable ? collected.outcomes : null)).toEqual({
+        status: "failure", criticalClass: "No Quiet Wins",
       });
     } finally {
       rmSync(root, { recursive: true, force: true });

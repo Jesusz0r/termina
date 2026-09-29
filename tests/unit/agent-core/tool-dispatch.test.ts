@@ -5,6 +5,12 @@ import { SUBAGENT_TOOL_DEFS } from "../../../agent-core/subagents.ts";
 const call = (name: string, input: unknown = {}) => ({ name, input });
 
 describe("tool batch admission and ordering", () => {
+  it("keeps path errors for object, array and missing required input", () => {
+    expect(toolInputError(call("spawn_subagent", []), SUBAGENT_TOOL_DEFS)).toContain("spawn_subagent must be object");
+    expect(toolInputError(call("spawn_subagent", { task: "review", paths: {} }), SUBAGENT_TOOL_DEFS)).toContain("spawn_subagent.paths must be array");
+    expect(toolInputError(call("spawn_subagent", {}), SUBAGENT_TOOL_DEFS)).toContain("spawn_subagent.task is required");
+  });
+
   it("validates required fields, exact types and nested arguments from the canonical schemas", () => {
     expect(toolInputError(call("spawn_subagent", {}), SUBAGENT_TOOL_DEFS)).toContain("task is required");
     expect(toolInputError(call("spawn_subagent", { task: 12 }), SUBAGENT_TOOL_DEFS)).toContain("task must be string");

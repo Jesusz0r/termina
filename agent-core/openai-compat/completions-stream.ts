@@ -4,34 +4,22 @@
  * Owns live deltas, terminal results, and payload text. Split from
  * agent-core/openai-compat.ts (issue #38).
  */
-import { isRecord } from "../../shared/guards.ts";
-import { TOOL_CALL_ARGUMENT_ERROR, TOOL_CALL_IDENTITY_ERROR, TOOL_CALL_INDEX_ERROR, TOOL_CALL_SHAPE_ERROR, decodeToolCallArguments, toolCallIdentityError, toolCallIndex } from "./tool-calls.ts";
+import { TOOL_CALL_IDENTITY_ERROR, TOOL_CALL_INDEX_ERROR, TOOL_CALL_SHAPE_ERROR, toolCallIdentityError } from "./tool-calls.ts";
+import { decodeToolCallArguments, parseCompletionStreamEvent, parseCompletionTextPayload } from "./parsers.ts";
 import type { CallResultLike } from "./types.ts";
 import { mergeUsageRecords, usageFromOpenAI } from "./usage.ts";
 
 
 export function completionLiveDelta(
-  event: Record<string, unknown>,
+  event: unknown,
 ): { text: string; thinking: string } | null {
-  const choices = event.choices;
-  if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== "object") return null;
-  const delta = (choices[0] as { delta?: Record<string, unknown> }).delta;
-  if (!delta) return null;
-  let thinking = "";
-  for (const field of ["reasoning_content", "reasoning", "reasoning_text"] as const) {
-    const value = delta[field];
-    if (typeof value === "string" && value) {
-      thinking = value;
-      break;
-    }
-  }
-  const text = typeof delta.content === "string" ? delta.content : "";
+  const { text, thinking } = parseCompletionStreamEvent(event);
   return text || thinking ? { text, thinking } : null;
 }
 
 
 export function completionResultFromEvents(
-  events: Array<Record<string, unknown>>,
+  events: readonly unknown[],
   onText: (text: string) => void,
   started: number,
 ): CallResultLike {
@@ -44,17 +32,14 @@ export function completionResultFromEvents(
   let ttftMs: number | null = null;
   let stopReason: string | null = null;
   let toolError: string | undefined;
-  for (const ev of events) {
-    if (ev.usage && typeof ev.usage === "object" && !Array.isArray(ev.usage)) {
-      rawUsage = mergeUsageRecords(rawUsage, ev.usage as Record<string, unknown>);
+  for (const raw of events) {
+    const ev = parseCompletionStreamEvent(raw);
+    if (ev.usage) {
+      rawUsage = mergeUsageRecords(rawUsage, ev.usage);
       usage = usageFromOpenAI(rawUsage);
     }
-    const choices = ev.choices;
-    if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== "object") continue;
-    const choice = choices[0] as { delta?: Record<string, unknown>; finish_reason?: unknown };
-    if (typeof choice.finish_reason === "string" && choice.finish_reason) stopReason = choice.finish_reason;
-    const delta = choice.delta ?? {};
-    const live = completionLiveDelta(ev);
+    if (ev.finishReason) stopReason = ev.finishReason;
+    const live = ev;
     if (live?.text) {
       if (ttftMs === null) ttftMs = Date.now() - started;
       text += live.text;
@@ -64,72 +49,37 @@ export function completionResultFromEvents(
       if (ttftMs === null) ttftMs = Date.now() - started;
       thinking += live.thinking;
     }
-    const toolCalls = delta.tool_calls;
-    if (toolCalls !== undefined && !Array.isArray(toolCalls)) toolError ??= TOOL_CALL_SHAPE_ERROR;
-    if (Array.isArray(toolCalls)) {
+    const toolCalls = ev.toolCalls;
+    if (toolCalls.length) {
       const indicesInEvent = new Set<number>();
-      for (const raw of toolCalls) {
-        if (!isRecord(raw)) {
-          toolError ??= TOOL_CALL_SHAPE_ERROR;
+      for (const tc of toolCalls) {
+        if ("error" in tc) {
+          toolError ??= tc.error;
           continue;
         }
-        const tc = raw as { index?: unknown; id?: unknown; type?: unknown; function?: unknown; extra_content?: unknown };
-        if (!("index" in tc)) {
-          toolError ??= TOOL_CALL_INDEX_ERROR;
-          continue;
-        }
-        const idx = toolCallIndex(tc.index);
-        if (idx === null) {
-          toolError ??= TOOL_CALL_INDEX_ERROR;
-          continue;
-        }
+        const idx = tc.index;
         if (indicesInEvent.has(idx)) {
           toolError ??= `${TOOL_CALL_INDEX_ERROR}: duplicate index in one delta`;
           continue;
         }
         indicesInEvent.add(idx);
         const cur = calls.get(idx);
-        if (tc.type !== undefined && tc.type !== null && tc.type !== "function") {
-          toolError ??= TOOL_CALL_SHAPE_ERROR;
-          continue;
-        }
         if (tc.type === null && (!cur || cur.type === undefined)) {
           toolError ??= TOOL_CALL_SHAPE_ERROR;
-          continue;
-        }
-        if (tc.id !== undefined && tc.id !== null && typeof tc.id !== "string") {
-          toolError ??= TOOL_CALL_IDENTITY_ERROR;
           continue;
         }
         if (tc.id === null && !cur) {
           toolError ??= TOOL_CALL_IDENTITY_ERROR;
           continue;
         }
-        if (tc.function !== undefined && !isRecord(tc.function)) {
-          toolError ??= TOOL_CALL_SHAPE_ERROR;
-          continue;
-        }
-        const fn = isRecord(tc.function) ? tc.function : {};
-        if (fn.name !== undefined && fn.name !== null && typeof fn.name !== "string") {
+        if (tc.name === null && (!cur || !cur.name)) {
           toolError ??= TOOL_CALL_IDENTITY_ERROR;
           continue;
         }
-        if (fn.name === null && (!cur || !cur.name)) {
-          toolError ??= TOOL_CALL_IDENTITY_ERROR;
-          continue;
-        }
-        if (fn.arguments !== undefined && typeof fn.arguments !== "string") {
-          toolError ??= TOOL_CALL_ARGUMENT_ERROR;
-          continue;
-        }
-        const id = typeof tc.id === "string" ? tc.id : "";
-        const name = typeof fn.name === "string" ? fn.name : "";
-        const type = tc.type === "function" ? tc.type : undefined;
-        const args = typeof fn.arguments === "string" ? fn.arguments : "";
-        const extra = isRecord(tc.extra_content) ? (tc.extra_content as Record<string, unknown>) : null;
-        const googleExtra = extra && isRecord(extra.google) ? (extra.google as Record<string, unknown>) : null;
-        const thoughtSignature =
-          googleExtra && typeof googleExtra.thought_signature === "string" ? googleExtra.thought_signature : "";
+        const id = tc.id ?? "";
+        const name = tc.name ?? "";
+        const type = tc.type ?? undefined;
+        const { args, thoughtSignature } = tc;
         if (!cur) {
           if (!id || !name) {
             toolError ??= TOOL_CALL_IDENTITY_ERROR;
@@ -194,9 +144,5 @@ export function completionResultFromEvents(
 
 
 export function textFromCompletionPayload(data: unknown): { text: string; usage?: Record<string, unknown> } {
-  if (!data || typeof data !== "object") return { text: "" };
-  const rec = data as { choices?: Array<{ message?: { content?: unknown } }>; usage?: Record<string, unknown> };
-  const content = rec.choices?.[0]?.message?.content;
-  const text = typeof content === "string" ? content : "";
-  return { text: text.trim(), usage: rec.usage };
+  return parseCompletionTextPayload(data);
 }

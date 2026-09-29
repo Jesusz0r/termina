@@ -5,7 +5,7 @@
  * device-code polling. Split from agent-core/auth.ts (issue #38).
  */
 import { isDeepStrictEqual } from "node:util";
-import { isRecord } from "../../shared/guards.ts";
+import { parseCopilotSession, parseDeviceCode, parseDeviceToken, parseOauthToken, parseOpenRouterKey } from "./oauth-payload.ts";
 import { COPILOT_HEADERS } from "./providers/github-copilot.ts";
 import { providerDefinition } from "./providers/index.ts";
 import { extractAccountId } from "./providers/openai-codex.ts";
@@ -13,36 +13,9 @@ import { type ProviderId } from "./providers/types.ts";
 import { ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED } from "./providers/anthropic.ts";
 import { GITHUB_ACCESS_TOKEN_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_TOKEN_URL, GITHUB_DEVICE_GRANT, GITHUB_DEVICE_URL, OPENAI_CODEX_CLIENT_ID, XAI_CLIENT_ID, XAI_DEFAULT_EXPIRES_MS, XAI_DEFAULT_INTERVAL_MS, XAI_DEVICE_GRANT, XAI_MIN_INTERVAL_MS, XAI_POLL_MARGIN_MS, XAI_SCOPE, XAI_SLOW_DOWN_MS, isSupportedProvider, redirectUri, testLoopbackOverride, tokenUrl, validateCopilotApiUrl, xaiDeviceUrl } from "./endpoints.ts";
 import { AUTH_REQUEST_CANCELLED, authFetch, authHttpError, isAuthHttpFailure, postForm, postJson } from "./http.ts";
-import { modifyProvider, readAuth, refreshFlights, type AuthWriteOpts } from "./store.ts";
+import { modifyProvider, parseStoredCredential, readAuth, refreshFlights, type AuthWriteOpts } from "./store.ts";
 
 const EXPIRE_MARGIN_MS = 300_000;
-
-
-export function parseOauthToken(
-  payload: unknown,
-  now = Date.now(),
-  opts: { requireRefresh?: boolean; previousRefresh?: string; defaultExpiresIn?: number } = {},
-): { ok: true; access: string; refresh: string; expires: number } | { ok: false; error: string } {
-  if (!payload || typeof payload !== "object") return { ok: false, error: "invalid token response" };
-  const rec = payload as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
-  if (typeof rec.access_token !== "string" || !rec.access_token) return { ok: false, error: "token response missing access_token" };
-  const refresh =
-    typeof rec.refresh_token === "string" && rec.refresh_token
-      ? rec.refresh_token
-      : opts.previousRefresh ?? "";
-  if (!refresh && opts.requireRefresh !== false) return { ok: false, error: "token response missing refresh_token" };
-  let expiresIn = typeof rec.expires_in === "number" ? rec.expires_in : Number(rec.expires_in);
-  if (!Number.isFinite(expiresIn) || expiresIn <= 0) {
-    if (opts.defaultExpiresIn && opts.defaultExpiresIn > 0) expiresIn = opts.defaultExpiresIn;
-    else return { ok: false, error: "token response missing expires_in" };
-  }
-  return {
-    ok: true,
-    access: rec.access_token,
-    refresh,
-    expires: now + expiresIn * 1000 - EXPIRE_MARGIN_MS,
-  };
-}
 
 
 function sleepAsync(ms: number, signal?: AbortSignal): Promise<void> {
@@ -79,7 +52,7 @@ export function persistOauth(
       if (opts?.expectedCredential && !isDeepStrictEqual(current, opts.expectedCredential)) {
         throw new Error("auth refresh superseded by a credential change");
       }
-      const cur = isRecord(current) ? current : {};
+      const cur = current ?? {};
       const accountId =
         providerId === "openai-codex"
           ? extractAccountId(parsed.access) ?? (typeof extra.accountId === "string" ? extra.accountId : undefined)
@@ -109,7 +82,7 @@ export function persistApiKey(
   try {
     modifyProvider(providerId, (current) => {
       if (providerId === "anthropic") return { type: "api_key", key };
-      const cur = isRecord(current) ? current : {};
+      const cur = current ?? {};
       return { ...cur, type: "api_key", key };
     }, opts);
   } catch (err) {
@@ -126,12 +99,12 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
   try {
     const got = readAuth();
     if (!got.ok) return { ok: false, error: "auth store unreadable — run /login" };
-    const entry = got.data[providerId];
-    if (!isRecord(entry) || entry.type !== "oauth" || typeof entry.refresh !== "string") {
+    const entry = parseStoredCredential(got.data[providerId]);
+    if (!entry || entry.type !== "oauth" || entry.refresh === null) {
       return { ok: false, error: "auth expired — run /login" };
     }
     let parsed: ReturnType<typeof parseOauthToken>;
-    let extra: Record<string, unknown> = entry;
+    let extra = entry.extra;
     if (providerId === "anthropic") {
       return { ok: false, error: ANTHROPIC_SUBSCRIPTION_LOGIN_REMOVED };
     } else if (providerId === "openai-codex") {
@@ -163,12 +136,12 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
         refresh: entry.refresh,
         expires: session.expires,
       };
-      extra = { ...entry, apiUrl: session.apiUrl };
+      extra = { ...entry.extra, apiUrl: session.apiUrl };
     } else {
       return { ok: false, error: "auth expired — run /login" };
     }
     if (!parsed.ok) return { ok: false, error: `auth refresh returned an invalid token response: ${parsed.error}` };
-    const stored = persistOauth(providerId, parsed, extra, { expectedCredential: entry });
+    const stored = persistOauth(providerId, parsed, extra, { expectedCredential: entry.extra });
     if (!stored.ok) return { ok: false, error: `auth refresh persist failed: ${stored.error}` };
     return { ok: true };
   } catch (error) {
@@ -239,9 +212,7 @@ export async function exchangeCodex(
     const parsed = parseOauthToken(res.payload, Date.now(), { requireRefresh: true });
     if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
-    const rec = isRecord(res.payload) ? res.payload : {};
-    const idToken = typeof rec.id_token === "string" ? rec.id_token : "";
-    const accountId = extractAccountId(parsed.access) || extractAccountId(idToken) || undefined;
+    const accountId = extractAccountId(parsed.access) || extractAccountId(parsed.idToken ?? "") || undefined;
     return persistOauth("openai-codex", parsed, accountId ? { accountId } : {}, opts);
   } catch (error) {
     return { ok: false, error: authHttpError(error) ?? "login failed: OpenAI token exchange failed" };
@@ -261,8 +232,7 @@ export async function exchangeOpenRouter(
       { code, code_verifier: verifier, code_challenge_method: "S256" },
       signal,
     );
-    const rec = isRecord(res.payload) ? res.payload : {};
-    const key = typeof rec.key === "string" ? rec.key : "";
+    const key = parseOpenRouterKey(res.payload);
     if (!res.ok || !key) return { ok: false, error: "login failed: OpenRouter key exchange failed" };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
     return persistApiKey("openrouter", key, opts);
@@ -361,18 +331,14 @@ export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<{
     { client_id: XAI_CLIENT_ID, scope: XAI_SCOPE, referrer: "termina" },
     signal,
   );
-  if (!res.ok || !isRecord(res.payload)) {
+  const parsed = parseDeviceCode(res.payload);
+  if (!res.ok || parsed === "invalid") {
     throw new Error(`xAI device authorization failed (HTTP ${res.status})`);
   }
-  const deviceCode = typeof res.payload.device_code === "string" ? res.payload.device_code : "";
-  const userCode = typeof res.payload.user_code === "string" ? res.payload.user_code : "";
-  const verification =
-    typeof res.payload.verification_uri_complete === "string" && res.payload.verification_uri_complete
-      ? res.payload.verification_uri_complete
-      : typeof res.payload.verification_uri === "string"
-        ? res.payload.verification_uri
-        : "";
-  if (!deviceCode || !userCode || !verification) {
+  if (parsed === "missing-fields") throw new Error("xAI device code response is missing fields");
+  const { deviceCode, userCode } = parsed;
+  const verification = parsed.verificationUriComplete ?? parsed.verificationUri;
+  if (!verification) {
     throw new Error("xAI device code response is missing fields");
   }
   return {
@@ -380,11 +346,11 @@ export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<{
     userCode,
     verificationUri: validateHttpsVerificationUri(verification, { hosts: ["auth.x.ai"], label: "xAI" }),
     intervalMs: intervalMs(
-      res.payload.interval,
+      parsed.interval,
       XAI_DEFAULT_INTERVAL_MS,
       testLoopbackOverride("TERMINA_TEST_DEVICE_URL") ? 0 : XAI_MIN_INTERVAL_MS,
     ),
-    expiresMs: positiveMs(res.payload.expires_in, XAI_DEFAULT_EXPIRES_MS),
+    expiresMs: positiveMs(parsed.expiresIn, XAI_DEFAULT_EXPIRES_MS),
   };
 }
 
@@ -407,7 +373,7 @@ export async function pollXaiDeviceToken(
         if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
         return parsed;
       }
-      const err = isRecord(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
+      const err = parseDeviceToken(res.payload)?.error ?? "";
       if (err === "authorization_pending") return "pending";
       if (err === "slow_down") return "slow_down";
       if (err === "access_denied" || err === "authorization_denied") {
@@ -452,21 +418,21 @@ export async function requestGithubDeviceCode(signal?: AbortSignal): Promise<{
     signal,
     { accept: "application/json", "user-agent": COPILOT_HEADERS["user-agent"] },
   );
-  if (!res.ok || !isRecord(res.payload)) {
+  const parsed = parseDeviceCode(res.payload);
+  if (!res.ok || parsed === "invalid") {
     throw new Error(`GitHub device authorization failed (HTTP ${res.status})`);
   }
-  const deviceCode = typeof res.payload.device_code === "string" ? res.payload.device_code : "";
-  const userCode = typeof res.payload.user_code === "string" ? res.payload.user_code : "";
-  const verification = typeof res.payload.verification_uri === "string" ? res.payload.verification_uri : "";
-  if (!deviceCode || !userCode || !verification) {
+  if (parsed === "missing-fields") throw new Error("GitHub device code response is missing fields");
+  const { deviceCode, userCode, verificationUri: verification } = parsed;
+  if (!verification) {
     throw new Error("GitHub device code response is missing fields");
   }
   return {
     deviceCode,
     userCode,
     verificationUri: validateHttpsVerificationUri(verification, { hosts: ["github.com"], label: "GitHub" }),
-    intervalMs: intervalMs(res.payload.interval, 5_000, testLoopbackOverride("TERMINA_TEST_DEVICE_URL") ? 0 : 1_000),
-    expiresMs: positiveMs(res.payload.expires_in, 15 * 60 * 1000),
+    intervalMs: intervalMs(parsed.interval, 5_000, testLoopbackOverride("TERMINA_TEST_DEVICE_URL") ? 0 : 1_000),
+    expiresMs: positiveMs(parsed.expiresIn, 15 * 60 * 1000),
   };
 }
 
@@ -487,10 +453,9 @@ export async function pollGithubDeviceToken(
       "user-agent": COPILOT_HEADERS["user-agent"],
     }),
     parse: (res) => {
-      if (isRecord(res.payload) && typeof res.payload.access_token === "string" && res.payload.access_token) {
-        return { ok: true, githubToken: res.payload.access_token };
-      }
-      const err = isRecord(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
+      const parsed = parseDeviceToken(res.payload);
+      if (parsed?.accessToken) return { ok: true, githubToken: parsed.accessToken };
+      const err = parsed?.error ?? "";
       if (err === "access_denied") return { ok: false, error: "GitHub device authorization was denied" };
       if (err === "expired_token") return { ok: false, error: "GitHub device code expired" };
       if (err === "slow_down") return "slow_down";
@@ -526,22 +491,20 @@ export async function exchangeGithubCopilotToken(
       },
       signal,
     );
-    const payload = res.payload;
-    if (!res.ok || !isRecord(payload) || typeof payload.token !== "string" || !payload.token) {
+    const parsed = parseCopilotSession(res.payload);
+    if (!res.ok || !parsed) {
       return { ok: false, error: `Copilot session token failed (HTTP ${res.status})` };
     }
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
-    const endpoints = isRecord(payload.endpoints) ? payload.endpoints : {};
-    const reported = typeof endpoints.api === "string" ? endpoints.api : "";
-    const apiUrl = validateCopilotApiUrl(reported) || providerDefinition("github-copilot").baseUrl;
+    const apiUrl = validateCopilotApiUrl(parsed.apiUrl ?? "") || providerDefinition("github-copilot").baseUrl;
     let expires = Date.now() + 25 * 60 * 1000;
-    const expiresAt = payload.expires_at;
-    if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > 0) {
+    const expiresAt = parsed.expiresAt;
+    if (expiresAt !== null) {
       expires = (expiresAt > 1_000_000_000_000 ? expiresAt : expiresAt * 1000) - EXPIRE_MARGIN_MS;
-    } else if (typeof payload.refresh_in === "number" && payload.refresh_in > 0) {
-      expires = Date.now() + payload.refresh_in * 1000 - EXPIRE_MARGIN_MS;
+    } else if (parsed.refreshIn !== null) {
+      expires = Date.now() + parsed.refreshIn * 1000 - EXPIRE_MARGIN_MS;
     }
-    return { ok: true, access: payload.token, expires, apiUrl };
+    return { ok: true, access: parsed.access, expires, apiUrl };
   } catch (error) {
     return { ok: false, error: authHttpError(error) ?? "Copilot session token failed" };
   }
