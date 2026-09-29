@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { readSystemProcessIdentity } from "../../../shared/process-identity.js";
+import { readSystemProcessIdentity } from "../../../shared/process-identity.ts";
 import { OwnedProcessTree } from "../../e2e/owned-processes.ts";
 
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
-vi.mock("../../../shared/process-identity.js", () => ({ readSystemProcessIdentity: vi.fn() }));
+vi.mock("../../../shared/process-identity.ts", () => ({ readSystemProcessIdentity: vi.fn() }));
 
 describe("E2E descendant ownership", () => {
   let identities: Map<number, string>;

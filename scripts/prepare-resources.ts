@@ -20,7 +20,7 @@ import { pathToFileURL } from "node:url";
 import { buildCore, stageCoreBinary } from "./build-core.ts";
 import { prepareRipgrep } from "./prepare-ripgrep.ts";
 import { errorCode } from "../shared/guards.ts";
-import { readSystemProcessIdentity } from "../shared/process-identity.js";
+import { readSystemProcessIdentity } from "../shared/process-identity.ts";
 
 const RESOURCES = join(process.cwd(), "resources");
 const MAX_NODE_ARCHIVE_BYTES = 128 * 1024 * 1024;

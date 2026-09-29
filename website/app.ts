@@ -20,19 +20,22 @@
         io.unobserve(e.target);
       }
     },
-    { threshold: 0.25 }
+    { threshold: 0.25 },
   );
   document.querySelectorAll(".reveal, #wl-svg").forEach((el) => io.observe(el));
 
   /* ---------- benchmark bars ---------- */
-  function growBars() {
+  function growBars(): void {
     document.querySelectorAll("#bench-chart .bar").forEach((bar, i) => {
-      setTimeout(() => { bar.style.width = bar.dataset.w + "%"; }, i * 90);
+      if (!(bar instanceof HTMLElement)) return;
+      const width = bar.dataset.w;
+      if (width === undefined) return;
+      setTimeout(() => { bar.style.width = `${width}%`; }, i * 90);
     });
   }
 
   /* ---------- worldline diagram draw-on-scroll ---------- */
-  function drawWorldline() {
+  function drawWorldline(): void {
     const paths = ["wl-trunk", "wl-trunk2", "wl-a", "wl-b"];
     paths.forEach((id, i) => {
       const p = document.getElementById(id);
@@ -58,7 +61,15 @@
 
   const tuiScreen = document.getElementById("tui-screen");
 
-  const TUI_SCRIPT = [
+  interface TuiLine {
+    cls: string;
+    text: string;
+    type?: boolean;
+    pauseAfter?: number;
+    edit?: string;
+  }
+
+  const TUI_SCRIPT: TuiLine[] = [
     { cls: "dim", text: "$ pi" },
     { cls: "dim", text: "✳ session ready — your model · plan mode off" },
     { cls: "user", text: "add token caching to the auth middleware", type: true },
@@ -74,7 +85,7 @@
     { cls: "agent", text: "Done. Review the diff on the right →" },
   ];
 
-  const CODE = {
+  const CODE: Record<string, { file: string; lines: string[] }> = {
     cache: {
       file: "cache",
       lines: [
@@ -122,7 +133,8 @@
 
   let lineIndex = 0;
 
-  function addTuiLine(entry) {
+  function addTuiLine(entry: TuiLine): number {
+    if (!tuiScreen) return 0;
     const div = document.createElement("div");
     div.className = "tui-line " + entry.cls;
     tuiScreen.appendChild(div);
@@ -140,14 +152,15 @@
     return 0;
   }
 
-  function showCode(key) {
+  function showCode(key: string): void {
     const spec = CODE[key];
     if (!spec) return;
     // activate tab
     document.querySelectorAll(".ed-file").forEach((f) => f.classList.remove("active"));
-    document.getElementById("tab-" + spec.file).classList.add("active");
+    document.getElementById("tab-" + spec.file)?.classList.add("active");
 
     const area = document.getElementById("code-area");
+    if (!area) return;
     area.innerHTML = "";
     spec.lines.forEach((html, idx) => {
       const row = document.createElement("div");
@@ -158,7 +171,7 @@
     });
   }
 
-  function lightTimeline(upTo) {
+  function lightTimeline(upTo: number): void {
     const dots = document.querySelectorAll(".tl-dot");
     const total = dots.length;
     dots.forEach((d, i) => {
@@ -166,7 +179,8 @@
       else d.classList.remove("lit");
     });
     const fill = document.getElementById("tl-fill");
-    if (upTo <= 0) { fill.style.width = "0px"; return; }
+    if (!fill) return;
+    if (upTo <= 0 || total <= 1) { fill.style.width = "0px"; return; }
     const pct = ((upTo - 1) / (total - 1)) * 100;
     // tl-fill is inset by half the dot (4.5px) on the left; width is % of the
     // full track so we subtract the proportional 9px dot-diameter to land
@@ -174,23 +188,24 @@
     fill.style.width = `calc(${pct}% - ${pct * 0.09}px)`;
   }
 
-  function resetMockup() {
+  function resetMockup(): void {
+    if (!tuiScreen) return;
     tuiScreen.innerHTML = "";
     lineIndex = 0;
     lightTimeline(0);
   }
 
-  function playScenario() {
+  function playScenario(): void {
     resetMockup();
-    const stepDurations = [];
 
-    function next() {
+    function next(): void {
       if (lineIndex >= TUI_SCRIPT.length) {
         // hold the finished state, then restart
         setTimeout(playScenario, 6500);
         return;
       }
       const entry = TUI_SCRIPT[lineIndex++];
+      if (!entry) return;
       let wait = 620;
       if (entry.edit) {
         showCode(entry.edit);
@@ -199,7 +214,11 @@
       const typeTime = addTuiLine(entry);
       if (entry.pauseAfter) wait = Math.max(wait, entry.pauseAfter);
       // trim old TUI lines so the pane never scrolls awkwardly
-      while (tuiScreen.children.length > 11) tuiScreen.removeChild(tuiScreen.firstChild);
+      while (tuiScreen && tuiScreen.children.length > 11) {
+        const oldest = tuiScreen.firstChild;
+        if (!oldest) break;
+        tuiScreen.removeChild(oldest);
+      }
 
       // timeline progress heuristic
       const progressEvents = [3, 4, 8, 9, 11];
@@ -213,41 +232,44 @@
 
   // start when the mockup scrolls into view; replay on re-entry is avoided
   const mockup = document.querySelector(".mockup");
-  if (mockup) {
+  if (mockup && tuiScreen) {
     const mio = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting) {
+        if (entries[0]?.isIntersecting) {
           mio.disconnect();
           setTimeout(playScenario, 600);
         }
       },
-      { threshold: 0.3 }
+      { threshold: 0.3 },
     );
     mio.observe(mockup);
   }
 
   /* ---------- install tabs ---------- */
   document.querySelectorAll(".install-tab").forEach((tab) => {
+    if (!(tab instanceof HTMLElement)) return;
     tab.addEventListener("click", () => {
       document.querySelectorAll(".install-tab").forEach((t) => t.classList.remove("active"));
       document.querySelectorAll(".install-pane").forEach((p) => p.classList.remove("active"));
       tab.classList.add("active");
-      document.querySelector(`.install-pane[data-pane="${tab.dataset.tab}"]`).classList.add("active");
+      document.querySelector(`.install-pane[data-pane="${tab.dataset.tab ?? ""}"]`)?.classList.add("active");
     });
   });
 
   /* ---------- copy buttons ---------- */
-  function flash(btn) {
+  function flash(btn: HTMLElement): void {
     const prev = btn.textContent;
     btn.textContent = "copied ✓";
     setTimeout(() => { btn.textContent = prev; }, 1400);
   }
 
   document.querySelectorAll(".copy-cmd").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(btn.dataset.cmd);
-      } catch {}
+    if (!(btn instanceof HTMLElement)) return;
+    btn.addEventListener("click", () => {
+      const cmd = btn.dataset.cmd;
+      if (cmd !== undefined && navigator.clipboard) {
+        void navigator.clipboard.writeText(cmd).catch(() => { /* clipboard can be denied */ });
+      }
       flash(btn);
     });
   });

@@ -27,6 +27,7 @@
     "electron",
     "scripts",
     "agent-core",
-    "shared"
+    "shared",
+    "website"
   ]
 }

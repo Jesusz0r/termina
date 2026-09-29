@@ -5,7 +5,7 @@
  * binding it validates. Split from agent-core/auth.ts (issue #38).
  */
 import { errorCode, isRecord } from "../../shared/guards.ts";
-import { readSystemProcessIdentity } from "../../shared/process-identity.js";
+import { readSystemProcessIdentity } from "../../shared/process-identity.ts";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";

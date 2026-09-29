@@ -1,8 +1,20 @@
 /** Regex execution stays off main, including compilation and pathological matches. */
 import { parentPort, workerData } from "node:worker_threads";
-let regex;
-try { regex = new RegExp(workerData.pattern); } catch { regex = null; }
-parentPort.on("message", ({ content, limit, previewLength }) => {
+
+interface MatchRequest {
+  content: string;
+  limit: number;
+  previewLength: number;
+}
+
+const port = parentPort;
+if (!port) throw new Error("content search matcher must run as a worker");
+
+const pattern = (workerData as { pattern: string }).pattern;
+let regex: RegExp | null;
+try { regex = new RegExp(pattern); } catch { regex = null; }
+
+port.on("message", ({ content, limit, previewLength }: MatchRequest) => {
   const matches = [];
   if (regex) {
     const lines = content.split("\n");
@@ -32,5 +44,5 @@ parentPort.on("message", ({ content, limit, previewLength }) => {
       if (matches.length >= cap) break;
     }
   }
-  parentPort.postMessage(regex ? matches : null);
+  port.postMessage(regex ? matches : null);
 });

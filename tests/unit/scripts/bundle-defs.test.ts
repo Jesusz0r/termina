@@ -12,7 +12,7 @@ const defsSrc = readFileSync(new URL("../../../scripts/bundle-defs.ts", import.m
 describe("shared bundle definitions (refs #133)", () => {
   it("defines the app and worker bundles with entry, output, and format", () => {
     expect(TERMINA_BUNDLES.contentSearchWorker).toEqual({
-      entryPoints: ["electron/content-search/match-lines.js"],
+      entryPoints: ["electron/content-search/match-lines.ts"],
       outfile: "dist-electron/content-search-worker.mjs", format: "esm",
     });
     expect(buildSrc).toContain("terminaBuildOptions(TERMINA_BUNDLES.contentSearchWorker)");

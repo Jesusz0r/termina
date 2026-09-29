@@ -4,6 +4,8 @@ node_modules/
 package-lock.json
 dist-electron/
 dist-renderer/
+# Emitted by scripts/stamp-website.ts. Source is website/app.ts.
+website/app.js
 *.log
 .DS_Store
 core/target/

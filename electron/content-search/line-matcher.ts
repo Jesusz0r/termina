@@ -25,9 +25,13 @@ export class ContentLineMatcher {
   invalid = false;
 
   constructor(pattern: string, shouldStop: () => boolean, budgetMs: number) {
-    // Source tests run the dependency-free JS entry; packaged/dev main uses
-    // its bundled sibling, produced by the canonical bundle definitions.
-    this.worker = new Worker(new URL(import.meta.url.endsWith(".ts") ? "./match-lines.js" : "./content-search-worker.mjs", import.meta.url), { workerData: { pattern } });
+    // Source tests run the TypeScript entry with type stripping. Packaged and
+    // dev main use the bundled sibling from the canonical bundle definitions.
+    const fromSource = import.meta.url.endsWith(".ts");
+    this.worker = new Worker(new URL(fromSource ? "./match-lines.ts" : "./content-search-worker.mjs", import.meta.url), {
+      workerData: { pattern },
+      ...(fromSource ? { execArgv: ["--experimental-strip-types"] } : {}),
+    });
     this.worker.on("message", (matches: LineMatch[] | null) => {
       this.invalid = matches === null;
       this.settle(matches ?? []);

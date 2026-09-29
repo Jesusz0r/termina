@@ -5,11 +5,16 @@
  * so the badge and download URLs cannot drift from the release tag.
  */
 import { readFileSync, writeFileSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
 
 const version = JSON.parse(readFileSync("package.json", "utf8")).version;
 if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
   throw new Error(`package.json version is not a release version: ${String(version)}`);
 }
+
+// The browser cannot run TypeScript. Emit the site script next to the HTML
+// before the pages upload. Source of truth is website/app.ts.
+writeFileSync("website/app.js", stripTypeScriptTypes(readFileSync("website/app.ts", "utf8")));
 
 const files = ["website/index.html", "website/guide.html"];
 for (const file of files) {

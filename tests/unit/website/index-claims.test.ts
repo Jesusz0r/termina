@@ -62,7 +62,7 @@ describe("website index claims (#388)", () => {
 
   it("drops the retired PI TUI comment and the vendor-pinned mockup model", () => {
     const html = read("website/index.html");
-    const script = read("website/app.js");
+    const script = read("website/app.ts");
     expect(html).not.toContain("<!-- PI TUI -->");
     expect(html).toContain("<!-- AGENT TUI -->");
     expect(html).not.toMatch(/gemini-2\.5-pro/);
@@ -72,7 +72,7 @@ describe("website index claims (#388)", () => {
   });
 
   it("keeps TERMINA_* installer escapes off the site", () => {
-    for (const page of ["website/index.html", "website/guide.html", "website/app.js"]) {
+    for (const page of ["website/index.html", "website/guide.html", "website/app.ts"]) {
       const text = read(page);
       expect(text, page).not.toMatch(/TERMINA_EVENTS_DIR|TERMINA_CORE_BIN|TERMINA_SKIP_CORE_BUILD/);
     }

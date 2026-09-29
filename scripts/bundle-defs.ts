@@ -37,7 +37,7 @@ export const TERMINA_BUNDLES: Record<TerminaBundleName, TerminaBundleDef> = {
     format: "esm",
   },
   contentSearchWorker: {
-    entryPoints: ["electron/content-search/match-lines.js"],
+    entryPoints: ["electron/content-search/match-lines.ts"],
     outfile: "dist-electron/content-search-worker.mjs",
     format: "esm",
   },

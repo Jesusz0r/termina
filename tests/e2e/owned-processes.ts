@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { readSystemProcessIdentity } from "../../shared/process-identity.js";
+import { readSystemProcessIdentity } from "../../shared/process-identity.ts";
 
 function checkedIdentity(pid: number): string | null {
   const identity = readSystemProcessIdentity(pid);

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { platform } from "node:os";
 
 /** Return a stable process-birth identity, or null when the OS cannot prove it. */
-export function readSystemProcessIdentity(pid) {
+export function readSystemProcessIdentity(pid: number): string | null {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
 
   if (platform() === "linux") {
