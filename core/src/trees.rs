@@ -405,47 +405,29 @@ mod tests {
     use super::{
         collect_reachable, delete_unreachable_loose, loose_object_count, prune_unreachable,
     };
+    use crate::test_fixture::TestTempDir;
     use crate::util::require_utf8_path_bytes;
     use git2::{Repository, Signature};
     use std::collections::HashSet;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SEQ: AtomicU64 = AtomicU64::new(0);
 
     struct RepoFixture {
         path: PathBuf,
+        _dir: TestTempDir,
     }
 
     impl RepoFixture {
         fn new() -> Self {
-            loop {
-                let path = std::env::temp_dir().join(format!(
-                    "termina-prune-{}-{}",
-                    std::process::id(),
-                    SEQ.fetch_add(1, Ordering::Relaxed)
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => {
-                        Repository::init(&path).expect("init prune fixture");
-                        return Self { path };
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => panic!("create prune fixture: {error}"),
-                }
-            }
+            let dir = TestTempDir::new("prune");
+            let path = dir.path().to_path_buf();
+            Repository::init(&path).expect("init prune fixture");
+            Self { path, _dir: dir }
         }
 
         fn open(&self) -> Repository {
             Repository::open(&self.path).expect("open prune fixture")
-        }
-    }
-
-    impl Drop for RepoFixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
         }
     }
 

@@ -72,13 +72,43 @@ function killBashTree(pid: number | undefined, child: ChildProcess): void {
   }
 }
 
+function failureHow(status: { code?: number | null; signal?: string | null }): string {
+  if (typeof status.code === "number") return `exit ${status.code}`;
+  if (status.signal && /^[A-Z0-9]+$/.test(status.signal)) return `signal ${status.signal}`;
+  return "it did not exit cleanly";
+}
+
+/** What the model should do next. A failed command must not look like a successful run that only needs less output. */
+function bashNotice(
+  state: CompletionState,
+  status: { code?: number | null; signal?: string | null; failed: boolean },
+  outputTruncated: boolean,
+  repro: string,
+  narrower: string,
+): string | null {
+  // A timeout or interrupt kills the process, so the close status is a signal
+  // failure. Classify by why we stopped, not by that signal.
+  if (state === "timeout") {
+    const cut = outputTruncated ? " Output was cut." : "";
+    return `The command timed out.${cut} Narrow it or split it; do not rerun it unchanged. ${repro}`;
+  }
+  if (state === "interrupted") return `The command was interrupted. ${repro}`;
+  if (status.failed || state === "failed") {
+    const cut = outputTruncated ? " Output was cut, so the failure may be above this tail." : "";
+    return `The command failed (${failureHow(status)}).${cut} Fix the command; do not rerun it unchanged. ${repro}`;
+  }
+  if (outputTruncated) return narrower;
+  if (state !== "complete") return `The command did not finish (${state}). ${repro}`;
+  return null;
+}
+
 export function runBash(
   command: string,
   opts: { cwd: string; timeoutMs?: number; shouldStop?: () => boolean; sandboxProfile?: string },
 ): Promise<ToolTextResult> {
   const timeoutMs = opts.timeoutMs ?? BASH_TIMEOUT_MS;
   const repro = `bash ${shellQuote(command)}`;
-  const continuation = `Re-run the command with a narrower output or redirect noisy streams: ${repro}`;
+  const narrower = `Re-run the command with a narrower output or redirect noisy streams: ${repro}`;
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
@@ -152,7 +182,8 @@ export function runBash(
       const tag = typeof status.code === "number" ? String(status.code) : status.signal ?? "error";
       let body = `${parts.filter(Boolean).join("\n") || "(no output)"}\n[exit ${tag}]`;
       const outputTruncated = stdoutResult.truncated || stderrResult.truncated;
-      if (outputTruncated || state !== "complete") body += `\n${continuation}`;
+      const notice = bashNotice(state, status, outputTruncated, repro, narrower);
+      if (notice) body += `\n${notice}`;
       const rendered = boundedToolResult(body, {
         maxBytes: BASH_CAP_BYTES,
         direction: "tail",
@@ -163,7 +194,7 @@ export function runBash(
       resolve(Object.freeze({
         ...rendered,
         truncated: rendered.truncated || outputTruncated,
-        continuation: outputTruncated || state !== "complete" ? continuation : null,
+        continuation: notice,
         repro,
         stdout: stdoutResult,
         stderr: stderrResult,

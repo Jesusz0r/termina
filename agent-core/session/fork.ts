@@ -119,6 +119,13 @@ async function materializeVisibleFork(
     if (!recoveredBlocks.ok) {
       return recoveredBlocks;
     }
+    // Originals are written into the child before its prune receipts. Their
+    // image files remain necessary for recovery even when absent from the view.
+    const recoveredImages = referencedImageNames([{
+      role: "user", sseq: 1, content: [...recoveredBlocks.blocks.values()],
+    }]);
+    if (!recoveredImages.ok) return recoveredImages;
+    imageNames = [...new Set([...imageNames, ...recoveredImages.names])];
     const recoveriesBySseq = new Map<number, ReplayRecovery[]>();
     for (const recovery of visibleRecoveries) {
       const entries = recoveriesBySseq.get(recovery.sseq) ?? [];

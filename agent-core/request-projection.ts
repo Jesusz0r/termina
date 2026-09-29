@@ -47,6 +47,8 @@ type ProjectRequestOptions = {
   messages: readonly ProjectionMessage[];
   overlay?: RequestOverlay | null;
   imageRoots?: readonly string[];
+  /** Opt in only when the active provider/protocol supports tool-result images. */
+  allowToolResultImages?: boolean;
   maxBytes?: number;
   /** Claude continues server calls itself; client calls must always be paired. */
   allowPendingServerTools?: boolean;
@@ -187,16 +189,35 @@ function validateToolSequences(messages: readonly ProjectionMessage[], allowPend
   return null;
 }
 
-function providerBlock(block: ProjectionBlock, imageRoots: readonly string[]): Record<string, unknown> {
+function providerBlock(
+  block: ProjectionBlock,
+  imageRoots: readonly string[],
+  allowToolResultImages: boolean,
+  observationCallId?: string,
+): Record<string, unknown> {
   const out: Record<string, unknown> = { type: block.type };
   for (const [key, value] of Object.entries(block)) {
     if (key === "type" || VIEW_KEYS.has(key) || value === undefined) continue;
     out[key] = value;
   }
-  if (block.type === "image" && out.source && typeof out.source === "object" && !Array.isArray(out.source)) {
-    const expanded = expandFileImageSource(out.source as Record<string, unknown>, [...imageRoots]);
+  if (block.type === "tool_result" && Array.isArray(block.content)) {
+    const callId = resultToolId(block) ?? "unknown";
+    out.content = block.content.map(part => {
+      if (!part || typeof part !== "object" || Array.isArray(part) || typeof part.type !== "string") return part;
+      return providerBlock(part as ProjectionBlock, imageRoots, allowToolResultImages, callId);
+    });
+  }
+  if (block.type === "image") {
+    if (observationCallId && !allowToolResultImages) {
+      throw new Error(`tool result ${observationCallId}: observation images are not supported by the active provider route`);
+    }
+    const source = out.source;
+    const expanded = source && typeof source === "object" && !Array.isArray(source)
+      ? expandFileImageSource(source as Record<string, unknown>, [...imageRoots])
+      : null;
     if (expanded) out.source = expanded;
-    else return { type: "text", text: "[image missing]" };
+    else if (observationCallId) throw new Error(`tool result ${observationCallId}: observation image is missing or invalid`);
+    else if (source && typeof source === "object" && !Array.isArray(source)) return { type: "text", text: "[image missing]" };
   }
   return out;
 }
@@ -214,11 +235,12 @@ function projectContentBlock(block: Record<string, unknown>): Record<string, unk
 function projectMessages(
   messages: readonly ProjectionMessage[],
   imageRoots: readonly string[],
+  allowToolResultImages: boolean,
 ): RequestMessage[] {
   return messages.map((message) => {
     if (typeof message.content === "string") return { role: message.role, content: message.content };
     const content = message.content
-      .map((block) => projectContentBlock(providerBlock(block, imageRoots)))
+      .map((block) => projectContentBlock(providerBlock(block, imageRoots, allowToolResultImages)))
       .filter((block): block is Record<string, unknown> => block !== null);
     return { role: message.role, content };
   });
@@ -247,11 +269,15 @@ function normalizeOverlay(
  * with the already-snapshotted overlay.
  */
 export function projectPersistedMessages(
-  opts: Pick<ProjectRequestOptions, "messages" | "imageRoots" | "allowPendingServerTools">,
+  opts: Pick<ProjectRequestOptions, "messages" | "imageRoots" | "allowPendingServerTools" | "allowToolResultImages">,
 ): ProjectPersistedResult {
   const sequenceError = validateToolSequences(opts.messages, opts.allowPendingServerTools);
   if (sequenceError) return { ok: false, error: sequenceError };
-  return { ok: true, messages: projectMessages(opts.messages, opts.imageRoots ?? []) };
+  try {
+    return { ok: true, messages: projectMessages(opts.messages, opts.imageRoots ?? [], opts.allowToolResultImages === true) };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "request image projection failed" };
+  }
 }
 
 /** Prepend a previously built overlay before provider-specific prefix stamping.

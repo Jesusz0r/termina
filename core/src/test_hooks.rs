@@ -71,32 +71,13 @@ fn wait_for_release(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::test_fixture::TestTempDir;
 
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    struct Fixture(std::path::PathBuf);
+    struct Fixture(TestTempDir);
 
     impl Fixture {
         fn new() -> Self {
-            loop {
-                let path = std::env::temp_dir().join(format!(
-                    "termina-test-hook-{}-{}",
-                    std::process::id(),
-                    SEQ.fetch_add(1, Ordering::Relaxed)
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Self(path),
-                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(e) => panic!("create test fixture: {e}"),
-                }
-            }
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).unwrap();
+            Self(TestTempDir::new("test-hook"))
         }
     }
 
@@ -154,6 +135,7 @@ mod tests {
 #[cfg(test)]
 mod pause_at_hook_tests {
     use super::*;
+    use crate::test_fixture::TestTempDir;
     use serde_json::json;
     use std::ffi::OsString;
     use std::fs;
@@ -198,22 +180,11 @@ mod pause_at_hook_tests {
         }
     }
 
-    struct Fixture(std::path::PathBuf);
+    struct Fixture(TestTempDir);
 
     impl Fixture {
         fn named(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "termina-capture-hook-{}-{name}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&path).expect("hook test fixture directory");
-            Self(path)
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).expect("hook test fixture cleanup");
+            Self(TestTempDir::new(&format!("capture-hook-{name}")))
         }
     }
 
@@ -223,10 +194,8 @@ mod pause_at_hook_tests {
             .lock()
             .expect("hook test env lock is never poisoned");
         let _env = EnvGuard::cleared();
-        let marker = std::env::temp_dir().join(format!(
-            "termina-capture-hook-{}-must-not-exist.ready",
-            std::process::id()
-        ));
+        let dir = TestTempDir::new("capture-hook-missing");
+        let marker = dir.join("must-not-exist.ready");
         let req = json!({ "hooks": { "probe": {
             "readyPath": marker.to_str().expect("temp hook marker path is UTF-8"),
             "releasePath": marker.to_str().expect("temp hook marker path is UTF-8"),

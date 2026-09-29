@@ -299,34 +299,31 @@ pub(crate) fn op_preflight(req: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixture::TestTempDir;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    fn open_file_config(bytes: &[u8]) -> git2::Config {
-        let path = std::env::temp_dir().join(format!(
-            "termina-preflight-config-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
+    fn open_file_config(bytes: &[u8]) -> (TestTempDir, git2::Config) {
+        let dir = TestTempDir::new("preflight-config");
+        let path = dir.join("probe.config");
         fs::write(&path, bytes).expect("write probe config");
-        git2::Config::open(&path).unwrap_or_else(|e| panic!("open probe config: {e}"))
+        let config =
+            git2::Config::open(&path).unwrap_or_else(|e| panic!("open probe config: {e}"));
+        (dir, config)
     }
 
     #[test]
     fn driver_probe_absent_vs_present() {
-        let absent = open_file_config(b"[core]\n\tbare = false\n");
+        let (_absent_dir, absent) = open_file_config(b"[core]\n\tbare = false\n");
         assert!(matches!(
             config_has_driver(&absent, "diff", "command"),
             ConfigProbe::Absent
         ));
-        let present = open_file_config(b"[diff \"tool\"]\n\tcommand = true\n");
+        let (_present_dir, present) = open_file_config(b"[diff \"tool\"]\n\tcommand = true\n");
         assert!(matches!(
             config_has_driver(&present, "diff", "command"),
             ConfigProbe::Present
         ));
-        let lfs = open_file_config(b"[diff \"lfs\"]\n\tcommand = true\n");
+        let (_lfs_dir, lfs) = open_file_config(b"[diff \"lfs\"]\n\tcommand = true\n");
         assert!(matches!(
             config_has_driver(&lfs, "diff", "command"),
             ConfigProbe::Absent
@@ -338,7 +335,7 @@ mod tests {
         let mut bytes = b"[diff \"".to_vec();
         bytes.push(0xff);
         bytes.extend_from_slice(b"hidden\"]\n\tcommand = true\n");
-        let config = open_file_config(&bytes);
+        let (_dir, config) = open_file_config(&bytes);
         assert!(
             matches!(
                 config_has_driver(&config, "diff", "command"),
@@ -353,7 +350,7 @@ mod tests {
         let mut bytes = b"[filter \"".to_vec();
         bytes.push(0xff);
         bytes.extend_from_slice(b"hidden\"]\n\tclean = true\n");
-        let config = open_file_config(&bytes);
+        let (_dir, config) = open_file_config(&bytes);
         assert!(matches!(
             config_has_non_lfs_filter(&config),
             ConfigProbe::Unreadable

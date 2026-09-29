@@ -90,6 +90,9 @@ export class PtyTerminal {
     });
   }
 
+  /** Native exit is known before buffered output finishes draining. */
+  get hasExited(): boolean { return this.exited; }
+
   /** Feed source data in bounded quanta, retaining only an unadmitted tail. */
   private flushOutput(): void {
     if (this.flushingOutput || this.pendingOutput.length === 0) {

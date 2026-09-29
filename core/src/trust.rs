@@ -310,41 +310,30 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixture::TestTempDir;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs as unix_fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SEQ: AtomicU64 = AtomicU64::new(0);
 
     struct Fixture {
         root: PathBuf,
         agent: PathBuf,
         project: PathBuf,
+        _dir: TestTempDir,
     }
 
     impl Fixture {
         fn new() -> Self {
-            loop {
-                let root = std::env::temp_dir().join(format!(
-                    "termina-trust-{}-{}",
-                    std::process::id(),
-                    SEQ.fetch_add(1, Ordering::Relaxed)
-                ));
-                match fs::create_dir(&root) {
-                    Ok(()) => {
-                        let agent = root.join("agent");
-                        let project = root.join("project");
-                        fs::create_dir(&agent).unwrap();
-                        fs::create_dir(&project).unwrap();
-                        return Self {
-                            root,
-                            agent,
-                            project,
-                        };
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => panic!("create trust fixture: {error}"),
-                }
+            let dir = TestTempDir::new("trust");
+            let agent = dir.join("agent");
+            let project = dir.join("project");
+            fs::create_dir(&agent).unwrap();
+            fs::create_dir(&project).unwrap();
+            let root = dir.path().to_path_buf();
+            Self {
+                root,
+                agent,
+                project,
+                _dir: dir,
             }
         }
 
@@ -353,12 +342,6 @@ mod tests {
                 "agentDir": self.agent.to_str().unwrap(),
                 "projectRoot": self.project.to_str().unwrap(),
             })
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
         }
     }
 

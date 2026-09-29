@@ -276,41 +276,27 @@ pub(crate) fn op_template(req: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::commit_index_if_changed;
+    use crate::test_fixture::TestTempDir;
     use git2::Repository;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SEQ: AtomicU64 = AtomicU64::new(0);
 
     struct RepoFixture {
         path: PathBuf,
         repo: Repository,
+        _dir: TestTempDir,
     }
 
     impl RepoFixture {
         fn new() -> Self {
-            loop {
-                let path = std::env::temp_dir().join(format!(
-                    "termina-apply-head-{}-{}",
-                    std::process::id(),
-                    SEQ.fetch_add(1, Ordering::Relaxed)
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => {
-                        let repo = Repository::init(&path).expect("init apply fixture");
-                        return Self { path, repo };
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => panic!("create apply fixture: {error}"),
-                }
+            let dir = TestTempDir::new("apply-head");
+            let path = dir.path().to_path_buf();
+            let repo = Repository::init(&path).expect("init apply fixture");
+            Self {
+                path,
+                repo,
+                _dir: dir,
             }
-        }
-    }
-
-    impl Drop for RepoFixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
         }
     }
 

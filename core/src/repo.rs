@@ -319,12 +319,10 @@ pub(crate) fn op_ls_ignored(req: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{canonical_git_workdir, git_marker_present};
+    use crate::test_fixture::TestTempDir;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SEQ: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn canonical_git_workdir_fails_when_path_is_missing() {
@@ -349,11 +347,8 @@ mod tests {
 
     #[test]
     fn git_marker_inspect_failure_is_an_error() {
-        let path = std::env::temp_dir().join(format!(
-            "termina-git-marker-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
+        let fixture = TestTempDir::new("git-marker");
+        let path = fixture.path().to_path_buf();
         fs::create_dir_all(path.join("source")).expect("create source");
         fs::write(path.join("source").join(".git"), "gitdir: missing\n").expect("write gitfile");
         let permissions = fs::metadata(&path).expect("stat parent").permissions();
@@ -365,7 +360,6 @@ mod tests {
         let err = git_marker_present(&path.join("source"))
             .expect_err("unreadable Git marker must fail closed");
         drop(restore);
-        let _ = fs::remove_dir_all(&path);
         assert!(
             err.contains("inspect Git marker failed"),
             "expected inspect error, got {err}"

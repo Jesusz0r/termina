@@ -1,31 +1,19 @@
 /**
  * Pending-image lock and transaction core.
  *
- * Owns image constants/types, the pending-image lock, producer
- * transactions, and claim records. Split from agent-core/host.ts (issue #38).
+ * Owns the pending-image lock, producer transactions, and claim records.
+ * Image value contracts live in image-types.ts. Split from agent-core/host.ts (issue #38).
  */
 import { isErrno } from "../../shared/guards.ts";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rename, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import { STORED_IMAGE_NAME } from "../session.ts";
+import { MAX_IMAGE_BYTES, MAX_PENDING_IMAGES, isSafeImageName, type ImageRef, type LoadedImage, type PendingImageMediaType } from "./image-types.ts";
 import { ACK_ID, OPEN_NOFOLLOW_READ } from "./context.ts";
 
 
-export { STORED_IMAGE_NAME };
-
-export const MAX_PENDING_IMAGES = 4;
-
-export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
-
-export const MAX_PENDING_IMAGE_BATCH_BYTES = MAX_PENDING_IMAGES * MAX_IMAGE_BYTES;
-
-export const PENDING_IMAGE_NAME = /^image-[A-Za-z0-9._-]+\.(png|jpe?g|webp|gif)$/;
-
 const STAGE_IMAGE_NAME = /^image-[A-Za-z0-9._-]+\.(png|jpe?g|webp|gif)\.stage-[A-Za-z0-9_-]+$/;
-
-const MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 const IMAGE_LOCK_WAIT_MS = 250;
 
@@ -49,12 +37,6 @@ const MANIFEST_TMP_NAME = /^images-[A-Za-z0-9_-]+\.json\.tmp-[A-Za-z0-9_-]+$/;
 
 const QUARANTINE_NAME = /^images-[A-Za-z0-9_-]+\.quarantine-[A-Za-z0-9_-]+$/;
 
-
-export type ImageRef = { name: string; mediaType: string };
-
-export type LoadedImage = ImageRef & { bytes: Buffer };
-
-export type PendingImageMediaType = "image/png" | "image/jpeg" | "image/webp" | "image/gif";
 
 export type PendingImageInput = { bytes: Buffer; mediaType: PendingImageMediaType; id: string };
 
@@ -95,29 +77,8 @@ class PendingImageError extends Error {
 }
 
 
-export function isSafeImageName(name: string): boolean {
-  return PENDING_IMAGE_NAME.test(name) || STORED_IMAGE_NAME.test(name);
-}
-
-
-export function mediaTypeOfName(name: string): string {
-  if (name.endsWith(".png")) return "image/png";
-  if (name.endsWith(".webp")) return "image/webp";
-  if (name.endsWith(".gif")) return "image/gif";
-  return "image/jpeg";
-}
-
-
 export function pendingImagesPath(eventsDir: string, terminalId: string): string {
   return join(eventsDir, `images-${terminalId}.json`);
-}
-
-
-export function extForMedia(mediaType: string): string {
-  if (mediaType === "image/jpeg") return "jpg";
-  if (mediaType === "image/webp") return "webp";
-  if (mediaType === "image/gif") return "gif";
-  return "png";
 }
 
 
@@ -134,11 +95,6 @@ export function queueError(err: unknown): { ok: false; error: string } {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-
-export function isAllowedMediaType(value: string): value is PendingImageMediaType {
-  return MEDIA_TYPES.has(value);
 }
 
 

@@ -87,6 +87,7 @@ function hostWithSends(sends: ChunkSend[]): TerminalRuntimeHost {
     shouldAdmitSidecar() { return true; },
     onSidecarEvent() {},
     onSidecarError() {},
+    onPtyStopping() {},
     onPtyExitBeforeRelease() {},
     onPtyExitAfterRelease() {},
   };
@@ -164,6 +165,32 @@ describe("TerminalRuntime", () => {
     assert.equal(runtime.acceptOutput("term-1", 1, "late"), false);
     assert.deepEqual(noted, []);
     runtime.disposeEgress();
+  });
+
+  it.each(["native", "forced", "close"] as const)("revokes authority on %s before draining retained output", async (kind) => {
+    const stopped: string[] = [];
+    const runtime = new TerminalRuntime({
+      ...hostWithSends([]),
+      onPtyStopping(inst) { stopped.push(inst.id); },
+    }, { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    runtime.adopt(inst, { tailer: fakeTailer(), rendererTarget: null });
+    runtime.acceptOutput(inst.id, 1, "retained output");
+    if (kind === "native") {
+      inst.pty.onNativeExit();
+      assert.deepEqual(stopped, [inst.id]);
+      // Native exit revokes authority without dropping the unadmitted source tail.
+      assert.equal(runtime.acceptOutput(inst.id, 1, "final source tail"), true);
+    } else if (kind === "close") {
+      runtime.markClosed(inst.id);
+      assert.deepEqual(stopped, [inst.id]);
+    }
+    const finished = Promise.resolve(inst.pty.onExit(0));
+    assert.ok(stopped.length > 0, "revocation must not wait for output acknowledgement");
+    assert.equal(runtime.has(inst.id), true);
+    runtime.disposeEgress();
+    await finished;
+    assert.equal(runtime.has(inst.id), false);
   });
 
   it("releases the instance when the before-exit host hook throws", async () => {

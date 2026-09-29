@@ -304,7 +304,10 @@ function sessionBlockJson(value: unknown): string | null {
 
 /** Character measurement shared by receipt production, replay, and recovery.
  * Preserve stored counts and the existing coercions: these are session semantics,
- * not a UTF-8 byte count or a token estimate. */
+ * not a UTF-8 byte count or a token estimate. In particular, structured tool
+ * content keeps its historical String coercion and image keeps its legacy
+ * count so existing on-disk receipts remain recoverable. Visual token costs
+ * belong to reclaim's estimator, never to this durable measurement. */
 export function sessionBlockChars(block: Record<string, unknown>): number {
   if (typeof block.chars === "number") return block.chars;
   if (block.type === "text") return String(block.text ?? "").length;

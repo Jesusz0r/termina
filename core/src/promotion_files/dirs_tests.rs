@@ -1,36 +1,25 @@
 use super::prepare_directory;
+use crate::test_fixture::TestTempDir;
 use crate::util::stat_file;
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-static SEQ: AtomicU64 = AtomicU64::new(0);
-
-struct Fixture(PathBuf);
+struct Fixture(TestTempDir);
 impl Fixture {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "termina-prepare-sync-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(fs::canonicalize(path).unwrap())
+        Self(TestTempDir::new("prepare-sync"))
+    }
+    fn path(&self) -> &std::path::Path {
+        self.0.path()
     }
     fn request(&self) -> serde_json::Value {
-        let metadata = fs::metadata(&self.0).unwrap();
-        json!({"root": self.0,
+        let metadata = fs::metadata(self.path()).unwrap();
+        json!({"root": self.path(),
             "rootIdentity": {"dev": metadata.dev().to_string(), "ino": metadata.ino().to_string()},
             "components": ["a", "b", "c"], "createMissing": true,
             "expectedMissingAt": 0, "expectedChain": [],
         })
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
     }
 }
 
@@ -45,7 +34,7 @@ fn prepare_syncs_every_child_and_parent_before_returning_capability() {
     .unwrap();
     let expected: Vec<_> = ["a", "", "a/b", "a", "a/b/c", "a/b"]
         .iter()
-        .map(|path| fs::metadata(fixture.0.join(path)).unwrap().ino())
+        .map(|path| fs::metadata(fixture.path().join(path)).unwrap().ino())
         .collect();
     assert_eq!(synced, expected);
     assert!(response["result"]["identity"]["capability"].is_string());
@@ -77,7 +66,7 @@ fn prepare_propagates_each_child_or_parent_sync_failure_without_advancing() {
         assert_eq!(calls, failure + 1);
         let created_depth = failure / 2 + 1;
         for (depth, path) in ["a", "a/b", "a/b/c"].iter().enumerate() {
-            assert_eq!(fixture.0.join(path).exists(), depth < created_depth);
+            assert_eq!(fixture.path().join(path).exists(), depth < created_depth);
         }
     }
 }

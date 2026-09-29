@@ -6,6 +6,7 @@
  */
 import { acquireSessionRetentionLock, releaseSessionRetentionLock, validateSessionRetentionLease, type SessionRetentionLock } from "../../shared/session-retention-lock.ts";
 import { randomBytes } from "node:crypto";
+import { isRecord } from "../../shared/guards.ts";
 import { closeSync, constants as fsConstants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, opendirSync, readSync, writeSync, type BigIntStats } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { retainUnboundCleanup } from "./bundles.ts";
@@ -20,11 +21,14 @@ export function referencedImageNames(messages: ReplayMessage[]): SessionResult<{
   for (const m of messages) {
     if (typeof m.content === "string") continue;
     for (const block of m.content) {
-      if (block.type !== "image" || !block.source || typeof block.source !== "object" || Array.isArray(block.source)) continue;
-      const src = block.source as { type?: unknown; name?: unknown };
-      if (src.type !== "file" || typeof src.name !== "string") continue;
-      if (!isSafeImageName(src.name)) return { ok: false, error: `unsafe image name: ${src.name}` };
-      names.add(src.name);
+      const parts = block.type === "tool_result" && Array.isArray(block.content) ? block.content : [block];
+      for (const part of parts) {
+        if (!isRecord(part) || part.type !== "image" || !isRecord(part.source)) continue;
+        const src = part.source;
+        if (src.type !== "file") continue;
+        if (typeof src.name !== "string" || !isSafeImageName(src.name)) return { ok: false, error: `unsafe image name: ${String(src.name)}` };
+        names.add(src.name);
+      }
     }
   }
   return { ok: true, names: [...names] };

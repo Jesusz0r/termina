@@ -120,11 +120,19 @@ function payloadText(block: Block): string | null {
   return null;
 }
 
-/** Conservative local estimate; provider usage remains authoritative. */
+function visualTokens(value: unknown): number {
+  if (Array.isArray(value)) return value.reduce((sum, part) => sum + visualTokens(part), 0);
+  if (!isRecord(value)) return 0;
+  if (value.type === "image") return 2_000;
+  return value.type === "tool_result" ? visualTokens(value.content) : 0;
+}
+
+/** Conservative local estimate; provider usage remains authoritative.
+ * Visual cost is never used for durable receipt chars, bytes, or hashes. */
 export function estimateReclaimTokens(value: unknown): number {
   try {
     const text = typeof value === "string" ? value : stableJson(value);
-    return text ? Math.ceil(Buffer.byteLength(text, "utf8") / 4) : 0;
+    return (text ? Math.ceil(Buffer.byteLength(text, "utf8") / 4) : 0) + visualTokens(value);
   } catch {
     return 0;
   }
@@ -228,7 +236,7 @@ export function planPruneStubs(messages: ReclaimMessage[], opts: ReclaimPlanOpti
       if (type === "tool_result" && block.stubbed) continue;
       if (isThinkingBlock(block) && !blocks.some((candidate) => isRecord(candidate) && !isThinkingBlock(candidate))) continue;
       const payload = payloadText(block);
-      if (payload === null || sessionBlockChars(block) < PRUNE_MIN_CHARS) continue;
+      if (payload === null || (sessionBlockChars(block) < PRUNE_MIN_CHARS && visualTokens(block) === 0)) continue;
       const originalBytes = sessionBlockBytes(block);
       const originalHash = sessionBlockHash(block);
       if (originalBytes === null || originalHash === null || originalBytes < 1 || originalBytes > MAX_SESSION_RECORD_BYTES) continue;
@@ -242,7 +250,7 @@ export function planPruneStubs(messages: ReclaimMessage[], opts: ReclaimPlanOpti
       const tool = typeof block.tool === "string" ? block.tool : undefined;
       const repro = typeof block.repro === "string" ? block.repro : undefined;
       const action: PruneAction = isThinkingBlock(block) ? "drop" : "stub";
-      const reclaimedTokens = estimateReclaimTokens(payload);
+      const reclaimedTokens = estimateReclaimTokens(payload) + visualTokens(block);
       if (reclaimedTokens <= 0) continue;
       const fallback: SessionReclaimRecovery = {
         source: "session-record",

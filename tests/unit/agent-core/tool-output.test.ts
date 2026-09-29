@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import * as output from "../../../agent-core/tool-output.ts";
+import { grepStdoutHitCount } from "../../../agent-core/main/grep.ts";
 import * as core from "../../../agent-core/main.ts";
 import * as files from "../../../agent-core/main/files.ts";
 import * as fileOps from "../../../agent-core/main/file-ops.ts";
@@ -78,6 +79,29 @@ function responseWithChunks(chunks: any[], { contentLength, status = 200 }: { co
     },
   };
 }
+
+describe("capped search is not a failure when hits already arrived", () => {
+  it("keeps a timeout or visit cap with hits successful", () => {
+    expect(output.cappedSearchIsError("timeout", 3)).toBe(false);
+    expect(output.cappedSearchIsError("visit-cap", 1)).toBe(false);
+    expect(output.cappedSearchIsError("complete", 4)).toBe(false);
+  });
+
+  it("counts only parseable grep rows as hits", () => {
+    expect(grepStdoutHitCount("")).toBe(0);
+    expect(grepStdoutHitCount("partial line without a row")).toBe(0);
+    expect(grepStdoutHitCount("src/a.ts:3:needle\n")).toBe(1);
+    expect(grepStdoutHitCount("src/a.ts:3:needle\nnot-a-row\n")).toBe(1);
+  });
+
+  it("keeps an empty cap, an interrupt, and a failure as errors", () => {
+    expect(output.cappedSearchIsError("timeout", 0)).toBe(true);
+    expect(output.cappedSearchIsError("visit-cap", 0)).toBe(true);
+    expect(output.cappedSearchIsError("interrupted", 2)).toBe(true);
+    expect(output.cappedSearchIsError("failed", 2)).toBe(true);
+    expect(output.cappedSearchIsError("complete", 0)).toBe(false);
+  });
+});
 
 describe("Agent Core Bounded Output Foundation", () => {
   describe("Pure Accumulator & Bounded Text Logic", () => {

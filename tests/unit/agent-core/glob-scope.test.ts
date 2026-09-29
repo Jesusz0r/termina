@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { globFiles, GREP_VISIT_CAP } from "../../../agent-core/main/files.ts";
+import { grepFiles } from "../../../agent-core/main/grep.ts";
 
 const roots: string[] = [];
 function fixture(): string {
@@ -24,6 +25,34 @@ it("resolves literal paths and narrow subtrees without spending the budget on un
   }
   expect(await globFiles(root, "lib/missing.ts")).toMatchObject({ content: "(no matches)", isError: false });
   expect(await globFiles(root, "missing/*.ts")).toMatchObject({ content: "(no matches)", isError: false });
+});
+
+it("does not treat a visit cap that already returned hits as an error", async () => {
+  const root = fixture();
+  for (let i = 0; i <= GREP_VISIT_CAP; i++) writeFileSync(join(root, `hit-${i}.txt`), "x");
+  const result = await globFiles(root, "*.txt");
+  expect(result.state).toBe("visit-cap");
+  expect(result.isError).toBe(false);
+  expect(result.content).toContain("hit-");
+  expect(result.content).toContain("Glob again");
+});
+
+it("does not treat a capped grep that already returned hits as an error", async () => {
+  const root = fixture();
+  for (let i = 0; i <= GREP_VISIT_CAP; i++) writeFileSync(join(root, `g-${i}.txt`), "needle\n");
+  const result = await grepFiles(root, { pattern: "needle" }, { jsOnly: true, budgetMs: 30_000 });
+  expect(result.state).toBe("visit-cap");
+  expect(result.isError).toBe(false);
+  expect(result.content).toContain("needle");
+  expect(result.content).toContain("Grep again");
+});
+
+it("keeps a capped search with no hits as an error", async () => {
+  const root = fixture();
+  const result = await globFiles(root, "*.txt", { budgetMs: 0 });
+  expect(result.state).toBe("timeout");
+  expect(result.isError).toBe(true);
+  expect(result.content).not.toContain("hit-");
 });
 
 it("honors cancellation and deadlines before missing or ignored prefix fast paths", async () => {

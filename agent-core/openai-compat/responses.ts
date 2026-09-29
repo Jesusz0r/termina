@@ -4,8 +4,8 @@
  * Owns input mapping, explicit breakpoints, and the Responses body.
  * Split from agent-core/openai-compat.ts (issue #38).
  */
-import { applyCacheOpts, blockText, imageDataUrl, unmatchedToolCallError } from "./completions.ts";
-import type { CompletionsOpts, KernelMessage, ToolDef } from "./types.ts";
+import { applyCacheOpts, blockText, hasToolResultImages, imageDataUrl, unmatchedToolCallError } from "./completions.ts";
+import { supportsToolResultImages, type CompletionsOpts, type KernelMessage, type ToolDef } from "./types.ts";
 
 
 export function toResponsesTools(tools: ToolDef[]): Array<Record<string, unknown>> {
@@ -105,7 +105,25 @@ export function stripResponsesBreakpoints(body: Record<string, unknown>): Record
 }
 
 
-export function toResponsesInput(messages: KernelMessage[]): Array<Record<string, unknown>> {
+function toolResultOutput(block: Record<string, unknown>, provider: string): Array<Record<string, unknown>> {
+  if (!hasToolResultImages(block)) return [{ type: "input_text", text: blockText(block) }];
+  if (!supportsToolResultImages(provider, "openai-responses")) {
+    throw new Error(`provider protocol error: tool-result images are not supported for ${provider}`);
+  }
+  // Responses accepts typed text/image output inside the original function call.
+  // https://developers.openai.com/api/reference/resources/responses/methods/create
+  return (block.content as Array<Record<string, unknown>>).map(part => {
+    if (part?.type === "text" && typeof part.text === "string") return { type: "input_text", text: part.text };
+    if (part?.type === "image") {
+      const url = imageDataUrl(part);
+      if (url) return { type: "input_image", image_url: url };
+    }
+    throw new Error(`provider protocol error: invalid image tool result for ${String(block.tool_use_id ?? "unknown")}`);
+  });
+}
+
+
+export function toResponsesInput(messages: KernelMessage[], provider = "openai"): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   const openCalls: string[] = [];
 
@@ -179,7 +197,7 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
         out.push({
           type: "function_call_output",
           call_id: callId,
-          output: [{ type: "input_text", text: blockText(b) }],
+          output: toolResultOutput(b, provider),
         });
       } else if (b.type === "text") {
         parts.push({ type: "input_text", text: blockText(b) });
@@ -209,7 +227,7 @@ export function responsesBody(
     store: false,
     stream: true,
     instructions: system || "You are a coding agent.",
-    input: toResponsesInput(messages),
+    input: toResponsesInput(messages, opts?.provider),
     tools: toResponsesTools(tools),
     ...(tools.length > 0 ? { tool_choice: "auto" } : {}),
     parallel_tool_calls: true,

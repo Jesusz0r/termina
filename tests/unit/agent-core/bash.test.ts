@@ -17,6 +17,8 @@ describe("runBash process ownership", () => {
       expect(result.isError).toBe(true);
       expect(result.stdout?.text).toBe("out");
       expect(result.stderr?.text).toBe("err");
+      expect(result.continuation).toContain("The command failed (exit 7)");
+      expect(result.continuation).not.toContain("narrower output");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -53,6 +55,39 @@ describe("runBash process ownership", () => {
     }
   });
 
+  it("says a failed command failed when its output was also cut", async () => {
+    const root = mkdtempSync(join(tmpdir(), "termina-bash-"));
+    try {
+      const result = await runBash(
+        `${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(30000)); process.exit(3)'`,
+        { cwd: root },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.exitCode).toBe(3);
+      expect(result.truncated).toBe(true);
+      expect(result.continuation).toContain("The command failed (exit 3)");
+      expect(result.continuation).toContain("Output was cut");
+      expect(result.continuation).not.toMatch(/^Re-run the command/);
+      expect(result.content).toContain("The command failed (exit 3)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("says an interrupted command was interrupted, even though the kill looks like a signal failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "termina-bash-"));
+    try {
+      const result = await runBash("sleep 5", { cwd: root, timeoutMs: 5_000, shouldStop: () => true });
+      expect(result.state).toBe("interrupted");
+      expect(result.isError).toBe(true);
+      expect(result.continuation).toContain("The command was interrupted");
+      expect(result.continuation).not.toContain("The command failed");
+      expect(result.content).toContain("The command was interrupted");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("kills the process group on timeout so background jobs cannot leak", async () => {
     const root = mkdtempSync(join(tmpdir(), "termina-bash-"));
     try {
@@ -62,6 +97,9 @@ describe("runBash process ownership", () => {
         { cwd: root, timeoutMs: 150 },
       );
       expect(result.state).toBe("timeout");
+      expect(result.continuation).toContain("The command timed out");
+      expect(result.continuation).not.toContain("The command failed");
+      expect(result.content).toContain("The command timed out");
       await new Promise((resolve) => setTimeout(resolve, 1_200));
       expect(existsSync(leaked)).toBe(false);
     } finally {

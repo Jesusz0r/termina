@@ -3,6 +3,7 @@
  * plain stdout). Pure over its inputs plus the passed surface.
  */
 import type { AgentTui, TranscriptHandle } from "../tui.ts";
+import { toolResultText } from "../tool-output.ts";
 import { displayToolOutput, formatToolAnnounce, toolTranscriptDetail, toolTranscriptOutput, type ToolUse } from "./tools.ts";
 
 export type ContentBlock = Record<string, unknown> & {
@@ -18,19 +19,6 @@ function blockInput(block: ContentBlock): ToolUse["input"] {
   const raw = block.input;
   if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as ToolUse["input"];
   return {};
-}
-
-function blockBodyText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) return "";
-  const parts: string[] = [];
-  for (const part of value) {
-    if (typeof part === "string") parts.push(part);
-    else if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
-      parts.push((part as { text: string }).text);
-    }
-  }
-  return parts.join("\n");
 }
 
 function replayToolState(block: ContentBlock, text: string): "success" | "error" {
@@ -137,7 +125,7 @@ export function renderHistoryTranscript(
       }
       if (block.type === "tool_result" || block.type === "web_search_tool_result") {
         const id = String(block.tool_use_id ?? block.toolUseId ?? "");
-        const text = blockBodyText(block.content);
+        const text = toolResultText(block.content);
         const err =
           block.type === "web_search_tool_result" &&
           Boolean(block.content) &&

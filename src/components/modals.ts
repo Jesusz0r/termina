@@ -54,6 +54,41 @@ export function showInput(title: string, placeholder: string, prefill: string): 
   });
 }
 
+/** A dismissible, one-shot choice. Programmatic dismissal never submits. */
+export function showChoice(
+  title: string,
+  message: string,
+  choices: Array<{ value: string; label: string }>,
+  onAnswer: (value: string | null) => void,
+): { close: () => void } {
+  const label = document.createElement("label");
+  label.textContent = "Window to control";
+  const select = document.createElement("select");
+  select.setAttribute("aria-label", "Window to control");
+  select.style.cssText = "display:block;width:100%;margin-top:8px;padding:8px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font:inherit";
+  for (const choice of choices) {
+    const option = document.createElement("option");
+    option.value = choice.value;
+    option.textContent = choice.label;
+    select.appendChild(option);
+  }
+  label.appendChild(select);
+  let settled = false;
+  const answer = (value: string | null): void => {
+    if (settled) return;
+    settled = true;
+    onAnswer(value);
+  };
+  const dialog = makeModal(title, message, [
+    { label: "Cancel", primary: false, onClick: () => answer(null) },
+    { label: "Allow", primary: true, onClick: () => answer(select.value || null) },
+  ], label, { role: "alertdialog" });
+  const allow = dialog.modal.querySelector<HTMLButtonElement>(".primary")!;
+  allow.disabled = choices.length === 0;
+  dialog.modal.querySelector<HTMLButtonElement>(".modal-btn")!.focus();
+  return { close: () => { settled = true; dialog.close(); } };
+}
+
 // --------------------------------------------------------------- modal core --
 
 interface ModalButton {

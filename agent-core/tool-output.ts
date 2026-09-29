@@ -9,6 +9,8 @@
  */
 
 import { Buffer } from "node:buffer";
+import { isRecord } from "../shared/guards.ts";
+import { isAllowedMediaType, mediaTypeOfName, STORED_IMAGE_NAME, type ImageRef } from "./host/image-types.ts";
 import type { McpContinuation } from "./mcp.ts";
 
 /** Default bound for one tool text result (grep pages, generic output). */
@@ -24,6 +26,16 @@ export const COMPLETION_STATES = Object.freeze([
 ] as const);
 
 export type CompletionState = (typeof COMPLETION_STATES)[number];
+
+/**
+ * A budget or page cap that already returned hits is a partial success.
+ * Interrupted, failed, and unreadable searches stay errors even with hits.
+ * A cap that returned nothing stays an error so it is not read as "no matches".
+ */
+export function cappedSearchIsError(state: CompletionState, hitCount: number): boolean {
+  if (hitCount > 0 && (state === "complete" || state === "timeout" || state === "visit-cap")) return false;
+  return state !== "complete";
+}
 type BoundedTextDirection = "head" | "tail";
 
 export type BoundedTextMarkerDetails = {
@@ -554,6 +566,41 @@ export type ToolTextResult = BoundedToolResult & {
   exitCode?: number | null;
   signal?: string | null;
 };
+
+/** A tool may attach one durably stored observation, separate from bounded text. */
+export type ToolOutput = ToolTextResult & { image?: ImageRef };
+
+export type ToolResultContent = string | Array<
+  | { type: "text"; text: string }
+  | { type: "image"; source: { type: "file"; name: string; media_type: string } }
+>;
+
+/** Pixel bytes belong in the image store, never the durable tool envelope. */
+export function toolResultContent(output: ToolOutput): ToolResultContent {
+  if (output.image === undefined) return output.content;
+  const image = output.image;
+  if (!isRecord(image) || typeof image.name !== "string" || !STORED_IMAGE_NAME.test(image.name) ||
+      typeof image.mediaType !== "string" || !isAllowedMediaType(image.mediaType) ||
+      mediaTypeOfName(image.name) !== image.mediaType) {
+    throw new Error("Tool observation requires a stored image reference with matching media type");
+  }
+  return [
+    { type: "text", text: output.content },
+    { type: "image", source: { type: "file", name: image.name, media_type: image.mediaType } },
+  ];
+}
+
+/** Text-only surfaces show an image marker; they never stringify pixel sources. */
+export function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((part): string[] => {
+    if (typeof part === "string") return [part];
+    if (!isRecord(part)) return [];
+    if (part.type === "image") return ["[image]"];
+    return typeof part.text === "string" ? [part.text] : [];
+  }).join("\n");
+}
 
 export function genericToolText(content: string, isError: boolean): ToolTextResult {
   return boundedToolResult(content, {

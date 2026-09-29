@@ -9,6 +9,7 @@
 
 // Split into ./openai-compat/ modules (issue #38). This entry re-exports the public surface.
 export type { CompletionsOpts, KernelMessage, ProviderUsage, ToolDef } from "./openai-compat/types.ts";
+export { supportsToolResultImages } from "./openai-compat/types.ts";
 export { completionsBody, toCompletionsMessages } from "./openai-compat/completions.ts";
 export { isTruncatedStopReason, responsesBody, stripResponsesBreakpoints, toResponsesInput, toResponsesTools } from "./openai-compat/responses.ts";
 export { mergeProviderUsage, normalizeProviderUsage, providerReportedUsd, usageFromOpenAI } from "./openai-compat/usage.ts";

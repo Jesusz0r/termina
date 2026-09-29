@@ -222,36 +222,16 @@ pub(crate) fn hash_path(
 mod tests {
     use super::super::binding::CaptureRoot;
     use super::{apply_rewrite_hooks, rewrite_hooks};
+    use crate::test_fixture::TestTempDir;
     use serde_json::json;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    struct Fixture(PathBuf);
+    struct Fixture(TestTempDir);
 
     impl Fixture {
         fn new() -> Self {
-            loop {
-                let path = std::env::temp_dir().join(format!(
-                    "termina-rewrite-{}-{}",
-                    std::process::id(),
-                    SEQ.fetch_add(1, Ordering::Relaxed)
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Self(path),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => panic!("create rewrite fixture: {error}"),
-                }
-            }
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            Self(TestTempDir::new("rewrite"))
         }
     }
 
@@ -277,7 +257,7 @@ mod tests {
             .permissions();
         permissions.set_mode(0o444);
         fs::set_permissions(fixture.0.join("target.txt"), permissions).expect("chmod target");
-        let root = CaptureRoot::open(&fixture.0).expect("open capture root");
+        let root = CaptureRoot::open(fixture.0.path()).expect("open capture root");
         let path = root
             .resolve("target.txt")
             .expect("resolve")
@@ -300,7 +280,7 @@ mod tests {
     fn rewrite_hook_restore_mtime_without_mtime_fails_closed() {
         let fixture = Fixture::new();
         fs::write(fixture.0.join("target.txt"), "original\n").expect("write target");
-        let root = CaptureRoot::open(&fixture.0).expect("open capture root");
+        let root = CaptureRoot::open(fixture.0.path()).expect("open capture root");
         let path = root
             .resolve("target.txt")
             .expect("resolve")

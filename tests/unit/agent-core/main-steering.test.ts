@@ -26,7 +26,7 @@ function rows(file: string): Row[] {
   });
 }
 
-/** Real interactive kernel and tools. Only the provider is mocked. */
+/** Real interactive kernel and tools; mocked provider, plus scoped storage failure when requested. */
 async function steeringScenario(
   mode: "stream" | "tool" | "final" | "children" | "server",
   lines: string[],
@@ -53,8 +53,24 @@ async function steeringScenario(
   const sidecarFile = join(events, "term-steering.jsonl");
   const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
   const frameFile = join(root, "frame.txt");
+  const blockedImageWrites = join(project, "block-image-writes");
   const script = `
     import { appendFileSync, existsSync, renameSync, writeFileSync } from "node:fs";
+    if (${Boolean(options.failedImage)}) {
+      // Persistence now supports more than 99 images. Cause a real write-open failure
+      // instead of assuming that occupying a fixed number of names exhausts storage.
+      const { default: fs } = await import("node:fs");
+      const { syncBuiltinESMExports } = await import("node:module");
+      const open = fs.openSync;
+      fs.openSync = (path, ...args) => {
+        if (String(path).startsWith(${JSON.stringify(join(events, "core-steering", "current", "session-img-"))})
+            && args[0] === "wx" && existsSync(${JSON.stringify(blockedImageWrites)})) {
+          throw Object.assign(new Error("test image storage denied"), { code: "EACCES" });
+        }
+        return open(path, ...args);
+      };
+      syncBuiltinESMExports();
+    }
     if (${Boolean(options.draftCase)}) {
       const { AgentTui } = await import(${JSON.stringify(new URL("../../../agent-core/tui.ts", import.meta.url).href)});
       Object.defineProperty(process.stdin, "isTTY", { value: true });
@@ -187,8 +203,7 @@ async function steeringScenario(
       expect(await appendPendingImages(events, "term-steering", [{ id: "steer", mediaType: "image/png", bytes: Buffer.from("steering image") }]))
         .toMatchObject({ ok: true });
     }
-    const blockedImages = options.failedImage ? Array.from({ length: 99 }, (_, i) => join(events, "core-steering", "current", `session-img-${i + 1}.png`)) : [];
-    for (const file of blockedImages) writeFileSync(file, "occupied");
+    if (options.failedImage) writeFileSync(blockedImageWrites, "deny image creation");
     if (lines.length > 0) submitInput(lines.join("\n") + "\n");
     await waitFor(() => rows(sidecarFile).filter(row => row.t === "steer_input").length >= Math.min(lines.length, 16));
     allowPreflight = true;
@@ -230,7 +245,7 @@ async function steeringScenario(
       child.stdin.write("\n");
       await waitFor(() => output.split("queued messages retained").length >= 3);
       expect(rows(sidecarFile).filter(row => row.t === "agent_start")).toHaveLength(1);
-      for (const file of blockedImages) rmSync(file);
+      rmSync(blockedImageWrites);
       child.stdin.write("\n");
     }
     if (mode === "children") {

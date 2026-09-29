@@ -8,8 +8,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { ACK_ID } from "./context.ts";
-import { MAX_IMAGE_BYTES, MAX_PENDING_IMAGES, MAX_PENDING_IMAGE_BATCH_BYTES, PENDING_IMAGE_NAME, cleanupStaleRecords, emptyClaim, extForMedia, isAllowedMediaType, isClaimName, isSafeImageName, listAdoptableClaims, loadClaimImage, pathExists, pendingImagesPath, queueError, queueFail, queuedImageCount, readImageRecord, rollbackTransaction, unlinkRegular, withPendingImageLock, writeExclusiveFile } from "./images.ts";
-import type { ImageRef, LoadedImage, PendingImageClaimResult, PendingImageInput, PendingImageMediaType, PendingImageResult, PendingImageStateResult, ProducerTx } from "./images.ts";
+import { MAX_IMAGE_BYTES, MAX_PENDING_IMAGES, MAX_PENDING_IMAGE_BATCH_BYTES, PENDING_IMAGE_NAME, extForMedia, isAllowedMediaType, isSafeImageName, type ImageRef, type LoadedImage, type PendingImageMediaType } from "./image-types.ts";
+import { cleanupStaleRecords, emptyClaim, isClaimName, listAdoptableClaims, loadClaimImage, pathExists, pendingImagesPath, queueError, queueFail, queuedImageCount, readImageRecord, rollbackTransaction, unlinkRegular, withPendingImageLock, writeExclusiveFile } from "./images.ts";
+import type { PendingImageClaimResult, PendingImageInput, PendingImageResult, PendingImageStateResult, ProducerTx } from "./images.ts";
 
 
 export async function appendPendingImages(

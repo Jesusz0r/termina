@@ -72,6 +72,8 @@ use store_tx::{
 use trust::op_trust_hashes;
 
 mod repo;
+#[cfg(test)]
+mod test_fixture;
 use repo::{
     op_git_common_dir, op_git_head, op_git_object_format, op_git_top_level, op_ls_ignored,
     op_ls_tracked, op_repo_diff, op_repo_file, op_repo_status, op_repo_tree,

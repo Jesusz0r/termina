@@ -67,11 +67,12 @@ describe("pty-terminal queues (refs #195)", () => {
     const { term, view } = hollow();
     const exits: boolean[] = [];
     const sent: number[] = [];
+    const stopping = vi.fn();
     const runtime = new TerminalRuntime({
       sendChunk: (_id, _generation, _window, _renderer, seq) => { sent.push(seq); return true; },
       sendExit: () => true,
       isDisposed: () => false, shouldAdmitSidecar: () => true,
-      onSidecarEvent() {}, onSidecarError() {}, onPtyExitBeforeRelease() {},
+      onSidecarEvent() {}, onSidecarError() {}, onPtyStopping: stopping, onPtyExitBeforeRelease() {},
       onPtyExitAfterRelease: (_inst, _target, details) => { exits.push(details.drained); },
     }, { maxQueueChunks: 2, flushIntervalMs: 0 });
     const inst = { id: "term-1", generation: 1, pty: term, closed: false, exitHandled: false, notePtyOutput() {} } as unknown as AgentTerminalInstance;
@@ -81,9 +82,12 @@ describe("pty-terminal queues (refs #195)", () => {
       view.pendingOutput.push({ data: "x".repeat(192 * 1024), offset: 0 });
       view.flushOutput();
       expect(view.pendingOutput).toHaveLength(1);
+      expect(term.hasExited).toBe(false);
       view.exited = true;
       view.pendingExitCode = 0;
       term.onNativeExit();
+      expect(term.hasExited).toBe(true);
+      expect(stopping).toHaveBeenCalledExactlyOnceWith(inst);
       view.flushOutput();
       await vi.advanceTimersByTimeAsync(9000);
       expect(runtime.get(inst.id)).toBe(inst);

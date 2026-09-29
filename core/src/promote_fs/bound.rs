@@ -298,47 +298,33 @@ pub(crate) fn open_or_create_promotion_parent(
 #[cfg(test)]
 mod open_or_create_promotion_parent_tests {
     use super::open_or_create_promotion_parent;
+    use crate::test_fixture::TestTempDir;
     use crate::util::stat_file;
     use std::ffi::CString;
     use std::fs;
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SEQ: AtomicU64 = AtomicU64::new(0);
 
     struct DirFixture {
         path: PathBuf,
         root: fs::File,
+        _dir: TestTempDir,
     }
 
     impl DirFixture {
         fn new() -> Self {
-            loop {
-                let path = std::env::temp_dir().join(format!(
-                    "termina-promote-parent-{}-{}",
-                    std::process::id(),
-                    SEQ.fetch_add(1, Ordering::Relaxed)
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => {
-                        let root = fs::OpenOptions::new()
-                            .read(true)
-                            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                            .open(&path)
-                            .expect("open promotion parent fixture root");
-                        return Self { path, root };
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => panic!("create promotion parent fixture: {error}"),
-                }
+            let dir = TestTempDir::new("promote-parent");
+            let path = dir.path().to_path_buf();
+            let root = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&path)
+                .expect("open promotion parent fixture root");
+            Self {
+                path,
+                root,
+                _dir: dir,
             }
-        }
-    }
-
-    impl Drop for DirFixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
         }
     }
 

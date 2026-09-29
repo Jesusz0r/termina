@@ -7,6 +7,8 @@
  * applies these decisions (persist, splice, summarize calls).
  */
 
+import { toolResultText } from "./tool-output.ts";
+
 /** Minimal message shape planners need; the loop's Message is assignable. */
 interface CompactionBlock {
   type: string;
@@ -240,11 +242,12 @@ export function serializeForSummary(messages: readonly CompactionMessage[]): str
       } else if (b.type === "tool_use" || b.type === "server_tool_use") {
         parts.push(`[${role} tool call]: ${b.name}(${summaryValue(b.input, 300)})`);
       } else if (b.type === "tool_result" && !b.stubbed) {
-        parts.push(`[Tool result]: ${summaryValue(b.content, 500)}`);
+        const text = Array.isArray(b.content) ? toolResultText(b.content) : summaryValue(b.content, 500);
+        parts.push(`[Tool result]: ${text.slice(0, 500)}`);
       } else if (b.type === "web_search_tool_result") {
         parts.push(`[Search evidence]: ${summaryValue(b.content, 800)}`);
       } else if (b.type === "image") {
-        parts.push(`[${role} image]: ${summaryValue(b.source, 160)}`);
+        parts.push(`[${role} image]: [image omitted from text summary]`);
       }
     }
   }

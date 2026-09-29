@@ -35,7 +35,15 @@ function toCompletionsTools(tools: ToolDef[]): Array<Record<string, unknown>> {
 }
 
 
+export function hasToolResultImages(b: Record<string, unknown>): boolean {
+  return b.type === "tool_result" && Array.isArray(b.content)
+    && b.content.some(part => part && typeof part === "object" && part.type === "image");
+}
+
+
 export function blockText(b: Record<string, unknown>): string {
+  // Text-only mappers must never silently discard a tool's observation.
+  if (hasToolResultImages(b)) throw new Error("provider protocol error: tool-result images are not supported by this text-only mapper");
   if (typeof b.text === "string") return b.text;
   if (typeof b.content === "string") return b.content;
   if (Array.isArray(b.content)) {

@@ -12,6 +12,7 @@ import {
   GREP_BYTE_CAP,
   BoundedTextAccumulator,
   boundedToolResult,
+  cappedSearchIsError,
   logicalToolText,
   type CompletionState,
   type ToolTextResult,
@@ -126,6 +127,16 @@ function forEachGrepLine(
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+}
+
+/** Count only parseable `file:line:text` rows. A partial stdout chunk is not a hit. */
+export function grepStdoutHitCount(raw: string): number {
+  if (!raw) return 0;
+  let count = 0;
+  for (const row of raw.split("\n")) {
+    if (parseGrepRow(row)) count++;
+  }
+  return count;
 }
 
 function parseGrepRow(row: string): { file: string; line: number; text: string } | null {
@@ -386,8 +397,9 @@ function grepRipgrep(
       let body = "";
       if (timedOut) {
         state = "timeout";
-        isError = true;
-        body = text ? `${formatGrepHits(text)}\n(grep timed out)` : "(grep timed out)";
+        const hits = grepStdoutHitCount(text);
+        isError = cappedSearchIsError(state, hits);
+        body = hits > 0 ? `${formatGrepHits(text)}\n(grep timed out)` : "(grep timed out)";
       } else if (stopCallbackFailed) {
         state = "failed";
         isError = true;
@@ -402,12 +414,17 @@ function grepRipgrep(
         body = `error: ${stderrResult.text || "could not start ripgrep"}`;
       } else if (killedForOutput) {
         // The process was stopped only because its display stream reached the
-        // output cap; this is a complete search with an intentionally clipped
-        // page, not a provider/tool failure.
-        state = "complete";
-        body = text
-          ? `${formatGrepHits(text)}\n(more matching files not listed)`
-          : "(output clipped before results arrived)";
+        // output cap. A page of hits is a clipped success. No parseable hit
+        // is not a finished search and must not look like "no matches".
+        const hits = grepStdoutHitCount(text);
+        if (hits > 0) {
+          state = "complete";
+          body = `${formatGrepHits(text)}\n(more matching files not listed)`;
+        } else {
+          state = "failed";
+          isError = true;
+          body = "(output clipped before results arrived)";
+        }
       } else if (code === 2) {
         // ripgrep exit codes are a stable documented contract: 0 = match,
         // 1 = no match, 2 = error. Keep partial hits like the timeout and
@@ -570,17 +587,16 @@ export async function grepFiles(
     }
     if (lineState.state === "unreadable" && state === "complete") state = "unreadable";
   }
-  const stateError = state !== "complete";
   if (hits.length === 0) {
     const stateDesc = state === "timeout" ? "timed out" : state;
     const body = state === "complete"
       ? lineTruncated ? "(no matches in retained line prefixes; some lines were truncated)" : GREP_NO_MATCHES_PREFIX
       : `(grep ${stateDesc} after ${scanned} files)`;
-    const needsContinuation = stateError || lineTruncated;
+    const needsContinuation = state !== "complete" || lineTruncated;
     const result = logicalToolText(body, {
       maxBytes: GREP_BYTE_CAP,
       state,
-      isError: stateError,
+      isError: cappedSearchIsError(state, 0),
       forceMarker: needsContinuation,
       marker: needsContinuation ? continuation : "",
       continuation: needsContinuation ? continuation : null,
@@ -595,11 +611,11 @@ export async function grepFiles(
   if (state !== "complete") extra.push(`(grep ${state === "timeout" ? "timed out" : state} after ${scanned} files)`);
   if (lineTruncated) extra.push("(some matching lines were truncated)");
   const body = extra.length > 0 ? `${formatted}\n${extra.join("\n")}` : formatted;
-  const needsContinuation = stateError || fileCap || hitCap || lineTruncated;
+  const needsContinuation = state !== "complete" || fileCap || hitCap || lineTruncated;
   const result = logicalToolText(body, {
     maxBytes: GREP_BYTE_CAP,
     state,
-    isError: stateError,
+    isError: cappedSearchIsError(state, hits.length),
     forceMarker: needsContinuation,
     marker: needsContinuation ? continuation : "",
     continuation: needsContinuation ? continuation : null,

@@ -12,6 +12,7 @@ import { rankFileTags } from "../tui-text.ts";
 import {
   GREP_BYTE_CAP,
   boundedToolResult,
+  cappedSearchIsError,
   logicalToolText,
   type CompletionState,
   type ToolTextResult,
@@ -700,7 +701,7 @@ export async function globFiles(
   const result = logicalToolText(body, {
     maxBytes: GREP_BYTE_CAP,
     state: collected.state,
-    isError: incomplete,
+    isError: cappedSearchIsError(collected.state, visible.length),
     forceMarker: needsContinuation,
     marker: needsContinuation ? `${hasMore ? "(more matching files not listed)\n" : ""}${continuation}` : "",
     continuation: needsContinuation ? continuation : null,

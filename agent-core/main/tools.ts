@@ -5,7 +5,7 @@
  */
 import type { McpCancellationScope, McpContinuation } from "../mcp.ts";
 import { isGrepNoMatches } from "../stall.ts";
-import { genericToolText, utf8TextSuffix, type BoundedText, type ToolTextResult } from "../tool-output.ts";
+import { genericToolText, toolResultContent, toolResultText, utf8TextSuffix, type BoundedText, type ToolOutput, type ToolResultContent } from "../tool-output.ts";
 import { isReplaceAll } from "./file-ops.ts";
 import { shellQuote } from "./files.ts";
 import { boundedSidecarEdits } from "./sidecar.ts";
@@ -67,7 +67,7 @@ export interface ToolOutcome {
   signal?: string | null;
 }
 
-export function toolResult(use: ToolUse, content: string): Record<string, unknown> {
+export function toolResult(use: ToolUse, content: ToolResultContent): Record<string, unknown> {
   return { type: "tool_result", tool_use_id: use.id, content };
 }
 
@@ -86,7 +86,7 @@ function boundedMetadata(value: BoundedText): BoundedOutcomeMetadata {
 
 export function done(
   use: ToolUse,
-  value: string | (ToolTextResult & { cancellationScope?: McpCancellationScope }),
+  value: string | (ToolOutput & { cancellationScope?: McpCancellationScope }),
   isError?: boolean,
 ): ToolOutcome {
   const cancellationScope = typeof value === "string" ? undefined : value.cancellationScope;
@@ -94,7 +94,7 @@ export function done(
     ? Object.freeze({ ...genericToolText(value, isError === true), repro: reproFor(use) ?? null })
     : value;
   return {
-    result: toolResult(use, output.content),
+    result: toolResult(use, toolResultContent(output)),
     isError: output.isError,
     bounded: boundedMetadata(output),
     continuation: output.continuation ?? null,
@@ -195,7 +195,7 @@ export function capDisplay(text: string, maxBytes: number): string {
 }
 
 export function formatToolFollowup(use: ToolUse, outcome: Pick<ToolOutcome, "result" | "isError" | "bounded" | "executed">): string {
-  const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
+  const content = toolResultText(outcome.result.content);
   const state = outcome.bounded?.state;
   const incomplete = state !== undefined && state !== "complete" && state !== "failed";
   const status = outcome.executed === false ? "not executed" : incomplete ? `incomplete (${state})` : outcome.isError ? "failed" : "done";
@@ -227,7 +227,7 @@ export function displayToolOutput(content: string): string {
 }
 
 export function toolTranscriptOutput(use: ToolUse, outcome: ToolOutcome): string {
-  const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
+  const content = toolResultText(outcome.result.content);
   const output = displayToolOutput(content);
   if (outcome.isError || outcome.executed === false) return output;
   // Display the applied input, not a reconstructed file diff. Each side is

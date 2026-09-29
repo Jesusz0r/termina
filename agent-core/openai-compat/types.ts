@@ -6,6 +6,13 @@
  */
 
 
+/** Only first-party protocols whose image tool-result wire shape is verified. */
+export function supportsToolResultImages(provider: string, protocol: string): boolean {
+  return (provider === "anthropic" && protocol === "anthropic-messages")
+    || (provider === "openai" && protocol === "openai-responses");
+}
+
+
 export type ToolDef = {
   name: string;
   description: string;
