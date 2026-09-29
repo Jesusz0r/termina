@@ -1,7 +1,7 @@
 {
   "name": "termina",
   "productName": "Termina",
-  "version": "0.1.60",
+  "version": "0.1.61",
   "description": "Hybrid terminal/editor: prompt an agentic coding agent in a terminal, watch it edit files live in a Monaco (VS Code) editor, click modified files to inspect them.",
   "repository": {
     "type": "git",
@@ -35,6 +35,11 @@
     "test": "pnpm run typecheck && pnpm run test:unit",
     "test:spikes": "pnpm run test:native && pnpm run spike -- platform",
     "test:e2e": "playwright test",
+    "test:browser-poc": "playwright test tests/e2e/browser-poc.spec.ts --workers=1 --retries=0",
+    "test:computer-macos": "swift test --package-path native/computer-use/macos && native/computer-use/macos/.build/debug/termina-computer-fixture --self-test && node --experimental-strip-types scripts/computer-use-macos-smoke.ts",
+    "test:computer-macos-live": "swift build --package-path native/computer-use/macos && node --experimental-strip-types scripts/computer-use-macos-live.ts --allow-fixture-capture",
+    "test:computer-macos-control-live": "swift build --package-path native/computer-use/macos && node --experimental-strip-types scripts/computer-use-macos-control-live.ts --allow-fixture-input",
+    "test:computer-default-browser-live": "swift build --package-path native/computer-use/macos && node --experimental-strip-types scripts/computer-use-default-browser-live.ts --allow-default-browser-capture",
     "spike": "node --experimental-strip-types scripts/spike.ts"
   },
   "dependencies": {
