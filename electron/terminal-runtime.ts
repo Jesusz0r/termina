@@ -69,8 +69,10 @@ export interface TerminalRuntimeHost {
   shouldAdmitSidecar(terminalId: string): boolean;
   onSidecarEvent(terminalId: string, event: SidecarEvent): void | Promise<void>;
   onSidecarError(error: Error, event: SidecarEvent): void;
-  /** Revoke live authority on close/exit, before output drain. May be repeated. */
-  onPtyStopping(inst: AgentTerminalInstance): void;
+  /** Revoke live authority on close/exit, before output drain. May be repeated.
+   * Optional: hosts without live-authority consumers (e.g. no computer
+   * control) simply omit it. */
+  onPtyStopping?(inst: AgentTerminalInstance): void;
   /** Still in the map: capture owner, expire preflights, fold exit, discard session. */
   onPtyExitBeforeRelease(
     inst: AgentTerminalInstance,
@@ -257,7 +259,7 @@ export class TerminalRuntime {
     inst.pty.onNativeExit = () => {
       if (inst.exitHandled || exitDeadline !== null || this.terminals.get(inst.id) !== inst) return;
       exitDeadline = Date.now() + PTY_EXIT_DRAIN_TIMEOUT_MS;
-      this.host.onPtyStopping(inst);
+      this.host.onPtyStopping?.(inst);
       // Do not finish egress yet: that closes admission to the source tail.
       // Cancel the unadmitted tail only when the shared deadline expires.
       const cancelTail = () => {
@@ -270,7 +272,7 @@ export class TerminalRuntime {
     inst.pty.onExit = async (code: number, origin: "native" | "forced" = "native") => {
       if (inst.exitHandled) return;
       inst.exitHandled = true;
-      if (exitDeadline === null) this.host.onPtyStopping(inst);
+      if (exitDeadline === null) this.host.onPtyStopping?.(inst);
       if (sourceDrainTimer !== null) clearTimeout(sourceDrainTimer);
       this.pendingSourceDrains.delete(inst);
       const remaining = exitDeadline === null ? PTY_EXIT_DRAIN_TIMEOUT_MS : Math.max(0, exitDeadline - Date.now());
@@ -315,7 +317,7 @@ export class TerminalRuntime {
     const inst = this.terminals.get(id);
     if (!inst || inst.closed) return inst;
     inst.closed = true;
-    this.host.onPtyStopping(inst);
+    this.host.onPtyStopping?.(inst);
     this.egress.cancel(id, inst.generation);
     return inst;
   }
