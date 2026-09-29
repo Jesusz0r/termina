@@ -1,4 +1,10 @@
 //! #251: non-UTF8 Git paths must fail the op, never drop or forge entries.
+//!
+//! macOS note: APFS refuses fixture files with non-UTF8 names (EILSEQ at
+//! creation), so these tests fail at fixture setup on macOS before reaching
+//! core code. That is environmental, not a product regression: Linux CI
+//! carries the real coverage for this invariant. Do not silence them with
+//! `#[ignore]` on macOS; that would drop the coverage instead of documenting it.
 
 mod common;
 
