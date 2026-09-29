@@ -301,6 +301,121 @@ export default async function run(log: (msg: string) => void) {
       (lstatSync(join(restored, "exec.sh")).mode & 0o111) !== 0,
   );
 
+  // --------------------------------- materialize kill-and-retry convergence
+  // A killed materialize must never poison its target: candidates launch
+  // only after a successful return, and teardown/sweep never re-admits a
+  // torn tree. Retry from the same state must converge byte-exact, no
+  // matter where the kill landed: before the first write, inside the
+  // destructive stale removal, or mid-write.
+  const verifyMaterialized = (target: string): boolean => {
+    for (const [rel, exp] of Object.entries(expected)) {
+      let st;
+      try {
+        st = lstatSync(join(target, rel));
+      } catch {
+        return false;
+      }
+      if (exp.symlink !== undefined) {
+        if (!st.isSymbolicLink() || readlinkSync(join(target, rel)) !== exp.symlink) return false;
+        continue;
+      }
+      if (st.isSymbolicLink() || !st.isFile()) return false;
+      const modeOk = exp.mode === "100755" ? (st.mode & 0o111) !== 0 : (st.mode & 0o111) === 0;
+      if (!modeOk || (exp.bytes !== undefined && !readFileSync(join(target, rel)).equals(exp.bytes))) return false;
+    }
+    return true;
+  };
+  const rawMaterialize = async (target: string, extra: Record<string, unknown> = {}) => {
+    // The payload carries the opened binding, like the typed client: the
+    // core authenticates the target descriptor, never the pathname.
+    const binding = await boundPromotionOpenDirectory({ path: target, expectedIdentity: promotionIdentity(target) });
+    return startCoreRequest(corePayload(store, "materialize", {
+      stateId: state.commit,
+      targetDir: target,
+      boundRootIdentity: JSON.parse(JSON.stringify(binding)),
+      ...extra,
+    }));
+  };
+
+  // Kill at 0%: paused before the root is even opened, nothing written.
+  const killZero = join(work, "materialize-kill-zero");
+  mkdirSync(killZero, { recursive: true, mode: 0o700 });
+  const killZeroReady = join(work, "mat-kill-zero-ready");
+  const killZeroRelease = join(work, "mat-kill-zero-release");
+  const zeroReq = await rawMaterialize(killZero, {
+    testHook: { stage: "promotion-materialize-root-open", readyPath: killZeroReady, releasePath: killZeroRelease },
+  });
+  const zeroOutcome = zeroReq.settled.then(
+    () => "unexpected success",
+    () => "killed",
+  );
+  await waitForMarker(killZeroReady);
+  zeroReq.child.kill("SIGKILL");
+  check("a 0% materialize kill reports failure, not success", (await zeroOutcome) === "killed");
+  await materializeState(store, state.commit, killZero);
+  check("retry after a 0% kill converges byte-exact", verifyMaterialized(killZero));
+
+  // Kill inside the destructive stale removal: seed stale/wrong entries so
+  // the leaf-validated pause fires while removals are still in flight.
+  const killStale = join(work, "materialize-kill-stale");
+  mkdirSync(killStale, { recursive: true, mode: 0o700 });
+  writeFileSync(join(killStale, "stale.txt"), "stale\n");
+  writeFileSync(join(killStale, "tracked.txt"), "wrong\n");
+  const killStaleReady = join(work, "mat-kill-stale-ready");
+  const killStaleRelease = join(work, "mat-kill-stale-release");
+  const staleReq = await rawMaterialize(killStale, {
+    testHook: { stage: "promotion-materialize-leaf-validated", readyPath: killStaleReady, releasePath: killStaleRelease },
+  });
+  const staleOutcome = staleReq.settled.then(
+    () => "unexpected success",
+    () => "killed",
+  );
+  await waitForMarker(killStaleReady);
+  staleReq.child.kill("SIGKILL");
+  check("a stale-phase materialize kill reports failure, not success", (await staleOutcome) === "killed");
+  await materializeState(store, state.commit, killStale);
+  check(
+    "retry after a stale-phase kill removes stale paths and converges byte-exact",
+    !existsSync(join(killStale, "stale.txt")) && verifyMaterialized(killStale),
+  );
+
+  // Kill mid-write: no pause hook exists in the write loop, so land a timed
+  // kill and prove it landed mid-write (a strict partial target) before the
+  // retry. Bounded attempts with fresh targets; failing to land one is a
+  // loud failure, never a silent pass.
+  const countPresent = (target: string) =>
+    Object.keys(expected).filter((rel) => existsSync(join(target, rel))).length;
+  let midWriteTarget: string | null = null;
+  // Adaptive delay: overshoot (completed) halves it, undershoot (nothing
+  // written yet) doubles it. The partial-target proof below is what makes
+  // a landed kill count, not the delay value.
+  let delayMs = 100;
+  for (let attempt = 0; attempt < 7 && !midWriteTarget; attempt++) {
+    const candidate = join(work, `materialize-kill-mid-${attempt}`);
+    mkdirSync(candidate, { recursive: true, mode: 0o700 });
+    const req = await rawMaterialize(candidate);
+    const outcome = req.settled.then(
+      () => "completed",
+      () => "killed",
+    );
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    req.child.kill("SIGKILL");
+    const result = await outcome;
+    const present = countPresent(candidate);
+    if (result === "killed" && present > 0 && present < Object.keys(expected).length) {
+      midWriteTarget = candidate;
+    } else {
+      rmSync(candidate, { recursive: true, force: true });
+      delayMs = result === "completed" ? Math.max(10, Math.floor(delayMs / 2)) : Math.min(1000, delayMs * 2);
+    }
+  }
+  check("a timed kill landed mid-write (strict partial target)", midWriteTarget !== null);
+  if (midWriteTarget) {
+    check("the mid-write kill interrupted convergence (not byte-exact)", !verifyMaterialized(midWriteTarget));
+    await materializeState(store, state.commit, midWriteTarget);
+    check("retry after a mid-write kill converges byte-exact", verifyMaterialized(midWriteTarget));
+  }
+
   // ------------------------------------------------------------ blob dedupe
   writeFileSync(join(repo, "dup-a.txt"), "same bytes\n");
   writeFileSync(join(repo, "dup-b.txt"), "same bytes\n");

@@ -172,7 +172,7 @@ try {
   const changedNames = () => git(["diff", "--name-only", baseOid]).split("\\n").filter(Boolean).sort();
   const expectChanged = (label, lo, hi) => {
     const names = changedNames();
-    const expected = Array.from({ length: hi - lo }, (_, k) => \`file-\${lo + k}.ts\`);
+    const expected = Array.from({ length: hi - lo }, (_, k) => \`file-\${lo + k}.ts\`).sort();
     if (names.length !== expected.length || names.some((name, k) => name !== expected[k])) {
       throw new Error(\`\${label} worktree diverged from its branch: \${names.length} changed files\`);
     }
