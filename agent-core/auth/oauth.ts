@@ -15,9 +15,6 @@ import { GITHUB_ACCESS_TOKEN_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_TOKEN
 import { AUTH_REQUEST_CANCELLED, authFetch, authHttpError, isAuthHttpFailure, postForm, postJson } from "./http.ts";
 import { modifyProvider, parseStoredCredential, readAuth, refreshFlights, type AuthWriteOpts } from "./store.ts";
 
-const EXPIRE_MARGIN_MS = 300_000;
-
-
 function sleepAsync(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -306,15 +303,13 @@ async function pollDeviceGrant<T extends object>(
 }
 
 
-function intervalMs(value: unknown, fallback: number, min: number): number {
-  const seconds = Number(value);
+function intervalMs(seconds: number, fallback: number, min: number): number {
   if (!Number.isFinite(seconds) || seconds < 0) return Math.max(fallback, min);
   return Math.max(seconds * 1000, min);
 }
 
 
-function positiveMs(value: unknown, fallback: number): number {
-  const seconds = Number(value);
+function positiveMs(seconds: number, fallback: number): number {
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : fallback;
 }
 
@@ -497,14 +492,7 @@ export async function exchangeGithubCopilotToken(
     }
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
     const apiUrl = validateCopilotApiUrl(parsed.apiUrl ?? "") || providerDefinition("github-copilot").baseUrl;
-    let expires = Date.now() + 25 * 60 * 1000;
-    const expiresAt = parsed.expiresAt;
-    if (expiresAt !== null) {
-      expires = (expiresAt > 1_000_000_000_000 ? expiresAt : expiresAt * 1000) - EXPIRE_MARGIN_MS;
-    } else if (parsed.refreshIn !== null) {
-      expires = Date.now() + parsed.refreshIn * 1000 - EXPIRE_MARGIN_MS;
-    }
-    return { ok: true, access: parsed.access, expires, apiUrl };
+    return { ok: true, access: parsed.access, expires: parsed.expires, apiUrl };
   } catch (error) {
     return { ok: false, error: authHttpError(error) ?? "Copilot session token failed" };
   }

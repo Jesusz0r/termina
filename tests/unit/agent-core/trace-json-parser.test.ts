@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createAttemptRecord, createTaskSettledRecord, parseTraceLinkIndex, parseTraceManifest, parseTraceRecord } from "../../../agent-core/trace.ts";
 import { toolOutcomes } from "../../../agent-core/trace/normalize.ts";
+import { MAX_TOOL_OUTCOMES } from "../../../agent-core/trace/schema.ts";
 
 const attempt = createAttemptRecord({
   runId: "run-1", taskId: "task-1", attemptId: "attempt-1", role: "main",
@@ -8,7 +9,7 @@ const attempt = createAttemptRecord({
 });
 
 describe("canonical trace JSON parser", () => {
-  it.each([null, 42, "trace", []])("rejects non-object trace %j", (value) => {
+  it.each([null, 42, "trace", []].map((value) => ({ value })))("rejects non-object trace $value", ({ value }) => {
     expect(parseTraceRecord(value)).toBeNull();
     expect(parseTraceManifest(value)).toBeNull();
     expect(parseTraceLinkIndex(value)).toBeNull();
@@ -46,6 +47,19 @@ describe("canonical trace JSON parser", () => {
   it("does not turn malformed or negative exit codes into passing checks", () => {
     expect(() => toolOutcomes([{ toolName: "bash", exitCode: "bad" }])).toThrow(/exitCode/);
     expect(toolOutcomes([{ toolName: "bash", exitCode: -1 }])[0]?.exitCode).toBe(-1);
+  });
+
+  it("rejects oversized stored outcome arrays instead of truncating evidence", () => {
+    const prefix = Array.from({ length: MAX_TOOL_OUTCOMES }, () => ({ toolName: "read_file", isError: false }));
+    const bounded = parseTraceRecord({ ...attempt, toolOutcomes: prefix });
+    expect(bounded?.recordType === "attempt" && bounded.toolOutcomes.length).toBe(MAX_TOOL_OUTCOMES);
+    for (const tail of [
+      { toolName: "edit", isError: false },
+      { toolName: "bash", isError: false, exitCode: 0 },
+      { toolName: "edit", isError: false, exitCode: "bad" },
+    ]) {
+      expect(parseTraceRecord({ ...attempt, toolOutcomes: [...prefix, tail] })).toBeNull();
+    }
   });
 
   it("rejects malformed edit metadata instead of erasing the edit outcome", () => {

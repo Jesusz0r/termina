@@ -552,6 +552,9 @@ export function parseTraceRecord(value: unknown): StoredTraceRecord | null {
   try {
     if (recordType === "attempt") {
       if (!validExistingId(value.attemptId)) return null;
+      const rawToolOutcomes = value.toolOutcomes;
+      // Stored evidence must be complete. The write-side cap cannot truncate it.
+      if (Array.isArray(rawToolOutcomes) && rawToolOutcomes.length > MAX_TOOL_OUTCOMES) return null;
       const role = value.role === undefined || value.role === null ? null : isExistingTraceRole(value.role) ? value.role : undefined;
       const parentAttemptId = storedLink(value.parentAttemptId);
       const retryOfAttemptId = storedLink(value.retryOfAttemptId);
@@ -575,7 +578,7 @@ export function parseTraceRecord(value: unknown): StoredTraceRecord | null {
         startedAtMs: nullableNumber(value.startedAtMs), endedAtMs: nullableNumber(value.endedAtMs),
         ttftMs: nullableNumber(value.ttftMs), turnMs: nullableNumber(value.turnMs),
         usage: usage(usageValue), cost: cost(costValue), cache: cache(cacheValue),
-        toolOutcomes: toolOutcomes(value.toolOutcomes), reclaimEvidence: reclaimEvidence(value.reclaimEvidence),
+        toolOutcomes: toolOutcomes(rawToolOutcomes), reclaimEvidence: reclaimEvidence(value.reclaimEvidence),
         revisions: revisions(revisionsValue), wasteTokens: nullableNumber(value.wasteTokens),
         wasteCause: optionalText(value.wasteCause, "wasteCause"), providerError: optionalText(value.providerError, "providerError"),
         sessionLengthBucket: optionalText(value.sessionLengthBucket, "sessionLengthBucket"),

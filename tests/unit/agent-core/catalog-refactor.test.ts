@@ -80,6 +80,30 @@ describe("catalog provider policy composition", () => {
     }] }, "anthropic")).toEqual([{ id: "claude-haiku-4-5" }]);
   });
 
+  it("does not coerce unused Copilot limits for other providers or top-level contexts", () => {
+    const capabilities = { limits: { max_context_window_tokens: { toString: "malformed" } } };
+    expect(parseModelsPayload({ data: [{ id: "gpt-4o", context_length: 128000, capabilities }] }, "openai"))
+      .toEqual([{ id: "gpt-4o", context: 128000 }]);
+    expect(parseModelsPayload({ data: [{ id: "gpt-4o", context_length: 96000, capabilities }] }, "github-copilot"))
+      .toEqual([{ id: "gpt-4o", context: 96000 }]);
+    expect(parseModelsPayload({ data: [{ id: "gpt-4o", visibility: "hide", capabilities }] }, "openai-codex"))
+      .toEqual([]);
+  });
+
+  it.each([true, [128000], {}, { toString: "malformed" }].map((value) => ({ value })))("rejects non-scalar numeric metadata $value without coercion", ({ value }) => {
+    expect(parseModelsPayload({ data: [{ id: "gpt-4o", capabilities: { limits: { max_prompt_tokens: value } } }] }, "github-copilot"))
+      .toEqual([{ id: "gpt-4o" }]);
+    expect(parseModelsPayload({ data: [{ id: "gpt-4o", context_length: value, top_provider: { max_completion_tokens: value } }] }, "openai"))
+      .toEqual([{ id: "gpt-4o" }]);
+  });
+
+  it("preserves numeric-string catalog limits", () => {
+    expect(parseModelsPayload({ data: [{ id: "gpt-4o", capabilities: { limits: { max_prompt_tokens: "32000" } } }] }, "github-copilot"))
+      .toEqual([{ id: "gpt-4o", context: 32000 }]);
+    expect(parseModelsPayload({ data: [{ id: "gpt-4o", context_length: "128000", top_provider: { max_completion_tokens: "64000" } }] }, "openai"))
+      .toEqual([{ id: "gpt-4o", context: 128000, outputLimit: 64000 }]);
+  });
+
   it("keeps empty advertised endpoints distinct from absent metadata", () => {
     expect(parseModelsPayload({ data: [
       { id: "gpt-empty", supported_endpoints: ["/unknown"] },

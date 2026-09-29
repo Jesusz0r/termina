@@ -21,11 +21,11 @@ describe("comparison manifest parser", () => {
     expect(parsed?.uncertainSessionArtifacts[0]).not.toBe(artifact);
   });
 
-  it.each([null, [], "candidate", 1])("rejects non-object candidate %j", (value) => {
+  it.each([null, [], "candidate", 1].map((value) => ({ value })))("rejects non-object candidate $value", ({ value }) => {
     expect(parseComparisonManifest({ ...manifest, candidates: { A: value } })).toBeNull();
   });
 
-  it.each([null, [], "artifact", 1])("rejects non-object artifact %j", (value) => {
+  it.each([null, [], "artifact", 1].map((value) => ({ value })))("rejects non-object artifact $value", ({ value }) => {
     expect(parseComparisonManifest({ ...manifest, uncertainSessionArtifacts: [value] })).toBeNull();
   });
 

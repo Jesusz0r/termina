@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createTaskSettledRecord } from "../../../agent-core/trace.ts";
-import { NO_QUIET_WINS_CLASS } from "../../../agent-core/trace/schema.ts";
+import { MAX_TOOL_OUTCOMES, NO_QUIET_WINS_CLASS } from "../../../agent-core/trace/schema.ts";
 import { toolOutcomes } from "../../../agent-core/trace/normalize.ts";
 import {
   applyNoQuietWins,
@@ -168,6 +168,28 @@ describe("No Quiet Wins class (#237)", () => {
       writeFileSync(join(root, "turn-1.json"), JSON.stringify({
         schemaVersion: 2, recordType: "attempt", attemptId: "fixture-1", runId: "run-a", taskId: "task-a",
         toolOutcomes: [{ toolName: "edit", isError: false, exitCode: "bad" }],
+      }));
+      const collected = collectTaskToolOutcomes(root, "run-a", "task-a");
+      expect(collected).toEqual({ readable: false, outcomes: [] });
+      expect(applyNoQuietWins("success", collected.readable ? collected.outcomes : null)).toEqual({
+        status: "failure", criticalClass: "No Quiet Wins",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { tail: { toolName: "edit", isError: false } },
+    { tail: { toolName: "bash", isError: false, exitCode: 0 } },
+    { tail: { toolName: "edit", isError: false, exitCode: "bad" } },
+  ])("fails closed when stored outcomes would truncate trailing evidence $tail", ({ tail }) => {
+    const root = mkdtempSync(join(tmpdir(), "termina-quiet-wins-oversized-"));
+    try {
+      const prefix = Array.from({ length: MAX_TOOL_OUTCOMES }, () => ({ toolName: "read_file", isError: false }));
+      writeFileSync(join(root, "turn-1.json"), JSON.stringify({
+        schemaVersion: 2, recordType: "attempt", attemptId: "fixture-1", runId: "run-a", taskId: "task-a",
+        toolOutcomes: [...prefix, tail],
       }));
       const collected = collectTaskToolOutcomes(root, "run-a", "task-a");
       expect(collected).toEqual({ readable: false, outcomes: [] });

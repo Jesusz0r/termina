@@ -288,6 +288,7 @@ export function includeEncryptedReasoning(provider: ProviderId, model: string): 
  * catalog-reported 4k window is valid (relay qwen spans 4k–10M).
  */
 export function acceptedContextWindow(raw: unknown): number | undefined {
+  if (typeof raw !== "number" && typeof raw !== "string") return undefined;
   const n = Math.floor(Number(raw));
   if (!Number.isFinite(n) || n <= 0) return undefined;
   return n;
@@ -295,6 +296,7 @@ export function acceptedContextWindow(raw: unknown): number | undefined {
 
 /** Accept a catalog-reported max-completion size. One owner for the 1k floor. */
 export function acceptedOutputLimit(raw: unknown): number | undefined {
+  if (typeof raw !== "number" && typeof raw !== "string") return undefined;
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 1_000) return undefined;
   return Math.floor(n);

@@ -5,7 +5,7 @@ import { parseSessionMessageLine } from "../../../electron/session-search.ts";
 const message = { role: "assistant", sseq: 1, content: [{ type: "tool_use", id: "call-1", name: "bash", input: { command: "pnpm run test:unit" } }] };
 
 describe("canonical session message parser", () => {
-  it.each([null, 42, "message", []])("rejects non-object message %j", (value) => {
+  it.each([null, 42, "message", []].map((value) => ({ value })))("rejects non-object message $value", ({ value }) => {
     expect(parseSessionMessage(value).ok).toBe(false);
     expect(parseStoredSessionRecord(value).ok).toBe(false);
   });

@@ -160,19 +160,18 @@ function parseModelRow(value: unknown, provider: ProviderId): ModelInfo | null {
   const policy = providerDefinition(provider).catalog;
   const capabilities = isRecord(row.capabilities) ? row.capabilities : undefined;
   const limits = isRecord(capabilities?.limits) ? capabilities.limits : undefined;
+  const genericContext = row.context_length ?? row.context_window ?? row.max_input_tokens ?? row.context;
   const policyRow: CatalogRow = {
     visibility: typeof row.visibility === "string" ? row.visibility : undefined,
-    copilotContext: acceptedContextWindow(Number(limits?.max_context_window_tokens ?? limits?.max_prompt_tokens)),
+    copilotContext: provider === "github-copilot" && genericContext == null
+      ? acceptedContextWindow(limits?.max_context_window_tokens ?? limits?.max_prompt_tokens) : undefined,
     supportedEndpoints: Array.isArray(row.supported_endpoints)
       ? row.supported_endpoints.filter((endpoint): endpoint is string => typeof endpoint === "string") : undefined,
   };
   if (policy.acceptsRow?.(policyRow) === false) return null;
   const codex = provider === "openai-codex"
     ? codexContext(acceptedContextWindow(row.context_window), acceptedContextWindow(row.max_context_window)) : null;
-  const genericContext = row.context_length ?? row.context_window ?? row.max_input_tokens ?? row.context
-    ?? policy.contextFallback?.(policyRow);
-  const contextRaw = Number(codex?.window ?? genericContext);
-  const context = acceptedContextWindow(contextRaw);
+  const context = acceptedContextWindow(codex?.window ?? genericContext ?? policy.contextFallback?.(policyRow));
   const contextCeiling = codex?.ceiling;
   const supportedEndpoints = policy.supportedEndpoints?.(policyRow);
   // Doc-confirmed metadata only: OpenRouter `top_provider.max_completion_tokens`
@@ -184,8 +183,7 @@ function parseModelRow(value: unknown, provider: ProviderId): ModelInfo | null {
   // Anthropic `capabilities.effort`
   // (https://platform.claude.com/docs/en/api/models/list).
   const topProvider = isRecord(row.top_provider) ? row.top_provider : undefined;
-  const outputRaw = Number(topProvider?.max_completion_tokens);
-  const outputLimit = acceptedOutputLimit(outputRaw);
+  const outputLimit = acceptedOutputLimit(topProvider?.max_completion_tokens);
   const reasoningLevels = provider === "anthropic" ? anthropicEffortLevels(capabilities?.effort)
     : catalogReasoningLevels(provider === "openai-codex" ? row.supported_reasoning_levels
       : provider === "xai" ? capabilities?.reasoning_effort : undefined);
