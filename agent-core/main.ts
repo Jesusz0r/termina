@@ -497,7 +497,8 @@ const eventsDir = sessionEnvironment.TERMINA_EVENTS_DIR ?? "";
 const rawTerminalId = sessionEnvironment.TERMINA_TERMINAL_ID ?? "";
 const terminalId = isValidTerminalId(rawTerminalId) ? rawTerminalId : "";
 const sessionId = sessionEnvironment.TERMINA_CORE_SESSION_ID?.trim() || terminalId;
-/** Stable for one logical session boundary; rotated by /clear/quarantine. */
+/** Derived from the session id. `/clear` keeps that id, so it keeps this pin.
+ *  Quarantine still rotates it. */
 let cacheSeed = cacheSessionSeed(sessionId);
 const cacheGate = createCacheCapabilityGate({
   protocolFor: providerProtocol,
@@ -4933,6 +4934,11 @@ export function testOnlyPermissionMode(): PermissionMode {
   return permissionMode;
 }
 
+/** Test seam: provider routing pin. `/clear` must not change it. */
+export function testOnlyCacheRoutingKey(provider: ProviderId, model: string): string | null {
+  return cacheIdentityForRole("main", provider, model)?.key ?? null;
+}
+
 /** Test seam: persist one record against the live writer (covers /clear sequence reset). */
 export function testOnlyPersist(entry: Record<string, unknown> = { type: "checkpoint" }): SessionResult<{ storageSeq: number }> {
   try {
@@ -4944,14 +4950,15 @@ export function testOnlyPersist(entry: Record<string, unknown> = { type: "checkp
 
 /** Live-view reset shared by /clear success and its writer-open failure path.
  *  Conversation history, usage, and pending child-approval pickers go;
- *  permissionMode stays on the terminal. */
+ *  permissionMode stays. The cache pin stays too: it is the session id, and
+ *  `/clear` does not change that id. */
 function resetLiveSessionState(): void {
   storageSeq = 0;
   planPublishPending = false;
   history.length = 0;
   lastHandoff = null;
   clearSubagentApprovals();
-  rotateCacheSession();
+  resetCacheContinuity();
   sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
   lastUsd = null;
   postRevision = false;

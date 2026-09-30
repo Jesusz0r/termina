@@ -51,9 +51,11 @@ function normalizedCacheText(value: unknown): string | null {
  *
  * Durable identifiers are retained only in memory and are always hashed by
  * `deriveCacheIdentityKey`. Missing/whitespace identifiers receive a fresh
- * process-local seed; callers must reuse it for the lifetime of the boundary
- * and call this again after `/clear` or another new-session transition.
- * Invalid control-bearing identifiers fail closed with an empty seed.
+ * process-local seed. Reuse the durable seed for the lifetime of that
+ * session id, including across `/clear`, because `/clear` does not change
+ * the id. Call this again with no id only for a broken boundary such as a
+ * quarantined resume. Invalid control-bearing identifiers fail closed with
+ * an empty seed.
  */
 export function cacheSessionSeed(session: string | null | undefined): string {
   if (typeof session === "string" && CACHE_CONTROL_RE.test(session)) return "";
