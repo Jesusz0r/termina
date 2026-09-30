@@ -19,6 +19,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/compact", hint: "session · reclaim and summarize context" },
   { name: "/plan", hint: "session · write a Plan Board list" },
   { name: "/skills", hint: "session · pick a skill to follow" },
+  { name: "/mcp", hint: "session · list, add, or reconnect MCP servers" },
   { name: "/effort", hint: "model · show or set reasoning effort" },
   { name: "/permissions", hint: "danger · set bash approval policy" },
   { name: "/exit", hint: "danger · quit the engine" },

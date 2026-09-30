@@ -25,9 +25,31 @@ export class McpTransportError extends Error {
 }
 
 
+export class McpHttpStatusError extends Error {
+  readonly status: number;
+  constructor(name: string, status: number) {
+    super(`mcp ${name} HTTP ${status}`);
+    this.name = "McpHttpStatusError";
+    this.status = status;
+  }
+}
+
+
+export type McpServerState = "connected" | "failed" | "needs-authentication";
+
+
+export type McpServerReport = {
+  name: string;
+  state: McpServerState;
+  tools: number;
+};
+
+
 export type McpSession = {
   tools: McpClientTool[];
   notes: string[];
+  /** Handshake result for each server this connect attempted. Not inferred from notes. */
+  servers: readonly McpServerReport[];
   call(
     name: string,
     args: unknown,
@@ -324,10 +346,10 @@ class McpHttp implements McpConn {
         } catch {
           /* drain */
         }
-        throw new Error(`mcp ${this.name} HTTP ${res.status}`);
+        throw new McpHttpStatusError(this.name, res.status);
       }
       const text = await readCappedBody(res, MCP_HTTP_BODY_BYTES, this.name);
-      if (res.status < 200 || res.status >= 300) throw new Error(`mcp ${this.name} HTTP ${res.status}`);
+      if (res.status < 200 || res.status >= 300) throw new McpHttpStatusError(this.name, res.status);
       const ctype = res.headers.get("content-type") ?? "";
       const msg = ctype.includes("text/event-stream") ? parseSseRpc(text, id) : (JSON.parse(text) as RpcMsg);
       if (msg.error) throw rpcError(this.name, msg.error);
@@ -483,46 +505,48 @@ export async function startMcp(
     proc: McpConn | null;
     tools: McpClientTool[];
     note: string;
+    state: McpServerState;
   }> => {
     if (cfg.url) {
       const bad = mcpHttpUrlError(cfg.url);
       if (bad) {
-        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${bad}` };
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${bad}`, state: "failed" };
       }
       let hopHost: string;
       try {
         hopHost = new URL(cfg.url).hostname;
       } catch {
-        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: error: invalid URL` };
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: error: invalid URL`, state: "failed" };
       }
       // Startup shares the handshake deadline: a stuck resolver must not
       // delay MCP setup past it, and late answers are ignored (#159).
       const resolved = await resolvedHostError(hopHost, { signal: AbortSignal.timeout(MCP_HANDSHAKE_MS) });
       if (resolved) {
-        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${resolved}` };
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${resolved}`, state: "failed" };
       }
       const proc = new McpHttp(cfg.name, cfg.url, cfg.headers ?? {});
       try {
         const tools = await handshake(proc);
-        return { cfg, proc, tools, note: "" };
+        return { cfg, proc, tools, note: "", state: "connected" };
       } catch (err) {
         proc.kill();
         const why = err instanceof Error ? err.message : String(err);
-        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}` };
+        const state = err instanceof McpHttpStatusError && err.status === 401 ? "needs-authentication" : "failed";
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}`, state };
       }
     }
     const cwd = opts.confineCwd(cfg.cwd);
-    if (!cwd) return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: cwd is outside the project` };
+    if (!cwd) return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: cwd is outside the project`, state: "failed" };
     const proc = new McpProcess(cfg.name);
     try {
       proc.start(cfg, cwd, mcpEnv(cfg.env));
       const tools = await handshake(proc);
-      return { cfg, proc, tools, note: "" };
+      return { cfg, proc, tools, note: "", state: "connected" };
     } catch (err) {
       proc.kill();
       const extra = proc.stderrTail();
       const why = err instanceof Error ? err.message : String(err);
-      return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}${extra ? ` (${extra.slice(0, 200)})` : ""}` };
+      return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}${extra ? ` (${extra.slice(0, 200)})` : ""}`, state: "failed" };
     }
   };
 
@@ -588,6 +612,7 @@ export async function startMcp(
   return {
     tools,
     notes,
+    servers: started.map((row) => ({ name: row.cfg.name, state: row.state, tools: row.tools.length })),
     async call(name, args, callOpts) {
       const hit = byPrefixed.get(name);
       if (!hit) return mcpErrorResult(`error: unknown tool ${name}`);
