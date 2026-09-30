@@ -5,8 +5,10 @@
  * Split from agent-core/mcp.ts (issue #38).
  */
 import { outboundUrlError } from "../main/url.ts";
+import { durableAtomicWrite } from "../../shared/durable-write.ts";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 
 export const MAX_MCP_SERVERS = 8;
@@ -181,4 +183,158 @@ export function jailMcpCwd(projectRoot: string, requested: string | undefined): 
 
 export function userMcpPath(home: string): string {
   return join(home, ".termina", "agent", "mcp.json");
+}
+
+
+export type McpInventoryEntry = {
+  name: string;
+  disabled: boolean;
+  transport: "stdio" | "http" | "invalid";
+  /** Credential posture only. Never a header value, env value, or query string. */
+  auth: "header" | "env" | "none";
+  /** Command name or URL host. Not args, path, or query. */
+  target: string;
+  problem: string | null;
+};
+
+
+export type McpConfigEdit =
+  | { op: "add-http"; name: string; url: string }
+  | { op: "add-stdio"; name: string; command: string; args: string[] }
+  | { op: "remove" | "disable" | "enable"; name: string };
+
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+
+function mcpServerNameError(name: string): string | null {
+  if (!name || name.length > 64 || /[\0\n\r\s]/.test(name)) return "server name must be 1-64 characters without whitespace";
+  return null;
+}
+
+
+function publicHttpTarget(url: string): string {
+  try {
+    return new URL(url).host || "http";
+  } catch {
+    return "http";
+  }
+}
+
+
+function authPosture(rec: Record<string, unknown>): McpInventoryEntry["auth"] {
+  if (isRecord(rec.headers)) {
+    for (const key of Object.keys(rec.headers)) {
+      if (key.toLowerCase() === "authorization" && typeof rec.headers[key] === "string" && rec.headers[key]) return "header";
+    }
+  }
+  if (isRecord(rec.env) && Object.keys(rec.env).length > 0) return "env";
+  return "none";
+}
+
+
+/** Every configured server, including disabled and invalid entries the connect path skips. */
+export function inspectMcpConfig(raw: unknown): McpInventoryEntry[] {
+  if (!isRecord(raw) || !isRecord(raw.mcpServers)) return [];
+  const rows: McpInventoryEntry[] = [];
+  for (const [name, rec] of Object.entries(raw.mcpServers)) {
+    if (!isRecord(rec)) {
+      rows.push({ name, disabled: false, transport: "invalid", auth: "none", target: "", problem: "server entry is not an object" });
+      continue;
+    }
+    const disabled = rec.disabled === true;
+    const url = typeof rec.url === "string" ? rec.url.trim() : "";
+    const httpType = rec.type === "http" || rec.type === "sse";
+    if (url || httpType) {
+      const problem = !url ? "missing URL" : mcpHttpUrlError(url);
+      rows.push({
+        name,
+        disabled,
+        transport: problem ? "invalid" : "http",
+        auth: authPosture(rec),
+        target: url ? publicHttpTarget(url) : "http",
+        problem,
+      });
+      continue;
+    }
+    const command = typeof rec.command === "string" ? rec.command.trim() : "";
+    if (!command) {
+      rows.push({ name, disabled, transport: "invalid", auth: authPosture(rec), target: "", problem: "missing command" });
+      continue;
+    }
+    rows.push({ name, disabled, transport: "stdio", auth: authPosture(rec), target: command, problem: null });
+  }
+  return rows;
+}
+
+
+function enabledCount(raw: unknown): number {
+  return inspectMcpConfig(raw).filter((row) => !row.disabled && row.transport !== "invalid").length;
+}
+
+
+function configRoot(raw: unknown): Record<string, unknown> {
+  const root = isRecord(raw) ? { ...raw } : {};
+  root.mcpServers = isRecord(root.mcpServers) ? { ...root.mcpServers } : {};
+  return root;
+}
+
+
+/** Return a new config object. Does not write. Refuses a ninth enabled server. */
+export function editMcpConfig(raw: unknown, edit: McpConfigEdit): { ok: true; value: unknown } | { ok: false; error: string } {
+  const nameError = mcpServerNameError(edit.name);
+  if (nameError) return { ok: false, error: nameError };
+  const root = configRoot(raw);
+  const servers = root.mcpServers as Record<string, unknown>;
+  const existing = servers[edit.name];
+  if (edit.op === "remove") {
+    if (!isRecord(existing)) return { ok: false, error: `no MCP server ${edit.name}` };
+    delete servers[edit.name];
+    return { ok: true, value: root };
+  }
+  if (edit.op === "disable" || edit.op === "enable") {
+    if (!isRecord(existing)) return { ok: false, error: `no MCP server ${edit.name}` };
+    if (edit.op === "enable" && existing.disabled !== true) return { ok: false, error: `${edit.name} is already enabled` };
+    if (edit.op === "disable" && existing.disabled === true) return { ok: false, error: `${edit.name} is already disabled` };
+    if (edit.op === "enable" && enabledCount(raw) >= MAX_MCP_SERVERS) return { ok: false, error: `at most ${MAX_MCP_SERVERS} MCP servers can be enabled` };
+    servers[edit.name] = { ...existing, ...(edit.op === "disable" ? { disabled: true } : { disabled: undefined }) };
+    if (edit.op === "enable") delete (servers[edit.name] as Record<string, unknown>).disabled;
+    return { ok: true, value: root };
+  }
+  if (isRecord(existing)) return { ok: false, error: `${edit.name} already exists; remove it first` };
+  if (enabledCount(raw) >= MAX_MCP_SERVERS) return { ok: false, error: `at most ${MAX_MCP_SERVERS} MCP servers can be enabled` };
+  if (edit.op === "add-http") {
+    const urlError = mcpHttpUrlError(edit.url);
+    if (urlError) return { ok: false, error: urlError };
+    servers[edit.name] = { type: "http", url: edit.url };
+    return { ok: true, value: root };
+  }
+  if (!edit.command || edit.command.length > 512 || /[\0\n]/.test(edit.command)) return { ok: false, error: "invalid MCP command" };
+  if (edit.args.length > 32 || edit.args.some((arg) => arg.length > 4096 || /[\0]/.test(arg))) return { ok: false, error: "invalid MCP arguments" };
+  servers[edit.name] = { command: edit.command, args: edit.args };
+  return { ok: true, value: root };
+}
+
+
+export function readMcpConfigFile(path: string): { ok: true; value: unknown; missing: boolean } | { ok: false; error: string } {
+  try {
+    const info = statSync(path);
+    if (!info.isFile()) return { ok: false, error: "MCP config is not a file" };
+    if (info.size > MAX_MCP_JSON_BYTES) return { ok: false, error: "MCP config exceeds its size cap" };
+    if (info.size === 0) return { ok: true, value: { mcpServers: {} }, missing: false };
+    return { ok: true, value: JSON.parse(readFileSync(path, "utf8")) as unknown, missing: false };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { ok: true, value: { mcpServers: {} }, missing: true };
+    if (err instanceof SyntaxError) return { ok: false, error: "MCP config is not valid JSON" };
+    return { ok: false, error: "cannot read MCP config" };
+  }
+}
+
+
+export async function writeMcpConfigFile(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await durableAtomicWrite(path, `${JSON.stringify(value, null, 2)}\n`);
 }

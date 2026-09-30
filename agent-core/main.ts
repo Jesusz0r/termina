@@ -328,6 +328,12 @@ import {
 import {
   jailMcpCwd,
   loadMcpConfigs,
+  editMcpConfig,
+  formatMcpStatus,
+  inspectMcpConfig,
+  parseMcpSlash,
+  readMcpConfigFile,
+  writeMcpConfigFile,
   callDiscoveredMcpTool,
   mcpClientTools,
   searchMcpTools,
@@ -2009,6 +2015,74 @@ async function connectMcp(): Promise<void> {
     syncIndicators();
     out(`(MCP unavailable; built-in tools remain: ${error instanceof Error ? error.message : String(error)})\n`);
   }
+}
+
+function printMcpStatus(): void {
+  const file = readMcpConfigFile(userMcpPath(homedir()));
+  if (!file.ok) {
+    out(`(${file.error})\n`);
+    return;
+  }
+  out(`${formatMcpStatus(inspectMcpConfig(file.value), mcpSession?.servers ?? null)}\n`);
+}
+
+function startMcpCommand(line: string): void {
+  const parsed = parseMcpSlash(line);
+  if ("error" in parsed) {
+    out(`${parsed.error}\n`);
+    showPrompt();
+    return;
+  }
+  if (parsed.action === "list") {
+    printMcpStatus();
+    showPrompt();
+    return;
+  }
+  if (engineBusy()) {
+    out("(engine busy)\n");
+    showPrompt();
+    return;
+  }
+  const reconnect = (): void => {
+    mcpBusy = true;
+    showPrompt();
+    void connectMcp().finally(() => {
+      printMcpStatus();
+      mcpBusy = false;
+      showPrompt();
+      drainQueuedLine();
+    });
+  };
+  if (parsed.action === "reconnect") {
+    reconnect();
+    return;
+  }
+  const path = userMcpPath(homedir());
+  const file = readMcpConfigFile(path);
+  if (!file.ok) {
+    out(`(${file.error})\n`);
+    showPrompt();
+    return;
+  }
+  const edited = editMcpConfig(file.value, parsed.edit);
+  if (!edited.ok) {
+    out(`(${edited.error})\n`);
+    showPrompt();
+    return;
+  }
+  mcpBusy = true;
+  showPrompt();
+  void writeMcpConfigFile(path, edited.value).then(() => {
+    out(`(mcp ${parsed.edit.op} ${parsed.edit.name})\n`);
+    return connectMcp();
+  }).catch((error: unknown) => {
+    out(`(could not update MCP config: ${error instanceof Error ? error.message : String(error)})\n`);
+  }).finally(() => {
+    printMcpStatus();
+    mcpBusy = false;
+    showPrompt();
+    drainQueuedLine();
+  });
 }
 
 /** Provider-executed search. Same Anthropic key as the model. No Brave key. */
@@ -5782,6 +5856,10 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
   }
   if (line === "/models" || line.startsWith("/models ") || line === "/model" || line.startsWith("/model ")) {
     startCatalogCommand(line);
+    return;
+  }
+  if (line === "/mcp" || line.startsWith("/mcp ")) {
+    startMcpCommand(line);
     return;
   }
   if (line === "/permissions") {
