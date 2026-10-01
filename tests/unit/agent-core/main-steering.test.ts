@@ -59,6 +59,7 @@ async function steeringScenario(
     writeFileSync(server, `
       import { createInterface } from "node:readline";
       import { writeFileSync } from "node:fs";
+      writeFileSync("mcp-started", "started");
       createInterface({ input: process.stdin }).on("line", line => {
         const request = JSON.parse(line);
         if (request.id === undefined) return;
@@ -591,6 +592,7 @@ describe("/plan tool admission", () => {
         expect(result.content).toContain("not executed on a /plan turn");
       }
       expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("original\n");
+      expect(existsSync(join(project, "mcp-started"))).toBe(true);
       for (const file of ["created.txt", "second.txt", "bash-called", "mcp-called"]) {
         expect(existsSync(join(project, file)), file).toBe(false);
       }
@@ -600,9 +602,64 @@ describe("/plan tool admission", () => {
       expect(events.filter(row => row.t === "plan")[0].text).toContain("Plan:");
       expect(expectPaired(messages)).toHaveLength(allowed.length + actions.length);
     }, {
-      initialLine: "/plan inspect file.txt", mcp: true, textWithTools: true,
+      initialLine: "/plan use fixture to inspect file.txt", mcp: true, textWithTools: true,
       replies: ["Plan:\n- [ ] edit file.txt\n"],
       toolsByTurn: [[...allowed, ...actions], [{ name: "write_file", input: { path: "second.txt", content: "wrong" } }], []],
+    });
+  });
+
+  it("does not start an unnamed MCP server while allowing reads and refusing writes", async () => {
+    await steeringScenario("final", [], ({ project, requests, messages, events }) => {
+      expectOneRun(events);
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        expect(request.tools.some((tool: Row) => ["search_mcp_tools", "call_mcp_tool"].includes(tool.name))).toBe(false);
+      }
+      const results = toolResults(messages);
+      expect(results).toHaveLength(2);
+      expect(results[0].is_error).not.toBe(true);
+      expect(results[0].content).toContain("original");
+      expect(results[1]).toMatchObject({ is_error: true });
+      expect(results[1].content).toContain("not executed on a /plan turn");
+      expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("original\n");
+      for (const file of ["mcp-started", "mcp-called", "created.txt"]) {
+        expect(existsSync(join(project, file)), file).toBe(false);
+      }
+      expect(expectPaired(messages)).toHaveLength(2);
+    }, {
+      initialLine: "/plan inspect file.txt", mcp: true, textWithTools: true,
+      replies: ["Plan:\n- [ ] inspect file.txt\n"],
+      toolsByTurn: [[
+        { name: "read_file", input: { path: "file.txt" } },
+        { name: "write_file", input: { path: "created.txt", content: "wrong" } },
+      ], []],
+    });
+  });
+
+  it("allows a later implementation request to execute and verify a connected MCP tool", async () => {
+    await steeringScenario("final", [], ({ project, requests, messages, events }) => {
+      expect(events.filter(row => row.t === "agent_start")).toHaveLength(2);
+      expect(requests).toHaveLength(4);
+      const results = toolResults(messages);
+      expect(results).toHaveLength(3);
+      expect(results.every(result => result.is_error !== true)).toBe(true);
+      expect(results[0].content).toContain("mcp_fixture_write");
+      expect(results[1].content).toBe("executed");
+      expect(results[2].content).toContain("[exit 0]");
+      expect(readFileSync(join(project, "mcp-called"), "utf8")).toBe("executed");
+      expect(expectPaired(messages)).toHaveLength(1);
+      const implementation = messages.findIndex(message => message.role === "user"
+        && JSON.stringify(message.content).includes("Implement now using fixture"));
+      expect(implementation).toBeGreaterThan(-1);
+      expect(expectPaired(messages.slice(implementation))).toHaveLength(2);
+    }, {
+      initialLine: "/plan use fixture to inspect file.txt", mcp: true, textWithTools: true,
+      followUps: ["Implement now using fixture"], expectedRuns: 2,
+      replies: ["Plan:\n- [ ] use fixture after approval\n"],
+      toolsByTurn: [[{ name: "search_mcp_tools", input: { query: "fixture" } }], [], [
+        { name: "call_mcp_tool", input: { name: "mcp_fixture_write", arguments: {} } },
+        { name: "bash", input: { command: "test \"$(cat mcp-called)\" = executed" } },
+      ], []],
     });
   });
 
