@@ -310,6 +310,16 @@ not fill the board. A `/plan` turn publishes its reply; if that reply only
 asks what to plan, later replies keep publishing until one contains the
 list. The list stays until the next `/plan` or `/clear`.
 
+A `/plan` request can read files, search, fetch a URL, and discover available
+MCP tools. It cannot edit files, run shell commands, call MCP tools, or spawn
+or redirect a worker. Producing a task list
+does not unlock those tools during that request. Send an ordinary message
+such as “implement this plan” to allow implementation; this works even if a
+plan list is still owed. A new ordinary message can also steer an active
+planning run at its next safe boundary. `/clear` (or `/new`) resets both the
+planning restriction and pending plan publication. This restriction applies
+to the agent's tools, not manual editor changes or clicking Dispatch.
+
 ### Dispatching tasks
 
 - **Click any pending task** to send it to a parallel worker — a separate

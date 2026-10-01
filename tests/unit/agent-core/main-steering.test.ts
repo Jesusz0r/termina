@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { appendPendingImages, pendingImageState } from "../../../agent-core/host.ts";
 import { appendSubagentOutboxMessage } from "../../../agent-core/subagents.ts";
 import { OwnedProcessTree } from "../../e2e/owned-processes.ts";
@@ -42,12 +42,38 @@ async function steeringScenario(
     failedServer?: boolean;
     followUps?: string[];
     replies?: string[];
+    toolsByTurn?: Array<Array<{ name: string; input: Record<string, unknown> }>>;
+    mcp?: boolean;
+    textWithTools?: boolean;
+    resetBeforeFollowUp?: "/clear" | "/new";
   } = {},
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "termina-steering-"));
   const project = join(root, "project"), home = join(root, "home"), events = join(root, "events");
   for (const dir of [project, home, events]) mkdirSync(dir);
   writeFileSync(join(project, "file.txt"), "original\n");
+  if (options.mcp) {
+    const config = join(home, ".termina", "agent");
+    mkdirSync(config, { recursive: true });
+    const server = join(project, "mcp-server.mjs");
+    writeFileSync(server, `
+      import { createInterface } from "node:readline";
+      import { writeFileSync } from "node:fs";
+      createInterface({ input: process.stdin }).on("line", line => {
+        const request = JSON.parse(line);
+        if (request.id === undefined) return;
+        let result = {};
+        if (request.method === "initialize") result = { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "fixture", version: "1" } };
+        if (request.method === "tools/list") result = { tools: [{ name: "write", inputSchema: { type: "object", properties: {} } }] };
+        if (request.method === "tools/call") {
+          writeFileSync("mcp-called", "executed");
+          result = { content: [{ type: "text", text: "executed" }] };
+        }
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+      });
+    `);
+    writeFileSync(join(config, "mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: [server] } } }));
+  }
   const sessionFile = join(events, "core-steering", "current", "session.jsonl");
   const requestsFile = join(root, "requests.jsonl");
   const sidecarFile = join(events, "term-steering.jsonl");
@@ -88,6 +114,7 @@ async function steeringScenario(
     }
     let turn = 0;
     const planReplies = ${JSON.stringify(options.replies ?? null)};
+    const scriptedTools = ${JSON.stringify(options.toolsByTurn ?? null)};
     globalThis.fetch = async (input, init) => {
       if (String(input) === "https://models.dev/api.json") return new Response("{}", { status: 200 });
       if (++turn > 8) throw new Error("test request bound exceeded");
@@ -114,7 +141,7 @@ async function steeringScenario(
           status: 200, headers: { "content-type": "text/event-stream" },
         });
       }
-      const calls = turn === 1 && ${JSON.stringify(mode)} === "children" ? [
+      const calls = scriptedTools ? scriptedTools[turn - 1] ?? [] : turn === 1 && ${JSON.stringify(mode)} === "children" ? [
         { name: "spawn_subagent", input: { task: "first background job" } },
         { name: "spawn_subagent", input: { task: "second background job" } },
       ] : turn === 1 && ${JSON.stringify(mode)} !== "final" ? [
@@ -127,7 +154,7 @@ async function steeringScenario(
         call_id: "call-" + turn + "-" + i, name: call.name, arguments: JSON.stringify(call.input) }));
       const events = items.map(item => ({ type: "response.output_item.done", item }));
       const reply = Array.isArray(planReplies) && typeof planReplies[turn - 1] === "string" ? planReplies[turn - 1] : "finished";
-      if (!items.length) events.push({ type: "response.output_text.delta", delta: reply });
+      if (!items.length || ${Boolean(options.textWithTools)}) events.unshift({ type: "response.output_text.delta", delta: reply });
       events.push({ type: "response.completed", response: { status: "completed", output: items, usage: {} } });
       return new Response(events.map(event => "data: " + JSON.stringify(event) + "\\n\\n").join(""), {
         status: 200, headers: { "content-type": "text/event-stream" },
@@ -167,7 +194,11 @@ async function steeringScenario(
         && rows(sidecarFile).filter(event => event.t === "preflight_request")[1]?.requestId === row.requestId;
       if (secondPreflight && !rejectQueuedAdmission) continue;
       const ack = join(events, `ack-term-steering-${row.requestId}.json`);
-      if (!existsSync(ack)) writeFileSync(ack, JSON.stringify(secondPreflight ? { ok: false, error: "test admission failure" } : { ok: true }), { mode: 0o600 });
+      if (!existsSync(ack)) {
+        // Match host publication: the child must never observe partial JSON.
+        writeFileSync(ack + ".tmp", JSON.stringify(secondPreflight ? { ok: false, error: "test admission failure" } : { ok: true }), { mode: 0o600 });
+        renameSync(ack + ".tmp", ack);
+      }
     }
     if (mode === "children") {
       for (const id of ["bg-1", "bg-2"]) {
@@ -260,6 +291,13 @@ async function steeringScenario(
     let followUpRun = 1;
     for (const followUp of options.followUps ?? []) {
       await waitFor(() => rows(sidecarFile).filter(row => row.t === "checkpoint_result").length >= followUpRun);
+      if (followUpRun === 1 && options.resetBeforeFollowUp) {
+        // checkpoint_result precedes async trace settlement; /clear is only
+        // admitted once the final non-TTY prompt confirms the engine is idle.
+        await waitFor(() => output.endsWith("\n> "));
+        submitInput(options.resetBeforeFollowUp + "\n");
+        await waitFor(() => output.includes("session cleared"));
+      }
       submitInput(followUp + "\n");
       followUpRun += 1;
     }
@@ -286,6 +324,11 @@ async function steeringScenario(
     await withDeadline(closed, 5_000);
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+function toolResults(messages: Row[]): Row[] {
+  return messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
+    .filter(block => block.type === "tool_result");
 }
 
 function expectOneRun(events: Row[]): void {
@@ -512,6 +555,111 @@ describe("interactive conversation steering", () => {
         .flatMap(message => typeof message.content === "string" ? [message.content]
           : message.content.filter((block: Row) => block.type === "text").map((block: Row) => block.text));
       expect(delivered.slice(1)).toEqual(lines.slice(0, 16));
+    });
+  });
+});
+
+describe("/plan tool admission", () => {
+  it("allows reads and discovery but refuses every effectful entry even after publishing a list", async () => {
+    const allowed = [
+      { name: "read_file", input: { path: "file.txt" } },
+      { name: "read_files", input: { paths: ["file.txt"] } },
+      { name: "grep", input: { pattern: "original", path: "file.txt" } },
+      { name: "glob", input: { pattern: "*.txt" } },
+      { name: "search_mcp_tools", input: { query: "fixture" } },
+    ];
+    const denied = [
+      { name: "write_file", input: { path: "created.txt", content: "wrong" } },
+      { name: "edit", input: { path: "file.txt", old_text: "original", new_text: "wrong" } },
+      { name: "bash", input: { command: "printf wrong > bash-called" } },
+      { name: "spawn_subagent", input: { task: "write created.txt", paths: ["created.txt"] } },
+      { name: "message_subagent", input: { run_id: "bg-1", text: "write created.txt" } },
+      { name: "call_mcp_tool", input: { name: "mcp_fixture_write", arguments: {} } },
+    ];
+    const actions = denied;
+    await steeringScenario("final", [], ({ project, requests, messages, events }) => {
+      expect(requests).toHaveLength(3);
+      for (const action of actions) expect(requests[0].tools.some((tool: Row) => tool.name === action.name)).toBe(true);
+      const results = toolResults(messages);
+      expect(results).toHaveLength(allowed.length + actions.length + 1);
+      for (const result of results.slice(0, allowed.length)) expect(result.is_error, result.content).not.toBe(true);
+      expect(results[0].content).toContain("original");
+      expect(results[2].content).toContain("original");
+      expect(results[4].content).toContain("mcp_fixture_write");
+      for (const result of results.slice(allowed.length)) {
+        expect(result.is_error).toBe(true);
+        expect(result.content).toContain("not executed on a /plan turn");
+      }
+      expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("original\n");
+      for (const file of ["created.txt", "second.txt", "bash-called", "mcp-called"]) {
+        expect(existsSync(join(project, file)), file).toBe(false);
+      }
+      expect(events.some(row => row.t === "subagent_spawn")).toBe(false);
+      const ends = events.filter(row => row.t === "tool_end");
+      for (const end of ends.slice(allowed.length)) expect(end.isError).toBe(true);
+      expect(events.filter(row => row.t === "plan")[0].text).toContain("Plan:");
+      expect(expectPaired(messages)).toHaveLength(allowed.length + actions.length);
+    }, {
+      initialLine: "/plan inspect file.txt", mcp: true, textWithTools: true,
+      replies: ["Plan:\n- [ ] edit file.txt\n"],
+      toolsByTurn: [[...allowed, ...actions], [{ name: "write_file", input: { path: "second.txt", content: "wrong" } }], []],
+    });
+  });
+
+  it.each(["What should I plan?", "Plan:\n- [ ] edit file.txt\n"])("does not lock the next implementation submit after %j", async reply => {
+    await steeringScenario("final", [], ({ project, requests, messages, events }) => {
+      expect(requests).toHaveLength(3);
+      expect(JSON.stringify(requests[1].input.at(-1))).toContain("implement now");
+      expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("implemented");
+      const results = toolResults(messages);
+      expect(results).toHaveLength(2);
+      expect(results.every(result => result.is_error !== true)).toBe(true);
+      expect(results[1].content).toContain("[exit 0]");
+      if (reply.startsWith("What")) expect(events.filter(row => row.t === "plan").length).toBeGreaterThan(1);
+    }, {
+      initialLine: "/plan", followUps: ["implement now"], expectedRuns: 2, replies: [reply],
+      toolsByTurn: [[], [
+        { name: "write_file", input: { path: "file.txt", content: "implemented" } },
+        { name: "bash", input: { command: "test \"$(cat file.txt)\" = implemented" } },
+      ], []],
+    });
+  });
+
+  it("clears the refusal when a new non-plan steering message becomes durable", async () => {
+    await steeringScenario("final", ["implement now"], ({ project, requests, messages, events }) => {
+      expectOneRun(events);
+      expect(requests).toHaveLength(3);
+      expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("implemented");
+      const results = toolResults(messages);
+      expect(results[0]).toMatchObject({ is_error: true });
+      expect(results[0].content).toContain("steering");
+      expect(results[1].is_error).not.toBe(true);
+    }, {
+      initialLine: "/plan", toolsByTurn: [
+        [{ name: "write_file", input: { path: "file.txt", content: "stale" } }],
+        [{ name: "write_file", input: { path: "file.txt", content: "implemented" } }], [],
+      ],
+    });
+  });
+
+  it("applies the refusal when a queued /plan command is eventually rewritten", async () => {
+    await steeringScenario("final", ["/plan queued"], ({ project, messages }) => {
+      expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("original\n");
+      const results = toolResults(messages);
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({ is_error: true });
+      expect(results[0].content).toContain("not executed on a /plan turn");
+    }, { expectedRuns: 2, toolsByTurn: [[], [{ name: "write_file", input: { path: "file.txt", content: "wrong" } }], []] });
+  });
+
+  it.each(["/clear", "/new"] as const)("clears pending planning state with %s before a normal request", async resetBeforeFollowUp => {
+    await steeringScenario("final", [], ({ project, requests, events }) => {
+      expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("implemented");
+      expect(JSON.stringify(requests[1].input)).not.toContain("Write a Plan Board list");
+      expect(events.filter(row => row.t === "plan").map(row => row.text)).toEqual(["What should I plan?"]);
+    }, {
+      initialLine: "/plan", followUps: ["implement now"], resetBeforeFollowUp, expectedRuns: 2, replies: ["What should I plan?"],
+      toolsByTurn: [[], [{ name: "write_file", input: { path: "file.txt", content: "implemented" } }], []],
     });
   });
 });

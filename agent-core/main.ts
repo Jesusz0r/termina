@@ -122,7 +122,7 @@ import {
   emptyToolLoopTracker,
   trackToolLoopTurn,
 } from "./stall.ts";
-import { providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
+import { READ_TOOLS, providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
 import { READ_TOOL_DEFS } from "./main/read-tools.ts";
 import {
   HIGH_WATER,
@@ -1704,6 +1704,11 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   const notExecuted = (text: string): ToolOutcome => ({ ...done(use, text, true), executed: false });
   if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
   if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
+  // MCP annotations, bash commands, and child briefs cannot establish read-only
+  // behavior. Admit only the existing observational tools and local MCP discovery.
+  if (planToolsRestricted && !READ_TOOLS.has(use.name) && use.name !== "search_mcp_tools") {
+    return notExecuted(`error: ${use.name} is not executed on a /plan turn. Only reads and search are allowed; submit a non-/plan request to implement.`);
+  }
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
     return done(use, got);
@@ -4290,14 +4295,20 @@ function abortPromptStart(message: string, draft?: string): void {
   showPrompt();
 }
 
+type PlanSubmission = { publish: boolean; rewrite: boolean };
+
 async function runPrompt(
   prompt: string,
   extraImages: Array<{ name: string; mediaType: string }> = [],
-  planTurn = false,
+  plan: PlanSubmission = { publish: false, rewrite: false },
   admission?: { queued: boolean; onCommitted: () => void },
 ): Promise<void> {
+  // Publication may carry over to a later user request, but tool refusal only
+  // belongs to an actual `/plan` rewrite. A parsed list never grants write access.
+  const planTurn = plan.publish;
+  planToolsRestricted = plan.rewrite;
   // Arm before early aborts so a failed `/plan` start still publishes the
-  // user's next reply. A list in this turn clears the flag.
+  // user's next reply. A list in this turn clears the publication flag only.
   if (planTurn) planPublishPending = true;
   const abortStart = (message: string): void => abortPromptStart(message, admission?.queued ? undefined : prompt);
   if (shutdownRequested) return;
@@ -5029,6 +5040,7 @@ export function testOnlyPersist(entry: Record<string, unknown> = { type: "checkp
 function resetLiveSessionState(): void {
   storageSeq = 0;
   planPublishPending = false;
+  planToolsRestricted = false;
   history.length = 0;
   lastHandoff = null;
   clearSubagentApprovals();
@@ -5351,6 +5363,8 @@ function printSkillPicker(): void {
 let running = false;
 /** After `/plan`, plain submits publish until a reply contains a task list. */
 let planPublishPending = false;
+/** An actual `/plan` rewrite refuses effectful tools until the next user request. */
+let planToolsRestricted = false;
 const queuedLines: string[] = [];
 const MAX_QUEUED_LINES = 16;
 let queueDrainBlocked = false;
@@ -5401,6 +5415,9 @@ async function drainSteeringLines(): Promise<boolean> {
     if (!prepared.ok) throw new SessionStoreError(prepared.error);
     if (interrupted) break;
     pushUserPrompt(expandFileTags(canonicalCwd, line), prepared.images);
+    // Steering is a new non-command user request, not an assistant-granted
+    // mode switch. Only clear the refusal after the message is durable.
+    planToolsRestricted = false;
     // Enqueue may have happened before agent_start or in a preceding run.
     // Invalidate replay for the run that actually receives this message too.
     sidecar.logEvent({ t: "steer_input", behavior: "steer" });
@@ -5431,7 +5448,7 @@ function queueTypedLine(line: string): void {
     : "(queued — steers at the next safe boundary)\n");
 }
 
-function submit(line: string, planTurn = false, commitQueuedLine?: () => void): void {
+function submit(line: string, plan: PlanSubmission = { publish: false, rewrite: false }, commitQueuedLine?: () => void): void {
   if (resumeBusy || mcpBusy) {
     out("(engine busy)\n");
     return;
@@ -5450,7 +5467,7 @@ function submit(line: string, planTurn = false, commitQueuedLine?: () => void): 
   queueDrainBlocked = false;
   // A rejected prompt promise must never kill the engine: the pty would
   // close and the terminal looks like it quit on the user.
-  void runPrompt(line, [], planTurn, {
+  void runPrompt(line, [], plan, {
     queued: commitQueuedLine !== undefined,
     onCommitted: () => { committed = true; commitQueuedLine?.(); },
   })
@@ -6016,7 +6033,7 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
       showPrompt();
       return;
     }
-    submit(planPrompt, true, commitQueuedLine);
+    submit(planPrompt, { publish: true, rewrite: true }, commitQueuedLine);
     showPrompt();
     return;
   }
@@ -6041,7 +6058,7 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
       showPrompt();
       return;
     }
-    submit(skillSlashSubmit(skillCmd.skill, skillCmd.request), false, commitQueuedLine);
+    submit(skillSlashSubmit(skillCmd.skill, skillCmd.request), { publish: false, rewrite: false }, commitQueuedLine);
     showPrompt();
     return;
   }
@@ -6068,7 +6085,7 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
     });
     return;
   }
-  submit(line, planPublishPending, commitQueuedLine);
+  submit(line, { publish: planPublishPending, rewrite: false }, commitQueuedLine);
   showPrompt();
 }
 
