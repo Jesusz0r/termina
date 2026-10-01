@@ -79,11 +79,25 @@ export function parseMcpSlash(line: string): McpSlash | { error: string } {
 }
 
 
+const MCP_NAME_TOKEN = /[^A-Za-z0-9]+/;
+
+/** Names a prompt actually says. Short names are ignored so ordinary words do not connect a server. */
+export function mcpServersNamedIn(text: string, names: readonly string[]): string[] {
+  const tokens = new Set(text.split(MCP_NAME_TOKEN).map((token) => token.toLowerCase()).filter((token) => token.length >= 3));
+  const found: string[] = [];
+  for (const name of names) {
+    if (name.length < 3 || !tokens.has(name.toLowerCase())) continue;
+    found.push(name);
+  }
+  return found;
+}
+
+
 export function formatMcpStatus(
   entries: readonly McpInventoryEntry[],
   servers: readonly McpServerReport[] | null,
 ): string {
-  const header = "MCP (~/.termina/agent/mcp.json)\nNo OAuth login. Put an Authorization header or env credential in that file.";
+  const header = "MCP (~/.termina/agent/mcp.json)\nA prompt that names a server connects it. /mcp reconnect connects all.\nNo OAuth login. Put an Authorization header or env credential in that file.";
   if (entries.length === 0) return `${header}\n(no MCP servers)`;
   const live = new Map((servers ?? []).map((server) => [server.name, server]));
   const lines = entries.map((entry) => {

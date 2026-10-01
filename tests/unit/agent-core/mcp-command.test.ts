@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { editMcpConfig, formatMcpStatus, inspectMcpConfig, parseMcpSlash, readMcpConfigFile, writeMcpConfigFile, type McpConfigEdit } from "../../../agent-core/mcp.ts";
+import { editMcpConfig, formatMcpStatus, inspectMcpConfig, mcpServersNamedIn, parseMcpSlash, readMcpConfigFile, writeMcpConfigFile, type McpConfigEdit } from "../../../agent-core/mcp.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -27,6 +27,13 @@ describe("/mcp config", () => {
     expect(text).not.toContain("secret");
     expect(text).not.toContain("Bearer");
     expect(text).toContain("No OAuth login");
+    expect(text).toContain("names a server");
+  });
+
+  it("connects only servers the prompt names", () => {
+    expect(mcpServersNamedIn("do something on vercel, then check inngest", ["vercel", "inngest", "blender"])).toEqual(["vercel", "inngest"]);
+    expect(mcpServersNamedIn("investigation notes", ["inngest"])).toEqual([]);
+    expect(mcpServersNamedIn("use ai", ["ai"])).toEqual([]);
   });
 
   it("parses add, remove, and reconnect without treating server flags as its own", () => {

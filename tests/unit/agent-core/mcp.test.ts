@@ -263,6 +263,56 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
         else process.env.TERMINA_CORE_TEST = originalTestFlag;
       }
     });
+
+    it("publishes a finished server before a slower one completes", async () => {
+      const originalTestFlag = process.env.TERMINA_CORE_TEST;
+      process.env.TERMINA_CORE_TEST = "1";
+      const server = createServer((req, res) => {
+        let raw = "";
+        req.on("data", (chunk) => { raw += chunk; });
+        req.on("end", () => {
+          const request = JSON.parse(raw || "{}");
+          const slow = req.url === "/slow";
+          const send = (): void => {
+            const result = request.method === "tools/list"
+              ? { tools: [{ name: slow ? "slow-tool" : "fast-tool", description: "t", inputSchema: { type: "object" } }] }
+              : { protocolVersion: mcp.MCP_PROTOCOL, capabilities: {}, serverInfo: { name: "t", version: "1" } };
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+          };
+          if (slow && request.method === "tools/list") setTimeout(send, 250);
+          else send();
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("loopback server did not bind");
+        const port = address.port;
+        let fastSeenBeforeSlow = false;
+        const session = await mcp.startMcp(
+          [
+            { name: "slow", args: [], env: {}, url: `http://127.0.0.1:${port}/slow` },
+            { name: "fast", args: [], env: {}, url: `http://127.0.0.1:${port}/fast` },
+          ],
+          {
+            projectRoot: ".",
+            confineCwd: () => ".",
+            onUpdate(partial) {
+              const names = partial.servers.map((row) => row.name);
+              if (names.includes("fast") && !names.includes("slow")) fastSeenBeforeSlow = true;
+            },
+          },
+        );
+        expect(fastSeenBeforeSlow).toBe(true);
+        expect(session.servers.map((row) => row.state)).toEqual(["connected", "connected"]);
+        session.shutdown();
+      } finally {
+        server.close();
+        if (originalTestFlag === undefined) delete process.env.TERMINA_CORE_TEST;
+        else process.env.TERMINA_CORE_TEST = originalTestFlag;
+      }
+    });
   });
 
   describe("MCP Bounded Output & Error Normalization", () => {

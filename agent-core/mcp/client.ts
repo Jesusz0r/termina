@@ -50,6 +50,8 @@ export type McpSession = {
   notes: string[];
   /** Handshake result for each server this connect attempted. Not inferred from notes. */
   servers: readonly McpServerReport[];
+  /** Connect servers that are not already up. Does not replace the session. */
+  connect(configs: readonly McpServerConfig[]): Promise<void>;
   call(
     name: string,
     args: unknown,
@@ -490,7 +492,12 @@ async function handshake(proc: McpConn): Promise<McpClientTool[]> {
 
 export async function startMcp(
   configs: McpServerConfig[],
-  opts: { projectRoot: string; confineCwd: (cwd: string | undefined) => string | null },
+  opts: {
+    projectRoot: string;
+    confineCwd: (cwd: string | undefined) => string | null;
+    /** Fired as each server finishes. The same session object grows until the promise resolves. */
+    onUpdate?: (session: McpSession) => void;
+  },
 ): Promise<McpSession> {
   const procs: McpConn[] = [];
   const discovered: McpClientTool[] = [];
@@ -550,15 +557,21 @@ export async function startMcp(
     }
   };
 
-  const started = await Promise.all(configs.slice(0, MAX_MCP_SERVERS).map(connectOne));
-  for (const row of started) {
-    if (row.note) notes.push(row.note);
-    if (!row.proc) continue;
-    procs.push(row.proc);
-    liveByServer.set(row.cfg.name, row.proc);
-    serverConfigs.set(row.cfg.name, row.cfg);
-    for (const tool of row.tools) discovered.push(tool);
-  }
+  const servers: McpServerReport[] = [];
+  const byPrefixed = new Map<string, { server: string; original: string }>();
+  let tools: McpClientTool[] = [];
+
+  const refreshCatalog = (): void => {
+    const normalized = normalizeMcpDiscovery(discovered);
+    for (const conflict of normalized.conflicts) {
+      if (!notes.includes(conflict)) notes.push(conflict);
+    }
+    tools = selectMcpTools(normalized.tools);
+    byPrefixed.clear();
+    for (const tool of tools) {
+      if (liveByServer.has(tool.server)) byPrefixed.set(tool.name, { server: tool.server, original: tool.original });
+    }
+  };
 
   const ensureLive = async (server: string): Promise<McpConn | null> => {
     const current = liveByServer.get(server);
@@ -601,18 +614,10 @@ export async function startMcp(
     return attempt;
   };
 
-  const normalized = normalizeMcpDiscovery(discovered);
-  notes.push(...normalized.conflicts);
-  const tools = selectMcpTools(normalized.tools);
-  const byPrefixed = new Map<string, { server: string; original: string }>();
-  for (const tool of tools) {
-    if (liveByServer.has(tool.server)) byPrefixed.set(tool.name, { server: tool.server, original: tool.original });
-  }
-
-  return {
-    tools,
+  const session: McpSession = {
+    get tools() { return tools; },
     notes,
-    servers: started.map((row) => ({ name: row.cfg.name, state: row.state, tools: row.tools.length })),
+    servers,
     async call(name, args, callOpts) {
       const hit = byPrefixed.get(name);
       if (!hit) return mcpErrorResult(`error: unknown tool ${name}`);
@@ -661,5 +666,39 @@ export async function startMcp(
       isShutdown = true;
       for (const proc of procs) proc.kill();
     },
+    async connect(next) {
+      const pending = next.filter((cfg) => !servers.some((row) => row.name === cfg.name && row.state === "connected"));
+      await Promise.all(pending.slice(0, MAX_MCP_SERVERS).map(async (cfg) => {
+        const row = await connectOne(cfg);
+        if (isShutdown) {
+          row.proc?.kill();
+          return;
+        }
+        const previous = liveByServer.get(cfg.name);
+        if (previous) {
+          try { previous.kill(); } catch { /* already dead */ }
+          const index = procs.indexOf(previous);
+          if (index >= 0) procs.splice(index, 1);
+        }
+        for (let i = discovered.length - 1; i >= 0; i -= 1) {
+          if (discovered[i]?.server === cfg.name) discovered.splice(i, 1);
+        }
+        const report = servers.findIndex((item) => item.name === cfg.name);
+        if (report >= 0) servers.splice(report, 1);
+        servers.push({ name: row.cfg.name, state: row.state, tools: row.tools.length });
+        if (row.note) notes.push(row.note);
+        if (row.proc) {
+          procs.push(row.proc);
+          liveByServer.set(row.cfg.name, row.proc);
+          serverConfigs.set(row.cfg.name, row.cfg);
+          for (const tool of row.tools) discovered.push(tool);
+        }
+        refreshCatalog();
+        opts.onUpdate?.(session);
+      }));
+    },
   };
+
+  await session.connect(configs.slice(0, MAX_MCP_SERVERS));
+  return session;
 }

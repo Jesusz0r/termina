@@ -331,6 +331,7 @@ import {
   editMcpConfig,
   formatMcpStatus,
   inspectMcpConfig,
+  mcpServersNamedIn,
   parseMcpSlash,
   readMcpConfigFile,
   writeMcpConfigFile,
@@ -1995,31 +1996,91 @@ let mcpSession: McpSession | null = null;
 let mcpBusy = false;
 let mcpGeneration = 0;
 
-async function connectMcp(): Promise<void> {
+/** A turn started before a late server finished. Apply its tools when the turn ends. */
+let mcpToolsStale = false;
+
+function applyMcpTools(session: McpSession): void {
+  mcpSession = session;
+  if (running) {
+    mcpToolsStale = true;
+    return;
+  }
+  clientTools = mcpClientTools(TOOLS, session.tools);
+  mcpToolsStale = false;
+  syncIndicators();
+}
+
+function flushMcpTools(): void {
+  if (!mcpToolsStale || running || !mcpSession) return;
+  clientTools = mcpClientTools(TOOLS, mcpSession.tools);
+  mcpToolsStale = false;
+  syncIndicators();
+}
+
+function mcpLaunchOptions(generation: number, announced: Set<string>, announcedNotes: Set<string>) {
+  return {
+    projectRoot: canonicalCwd,
+    confineCwd: (cwd: string | undefined) => jailMcpCwd(canonicalCwd, cwd),
+    onUpdate(partial: McpSession) {
+      if (generation !== mcpGeneration) return;
+      for (const server of partial.servers) {
+        if (announced.has(server.name)) continue;
+        announced.add(server.name);
+        if (server.state === "connected") out(`(mcp ${server.name} connected, ${server.tools} tools)\n`);
+      }
+      for (const note of partial.notes) {
+        if (announcedNotes.has(note)) continue;
+        announcedNotes.add(note);
+        out(`(${note})\n`);
+      }
+      applyMcpTools(partial);
+    },
+  };
+}
+
+/** Replace the session. No argument connects every enabled server. */
+async function connectMcp(configs = loadMcpConfigs(userMcpPath(homedir()))): Promise<void> {
   const generation = ++mcpGeneration;
   mcpSession?.shutdown();
   mcpSession = null;
+  mcpToolsStale = false;
   clientTools = TOOLS.slice();
   syncIndicators();
   try {
-    const session = await startMcp(loadMcpConfigs(userMcpPath(homedir())), {
-      projectRoot: canonicalCwd,
-      confineCwd: (cwd) => jailMcpCwd(canonicalCwd, cwd),
-    });
+    const session = await startMcp(configs, mcpLaunchOptions(generation, new Set(), new Set()));
     if (generation !== mcpGeneration) {
       session.shutdown();
       return;
     }
-    mcpSession = session;
-    clientTools = mcpClientTools(TOOLS, session.tools);
-    syncIndicators();
-    for (const note of session.notes) out(`(${note})\n`);
+    applyMcpTools(session);
   } catch (error) {
     if (generation !== mcpGeneration) return;
     mcpSession = null;
     clientTools = TOOLS.slice();
+    mcpToolsStale = false;
     syncIndicators();
     out(`(MCP unavailable; built-in tools remain: ${error instanceof Error ? error.message : String(error)})\n`);
+  }
+}
+
+/** Connect servers a prompt names. Leaves other servers down, and leaves an already-connected server up. */
+async function ensureNamedMcp(text: string): Promise<void> {
+  const all = loadMcpConfigs(userMcpPath(homedir()));
+  const named = new Set(mcpServersNamedIn(text, all.map((cfg) => cfg.name)));
+  if (named.size === 0) return;
+  const missing = all.filter((cfg) => named.has(cfg.name) && !mcpSession?.servers.some((row) => row.name === cfg.name && row.state === "connected"));
+  if (missing.length === 0) return;
+  mcpBusy = true;
+  showPrompt();
+  try {
+    if (!mcpSession) {
+      await connectMcp(missing);
+      return;
+    }
+    await mcpSession.connect(missing);
+    applyMcpTools(mcpSession);
+  } finally {
+    mcpBusy = false;
   }
 }
 
@@ -4291,6 +4352,7 @@ function abortPromptStart(message: string, draft?: string): void {
   out(`(the run did not start: ${message})\n`);
   if (draft !== undefined) surface?.setDraft(draft);
   running = false;
+  flushMcpTools();
   currentAbort = null;
   showPrompt();
 }
@@ -4325,6 +4387,8 @@ async function runPrompt(
   // preflight failure before this prompt has built its own snapshot.
   activeRequestOverlay = null;
   protectedTaskApprovals.clear();
+  await ensureNamedMcp(prompt);
+  if (shutdownRequested) return;
   running = true;
   interrupted = shutdownRequested;
   currentAbort = new AbortController();
@@ -4869,6 +4933,7 @@ async function runPrompt(
   // task-settled record is still being written.
   activeRequestOverlay = null;
   running = false;
+  flushMcpTools();
   syncSubagentChrome();
   stopSubagentApprovalTimer();
   syncIndicators();
@@ -5335,6 +5400,7 @@ async function runBangCommand(command: string): Promise<void> {
     pushMessage("user", bangCommandContext(command, got.content));
   } finally {
     running = false;
+    flushMcpTools();
     stopSubagentApprovalTimer();
     interrupted = false;
     showPrompt();
@@ -5952,12 +6018,12 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
     streamPrepared = true;
     syncIndicators();
     out("(session cleared)\n");
-    mcpBusy = true;
+    mcpSession?.shutdown();
+    mcpSession = null;
+    mcpToolsStale = false;
+    clientTools = TOOLS.slice();
+    syncIndicators();
     showPrompt();
-    void connectMcp().finally(() => {
-      mcpBusy = false;
-      showPrompt();
-    });
     return;
   }
   if (line === "/compact") {
@@ -6123,9 +6189,8 @@ async function main(): Promise<void> {
       sidecar.logEvent({ t: "trace_startup", runId: traceRunId, ok: false, error: message });
     }
   }
-  // The TUI is constructed before the first MCP bind so it can render the
-  // startup banner, but no prompt may be accepted until the tool schema is
-  // fixed for this session.
+  // Hold the prompt through catalog and auth boot. MCP stays down until a
+  // prompt names a server.
   mcpBusy = true;
   frontMatter.systemPrompt();
   await bootCatalog();
@@ -6184,11 +6249,7 @@ async function main(): Promise<void> {
   if (!surface) out(banner);
   const bootList = currentCatalog();
   if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
-  try {
-    await connectMcp();
-  } finally {
-    mcpBusy = false;
-  }
+  mcpBusy = false;
   const resumeResult = sessionEnvironment.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
   let structured = "";
   let structuredImages: Array<{ name: string; mediaType: string }> = [];
