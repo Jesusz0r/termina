@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { editMcpConfig, formatMcpStatus, inspectMcpConfig, parseMcpSlash, readMcpConfigFile, writeMcpConfigFile } from "../../../agent-core/mcp.ts";
+import { editMcpConfig, formatMcpStatus, inspectMcpConfig, parseMcpSlash, readMcpConfigFile, writeMcpConfigFile, type McpConfigEdit } from "../../../agent-core/mcp.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -41,6 +41,42 @@ describe("/mcp config", () => {
       edit: { op: "add-stdio", name: "local", command: "npx", args: ["-y", "server", "--port", "9"] },
     });
     expect(parseMcpSlash("/mcp add stdio local npx")).toHaveProperty("error");
+  });
+
+  it("narrows the edit payload after list and reconnect return", () => {
+    const editFromSlash = (line: string): McpConfigEdit | null => {
+      const parsed = parseMcpSlash(line);
+      if ("error" in parsed) return null;
+      if (parsed.action === "list") return null;
+      if (parsed.action === "reconnect") return null;
+      return parsed.edit;
+    };
+    expect(editFromSlash("/mcp")).toBeNull();
+    expect(editFromSlash("/mcp reconnect")).toBeNull();
+    expect(editFromSlash("/mcp unknown")).toBeNull();
+    for (const op of ["remove", "disable", "enable"] as const) {
+      expect(editFromSlash(`/mcp ${op} local`)).toEqual({ op, name: "local" });
+    }
+    expect(editFromSlash("/mcp add stdio local -- node server.mjs")).toEqual({
+      op: "add-stdio", name: "local", command: "node", args: ["server.mjs"],
+    });
+  });
+
+  it("narrows the stdio payload after other config operations return", () => {
+    const stdioPayload = (edit: McpConfigEdit) => {
+      if (edit.op === "remove") return null;
+      if (edit.op === "disable" || edit.op === "enable") return null;
+      if (edit.op === "add-http") return null;
+      return { command: edit.command, args: edit.args };
+    };
+    const edits: McpConfigEdit[] = [
+      { op: "remove", name: "local" },
+      { op: "disable", name: "local" },
+      { op: "enable", name: "local" },
+      { op: "add-http", name: "docs", url: "https://example.com/mcp" },
+      { op: "add-stdio", name: "local", command: "node", args: ["server.mjs"] },
+    ];
+    expect(edits.map(stdioPayload)).toEqual([null, null, null, null, { command: "node", args: ["server.mjs"] }]);
   });
 
   it("refuses a non-https URL, a ninth server, and writes a durable config", async () => {

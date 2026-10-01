@@ -4596,8 +4596,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check("slash Tab /s completes to /skills", completeSlashLine("/s") === "/skills");
     check(
-      "slash /m is model and models",
-      matchingSlashCommands("/m").map((c) => c.name).join(" ") === "/model /models",
+      "slash /m is model, models, and mcp",
+      matchingSlashCommands("/m").map((c) => c.name).join(" ") === "/model /models /mcp",
+    );
+    check(
+      "slash /mod is model and models",
+      matchingSlashCommands("/mod").map((c) => c.name).join(" ") === "/model /models",
     );
     check("slash /models is exact", matchingSlashCommands("/models").map((c) => c.name).join(" ") === "/models");
     check("slash /model is exact", matchingSlashCommands("/model").map((c) => c.name).join(" ") === "/model");
@@ -4690,7 +4694,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check("slash Tab unique picker does not expand", completeSlashLine("/login google") === "/login google");
     check("slash ignores prompts", matchingSlashCommands("hello").length === 0);
-    check("slash Tab /m completes to /model", completeSlashLine("/m") === "/model");
+    check("slash Tab /m remains ambiguous", completeSlashLine("/m") === "/m");
+    check("slash Tab /mod completes to /model", completeSlashLine("/mod") === "/model");
+    check("slash Tab /mc completes to /mcp", completeSlashLine("/mc") === "/mcp");
     check("slash Tab /ex completes to /exit", completeSlashLine("/ex") === "/exit");
     check("slash Tab /foo is unchanged", completeSlashLine("/foo") === "/foo");
     const terminalControl = await import("../../../shared/terminal-control.ts");

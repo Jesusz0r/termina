@@ -19,7 +19,8 @@ export const MCP_SLASH_USAGE = [
 
 
 export type McpSlash =
-  | { action: "list" | "reconnect" }
+  | { action: "list" }
+  | { action: "reconnect" }
   | { action: "edit"; edit: McpConfigEdit };
 
 
