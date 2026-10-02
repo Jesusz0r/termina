@@ -79,17 +79,41 @@ export function parseMcpSlash(line: string): McpSlash | { error: string } {
 }
 
 
-const MCP_NAME_TOKEN = /[^A-Za-z0-9]+/;
+const MCP_MENTION_SEPARATOR = /[\s,;]/u;
+const MCP_MENTION_OPENING = "\"'`([{<";
+const MCP_MENTION_CLOSING = "\"'`])}>.!?:";
 
 /** Names a prompt actually says. Short names are ignored so ordinary words do not connect a server. */
 export function mcpServersNamedIn(text: string, names: readonly string[]): string[] {
-  const tokens = new Set(text.split(MCP_NAME_TOKEN).map((token) => token.toLowerCase()).filter((token) => token.length >= 3));
-  const found: string[] = [];
-  for (const name of names) {
-    if (name.length < 3 || !tokens.has(name.toLowerCase())) continue;
-    found.push(name);
+  const eligible = names.filter(name => name.length >= 3).map(name => name.toLowerCase());
+  if (eligible.length === 0) return [];
+  // Prefer complete names over their shorter pieces, including a literal final period.
+  eligible.sort((a, b) => b.length - a.length);
+  const input = text.toLowerCase();
+  // Skip closing prose punctuation in constant time, even for long quote runs.
+  const nextNonClosing = new Uint32Array(input.length + 1);
+  nextNonClosing[input.length] = input.length;
+  for (let index = input.length - 1; index >= 0; index--) {
+    nextNonClosing[index] = MCP_MENTION_CLOSING.includes(input[index]!) ? nextNonClosing[index + 1]! : index;
   }
-  return found;
+  const found = new Set<string>();
+  mentions: for (let index = 0; index < input.length; index++) {
+    if (index > 0 && !MCP_MENTION_SEPARATOR.test(input[index - 1]!)) continue;
+    let start = index;
+    while (start < input.length) {
+      for (const name of eligible) {
+        if (!input.startsWith(name, start)) continue;
+        const end = nextNonClosing[start + name.length]!;
+        if (end < input.length && !MCP_MENTION_SEPARATOR.test(input[end]!)) continue;
+        found.add(name);
+        index = end;
+        continue mentions;
+      }
+      if (!MCP_MENTION_OPENING.includes(input[start]!)) break;
+      start += 1;
+    }
+  }
+  return names.filter(name => name.length >= 3 && found.has(name.toLowerCase()));
 }
 
 

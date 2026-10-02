@@ -44,6 +44,7 @@ async function steeringScenario(
     replies?: string[];
     toolsByTurn?: Array<Array<{ name: string; input: Record<string, unknown> }>>;
     mcp?: boolean;
+    mcpName?: string;
     textWithTools?: boolean;
     resetBeforeFollowUp?: "/clear" | "/new";
   } = {},
@@ -73,7 +74,7 @@ async function steeringScenario(
         process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
       });
     `);
-    writeFileSync(join(config, "mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: [server] } } }));
+    writeFileSync(join(config, "mcp.json"), JSON.stringify({ mcpServers: { [options.mcpName ?? "fixture"]: { command: process.execPath, args: [server] } } }));
   }
   const sessionFile = join(events, "core-steering", "current", "session.jsonl");
   const requestsFile = join(root, "requests.jsonl");
@@ -561,13 +562,18 @@ describe("interactive conversation steering", () => {
 });
 
 describe("/plan tool admission", () => {
-  it("allows reads and discovery but refuses every effectful entry even after publishing a list", async () => {
+  it.each([
+    ["fixture", "mcp_fixture_write"],
+    ["fixture-mcp", "mcp_fixture-mcp_write"],
+    ["fixture_tools", "mcp_fixture_tools_write"],
+    ["fixture.api", "mcp_fixture_api_write"],
+  ])("allows reads and discovery but refuses every effectful entry even after publishing a list (%s)", async (mcpName, toolName) => {
     const allowed = [
       { name: "read_file", input: { path: "file.txt" } },
       { name: "read_files", input: { paths: ["file.txt"] } },
       { name: "grep", input: { pattern: "original", path: "file.txt" } },
       { name: "glob", input: { pattern: "*.txt" } },
-      { name: "search_mcp_tools", input: { query: "fixture" } },
+      { name: "search_mcp_tools", input: { query: mcpName } },
     ];
     const denied = [
       { name: "write_file", input: { path: "created.txt", content: "wrong" } },
@@ -575,7 +581,7 @@ describe("/plan tool admission", () => {
       { name: "bash", input: { command: "printf wrong > bash-called" } },
       { name: "spawn_subagent", input: { task: "write created.txt", paths: ["created.txt"] } },
       { name: "message_subagent", input: { run_id: "bg-1", text: "write created.txt" } },
-      { name: "call_mcp_tool", input: { name: "mcp_fixture_write", arguments: {} } },
+      { name: "call_mcp_tool", input: { name: toolName, arguments: {} } },
     ];
     const actions = denied;
     await steeringScenario("final", [], ({ project, requests, messages, events }) => {
@@ -586,7 +592,7 @@ describe("/plan tool admission", () => {
       for (const result of results.slice(0, allowed.length)) expect(result.is_error, result.content).not.toBe(true);
       expect(results[0].content).toContain("original");
       expect(results[2].content).toContain("original");
-      expect(results[4].content).toContain("mcp_fixture_write");
+      expect(results[4].content).toContain(toolName);
       for (const result of results.slice(allowed.length)) {
         expect(result.is_error).toBe(true);
         expect(result.content).toContain("not executed on a /plan turn");
@@ -602,7 +608,7 @@ describe("/plan tool admission", () => {
       expect(events.filter(row => row.t === "plan")[0].text).toContain("Plan:");
       expect(expectPaired(messages)).toHaveLength(allowed.length + actions.length);
     }, {
-      initialLine: "/plan use fixture to inspect file.txt", mcp: true, textWithTools: true,
+      initialLine: `/plan use ${mcpName} to inspect file.txt`, mcp: true, mcpName, textWithTools: true,
       replies: ["Plan:\n- [ ] edit file.txt\n"],
       toolsByTurn: [[...allowed, ...actions], [{ name: "write_file", input: { path: "second.txt", content: "wrong" } }], []],
     });
