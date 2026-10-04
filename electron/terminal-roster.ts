@@ -4,6 +4,8 @@
  */
 // Use .ts so the source harness can load this module with strip-types.
 import { isCoreSessionId } from "../agent-core/session.ts";
+import { isRecord } from "../shared/guards.ts";
+import { DISPATCH_OUTCOMES, type PlanTask } from "../shared/types.ts";
 
 export const MAX_TERMINAL_ROSTER = 16;
 export const MAX_ROSTER_BYTES = 64 * 1024;
@@ -30,7 +32,7 @@ export type TerminalRosterEntry = {
   model?: string;
   /** Handoff plan: task text, paths, and state. Worker assignments never
    *  persist — the restoring side resets active tasks to pending. */
-  plan?: Array<{ text: string; paths: string[]; state: "pending" | "active" | "done" }>;
+  plan?: Array<Pick<PlanTask, "text" | "paths" | "state" | "dispatchResult">>;
   /** Last verify verdict for the badge. */
   verify?: { state: "untested" | "pass" | "fail" | "timeout" | "cancelled"; command: string | null; summary: string | null };
 };
@@ -69,7 +71,11 @@ function parseRosterPlan(value: unknown): TerminalRosterEntry["plan"] {
         if (typeof p === "string" && p && p.length <= MAX_PLAN_PATH && !/[\x00-\x1f]/.test(p)) paths.push(p);
       }
     }
-    out.push({ text: rec.text, paths, state: rec.state });
+    const result = isRecord(rec.dispatchResult) ? rec.dispatchResult : null;
+    const outcome = DISPATCH_OUTCOMES.find((value) => value === result?.outcome);
+    const dispatchResult = result && typeof result.workerId === "string" && TERM_ID.test(result.workerId) && outcome
+      ? { workerId: result.workerId, outcome } : undefined;
+    out.push({ text: rec.text, paths, state: rec.state, ...(dispatchResult ? { dispatchResult } : {}) });
   }
   return out.length > 0 ? out : undefined;
 }

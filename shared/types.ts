@@ -91,6 +91,9 @@ export interface AgentActivityView {
   reason: AgentActivityReason | null;
 }
 
+export const DISPATCH_OUTCOMES = ["completed", "incomplete", "failed", "interrupted"] as const;
+export type DispatchOutcome = (typeof DISPATCH_OUTCOMES)[number];
+
 /** One task on the Plan Board (parsed from the agent's plan message). */
 export interface PlanTask {
   /** The task line text. */
@@ -102,6 +105,8 @@ export interface PlanTask {
   workerId?: string;
   /** Files this worker claimed. Empty when the task is not dispatched. */
   claimed?: string[];
+  /** Last finished attempt; separate from a currently running assignment. */
+  dispatchResult?: { workerId: string; outcome: DispatchOutcome };
   /** Worker model from an `@model provider/id` marker. Omit to inherit the owner tab. */
   model?: string;
 }

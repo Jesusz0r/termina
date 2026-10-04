@@ -174,9 +174,16 @@ export function createActivityPane<TPane extends ActivityPaneState>(
         meta.textContent = claim ? `${status} · ${claim}` : status;
         li.appendChild(meta);
       }
+      if (task.dispatchResult) {
+        const result = document.createElement("span");
+        result.className = "plan-meta plan-dispatch-result";
+        result.textContent = `last ${task.dispatchResult.outcome} · ${task.dispatchResult.workerId}`;
+        result.title = "The last attempt's changes remain in the owner's review";
+        li.appendChild(result);
+      }
       if (task.state !== "done") {
         li.classList.add("dispatchable");
-        li.title = task.workerId ? "show dispatch worker" : "dispatch this task";
+        li.title = task.workerId ? "show dispatch worker" : task.dispatchResult ? "retry this task" : "dispatch this task";
         if (!task.workerId) appendModelChip(li, pane, task);
         li.addEventListener("click", (e) => {
           e.stopPropagation();

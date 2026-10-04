@@ -71,7 +71,7 @@ import {
   parseScheduleMarker,
   pickDispatchTasks,
   reattachDispatchAssignments,
-  taskIsComplete,
+  settleDispatchTask,
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
 import { filterAgentEnvironment } from "./agent-env.js";
@@ -2846,6 +2846,7 @@ class TerminaApp {
                 text: t.text,
                 paths: t.paths,
                 state: t.state === "done" ? "done" : "pending",
+                ...(t.dispatchResult ? { dispatchResult: t.dispatchResult } : {}),
                 ...(model ? { model } : {}),
               };
             });
@@ -3265,21 +3266,22 @@ class TerminaApp {
     // A closed owner takes its background runs with it: no API burns for
     // a dead terminal, and no orphan results land nowhere.
     this.subagents.killOwner(inst.id, "terminal closed");
-    // A dispatch worker closed before settling: its task goes back to
-    // pending so the board stays honest.
+    // Exiting before settlement also releases the assignment and retains review.
     const dispatchExit = this.dispatchRuns.get(inst.id);
     if (dispatchExit) {
-      this.writeDispatchSettleNote(inst, "exited");
-      this.dispatchRuns.delete(inst.id);
-      this.dispatchWorkers.delete(inst.id);
       const ownerInst = this.runtime.get(dispatchExit.ownerId);
       const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchExit.taskText) : undefined;
-      if (ownerInst && task) {
-        task.state = "pending";
-        task.workerId = undefined;
-        task.claimed = undefined;
+      const end = inst.interruptedAt !== undefined || _details.origin === "forced" || _details.code === 0
+        ? "interrupted" : "failed";
+      const outcome = task ? settleDispatchTask(task, inst, end) : end;
+      this.writeDispatchSettleNote(inst, outcome);
+      if (ownerInst) {
+        this.collectWorker(inst, ownerInst, rendererTarget);
+        this.savePlanRoster(ownerInst);
         this.sendPlan(ownerInst, rendererTarget);
       }
+      this.dispatchRuns.delete(inst.id);
+      this.dispatchWorkers.delete(inst.id);
     }
     this.sendInstances(rendererTarget);
   }
@@ -3688,8 +3690,8 @@ class TerminaApp {
       (p) => this.canonicalPath(p),
     );
     if (tasks.length === 0) return;
+    const previousPlan = inst.plan;
     inst.plan = tasks;
-    this.savePlanRoster(inst);
     // Do not reset touched or tool outcomes. The plan can arrive after
     // the first tool events, and their progress must count.
     reattachDispatchAssignments(
@@ -3697,7 +3699,9 @@ class TerminaApp {
       [...this.dispatchRuns]
         .filter(([, entry]) => entry.ownerId === inst.id)
         .map(([workerId, entry]) => ({ workerId, taskText: entry.taskText })),
+      previousPlan,
     );
+    this.savePlanRoster(inst);
     this.sendPlan(inst, expected);
   }
 
@@ -4296,7 +4300,7 @@ class TerminaApp {
     }
   }
 
-  private writeDispatchSettleNote(worker: AgentTerminalInstance, status: "settled" | "exited"): void {
+  private writeDispatchSettleNote(worker: AgentTerminalInstance, status: NonNullable<PlanTask["dispatchResult"]>["outcome"]): void {
     const dispatch = this.dispatchRuns.get(worker.id);
     if (!dispatch) return;
     const touched = [...worker.touched].map((p) => `\`${p}\``).join(", ");
@@ -4928,15 +4932,15 @@ class TerminaApp {
           this.send("worldline:runs-changed", { terminalId: inst.id }, rendererTarget);
         }
         this.finalizePlan(inst, rendererTarget);
-        // A dispatch worker finished: mark the owner task done only when
-        // the worker's last file-tool outcomes cover that task's paths.
+        // Settlement releases execution ownership even when paths are incomplete.
         const dispatchEnd = this.dispatchRuns.get(inst.id);
         if (dispatchEnd) {
-          this.writeDispatchSettleNote(inst, "settled");
           const ownerInst = this.runtime.get(dispatchEnd.ownerId);
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchEnd.taskText) : undefined;
+          const end = event.error ? "failed" : inst.interruptedAt !== undefined ? "interrupted" : "settled";
+          const outcome = task ? settleDispatchTask(task, inst, end) : "incomplete";
+          this.writeDispatchSettleNote(inst, outcome);
           if (ownerInst) {
-            if (task && taskIsComplete(task.paths, inst.touched, inst.toolOutcomes)) task.state = "done";
             this.savePlanRoster(ownerInst);
             this.sendPlan(ownerInst, rendererTarget);
             this.collectWorker(inst, ownerInst, rendererTarget);

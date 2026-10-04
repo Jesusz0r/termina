@@ -8,7 +8,7 @@
  */
 import { isAbsolute, relative } from "node:path";
 import { planListEntries } from "../shared/plan-task.ts";
-import type { CanonicalizePath, PlanTask } from "../shared/types.ts";
+import type { CanonicalizePath, DispatchOutcome, PlanTask } from "../shared/types.ts";
 
 const MAX_PLAN_TASKS = 20;
 const MAX_PATHS_PER_TASK = 5;
@@ -120,6 +120,22 @@ export function taskIsComplete(
   return paths.every((p) => touched.has(p) && outcomes.get(p) === "ok");
 }
 
+/** Finish one attempt without discarding its edits, provenance, or retryability. */
+export function settleDispatchTask(
+  task: PlanTask,
+  worker: { id: string; touched: ReadonlySet<string>; toolOutcomes: ReadonlyMap<string, "ok" | "error"> },
+  end: "settled" | "failed" | "interrupted",
+): DispatchOutcome {
+  const outcome: DispatchOutcome = end !== "settled" ? end
+    : taskIsComplete(task.paths, worker.touched, worker.toolOutcomes) ? "completed"
+    : task.paths.some((path) => worker.toolOutcomes.get(path) === "error") ? "failed" : "incomplete";
+  task.state = outcome === "completed" ? "done" : "pending";
+  task.dispatchResult = { workerId: worker.id, outcome };
+  delete task.workerId;
+  delete task.claimed;
+  return outcome;
+}
+
 export function finalizePlanTasks(
   plan: PlanTask[],
   touched: ReadonlySet<string>,
@@ -137,7 +153,12 @@ export function findTaskByText(plan: PlanTask[], taskText: string): PlanTask | u
 export function reattachDispatchAssignments(
   plan: PlanTask[],
   assignments: Iterable<{ workerId: string; taskText: string }>,
+  previousPlan: PlanTask[],
 ): void {
+  for (const task of plan) {
+    const result = findTaskByText(previousPlan, task.text)?.dispatchResult;
+    if (result) task.dispatchResult = result;
+  }
   for (const entry of assignments) {
     const task = findTaskByText(plan, entry.taskText);
     if (!task) continue;
