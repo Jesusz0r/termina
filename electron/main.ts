@@ -3344,7 +3344,7 @@ class TerminaApp {
     // the primary project.
     const verifyOwner = this.projectOfTerminal(ownerId);
     const candidate = verifyOwner?.worldlines?.candidateSandboxOf(ownerId) ?? null;
-    const cwd = candidate?.root ?? this.terminalCwd();
+    const cwd = candidate?.root ?? owner.cwd;
     let tc: { command: string; args: string[]; label: string } | null;
     try {
       tc = await detectTestCommand(cwd);

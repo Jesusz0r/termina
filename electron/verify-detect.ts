@@ -16,8 +16,12 @@ type DetectedTestCommand = { command: string; args: string[]; label: string };
 export async function detectTestCommand(cwd: string): Promise<DetectedTestCommand | null> {
   const pkgText = await safeWorkspaceRead(cwd, "package.json");
   if (pkgText !== null) {
-    const fromPkg = detectTestFromPkg(pkgText);
-    if (fromPkg) return fromPkg;
+    const script = testScriptFromPkg(pkgText);
+    if (script) {
+      // Live Verify must use npm itself: it supplies local binary lookup,
+      // lifecycle hooks, and the package-script environment.
+      return { command: "npm", args: ["run", script.name], label: `npm run ${script.name}` };
+    }
   }
   return detectTestFromFiles(cwd);
 }
@@ -33,28 +37,29 @@ async function safeWorkspaceRead(root: string, relPath: string): Promise<string 
   }
 }
 
-/** The npm test script of a package text, resolved to its immutable base
- *  command body (WORLDLINES §6.8): a candidate's changed test config
- *  never changes what the evidence runs. */
-export function detectTestFromPkg(pkgText: string): DetectedTestCommand | null {
+function testScriptFromPkg(pkgText: string): { name: string; body: string } | null {
   try {
     const pkg = JSON.parse(pkgText) as { scripts?: Record<string, string> };
     const scripts = pkg.scripts ?? {};
     const names = Object.keys(scripts);
-    const pick = names.includes("test") ? "test" : names.find((n) => n.startsWith("test:"));
-    if (pick) {
-      const body = (scripts[pick] ?? "").trim();
-      if (!body) return null;
-      // npm scripts are shell by definition: preserve the immutable body
-      // verbatim through sh. Both executors (the verify shell path and
-      // sandboxed argv) run this form with exact shell semantics for
-      // quotes, escapes, wildcards, and metacharacters — no tokenizer.
-      return { command: "sh", args: ["-c", body], label: `npm run ${pick}` };
-    }
+    const name = names.includes("test") ? "test" : names.find((n) => n.startsWith("test:"));
+    if (!name) return null;
+    const body = (scripts[name] ?? "").trim();
+    return body ? { name, body } : null;
   } catch {
-    /* no package.json */
+    return null;
   }
-  return null;
+}
+
+/** The captured npm test script, resolved to its immutable base command
+ *  body (WORLDLINES §6.8). Unlike live Verify, evidence must not invoke a
+ *  candidate's mutable package-script alias. */
+export function detectTestFromPkg(pkgText: string): DetectedTestCommand | null {
+  const script = testScriptFromPkg(pkgText);
+  if (!script) return null;
+  // Preserve the captured shell body, including quotes and metacharacters,
+  // without tokenization. The label records its original package alias.
+  return { command: "sh", args: ["-c", script.body], label: `npm run ${script.name}` };
 }
 
 /** The pytest/cargo/go detection of a workspace. */

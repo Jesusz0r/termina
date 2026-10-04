@@ -4,7 +4,7 @@
  * live project state at call time and keeps the manager wiring.
  */
 import { lstat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { isErrno } from "../../shared/guards.js";
 import { PathLookup } from "../path-lookup.js";
 import { sandboxResourceLimitPreflight } from "../sandbox.js";
@@ -62,7 +62,7 @@ export async function gitDirLooksPresent(start: string): Promise<boolean> {
   }
 }
 
-/** Read-only load paths for the sandboxed core (agent-core copy + electron + node). */
+/** Read-only load paths for the sandboxed core and Verify (agent-core, Electron, Node, npm). */
 export function worldlineAppReadPaths(corePath: string, paths: PathLookup): string[] {
   const out: string[] = [];
   out.push(process.execPath);
@@ -74,6 +74,21 @@ export function worldlineAppReadPaths(corePath: string, paths: PathLookup): stri
     out.push(paths.cachedRealpath(node));
   } catch {
     /* The configured node path can disappear between checks. */
+  }
+  const npm = paths.findOnPath("npm");
+  if (npm) {
+    try {
+      const cli = paths.cachedRealpath(npm);
+      const npmRoot = dirname(dirname(cli));
+      // npm's symlinked CLI loads its own JS dependencies. Grant only the
+      // standard package directory, never the installation prefix or HOME.
+      if (basename(cli) === "npm-cli.js" && basename(dirname(cli)) === "bin"
+          && basename(npmRoot) === "npm" && basename(dirname(npmRoot)) === "node_modules") {
+        out.push(cli, npmRoot);
+      }
+    } catch {
+      /* The configured npm path can disappear between checks. */
+    }
   }
   return [...new Set(out)];
 }
