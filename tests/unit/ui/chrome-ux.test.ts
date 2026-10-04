@@ -257,6 +257,7 @@ describe("tab activity dots", () => {
     expect(mainSrc).toContain("windowFocused: document.hasFocus()");
     expect(mainSrc).toContain("if (sounded && pane.type === \"agent\") announceActivityCue(pane, sounded)");
     expect(mainSrc).toContain("() => revealActivityPane(targetId)");
-    expect(mainSrc).toContain("if (activeProjectId !== targetProject) return");
+    expect(mainSrc).toContain("void activateProject(targetProject).then((activated) => {");
+    expect(mainSrc).toContain("if (!activated || activeProjectId !== targetProject) return");
   });
 });

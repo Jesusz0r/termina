@@ -81,6 +81,7 @@ const PASS_THROUGH: AllowedPassThrough[] = [
   { file: "src/main.ts", method: "pasteTerminal", reason: "pty-view try/catch" },
   { file: "src/main.ts", method: "dropTerminalFiles", reason: "pty-view try/catch" },
   { file: "src/main.ts", method: "detectTest", reason: "worldline-project-state catch" },
+  { file: "src/main.ts", method: "projectActivate", reason: "awaited by activateProjectContext; catching activateProject callers" },
   { file: "src/main/preferences.ts", method: "getPreferences", reason: "loadPreferencesWithRetry try/catch" },
   { file: "src/editor.ts", method: "openFile", reason: "throws to catching callers" },
 ];
@@ -145,6 +146,15 @@ describe("renderer IPC rejection handling (refs #217 item 1)", () => {
     const editor = readFileSync(new URL("../../../src/editor.ts", import.meta.url), "utf8");
     expect(editor).toContain("throw new Error(res.error)");
     const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+    const activation = readFileSync(new URL("../../../src/main/project-activation.ts", import.meta.url), "utf8");
+    expect(activation).toContain("const result = await bindings.request(projectId);");
+    expect(renderer).toContain("return activateProjectContext(projectId, {");
+    expect(renderer).toContain("void activateProject(project.id).catch((err) => {");
+    expect(renderer).toMatch(/void activateProject\(targetProject\)\.then\([\s\S]*?\)\.catch\(/);
+    expect(renderer).toContain("await activateProject(owner.projectId)");
+    expect(renderer).toContain("await openFileSmartInner(path, preview, requestedOwner, line, column);");
+    expect(renderer).toContain("void activateProject(next).catch((err) => {");
+    expect(renderer).toContain("void activateProject(id).catch((err) => {");
     expect(renderer).toContain("void ensureProjectEditor(view).openFile(p.path, { preview: true, owner }).catch((err) => {");
     expect(renderer).toContain("void ensureProjectEditor(view).openFile(target.path, { preview: true, owner }).catch((err) => {");
     expect(renderer).toContain("await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });");

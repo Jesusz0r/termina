@@ -41,7 +41,10 @@ describe("multi-project editor event routing", () => {
     const smartStart = renderer.indexOf("async function openFileSmart(");
     expect(smartStart).toBeGreaterThanOrEqual(0);
     const smart = renderer.slice(smartStart, renderer.indexOf("// ---------------------------------------------------------------- panels", smartStart));
-    expect(smart.indexOf("setActiveProject(projId)")).toBeLessThan(smart.indexOf("revealEditor()"));
+    const activation = smart.indexOf("await activateProject(owner.projectId)");
+    expect(activation).toBeGreaterThanOrEqual(0);
+    expect(activation).toBeLessThan(smart.indexOf("revealEditor()"));
+    expect(smart).not.toContain("setActiveProject(");
     expect(smart.indexOf("revealEditor()")).toBeLessThan(smart.indexOf("ensureProjectEditor(view).openFile"));
   });
 

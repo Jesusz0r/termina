@@ -37,6 +37,8 @@ import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
 import { createTerminalMenu } from "./main/terminal-menu";
+import { activateProjectContext } from "./main/project-activation";
+import { resolveFileNavigation } from "./main/file-navigation";
 import { createTimelinePane } from "./main/timeline-pane";
 import { createActivityPane } from "./main/activity-pane";
 import { createPreferences, applyEditorPreferences, applyReviewPreferences } from "./main/preferences";
@@ -119,6 +121,8 @@ let activeProjectId: string | null = null;
 let activeProjectGeneration = 0;
 /** Highest activation epoch observed from main; stale folder pushes are inert. */
 let latestProjectActivationGeneration = 0;
+/** Push and invoke reply share one synchronous context application. */
+let appliedProjectFolder: FolderOpenedPayload | null = null;
 const emptyTemplate = document.getElementById("editor-empty-template") as HTMLTemplateElement;
 const rightPaneEl = document.getElementById("right-pane")!;
 // The base editor fills the pane before any project tab exists (the
@@ -189,7 +193,7 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
   statusEl.title = "idle";
   tabEl.append(statusEl, nameEl, closeEl);
   tabEl.addEventListener("click", () => {
-    void window.termina.projectActivate(project.id).catch((err) => {
+    void activateProject(project.id).catch((err) => {
       toast(`could not switch projects: ${(err as Error).message}`, "warning");
     });
   });
@@ -297,6 +301,18 @@ function placeEditorToggle(projectId: string | null): void {
     return;
   }
   projectViews.get(projectId)?.editorEl.querySelector(".pane-chrome")?.appendChild(button);
+}
+
+function activateProject(projectId: string): Promise<boolean> {
+  return activateProjectContext(projectId, {
+    request: (id) => window.termina.projectActivate(id),
+    prepareRenderer: ensureEditorModule,
+    applyFolder: applyFolderOpened,
+    hasProject: (id) => projectViews.has(id),
+    isCurrent: (folder) => activeProjectId === folder.projectId
+      && latestProjectActivationGeneration === folder.activationGeneration
+      && appliedProjectFolder?.activationGeneration === folder.activationGeneration,
+  });
 }
 
 function setActiveProject(projectId: string | null): void {
@@ -833,9 +849,6 @@ function createPaneShell(instanceId: string): Pane {
     },
     (filePath, line, column) => {
       const targetProjectId = pane.projectId ?? activeProjectId;
-      if (targetProjectId && targetProjectId !== activeProjectId) {
-        setActiveProject(targetProjectId);
-      }
       const owner = targetProjectId && pane.workspaceId
         ? { projectId: targetProjectId, workspaceId: pane.workspaceId }
         : undefined;
@@ -1010,8 +1023,8 @@ function revealActivityPane(instanceId: string): void {
   if (pane.projectId) lastActivePane.set(pane.projectId, instanceId);
   if (pane.projectId && pane.projectId !== activeProjectId) {
     const targetProject = pane.projectId;
-    void window.termina.projectActivate(targetProject).then(() => {
-      if (activeProjectId !== targetProject) return;
+    void activateProject(targetProject).then((activated) => {
+      if (!activated || activeProjectId !== targetProject) return;
       if (panes.has(instanceId)) activatePane(instanceId);
     }).catch((err) => {
       toast(`could not switch projects: ${(err as Error).message}`, "warning");
@@ -1455,25 +1468,6 @@ async function focusProjectShell(): Promise<void> {
 
 // ---------------------------------------------------------------- commands --
 
-function normalizePath(inputPath: string): string {
-  const isAbs = inputPath.startsWith("/");
-  const segments = inputPath.split("/");
-  const resolved: string[] = [];
-  for (const seg of segments) {
-    if (!seg || seg === ".") continue;
-    if (seg === "..") {
-      if (resolved.length > 0 && resolved[resolved.length - 1] !== "..") {
-        resolved.pop();
-      } else if (!isAbs) {
-        resolved.push("..");
-      }
-    } else {
-      resolved.push(seg);
-    }
-  }
-  return (isAbs ? "/" : "") + resolved.join("/");
-}
-
 async function openFileSmart(
   path: string,
   preview = true,
@@ -1499,49 +1493,19 @@ async function openFileSmartInner(
   column: number | undefined,
 ): Promise<void> {
   if (reviewView?.isVisible) reviewView.hide();
-  let owner = requestedOwner ?? (() => {
-    const view = activeProjectId ? projectViews.get(activeProjectId) : null;
-    return view?.workspaceId ? { projectId: view.id, workspaceId: view.workspaceId } : null;
-  })();
-
-  let cleanPath = path;
-  if (cleanPath.startsWith("file://")) {
-    cleanPath = cleanPath.slice("file://".length);
-    if (cleanPath.startsWith("localhost/")) {
-      cleanPath = cleanPath.slice("localhost".length);
-    }
-  }
-  try {
-    cleanPath = decodeURIComponent(cleanPath);
-  } catch {
-    // Keep raw string if URI decoding fails
-  }
-  cleanPath = normalizePath(cleanPath);
-
-  // If path is absolute, route to the project that owns it. Nested projects
-  // match by longest prefix: first-match would route a nested file to its
-  // parent project whenever the parent sorts first.
-  if (cleanPath.startsWith("/")) {
-    let best: { projId: string; view: ProjectView } | null = null;
-    for (const [projId, projView] of projectViews.entries()) {
-      if (cleanPath === projView.cwd || cleanPath.startsWith(projView.cwd + "/")) {
-        if (!best || projView.cwd.length > best.view.cwd.length) best = { projId, view: projView };
-      }
-    }
-    if (best) {
-      owner = { projectId: best.projId, workspaceId: best.view.workspaceId };
-      if (activeProjectId !== best.projId) {
-        setActiveProject(best.projId);
-      }
-    }
-  }
-
-  const view = owner ? projectViews.get(owner.projectId) : null;
-  if (!owner || !view) {
+  const requestedView = activeProjectId ? projectViews.get(activeProjectId) : null;
+  const target = resolveFileNavigation(path, projectViews, requestedOwner ?? (requestedView?.workspaceId
+    ? { projectId: requestedView.id, workspaceId: requestedView.workspaceId }
+    : null));
+  if (!target) {
     toast(`could not open ${pathBasename(path)}: file owner is unavailable`, "error");
     return;
   }
-  const abs = cleanPath.startsWith("/") ? cleanPath : normalizePath(`${view.cwd}/${cleanPath}`);
+  const { path: abs, owner } = target;
+  if (activeProjectId !== owner.projectId && !(await activateProject(owner.projectId))) return;
+  // Activation or close may supersede this request during the IPC round trip.
+  const view = projectViews.get(owner.projectId);
+  if (!view || activeProjectId !== owner.projectId) return;
   // Expand the editor only once the target project is known and in front:
   // revealing before routing resizes the terminal twice on cross-project opens.
   layout.revealEditor();
@@ -1801,7 +1765,7 @@ function cycleProjects(delta: 1 | -1): void {
   const index = activeProjectId ? ids.indexOf(activeProjectId) : -1;
   const next = ids[(index + delta + ids.length) % ids.length];
   if (next) {
-    void window.termina.projectActivate(next).catch((err) => {
+    void activateProject(next).catch((err) => {
       toast(`could not switch projects: ${(err as Error).message}`, "warning");
     });
   }
@@ -1810,7 +1774,7 @@ function cycleProjects(delta: 1 | -1): void {
 function activateProjectByIndex(index: number): void {
   const id = orderedProjectIds()[index];
   if (id) {
-    void window.termina.projectActivate(id).catch((err) => {
+    void activateProject(id).catch((err) => {
       toast(`could not switch projects: ${(err as Error).message}`, "warning");
     });
   }
@@ -2359,6 +2323,8 @@ function applyFolderOpened(e: FolderOpenedPayload): void {
     || e.activationGeneration < 1
     || e.activationGeneration < latestProjectActivationGeneration
   ) return;
+  if (appliedProjectFolder?.activationGeneration === e.activationGeneration
+    && appliedProjectFolder.projectId === e.projectId) return;
   latestProjectActivationGeneration = e.activationGeneration;
   projectCwd = e.cwd;
   const projectId = e.projectId;
@@ -2384,6 +2350,7 @@ function applyFolderOpened(e: FolderOpenedPayload): void {
   timelinePane.renderTimeline();
   hydrateWorldlines(projectId);
   scheduleProjectTestCommandRefresh(projectId);
+  appliedProjectFolder = e;
 }
 
 window.termina.onLoginHint((e) => {

@@ -168,6 +168,8 @@ import {
   type TimelinePrefix,
   type TimelineProgress,
   type ProjectWorkspaceRef,
+  type FolderOpenedPayload,
+  type ProjectActivateResult,
   type RendererIpcCapability,
   type VerifyState,
 } from "../shared/types.js";
@@ -6858,12 +6860,12 @@ class TerminaApp {
     projectId: string,
     expected?: PtyRendererSendTarget | null,
     expectedSelectionAction?: number,
-  ): Promise<boolean> {
+  ): Promise<FolderOpenedPayload | null> {
     const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
     const project = this.projects.get(projectId);
-    if (!project || this.projectIsSwitching(projectId)) return false;
+    if (!project || this.projectIsSwitching(projectId)) return null;
     const selectionAction = expectedSelectionAction ?? this.beginProjectSelectionAction();
-    if (expectedSelectionAction !== undefined && this.projectSelectionAction !== expectedSelectionAction) return false;
+    if (expectedSelectionAction !== undefined && this.projectSelectionAction !== expectedSelectionAction) return null;
     const activationGeneration = this.nextProjectActivationGeneration();
     this.activeProjectId = projectId;
     project.activationGeneration = activationGeneration;
@@ -6887,7 +6889,7 @@ class TerminaApp {
     activationGeneration: number,
     selectionAction = this.projectSelectionAction,
     expected?: PtyRendererSendTarget | null,
-  ): Promise<boolean> {
+  ): Promise<FolderOpenedPayload | null> {
     const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
     const project = this.projects.get(projectId);
     const current = () => !this.disposed
@@ -6897,13 +6899,14 @@ class TerminaApp {
       && project?.activationGeneration === activationGeneration
       && this.projectActivationGeneration === activationGeneration
       && this.projectSelectionAction === selectionAction;
-    if (!current()) return false;
+    if (!current()) return null;
     const needsLogin = await this.agentNeedsLogin();
     // Auth I/O is asynchronous. Re-check every active-project fence before
     // publishing; an earlier request must never resurrect a closed/hidden tab.
-    if (!current()) return false;
-    this.send("folder:opened", { cwd, projectId, workspaceId, activationGeneration, needsLogin }, rendererTarget);
-    return true;
+    if (!current()) return null;
+    const folder: FolderOpenedPayload = { cwd, projectId, workspaceId, activationGeneration, needsLogin };
+    this.send("folder:opened", folder, rendererTarget);
+    return folder;
   }
 
   /**
@@ -7846,9 +7849,10 @@ class TerminaApp {
       }
       return this.openProjectAt(cwd);
     });
-    ipcMain.handle("project:activate", async (_e, projectId: unknown) => {
+    ipcMain.handle("project:activate", async (_e, projectId: unknown): Promise<ProjectActivateResult> => {
       if (typeof projectId !== "string" || !this.projects.has(projectId)) return { ok: false };
-      return { ok: await this.activateProject(projectId) };
+      const folder = await this.activateProject(projectId);
+      return folder ? { ok: true, folder } : { ok: false };
     });
     ipcMain.handle("project:close", async (_e, projectId: unknown) => {
       if (typeof projectId !== "string") return { ok: false, error: "invalid project" };

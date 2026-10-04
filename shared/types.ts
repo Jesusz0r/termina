@@ -570,6 +570,10 @@ export interface FolderOpenedPayload {
   needsLogin: boolean;
 }
 
+export type ProjectActivateResult =
+  | { ok: true; folder: FolderOpenedPayload }
+  | { ok: false };
+
 export interface LoginHintPayload {
   needsLogin: boolean;
 }
@@ -767,7 +771,7 @@ export interface TerminaBridge {
   projectOpen(): Promise<{ cwd: string } | { cancelled: true }>;
   /** Open a project by path (the test suites cannot drive the dialog). */
   projectOpenPath(cwd: string): Promise<{ cwd: string } | { cancelled: true }>;
-  projectActivate(projectId: string): Promise<{ ok: boolean }>;
+  projectActivate(projectId: string): Promise<ProjectActivateResult>;
   projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
   /** Persist project tab order. `ids` is every open project, in strip order. */
   reorderProjects(ids: string[]): Promise<{ ok: boolean }>;
