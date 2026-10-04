@@ -1,5 +1,5 @@
 import { expect, test as base } from "./fixtures.ts";
-import { readFile, access, writeFile } from "node:fs/promises";
+import { readFile, access, mkdir, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
@@ -12,6 +12,11 @@ const scripts = {
 };
 
 const test = base.extend({
+  runRoot: async ({ runRoot }, use) => {
+    await mkdir(join(runRoot, "events"), { recursive: true, mode: 0o700 });
+    await writeFile(join(runRoot, "events", "verify-term-1.md"), "**Status:** ✅ PASSED — unrelated prior terminal\n", { mode: 0o600 });
+    await use(runRoot);
+  },
   projectRoot: async ({ projectRoot }, use) => {
     // Fixture output and installed binaries are not application source.
     await writeFile(join(projectRoot, ".gitignore"), "/stages.jsonl\nnode_modules/\n");
@@ -29,7 +34,14 @@ async function verifyContext(runRoot: string, terminalId: string): Promise<strin
   return readFile(join(runRoot, "events", `verify-${terminalId}.md`), "utf8").catch(() => "");
 }
 
-test("Verify executes npm lifecycle stages", async ({ page, projectRoot, runRoot }) => {
+test("a new terminal cannot inherit an unrelated prior green context", async ({ page, runRoot }) => {
+  await expect(page.locator("#splash")).toBeHidden();
+  expect((await verifyInfo(page, "term-1"))?.state).toBe("untested");
+  await expect.poll(() => verifyContext(runRoot, "term-1")).toContain("**Status:** NOT RUN");
+  expect(await verifyContext(runRoot, "term-1")).not.toContain("unrelated prior terminal");
+});
+
+test("Verify executes npm lifecycle stages and requires reverify after a source edit", async ({ page, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   expect(await page.evaluate(() => window.termina.detectTest("term-1"))).toEqual({ command: "npm", args: ["run", "test"], label: "npm run test" });
   const button = page.locator("#btn-verify");
@@ -38,6 +50,9 @@ test("Verify executes npm lifecycle stages", async ({ page, projectRoot, runRoot
   await button.click();
   await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("pass");
   await expect(page.locator("#verify-badge")).toHaveClass(/state-pass/);
+  await expect(page.locator("#verify-badge")).toHaveAttribute("title", /^npm run test\n.+ · exit 0 · \d+ ms\n/);
+  const scope = (await page.locator("#verify-badge").getAttribute("title"))!.split("\n").at(-1)!;
+  expect(realpathSync(scope)).toBe(realpathSync(projectRoot));
   const stages = await readVerifyStages(projectRoot);
   expect(stages.map((stage) => stage.args)).toEqual([["pre"], ["two words"], ["main"], ["post"]]);
   expect(stages.map((stage) => stage.event)).toEqual(["pretest", "test", "test", "posttest"]);
@@ -47,6 +62,29 @@ test("Verify executes npm lifecycle stages", async ({ page, projectRoot, runRoot
   expect(context).toContain("`npm run test`");
   expect(context).toContain('"event":"pretest"');
   expect(context).toContain('"event":"posttest"');
+  const verdict = (await verifyInfo(page, "term-1"))!;
+  expect(verdict.source?.tree).toMatch(/^[0-9a-f]{40}$/);
+  expect(realpathSync(verdict.source!.root)).toBe(realpathSync(projectRoot));
+  expect(verdict.result).toMatchObject({ state: "pass", exitCode: 0 });
+  expect(verdict.result!.finishedAt).toBeGreaterThanOrEqual(verdict.result!.startedAt);
+
+  await writeFile(join(projectRoot, "greeting.ts"), 'export const greeting = "changed outside the editor";\n');
+  await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("stale");
+  await expect(page.locator("#verify-badge")).toHaveClass(/state-stale/);
+  const stale = (await verifyInfo(page, "term-1"))!;
+  expect(stale.source).toEqual(verdict.source);
+  expect(stale.result).toEqual(verdict.result);
+  expect(stale.command).toBe(verdict.command);
+  await expect.poll(() => verifyContext(runRoot, "term-1")).toContain("**Status:** ⚠️ OUTDATED");
+  expect(await verifyContext(runRoot, "term-1")).toContain("**Historical execution:** ✅ PASSED (exit code 0)");
+
+  expect(await page.evaluate(() => window.termina.runVerify("term-1"))).toEqual({ ok: true });
+  await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("pass");
+  const updated = (await verifyInfo(page, "term-1"))!;
+  expect(updated.source?.tree).not.toBe(verdict.source?.tree);
+  expect(updated.result!.startedAt).toBeGreaterThan(verdict.result!.finishedAt);
+  expect((await readVerifyStages(projectRoot))).toHaveLength(8);
+  await expect.poll(() => verifyContext(runRoot, "term-1")).toContain(updated.source!.tree);
 });
 
 for (const failingStage of ["pretest", "test", "posttest"] as const) {
@@ -82,4 +120,74 @@ test("background-terminal Verify uses its owner's project without changing the a
   expect((await page.evaluate(() => window.termina.projectList())).find((project) => project.active)?.id).toBe(otherProject.id);
   await expect(page.locator(".project-tab.active .tab-name")).toHaveText("other verify project");
   await expect.poll(() => verifyContext(runRoot, "term-1")).toContain("✅ PASSED (exit code 0)");
+});
+
+test("a source edit during Verify preserves the successful execution as stale history", async ({ page, projectRoot, runRoot }) => {
+  await expect(page.locator("#splash")).toBeHidden();
+  const ready = join(runRoot, "verify-ready");
+  const release = join(runRoot, "verify-release");
+  await writeFile(join(projectRoot, "verify-gate.cjs"), `
+const fs = require("node:fs");
+const { setTimeout: delay } = require("node:timers/promises");
+(async () => {
+  fs.writeFileSync(${JSON.stringify(ready)}, "ready");
+  const deadline = Date.now() + 30000;
+  while (!fs.existsSync(${JSON.stringify(release)})) {
+    if (Date.now() >= deadline) throw new Error("verification gate was not released");
+    await delay(20);
+  }
+})().catch((error) => { console.error(error); process.exitCode = 9; });
+`);
+  await writeVerifyPackage(projectRoot, { ...scripts, test: "node verify-gate.cjs && termina-verify-fixture main" });
+  try {
+    expect(await page.evaluate(() => window.termina.runVerify("term-1"))).toEqual({ ok: true });
+    await expect.poll(() => access(ready).then(() => true, () => false)).toBe(true);
+    const running = (await verifyInfo(page, "term-1"))!;
+    expect(running.state).toBe("running");
+    expect(running.source?.tree).toBeTruthy();
+    await writeFile(join(projectRoot, "greeting.ts"), 'export const greeting = "changed during verification";\n');
+    await writeFile(release, "release");
+    await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("stale");
+    const stale = (await verifyInfo(page, "term-1"))!;
+    expect(stale.source).toEqual(running.source);
+    expect(stale.result).toMatchObject({ state: "pass", exitCode: 0 });
+    await expect(page.locator("#verify-badge")).toHaveClass(/state-stale/);
+    await expect.poll(() => verifyContext(runRoot, "term-1")).toContain("**Status:** ⚠️ OUTDATED");
+
+    expect(await page.evaluate(() => window.termina.runVerify("term-1"))).toEqual({ ok: true });
+    await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("pass");
+    expect((await verifyInfo(page, "term-1"))?.source?.tree).not.toBe(stale.source?.tree);
+  } finally {
+    await writeFile(release, "release");
+  }
+});
+
+test("closing and reopening a project restores stale history rather than a current pass", async ({ page, projectRoot, runRoot }) => {
+  await expect(page.locator("#splash")).toBeHidden();
+  const originalProject = (await page.evaluate(() => window.termina.projectList())).find((project) => project.active)!;
+  expect(await page.evaluate(() => window.termina.runVerify("term-1"))).toEqual({ ok: true });
+  await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("pass");
+  const verdict = (await verifyInfo(page, "term-1"))!;
+  const otherRoot = join(runRoot, "restoration-other-project");
+  await mkdir(otherRoot);
+  await page.evaluate((root) => window.termina.projectOpenPath(root), otherRoot);
+  expect(await page.evaluate((id) => window.termina.projectClose(id), originalProject.id)).toEqual({ ok: true });
+  expect((await page.evaluate(() => window.termina.projectList())).some((project) => project.id === originalProject.id)).toBe(false);
+  expect((await page.evaluate(() => window.termina.getInstances())).some((instance) => instance.projectId === originalProject.id)).toBe(false);
+
+  await page.evaluate((root) => window.termina.projectOpenPath(root), projectRoot);
+  const restoredProject = (await page.evaluate(() => window.termina.projectList())).find((project) => project.active)!;
+  const restored = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.projectId === restoredProject.id && instance.type === "agent")!;
+  expect(restored).toBeTruthy();
+  expect(restored.verify?.state).toBe("stale");
+  expect(restored.verify?.source).toEqual(verdict.source);
+  expect(restored.verify?.command).toBe(verdict.command);
+  expect(restored.verify?.result).toEqual(verdict.result);
+  await expect(page.locator("#verify-badge")).toHaveClass(/state-stale/);
+  await expect.poll(() => verifyContext(runRoot, restored.id)).toContain("**Status:** ⚠️ OUTDATED");
+  expect(await verifyContext(runRoot, restored.id)).toContain('"event":"posttest"');
+
+  expect(await page.evaluate((id) => window.termina.runVerify(id), restored.id)).toEqual({ ok: true });
+  await expect.poll(async () => (await verifyInfo(page, restored.id))?.state).toBe("pass");
+  expect((await verifyInfo(page, restored.id))?.result!.startedAt).toBeGreaterThan(verdict.result!.finishedAt);
 });

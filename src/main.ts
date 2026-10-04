@@ -1417,10 +1417,13 @@ function renderVerify(pane: Pane): void {
     verifyBadge.textContent = "unknown";
   } else {
     verifyBadge.textContent =
-      v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : v.state === "cancelled" ? `⏸ ${v.summary ?? "cancelled"}` : `✗ ${v.summary ?? "failing"}`;
+      v.state === "stale" ? `↻ ${v.summary ?? "outdated"}` : v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : v.state === "cancelled" ? `⏸ ${v.summary ?? "cancelled"}` : `✗ ${v.summary ?? "failing"}`;
   }
-  verifyBadge.title =
-    v.state === "running" ? "Click to cancel verification" : v.state === "fail" && v.summary ? v.summary : v.command ?? "";
+  verifyBadge.title = v.state === "running" ? "Click to cancel verification" : [
+    v.command, v.staleReason ?? (v.state === "fail" ? v.summary : null),
+    v.result ? `${new Date(v.result.finishedAt).toLocaleString()} · exit ${v.result.exitCode ?? "unknown"} · ${v.result.finishedAt - v.result.startedAt} ms` : null,
+    v.source?.root,
+  ].filter(Boolean).join("\n");
 }
 
 /** Show the Git handoff after a green Verify or an Accept. Termina never writes Git. */

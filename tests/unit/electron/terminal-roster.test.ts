@@ -41,15 +41,25 @@ describe("terminal roster model pin", () => {
 
 describe("terminal roster handoff", () => {
   it("keeps plan tasks and the last verdict", () => {
+    const verify = {
+      state: "fail", command: "npm test", summary: "1 failing",
+      source: { root: "/project", workspaceId: "ws-1", tree: "a".repeat(40), revision: 3, observationEpoch: 1, generation: 4 },
+      result: { state: "fail", exitCode: 1, startedAt: 100, finishedAt: 200 },
+    };
     const [entry] = parseTerminalRoster([{
       id: "term-1",
       type: "agent",
       engine: "core",
       plan: [{ text: "add tests", paths: ["a.ts"], state: "done" }],
-      verify: { state: "fail", command: "npm test", summary: "1 failing" },
+      verify,
+      verifyOutput: "fixture output\n",
     }]);
     expect(entry?.plan).toEqual([{ text: "add tests", paths: ["a.ts"], state: "done" }]);
-    expect(entry?.verify).toEqual({ state: "fail", command: "npm test", summary: "1 failing" });
+    expect(entry?.verify).toEqual(verify);
+    expect(entry?.verifyOutput).toBe("fixture output\n");
+    const restored = parseTerminalRoster(JSON.parse(JSON.stringify([entry])))[0]!;
+    expect(restored.verify).toEqual(verify);
+    expect(restored.verifyOutput).toBe("fixture output\n");
   });
 
   it("drops malformed handoff fields but keeps the entry", () => {
@@ -74,6 +84,19 @@ describe("terminal roster handoff", () => {
     expect(agent?.plan?.length).toBe(50);
     expect(shell?.plan).toBeUndefined();
     expect(shell?.verify).toBeUndefined();
+  });
+
+  it("drops bounded output before verdicts when the roster byte budget is full", () => {
+    const entries = Array.from({ length: 12 }, (_, i) => ({
+      id: `term-${i + 1}`, type: "agent" as const, engine: "core" as const,
+      verify: { state: "pass" as const, command: "npm run test", summary: "tests green" },
+      verifyOutput: "x".repeat(6000),
+    }));
+    const fitted = fitTerminalRoster(entries);
+    expect(Buffer.byteLength(JSON.stringify({ terminals: fitted }))).toBeLessThanOrEqual(64 * 1024);
+    expect(fitted).toHaveLength(12);
+    expect(fitted.every((entry) => entry.verify?.state === "pass")).toBe(true);
+    expect(fitted.every((entry) => entry.verifyOutput === undefined)).toBe(true);
   });
 
   it("degrades handoff before identity under the byte budget", () => {

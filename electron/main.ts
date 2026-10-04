@@ -82,6 +82,7 @@ import { DiagnosticsRunner } from "./diagnostics.js";
 import { ScheduleRunner, type ScheduleTickTask } from "./schedule.js";
 import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { formatProjectSnapshot, MAX_PROJECT_SNAPSHOT_BYTES } from "./main/project-snapshot.js";
+import { formatVerifyContext, invalidateVerify, isVerifySourceCurrent, verifyOutputTail } from "./main/verify-source.js";
 import { searchProjectContent } from "./content-search.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
@@ -172,7 +173,9 @@ import {
   type FolderOpenedPayload,
   type ProjectActivateResult,
   type RendererIpcCapability,
-  type VerifyState,
+  type VerifyInfo,
+  type VerifyResultState,
+  type VerifySource,
 } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -682,7 +685,7 @@ class TerminaApp {
   private appUpdater: AppUpdateController | null = null;
   private installingUpdate = false;
   /** In-flight background verify runs by owner terminal id. */
-  private verifyRuns = new Set<string>();
+  private verifyRuns = new Map<string, AgentTerminalInstance>();
   /** Background static diagnostics; main supplies live reads into app state. */
   private diagnostics = new DiagnosticsRunner({
     workspaceById: (workspaceId) => this.workspaceById(workspaceId),
@@ -728,6 +731,7 @@ class TerminaApp {
    *  Seeded by any failure, consumed by the loop below. Pass, cancel, or
    *  terminal close clears it. */
   private autoVerifyFailures = new Map<string, number>();
+  private verifyContextWrites = new Map<string, Promise<void>>();
   /** Consecutive failed verifies before the automatic loop stops. */
   private static readonly MAX_AUTO_VERIFY_ATTEMPTS = 3;
   /** True after the native owner has bound the events directory. */
@@ -2853,7 +2857,9 @@ class TerminaApp {
             this.sendPlan(inst);
           }
           if (rec.verify) {
-            inst.verify = { state: rec.verify.state, command: rec.verify.command, summary: rec.verify.summary };
+            inst.verify = invalidateVerify(rec.verify, "Previous session result has not been revalidated");
+            inst.verifyOutput = rec.verifyOutput ?? null;
+            this.writeVerifyContext(inst);
           }
         }
         spawned.push({ rec, id: inst.id });
@@ -3193,7 +3199,11 @@ class TerminaApp {
     }
     // Orient the first turn without discovery tool calls. Refreshes follow
     // watcher bursts through scheduleProjectSnapshot.
-    if (type === "agent") void this.writeProjectSnapshot(inst);
+    if (type === "agent") {
+      // A new terminal must not inherit a previous incarnation's green context.
+      this.writeVerifyContext(inst);
+      void this.writeProjectSnapshot(inst);
+    }
     this.sendInstances(rendererTarget);
     return inst;
   }
@@ -3329,6 +3339,57 @@ class TerminaApp {
     });
   }
 
+  private invalidateWorkspaceVerify(ws: WorkspaceState, reason: string, currentTree?: string): void {
+    if (this.disposed || this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
+    const version = ws.watcher?.sourceVersion();
+    const currentSource = currentTree && version ? {
+      workspaceId: ws.id, root: ws.root, tree: currentTree, generation: ws.generation,
+      revision: version.revision, observationEpoch: version.observationEpoch,
+    } : undefined;
+    for (const inst of this.runtime.values()) {
+      if (inst.closed || inst.workspaceId !== ws.id) continue;
+      if (currentTree && isVerifySourceCurrent(inst.verify.source, currentSource)) continue;
+      const verify = invalidateVerify(inst.verify, reason);
+      if (verify === inst.verify) continue;
+      inst.verify = verify;
+      this.savePlanRoster(inst);
+      this.writeVerifyContext(inst);
+      this.send("verify:state", { terminalId: inst.id, verify });
+    }
+  }
+
+  /** Live Verify uses the same Rust capture and idle fence as run preflight. */
+  private async captureVerifySource(ownerId: string, cwd: string): Promise<VerifySource | undefined> {
+    const project = this.projectOfTerminal(ownerId);
+    const owner = this.runtime.get(ownerId);
+    const ws = owner ? this.workspaceOfTerminal(owner) : null;
+    const watcher = ws?.watcher;
+    if (!project || !ws || !watcher || (!sameUserPath(ws.root, cwd) && !pathInside(ws.root, cwd))) return undefined;
+    let state: SourceState | null = null;
+    try {
+      const store = await project.storePromise;
+      if (!store || ws.watcher !== watcher) return undefined;
+      state = await this.captureStable(store, ws, { root: ws.root, gitDir: ws.primary ? store.sourceGitDir : join(ws.root, ".git") });
+      const version = watcher.sourceVersion();
+      const generation = ws.generation;
+      if (!version) return undefined;
+      await watcher.observeCapturedSourcePaths(await store.treePaths(state.commit));
+      const after = watcher.sourceVersion();
+      return after && after.activityRevision === version.activityRevision && after.revision === version.revision
+        && after.observationEpoch === version.observationEpoch && ws.watcher === watcher && ws.generation === generation
+        ? { workspaceId: ws.id, root: ws.root, tree: state.tree, generation, revision: version.revision, observationEpoch: version.observationEpoch } : undefined;
+    } catch (err) {
+      console.warn(`[main] Verify source could not be validated: ${String(err)}`);
+      return undefined;
+    } finally {
+      if (state) await this.releaseStateIfUnused(state.commit, undefined, undefined, project);
+    }
+  }
+
+  private releaseVerifyAdmission(ownerId: string, owner: AgentTerminalInstance): void {
+    if (this.verifyRuns.get(ownerId) === owner) this.verifyRuns.delete(ownerId);
+  }
+
   private async runVerify(ownerId: string): Promise<{ ok: boolean; error?: string }> {
     const owner = this.runtime.get(ownerId);
     if (!owner) return { ok: false, error: "terminal not found" };
@@ -3338,8 +3399,8 @@ class TerminaApp {
     const rendererTarget = this.captureRendererSendTarget();
     const verifyOwnerId = this.projectOfTerminal(ownerId)?.id;
     if (this.disposed || this.projectIsSwitching(verifyOwnerId)) return { ok: false, error: "the project is changing" };
-    if (this.verifyRuns.has(ownerId)) return { ok: false, error: "a verify run is already in progress" };
-    this.verifyRuns.add(ownerId);
+    if (this.verifyRuns.has(ownerId) || this.verifyJobs.has(ownerId)) return { ok: false, error: "a verify run is already in progress" };
+    this.verifyRuns.set(ownerId, owner);
     // Run candidate tests inside the candidate sandbox. The tests cannot write
     // the primary project.
     const verifyOwner = this.projectOfTerminal(ownerId);
@@ -3349,27 +3410,32 @@ class TerminaApp {
     try {
       tc = await detectTestCommand(cwd);
     } catch (err) {
-      this.verifyRuns.delete(ownerId);
+      this.releaseVerifyAdmission(ownerId, owner);
       return { ok: false, error: `could not detect the test command: ${(err as Error).message}` };
     }
     if (!tc) {
-      this.verifyRuns.delete(ownerId);
+      this.releaseVerifyAdmission(ownerId, owner);
       return { ok: false, error: "no test command detected (looked for package.json scripts, pytest, cargo, go)" };
     }
-    if (
-      this.disposed ||
-      this.projectIsSwitching(verifyOwnerId) ||
-      this.runtime.get(ownerId) !== owner ||
-      (candidate && (!verifyOwner?.worldlines?.candidateSandboxOf(ownerId) || !existsSync(candidate.root)))
-    ) {
-      this.verifyRuns.delete(ownerId);
+    const ownerAdmitted = (): boolean => !this.disposed && !owner.closed && !this.projectIsSwitching(verifyOwnerId)
+      && this.runtime.get(ownerId) === owner
+      && (!candidate || (!!verifyOwner?.worldlines?.candidateSandboxOf(ownerId) && existsSync(candidate.root)));
+    if (!ownerAdmitted()) {
+      this.releaseVerifyAdmission(ownerId, owner);
       return { ok: false, error: "the project is changing" };
     }
 
+    const sourceWorkspace = this.workspaceOfTerminal(owner);
+    const sourceWatcher = sourceWorkspace?.watcher;
+    let testedSource: VerifySource | undefined;
+    let startedAt = 0;
     let child: ReturnType<typeof spawn>;
     let verifyProfilePath: string | null = null;
     let verifyProfileParent: PromotionFsIdentity | null = null;
     try {
+      const sourceTask = this.captureVerifySource(ownerId, cwd);
+      this.trackRecordingTask(sourceTask);
+      testedSource = await sourceTask;
       const shells = await detectShells();
       const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
@@ -3384,6 +3450,8 @@ class TerminaApp {
       const env = candidate
         ? { ...candidateEnv(null), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, TERMINA_EVENTS_DIR: candidate.eventsDir }
         : { ...verifyEnv() };
+      if (!ownerAdmitted()) throw new Error("the project is changing");
+      startedAt = Date.now();
       child = spawn(command, args, {
         cwd,
         detached: process.platform !== "win32",
@@ -3395,7 +3463,16 @@ class TerminaApp {
       if (verifyProfilePath && verifyProfileParent) {
         await this.removeBoundEvidenceProfile(verifyProfilePath, verifyProfileParent);
       }
-      this.verifyRuns.delete(ownerId);
+      this.releaseVerifyAdmission(ownerId, owner);
+      if (this.runtime.get(ownerId) === owner && !owner.closed && !this.projectIsSwitching(verifyOwnerId)) {
+        const verify = invalidateVerify(owner.verify, "Verification could not be started");
+        if (verify !== owner.verify) {
+          owner.verify = verify;
+          this.savePlanRoster(owner);
+          this.writeVerifyContext(owner);
+          this.send("verify:state", { terminalId: ownerId, verify }, rendererTarget);
+        }
+      }
       return { ok: false, error: `could not start the background test: ${(err as Error).message}` };
     }
 
@@ -3405,7 +3482,7 @@ class TerminaApp {
     let cleanupPromise: Promise<boolean> | null = null;
     let cleanupDone = false;
     let cleanupWaitAttached = false;
-    let pendingFinish: { code: number | null; how: VerifyState } | null = null;
+    let pendingFinish: { code: number | null; how: VerifyResultState } | null = null;
     const requestCleanup = (signal: NodeJS.Signals, graceMs = 1_500): Promise<boolean> => {
       cleanupPromise ??= terminateSandboxProcessGroup(child, signal, graceMs);
       if (!cleanupWaitAttached) {
@@ -3426,18 +3503,18 @@ class TerminaApp {
     const job: VerifyJob = { child, interrupted: false, cleanup: requestCleanup };
     this.verifyJobs.set(ownerId, job);
     const appendOutput = (data: Buffer | string): void => {
-      if (output.length >= MAX_VERIFY_OUTPUT) return;
-      output += data.toString().slice(0, MAX_VERIFY_OUTPUT - output.length);
+      output = (output + data.toString()).slice(-MAX_VERIFY_OUTPUT);
     };
-    const finishNow = (code: number | null, how: VerifyState): void => {
+    const finishNow = async (code: number | null, how: VerifyResultState): Promise<void> => {
       if (finished) return;
       finished = true;
       clearTimeout(verifyTimer);
-      this.verifyRuns.delete(ownerId);
-      this.verifyJobs.delete(ownerId);
-      const autoTask = this.autoVerifyTasks.get(ownerId) ?? null;
-      this.autoVerifyTasks.delete(ownerId);
-      const wasLooping = this.autoVerifyFailures.has(ownerId);
+      const finishedAt = Date.now();
+      const liveOwner = this.runtime.get(ownerId);
+      const ownsAutoTask = this.verifyJobs.get(ownerId) === job && (!liveOwner || liveOwner === owner);
+      const autoTask = ownsAutoTask ? this.autoVerifyTasks.get(ownerId) ?? null : null;
+      if (ownsAutoTask) this.autoVerifyTasks.delete(ownerId);
+      const wasLooping = ownsAutoTask && this.autoVerifyFailures.has(ownerId);
       if (verifyProfilePath) {
         const profilePath = verifyProfilePath;
         const profileParent = verifyProfileParent;
@@ -3445,61 +3522,96 @@ class TerminaApp {
         verifyProfileParent = null;
         if (profileParent) void this.removeBoundEvidenceProfile(profilePath, profileParent);
       }
-      if (this.runtime.get(ownerId) !== owner || this.projectIsSwitching(this.projectOfTerminal(ownerId)?.id) || this.disposed) return;
-      let summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : how === "cancelled" ? "cancelled" : "tests failing";
-      let failed: { count: number; names: string[] } | null = null;
-      if (how === "fail") {
-        try {
-          const parsed = parseFailingTests(output);
-          if (parsed.count > 0) {
-            failed = parsed;
-            summary = verifyFailSummary(parsed);
+      try {
+        if (!ownerAdmitted() || this.verifyJobs.get(ownerId) !== job) return;
+        const sourceTask = this.captureVerifySource(ownerId, cwd);
+        this.trackRecordingTask(sourceTask);
+        const currentSource = await sourceTask;
+        if (!ownerAdmitted() || this.verifyJobs.get(ownerId) !== job) return;
+        if (job.interrupted && how !== "timeout") how = "cancelled";
+        let summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : how === "cancelled" ? "cancelled" : "tests failing";
+        let failed: { count: number; names: string[] } | null = null;
+        if (how === "fail") {
+          try {
+            const parsed = parseFailingTests(output);
+            if (parsed.count > 0) {
+              failed = parsed;
+              summary = verifyFailSummary(parsed);
+            }
+          } catch {
+            /* Keep the generic failing summary. Parsing never fails the run. */
           }
-        } catch {
-          /* Keep the generic failing summary. Parsing never fails the run. */
         }
-      }
-      owner.verify = { state: how, command: tc.label, summary };
-      this.savePlanRoster(owner);
-      // Do not write a result for a cancelled run. The previous context stays.
-      if (how !== "cancelled") this.writeVerifyContext(ownerId, tc.label, how, code, output, failed);
-      if (autoTask && how !== "cancelled") {
-        const verdict = how === "pass" ? "✅ auto-verify passed" : how === "timeout" ? "⏰ auto-verify timed out" : "❌ auto-verify failed";
-        this.appendMailboxNote(ownerId, `## Auto-verify\n\nTask: ${autoTask}\nResult: ${verdict} — \`${summary}\``);
-      }
-      if (how === "pass" || how === "cancelled") {
-        this.autoVerifyFailures.delete(ownerId);
-        if (how === "pass" && wasLooping && !autoTask) {
-          this.appendMailboxNote(ownerId, `## Auto-verify\n\nResult: ✅ verify passed — \`${summary}\``);
-        }
-      } else if (how === "timeout") {
-        // A timed-out suite usually hangs again; retrying would burn up to
-        // three 10-minute runs. Report it and stop the loop.
-        this.autoVerifyFailures.delete(ownerId);
-        if (!autoTask) {
-          this.appendMailboxNote(ownerId, `## Verify timed out\n\n\`${summary}\` — automatic re-verify is disabled for timeouts; run Verify manually when the suite is responsive again.`);
-        }
-      } else {
-        const attempts = (this.autoVerifyFailures.get(ownerId) ?? 0) + 1;
-        if (attempts >= TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS) {
+        const verdict: VerifyInfo = {
+          state: how, command: tc.label, summary, source: testedSource,
+          result: { state: how, exitCode: code, startedAt, finishedAt },
+        };
+        // Capture cleanup also awaits Rust. Re-read observation after those
+        // awaits, immediately before certifying; running invalidation is deferred.
+        const liveWorkspace = this.workspaceOfTerminal(owner);
+        const liveVersion = sourceWatcher?.sourceVersion();
+        const liveSource = liveWorkspace && liveVersion && currentSource ? {
+          workspaceId: liveWorkspace.id, root: liveWorkspace.root, tree: currentSource.tree,
+          generation: liveWorkspace.generation, revision: liveVersion.revision, observationEpoch: liveVersion.observationEpoch,
+        } : undefined;
+        const current = liveWorkspace === sourceWorkspace && liveWorkspace?.watcher === sourceWatcher
+          && isVerifySourceCurrent(testedSource, currentSource) && isVerifySourceCurrent(currentSource, liveSource);
+        owner.verify = current ? verdict : invalidateVerify(verdict,
+          testedSource && currentSource ? "Source changed during verification" : "The tested source could not be validated");
+        owner.verifyOutput = verifyOutputTail(output);
+        this.savePlanRoster(owner);
+        this.writeVerifyContext(owner, failed);
+        if (owner.verify.state === "stale") {
           this.autoVerifyFailures.delete(ownerId);
-          this.appendMailboxNote(ownerId, `## Auto-verify stopped\n\n${attempts} consecutive failed verifies — needs attention before another automatic run.`);
-        } else {
-          this.autoVerifyFailures.set(ownerId, attempts);
+          if (autoTask || wasLooping) {
+            this.appendMailboxNote(ownerId, `## Auto-verify\n\n${autoTask ? `Task: ${autoTask}\n` : ""}Result: outdated — ${owner.verify.staleReason}. Run Verify again against stable source.`);
+          }
+          this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
+          return;
+        }
+        if (autoTask && how !== "cancelled") {
+          const verdict = how === "pass" ? "✅ auto-verify passed" : how === "timeout" ? "⏰ auto-verify timed out" : "❌ auto-verify failed";
+          this.appendMailboxNote(ownerId, `## Auto-verify\n\nTask: ${autoTask}\nResult: ${verdict} — \`${summary}\``);
+        }
+        if (how === "pass" || how === "cancelled") {
+          this.autoVerifyFailures.delete(ownerId);
+          if (how === "pass" && wasLooping && !autoTask) {
+            this.appendMailboxNote(ownerId, `## Auto-verify\n\nResult: ✅ verify passed — \`${summary}\``);
+          }
+        } else if (how === "timeout") {
+          // A timed-out suite usually hangs again; retrying would burn up to
+          // three 10-minute runs. Report it and stop the loop.
+          this.autoVerifyFailures.delete(ownerId);
           if (!autoTask) {
-            this.appendMailboxNote(ownerId, `## Verify failed\n\n\`${summary}\` — will automatically re-verify when your next run settles (attempt ${attempts} of ${TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS}).`);
+            this.appendMailboxNote(ownerId, `## Verify timed out\n\n\`${summary}\` — automatic re-verify is disabled for timeouts; run Verify manually when the suite is responsive again.`);
+          }
+        } else {
+          const attempts = (this.autoVerifyFailures.get(ownerId) ?? 0) + 1;
+          if (attempts >= TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS) {
+            this.autoVerifyFailures.delete(ownerId);
+            this.appendMailboxNote(ownerId, `## Auto-verify stopped\n\n${attempts} consecutive failed verifies — needs attention before another automatic run.`);
+          } else {
+            this.autoVerifyFailures.set(ownerId, attempts);
+            if (!autoTask) {
+              this.appendMailboxNote(ownerId, `## Verify failed\n\n\`${summary}\` — will automatically re-verify when your next run settles (attempt ${attempts} of ${TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS}).`);
+            }
           }
         }
+        this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
+      } finally {
+        if (this.verifyJobs.get(ownerId) === job) {
+          this.releaseVerifyAdmission(ownerId, owner);
+          this.verifyJobs.delete(ownerId);
+        }
       }
-      this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
     };
-    function finishAfterCleanup(): void {
+    const finishAfterCleanup = (): void => {
       if (!cleanupDone || !pendingFinish || finished) return;
       const pending = pendingFinish;
       pendingFinish = null;
-      finishNow(pending.code, pending.how);
-    }
-    const finish = (code: number | null, how: VerifyState): void => {
+      this.trackRecordingTask(finishNow(pending.code, pending.how));
+    };
+    const finish = (code: number | null, how: VerifyResultState): void => {
       if (finished) return;
       pendingFinish = { code, how };
       requestCleanup(how === "timeout" ? "SIGKILL" : "SIGTERM");
@@ -3511,6 +3623,8 @@ class TerminaApp {
       finish(null, "timeout");
     }, 10 * 60 * 1000);
 
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", appendOutput);
     child.stderr?.on("data", appendOutput);
     child.once("error", (err) => {
@@ -3521,13 +3635,14 @@ class TerminaApp {
       if (!finished) finish(code, timedOut ? "timeout" : job.interrupted ? "cancelled" : code === 0 ? "pass" : "fail");
     });
 
-    owner.verify = { state: "running", command: tc.label, summary: "running…" };
+    owner.verifyOutput = "";
+    owner.verify = { state: "running", command: tc.label, summary: "running…", source: testedSource };
     this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
     return { ok: true };
   }
 
   private cancelVerifyForComparison(comparisonId: string): void {
-    for (const ownerId of [...this.verifyRuns]) {
+    for (const ownerId of [...this.verifyRuns.keys()]) {
       const owner = this.runtime.get(ownerId);
       const workspace = owner ? this.projectOfTerminal(ownerId)?.workspaces.get(owner.workspaceId) : undefined;
       if (workspace?.comparisonId !== comparisonId) continue;
@@ -3562,40 +3677,40 @@ class TerminaApp {
   }
 
   /** Write the verify result to the context file the bridge extension reads. */
-  private writeVerifyContext(
-    ownerId: string,
-    label: string,
-    state: VerifyState,
-    code: number | null,
-    output: string,
-    failed: { count: number; names: string[] } | null = null,
-  ): void {
-    const owner = this.runtime.get(ownerId);
-    const eventsDir = owner ? this.eventsDirOf(owner) : this.eventsDir;
-    const root = owner ? this.eventsBindingOf(owner) : this.eventsDirBinding;
+  private writeVerifyContext(owner: AgentTerminalInstance, failed: { count: number; names: string[] } | null = null): void {
+    const root = this.eventsBindingOf(owner);
     if (!root) return;
-    const stamp = new Date().toISOString();
-    const status = state === "pass" ? "✅ PASSED" : state === "timeout" ? "⏰ TIMED OUT" : "❌ FAILED";
-    const failLine =
-      failed && failed.count > 0
-        ? `**Failed:** ${failed.count} — ${failed.names.map((n) => `\`${n}\``).join(", ")}\n\n`
-        : "";
-    const body = output.trim().slice(-6000);
-    const md =
-      `## Test run — \`${label}\` — ${stamp}\n\n` +
-      `**Status:** ${status}${code !== null ? ` (exit code ${code})` : ""}\n\n` +
-      failLine +
-      (body ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
-    void writeBoundOwnedFile({
-      root: eventsDir,
-      rootIdentity: root,
-      components: [`verify-${ownerId}.md`],
-      parentIdentity: root,
-      content: Buffer.from(md),
-      mode: 0o600,
-      maxBytes: 16 * 1024,
-    }).catch((err) => {
-      console.warn(`[main] could not write verify context: ${String(err)}`);
+    const eventsDir = this.eventsDirOf(owner);
+    const verify = owner.verify;
+    const md = formatVerifyContext(verify, owner.verifyOutput, failed);
+    const previous = this.verifyContextWrites.get(owner.id) ?? Promise.resolve();
+    const task = previous.then(async () => {
+      // Serialize immutable verdicts: a late pass must not overwrite stale context.
+      if (this.runtime.get(owner.id) !== owner || owner.closed || owner.verify !== verify) return;
+      try {
+        await writeBoundOwnedFile({
+          root: eventsDir,
+          rootIdentity: root,
+          components: [`verify-${owner.id}.md`],
+          parentIdentity: root,
+          content: Buffer.from(md),
+          mode: 0o600,
+          maxBytes: 16 * 1024,
+        });
+      } catch (err) {
+        console.warn(`[main] could not write verify context: ${String(err)}`);
+        // Derived context may be absent, but must not retain an obsolete green.
+        await this.removeEventLeaf(owner, `verify-${owner.id}.md`);
+      }
+    });
+    this.verifyContextWrites.set(owner.id, task);
+    this.trackRecordingTask(task);
+    const forget = (): void => {
+      if (this.verifyContextWrites.get(owner.id) === task) this.verifyContextWrites.delete(owner.id);
+    };
+    void task.then(forget, (err) => {
+      forget();
+      console.warn(`[main] Verify context update failed: ${String(err)}`);
     });
   }
 
@@ -3833,9 +3948,8 @@ class TerminaApp {
 
   /** True when an active verify or dispatch overlaps the given workspace. */
   private overlapInWorkspace(workspaceId: string): boolean {
-    for (const id of this.verifyRuns) {
-      const inst = this.runtime.get(id);
-      if (inst && inst.workspaceId === workspaceId) return true;
+    for (const inst of this.verifyRuns.values()) {
+      if (inst.workspaceId === workspaceId) return true;
     }
     for (const entry of this.dispatchRuns.values()) {
       const owner = this.runtime.get(entry.ownerId);
@@ -5310,6 +5424,7 @@ class TerminaApp {
         return;
       }
       const state = captured.state;
+      this.invalidateWorkspaceVerify(ws, "Source capture differs from the recorded test run", state.tree);
       markStage("capture");
       this.setWorkspaceState(ws, state.commit);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
@@ -5571,7 +5686,7 @@ class TerminaApp {
     // finally below must not release it early.
     let releaseOnExit = true;
     try {
-      const capturePromise = this.captureStable(store, ws);
+      const capturePromise = this.captureStable(store, ws, { root: ws.root, gitDir: store.sourceGitDir });
       const captured = await Promise.race([
         capturePromise.then((state) => ({ ok: true as const, state })),
         new Promise<{ ok: false }>((resolve) => {
@@ -5621,7 +5736,7 @@ class TerminaApp {
    * reject any raw activity or generation change across capture. Two bounded
    * attempts prevent a continuously changing source from waiting forever.
    */
-  private async captureStable(store: SnapshotStore, ws: WorkspaceState): Promise<SourceState> {
+  private async captureStable(store: SnapshotStore, ws: WorkspaceState, source: { root: string; gitDir: string }): Promise<SourceState> {
     for (let attempt = 0; attempt < 2; attempt++) {
       const watcher = ws.watcher;
       if (!watcher) throw new Error("source watcher is not available");
@@ -5631,9 +5746,13 @@ class TerminaApp {
       if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
         throw new Error("the retained-blob budget is exhausted");
       }
-      const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null);
+      const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null, {}, {}, source);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
-      if (ws.generation === gen && watcher.isIdleAt(idleRevision)) return state;
+      if (ws.generation === gen && ws.watcher === watcher && watcher.isIdleAt(idleRevision)) {
+        this.invalidateWorkspaceVerify(ws, "Source capture differs from the recorded test run", state.tree);
+        return state;
+      }
+      await this.releaseStateIfUnused(state.commit, undefined, undefined, this.projectOfWorkspace(ws.id));
     }
     throw new Error("the source changed during capture");
   }
@@ -6324,6 +6443,8 @@ class TerminaApp {
     // becomes the next run's prompt. The old verify verdict is stale too.
     inst.pendingPrompt = null;
     inst.verify = { state: "untested", command: null, summary: null };
+    inst.verifyOutput = null;
+    this.writeVerifyContext(inst);
     this.send("verify:state", { terminalId, verify: inst.verify }, expected);
     // Modified files and their original baselines intentionally survive /clear:
     // they describe real workspace changes still present on disk. The next
@@ -7269,6 +7390,8 @@ class TerminaApp {
     const canonicalRootPromise = this.canonicalPath(ws.root);
     const workspaceTerminals = (): AgentTerminalInstance[] =>
       [...ws.terminalIds].map((id) => this.runtime.get(id)).filter((t): t is AgentTerminalInstance => t !== undefined);
+    watcher.onSourceChanged = () => this.invalidateWorkspaceVerify(ws, "Workspace activity after the recorded test run");
+    watcher.onObservationLost = () => this.invalidateWorkspaceVerify(ws, "Source observation is unavailable");
     watcher.onChange = async (change) => {
       const rendererTarget = this.captureRendererSendTarget();
       const owner = this.projectOfWorkspace(ws.id);
@@ -7311,7 +7434,7 @@ class TerminaApp {
       // receives user edits on its next turn (see the edits-<id>.md context
       // file).
       const busy = workspaceTerminals().filter((t) => t.busy);
-      const verifyInWorkspace = [...this.verifyRuns].some((id) => this.runtime.get(id)?.workspaceId === ws.id);
+      const verifyInWorkspace = [...this.verifyRuns.values()].some((inst) => inst.workspaceId === ws.id);
       if (busy.length === 0 && !verifyInWorkspace && !this.promotionPaths?.has(relPath)) {
         this.recordUserEdit(ws, { path, relPath, status: change.status, prev: change.prev, content: change.content, at: now });
       }

@@ -185,7 +185,18 @@ export interface TimelineProgress {
 /** The recording state shown outside the dot strip (WORLDLINES §6). */
 export type RecorderState = "indexing" | "ready" | "paused" | "degraded" | "budget";
 
-export type VerifyState = "untested" | "running" | "pass" | "fail" | "timeout" | "cancelled";
+export const VERIFY_RESULT_STATES = ["pass", "fail", "timeout", "cancelled"] as const;
+export type VerifyResultState = (typeof VERIFY_RESULT_STATES)[number];
+export type VerifyState = "untested" | "running" | "stale" | VerifyResultState;
+export interface VerifySource {
+  workspaceId: string;
+  root: string;
+  /** Rust capture's content tree identity, not its time-dependent commit. */
+  tree: string;
+  revision: number;
+  observationEpoch: number;
+  generation: number;
+}
 /** Verify & Iterate: the last test run attached to a terminal. */
 export interface VerifyInfo {
   state: VerifyState;
@@ -193,6 +204,10 @@ export interface VerifyInfo {
   command: string | null;
   /** One-line result summary for the badge. */
   summary: string | null;
+  source?: VerifySource;
+  /** Historical execution facts survive loss of current source validity. */
+  result?: { state: VerifyResultState; exitCode: number | null; startedAt: number; finishedAt: number };
+  staleReason?: string;
 }
 
 /** One lossless, sequenced PTY egress quantum. */

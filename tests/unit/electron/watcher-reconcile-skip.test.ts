@@ -34,10 +34,13 @@ describe("Watcher reconcile unreadable directories", () => {
     try {
       watcher.start();
       await sleep(150);
+      const before = watcher.sourceVersion()!;
       internals.requestReconcile(internals.generation);
       const deadline = Date.now() + 8000;
       while (internals.overflowed && Date.now() < deadline) await sleep(50);
       expect(internals.overflowed).toBe(false);
+      // Recovered delivery is not continuity with a previously certified tree.
+      expect(watcher.sourceVersion()!.observationEpoch).toBeGreaterThan(before.observationEpoch);
       expect(internals.watcherPaused).toBe(false);
       expect(internals.healthy).toBe(true);
       expect(await watcher.waitForIdle(2000)).not.toBeNull();
@@ -79,10 +82,13 @@ describe("Watcher reconcile unreadable directories", () => {
       await sleep(300);
       rmSync(join(root, "gone", "old.txt"), { force: true });
       failGone = true;
+      const before = watcher.sourceVersion()!;
       internals.requestReconcile(internals.generation);
       const deadline = Date.now() + 8000;
       while (internals.overflowed && Date.now() < deadline) await sleep(50);
       expect(internals.overflowed).toBe(false);
+      // Recovered delivery is not continuity with a previously certified tree.
+      expect(watcher.sourceVersion()!.observationEpoch).toBeGreaterThan(before.observationEpoch);
       expect(deleted).toContain(join(root, "gone", "old.txt"));
     } finally {
       watcher.stop();

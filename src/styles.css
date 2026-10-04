@@ -3044,6 +3044,11 @@ html[data-theme="light"] #statusbar .muted {
   background: rgba(0, 0, 0, 0.22);
 }
 
+#verify-badge.state-stale {
+  background: color-mix(in srgb, var(--yellow) 18%, var(--bg));
+  color: var(--yellow);
+}
+
 #verify-badge.state-unknown {
   color: var(--text-dim);
 }

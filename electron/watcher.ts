@@ -121,6 +121,11 @@ export class ProjectWatcher {
   private drainWaiters: Array<{ generation: number; resolve: (ok: boolean) => void }> = [];
   /** Increments on every relevant raw fs notification, before debounce. */
   private rawRevision = 0;
+  /** Relevant notifications, including changes restored before the next read. */
+  private sourceRevision = 0;
+  /** Evidence continuity can be lost while the native watcher stays open. */
+  private sourceObservationEpoch = 0;
+  private capturedSourcePaths = new Set<string>();
   /** Changes whenever watcher observation becomes available or unavailable. */
   private healthRevision = 0;
   /** A failed watcher must never certify a checkpoint as stable. */
@@ -165,6 +170,9 @@ export class ProjectWatcher {
   /** Fired when a file changed but its content was not cached (oversized or
    *  binary). Carries the path and status only — no content, no prev. */
   onFileUncached: (path: string, status: "created" | "modified") => void | Promise<void> = () => {};
+  /** Invalidate live evidence before reads/debounce can collapse a change. */
+  onSourceChanged: () => void = () => {};
+  onObservationLost: () => void = () => {};
 
   /**
    * @param root watched directory
@@ -205,14 +213,22 @@ export class ProjectWatcher {
         // still raw activity: invalidate any idle barrier, but never invent a
         // path or read a made-up file.
         this.rawRevision++;
+        // Settled evidence is conservative even for dependencies/output paths.
+        this.onSourceChanged();
         const rawFilename: unknown = filename;
-        if (typeof rawFilename === "string") {
-          if (rawFilename) this.schedule(rawFilename, generation, true);
+        if (typeof rawFilename === "string" && rawFilename) {
+          this.schedule(rawFilename, generation, true);
           return;
         }
-        if (!Buffer.isBuffer(rawFilename) || rawFilename.length === 0) return;
+        if (!Buffer.isBuffer(rawFilename) || rawFilename.length === 0) {
+          this.sourceChanged();
+          return;
+        }
         const relPath = rawFilename.toString("utf8");
-        if (!relPath || !Buffer.from(relPath, "utf8").equals(rawFilename)) return;
+        if (!relPath || !Buffer.from(relPath, "utf8").equals(rawFilename)) {
+          this.sourceChanged();
+          return;
+        }
         this.schedule(relPath, generation, true);
       });
       watcher.on("error", (err) => {
@@ -239,9 +255,7 @@ export class ProjectWatcher {
 
   stop(): void {
     this.generation++;
-    this.rawRevision++;
-    this.healthy = false;
-    this.healthRevision++;
+    this.markUnhealthy();
     this.overflowed = false;
     this.reconcileRunning = false;
     this.watcherPaused = false;
@@ -278,8 +292,19 @@ export class ProjectWatcher {
   }
 
   private schedule(relPath: string, generation: number, rawObserved = false): void {
-    if (generation !== this.generation || this.isIgnored(relPath)) return;
-    if (!rawObserved) this.rawRevision++;
+    if (generation !== this.generation) return;
+    const segments = relPath.split(sep);
+    const ignoreConfig = segments.at(-1) === ".gitignore";
+    const ignored = this.isIgnored(relPath);
+    // Editor-hidden directories can still contain Rust capture inputs, including
+    // new files absent from the last captured-path index.
+    const relevant = !this.isGitIgnored(relPath) || ignoreConfig || segments.includes(".git") || this.capturedSourcePaths.has(this.sourcePathKey(relPath));
+    if (relevant) this.sourceRevision++;
+    if (!rawObserved) {
+      this.rawRevision++;
+      this.onSourceChanged();
+    }
+    if (ignored && !ignoreConfig) return;
     if (this.reconcileRunning || this.overflowed) {
       this.recordReconcileNotification(relPath);
       return;
@@ -382,6 +407,7 @@ export class ProjectWatcher {
 
   private pauseWatcher(): void {
     this.watcherPaused = true;
+    this.loseSourceObservation();
     // Keep the native observer open during reconciliation. Closing it creates
     // a scan/re-arm gap in which a mutation can be neither journaled nor
     // rediscovered. The callback below journals overlapping notifications;
@@ -499,6 +525,50 @@ export class ProjectWatcher {
     this.healthy = false;
     this.healthRevision++;
     this.rawRevision++;
+    this.loseSourceObservation();
+  }
+
+  private loseSourceObservation(): void {
+    this.sourceObservationEpoch++;
+    this.onObservationLost();
+  }
+
+  private sourceChanged(): void {
+    this.sourceRevision++;
+    this.onSourceChanged();
+  }
+
+  /** Healthy source observations, with raw activity for fencing metadata reads. */
+  sourceVersion(): { revision: number; observationEpoch: number; activityRevision: number } | null {
+    return this.healthy && !this.overflowed ? { revision: this.sourceRevision, observationEpoch: this.sourceObservationEpoch, activityRevision: this.rawRevision } : null;
+  }
+
+  private sourcePathKey(path: string): string {
+    // Notification and index spelling may differ on case-insensitive volumes.
+    return path.split(sep).join("/").normalize("NFC").toLowerCase();
+  }
+
+  /** Captured inputs remain evidence inputs even inside editor-ignored folders. */
+  async observeCapturedSourcePaths(paths: Iterable<string>): Promise<void> {
+    const next = new Set<string>();
+    let bytes = 0;
+    let i = 0;
+    for (const path of paths) {
+      if (this.isIgnored(path) || this.isIgnored(path.toLowerCase())) {
+        const segments = this.sourcePathKey(path).split("/");
+        while (segments.length) {
+          const key = segments.join("/");
+          if (!next.has(key)) {
+            bytes += Buffer.byteLength(key, "utf8");
+            if (next.size >= 100_000 || bytes > 8 * 1024 * 1024) throw new Error("captured source observation budget exceeded");
+            next.add(key);
+          }
+          segments.pop();
+        }
+      }
+      if (++i % 200 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    this.capturedSourcePaths = next;
   }
 
   /**
@@ -745,9 +815,11 @@ export class ProjectWatcher {
 
   /** True when the watcher drops this root-relative path (segments/gitignore). */
   isIgnored(relPath: string): boolean {
-    const segments = relPath.split(sep);
-    if (segments.some((s) => IGNORED_SEGMENTS.has(s))) return true;
-    return this.gitignoreRules.size > 0 && matchGitignore(this.gitignoreRules, segments.join("/"));
+    return relPath.split(sep).some((segment) => IGNORED_SEGMENTS.has(segment)) || this.isGitIgnored(relPath);
+  }
+
+  private isGitIgnored(relPath: string): boolean {
+    return this.gitignoreRules.size > 0 && matchGitignore(this.gitignoreRules, relPath.split(sep).join("/"));
   }
 
   /** The directory key of one .gitignore path (platform separators in,

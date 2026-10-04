@@ -187,6 +187,7 @@ describe("main hardening batch (refs #219)", () => {
     const dir = mkdtempSync(join(tmpdir(), "termina-clear-"));
     try {
       const sent: Array<{ channel: string; payload: unknown }> = [];
+      const contextStates: unknown[] = [];
       const inst = {
         id: "term-1",
         timeline: [],
@@ -204,6 +205,7 @@ describe("main hardening batch (refs #219)", () => {
         currentRun: null,
         pendingPrompt: { file: "prompt-term-1-x.json", text: "staged prompt", images: 0 },
         verify: { state: "fail", command: "npm run test", summary: "failing" },
+        verifyOutput: "previous output" as string | null,
       };
       const terminals = new Map([["term-1", inst]]);
       const app = {
@@ -225,10 +227,13 @@ describe("main hardening batch (refs #219)", () => {
         clearUserEdits: () => undefined,
         clearMailbox: () => undefined,
         projectOfTerminal: () => null,
+        writeVerifyContext: (target: typeof inst) => contextStates.push({ verify: target.verify, output: target.verifyOutput }),
       };
       await clear.call(app, "term-1", null);
       expect(inst.pendingPrompt).toBeNull();
       expect(inst.verify).toEqual({ state: "untested", command: null, summary: null });
+      expect(inst.verifyOutput).toBeNull();
+      expect(contextStates).toEqual([{ verify: inst.verify, output: null }]);
       expect(sent).toContainEqual({
         channel: "verify:state",
         payload: { terminalId: "term-1", verify: { state: "untested", command: null, summary: null } },
