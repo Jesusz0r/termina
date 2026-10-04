@@ -652,6 +652,8 @@ export interface TerminaBridge {
   readyTerminal(id: string, generation: number): void;
   /** Retire one PTY sequence after xterm has consumed it. */
   acknowledgePtyData(payload: Pick<PtyDataPayload, "id" | "generation" | "windowGeneration" | "rendererGeneration" | "sequence">): void;
+  /** Report the selected pane for native actions; main validates ownership and generation. */
+  selectTerminal(id: string, generation: number): Promise<{ ok: boolean }>;
   closeTerminal(id: string, generation: number): Promise<void>;
   writeTerminal(id: string, data: string): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;

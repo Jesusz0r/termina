@@ -80,6 +80,7 @@ const bridge: TerminaBridge = {
   getShells: () => ipcRenderer.invoke("terminals:shells"),
   readyTerminal: (id, generation) => ipcRenderer.send("pty:ready", id, generation),
   acknowledgePtyData: (payload) => ipcRenderer.send("pty:ack", payload),
+  selectTerminal: (id, generation) => ipcRenderer.invoke("terminals:select", id, generation),
   closeTerminal: (id, generation) => ipcRenderer.invoke("terminals:close", id, generation),
   writeTerminal: (id, data) => ipcRenderer.invoke("terminals:write", id, data),
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke("terminals:resize", id, cols, rows),

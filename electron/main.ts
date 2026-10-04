@@ -131,6 +131,7 @@ import {
   parsePtyAckPayload,
   parseRendererCapability,
   parseTerminalCreateOptions,
+  parseTerminalTarget,
 } from "./main/ipc-validate.js";
 import {
   newWorkspaceState,
@@ -753,6 +754,8 @@ class TerminaApp {
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   /** Renderer-reported scope: a live core TUI owns keyboard focus, so the menu blanks the Ctrl+P / Ctrl+R accelerators it would otherwise steal. */
   private coreTerminalFocused = false;
+  /** Native terminal actions use the exact pane selected by this renderer document. */
+  private terminalSelection: { id: string; generation: number; target: PtyRendererSendTarget } | null = null;
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /clear (/new alias) slash-command detection (terminals:write is per keystroke). */
   private newCommandBuffers = new Map<string, string>();
@@ -4622,6 +4625,7 @@ class TerminaApp {
     const inst = this.runtime.get(id);
     if (!inst || inst.closed) return;
     const owner = this.projectOfTerminal(id);
+    inst.interruptedAt = Date.now();
     this.closeTerminal(id);
     // Persist the user's close intent immediately. Waiting for the process
     // exit callback loses it when the app quits while PTY teardown is still
@@ -4640,20 +4644,37 @@ class TerminaApp {
     this.sendInstances();
   }
 
+  private selectTerminal(id: unknown, generation: unknown): { ok: boolean } {
+    const ref = parseTerminalTarget(id, generation);
+    const inst = ref ? this.runtime.get(ref.id) : undefined;
+    const target = this.captureRendererSendTarget();
+    if (!ref || !inst || inst.closed || inst.generation !== ref.generation || !target
+      || this.disposed || this.projectIsSwitching(this.activeProjectId ?? undefined)
+      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId) return { ok: false };
+    this.terminalSelection = { ...ref, target };
+    return { ok: true };
+  }
+
+  private selectedTerminal(): AgentTerminalInstance | null {
+    const selected = this.terminalSelection;
+    if (!selected || !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), selected.target)) return null;
+    const inst = this.runtime.get(selected.id);
+    if (!inst || inst.closed || inst.generation !== selected.generation
+      || this.disposed || this.projectIsSwitching(this.activeProjectId ?? undefined)
+      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId) return null;
+    return inst;
+  }
+
   private closeActiveTerminal(): void {
-    const inst = this.activeProjectTerminals().at(-1);
+    const inst = this.selectedTerminal();
     if (inst) this.closeUserTerminal(inst.id);
   }
 
   private async abortActive(): Promise<void> {
-    const inst = this.activeProjectTerminals().at(-1);
-    if (inst) inst.pty.write("\x03");
-  }
-
-  /** The terminals of the active project, in creation order. */
-  private activeProjectTerminals(): AgentTerminalInstance[] {
-    const project = this.project();
-    return [...this.runtime.values()].filter((inst) => !inst.closed && (!project || project.terminalIds.has(inst.id)));
+    const inst = this.selectedTerminal();
+    if (!inst) return;
+    inst.interruptedAt = Date.now();
+    inst.pty.interrupt();
   }
 
   private instanceList(): InstanceSummary[] {
@@ -7995,12 +8016,14 @@ class TerminaApp {
         p.sequence,
       );
     });
+    ipcMain.handle("terminals:select", (_event, id: unknown, generation: unknown) => this.selectTerminal(id, generation));
     ipcMain.handle("terminals:close", (event, id: unknown, generation: unknown) => {
       if (event.sender !== this.win?.webContents) return;
-      if (typeof id !== "string" || typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) return;
-      const inst = this.runtime.get(id);
-      if (!inst || inst.generation !== generation) return;
-      this.closeUserTerminal(id);
+      const ref = parseTerminalTarget(id, generation);
+      if (!ref) return;
+      const inst = this.runtime.get(ref.id);
+      if (!inst || inst.generation !== ref.generation) return;
+      this.closeUserTerminal(ref.id);
     });
     ipcMain.handle("terminals:write", (_e, id: unknown, data: unknown) => {
       if (typeof id !== "string" || typeof data !== "string") return;

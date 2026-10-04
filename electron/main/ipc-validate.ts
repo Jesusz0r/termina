@@ -32,6 +32,12 @@ function isPositiveSafeInt(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
+/** An exact live terminal target. Never substitute stored terminal order. */
+export function parseTerminalTarget(id: unknown, generation: unknown): { id: string; generation: number } | null {
+  if (typeof id !== "string" || !id.trim() || id.length > 64 || !isPositiveSafeInt(generation)) return null;
+  return { id, generation };
+}
+
 /** Validate the shape of a renderer capability before comparing it. */
 export function parseRendererCapability(value: unknown): RendererIpcCapability | null {
   if (!isRecord(value)) return null;

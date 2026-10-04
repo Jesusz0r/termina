@@ -1063,6 +1063,9 @@ function activatePane(instanceId: string): void {
   if (!pane) return;
   removeSplash();
   activeId = instanceId;
+  void window.termina.selectTerminal(instanceId, pane.generation).catch((err) => {
+    toast(`could not select the terminal: ${(err as Error).message}`, "warning");
+  });
   // Viewing clears the unseen-failure nudge.
   if (pane.verifyAttention) {
     pane.verifyAttention = false;
