@@ -7,6 +7,7 @@ export function attachTabReorder(
   list: HTMLElement,
   opts: {
     tabClass: string;
+    axis?: "horizontal" | "vertical";
     canDrag?: (tab: HTMLElement) => boolean;
     onCommit: () => void;
   },
@@ -20,9 +21,14 @@ export function attachTabReorder(
   let startX = 0;
   let startY = 0;
   let suppressClick = false;
-  let targets: { el: HTMLElement; left: number; width: number }[] = [];
+  let targets: { el: HTMLElement; start: number; size: number }[] = [];
   let startScroll = 0;
 
+  const vertical = opts.axis === "vertical";
+  const rectStart = vertical ? "top" : "left";
+  const rectSize = vertical ? "height" : "width";
+  const scrollPosition = vertical ? "scrollTop" : "scrollLeft";
+  const pointerPosition = (event: PointerEvent): number => vertical ? event.clientY : event.clientX;
   const canDrag = opts.canDrag ?? (() => true);
 
   const end = (commit: boolean): void => {
@@ -57,25 +63,25 @@ export function attachTabReorder(
 
   const slide = (move: () => void): void => {
     const tabs = targets.map(({ el }) => el);
-    const before = new Map(tabs.map((el) => [el, el.getBoundingClientRect().left]));
+    const before = new Map(tabs.map((el) => [el, el.getBoundingClientRect()[rectStart]]));
     move();
     for (const el of tabs) {
       el.style.transition = "none";
       el.style.transform = "";
-      const dx = (before.get(el) ?? 0) - el.getBoundingClientRect().left;
-      el.style.transform = `translateX(${dx}px)`;
+      const delta = (before.get(el) ?? 0) - el.getBoundingClientRect()[rectStart];
+      el.style.transform = `${vertical ? "translateY" : "translateX"}(${delta}px)`;
       el.getBoundingClientRect();
       el.style.transition = "";
       el.style.transform = "";
     }
   };
 
-  const moveSlot = (clientX: number): void => {
+  const moveSlot = (position: number): void => {
     const slot = placeholder;
     if (!slot) return;
     // Keep hit targets in their original content coordinates. Measuring the
     // animated neighbors makes the slot oscillate under a stationary pointer.
-    const index = insertionIndex(clientX + list.scrollLeft - startScroll, targets);
+    const index = insertionIndex(position + list[scrollPosition] - startScroll, targets);
     const anchor = targets[index]?.el ?? null;
     if (slot.nextSibling === anchor) return;
     slide(() => list.insertBefore(slot, anchor));
@@ -83,13 +89,13 @@ export function attachTabReorder(
 
   const lift = (el: HTMLElement): void => {
     const rect = el.getBoundingClientRect();
-    startScroll = list.scrollLeft;
+    startScroll = list[scrollPosition];
     targets = [...list.children]
       .filter((node): node is HTMLElement => node instanceof HTMLElement
         && node !== el && node.classList.contains(opts.tabClass) && canDrag(node))
       .map((el) => {
         const rect = el.getBoundingClientRect();
-        return { el, left: rect.left, width: rect.width };
+        return { el, start: rect[rectStart], size: rect[rectSize] };
       });
     originNext = el.nextSibling;
     const slot = document.createElement("div");
@@ -139,12 +145,12 @@ export function attachTabReorder(
     }
     tab.style.left = `${event.clientX - offsetX}px`;
     tab.style.top = `${event.clientY - offsetY}px`;
-    moveSlot(event.clientX);
+    moveSlot(pointerPosition(event));
   });
 
   window.addEventListener("pointerup", (event) => {
     if (event.pointerId !== pointerId) return;
-    moveSlot(event.clientX);
+    moveSlot(pointerPosition(event));
     end(true);
   });
   window.addEventListener("pointercancel", (event) => {

@@ -287,6 +287,39 @@ export function cellColumnsForLine(line: IBufferLine, textLength: number): numbe
   return columns;
 }
 
+// Bound mouse-hover work even when a producer emits an enormous unbroken line.
+const MAX_LINK_LINE_CELLS = 16_384;
+
+function wrappedLinkLine(term: Terminal, requestedRow: number): { text: string; positions: IBufferRange["start"][] } | null {
+  const buffer = term.buffer.active;
+  let first = requestedRow;
+  let line = buffer.getLine(first);
+  if (!line) return null;
+  let scanned = 0;
+  while (line.isWrapped) {
+    scanned += line.length;
+    if (first === 0 || scanned > MAX_LINK_LINE_CELLS) return null;
+    line = buffer.getLine(--first);
+    if (!line) return null;
+  }
+  let text = "";
+  const positions: IBufferRange["start"][] = [];
+  scanned = 0;
+  for (let row = first; line; row++) {
+    scanned += line.length;
+    if (scanned > MAX_LINK_LINE_CELLS) return null;
+    const next = buffer.getLine(row + 1);
+    const continues = next?.isWrapped === true;
+    const part = line.translateToString(!continues);
+    if (text.length + part.length > MAX_LINK_LINE_CELLS) return null;
+    for (const column of cellColumnsForLine(line, part.length)) positions.push({ x: column + 1, y: row + 1 });
+    text += part;
+    if (!continues) break;
+    line = next;
+  }
+  return { text, positions };
+}
+
 /**
  * Creates an xterm.js ILinkProvider for clickable terminal file references.
  */
@@ -297,13 +330,13 @@ export function createTerminalLinkProvider(
 ): ILinkProvider {
   return {
     provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void): void {
-      const line = term.buffer.active.getLine(bufferLineNumber - 1);
-      if (!line) {
+      const logical = wrappedLinkLine(term, bufferLineNumber - 1);
+      if (!logical) {
         callback(undefined);
         return;
       }
 
-      const lineText = line.translateToString(true);
+      const lineText = logical.text;
       if (!lineText.trim()) {
         callback(undefined);
         return;
@@ -316,18 +349,11 @@ export function createTerminalLinkProvider(
         return;
       }
 
-      // Link ranges are terminal cells (1-based, end-inclusive), not string offsets.
-      const columns = cellColumnsForLine(line, lineText.length);
-      const cellOf = (offset: number): number => (offset < columns.length ? columns[offset]! : offset);
-      const rangeFor = (startIndex: number, endIndex: number): IBufferRange => {
-        const startX = cellOf(startIndex) + 1;
-        const endCharIdx = Math.max(0, endIndex - 1);
-        const endX = cellOf(endCharIdx) + 1;
-        return {
-          start: { x: startX, y: bufferLineNumber },
-          end: { x: endX, y: bufferLineNumber },
-        };
-      };
+      // Link ranges are cells across soft-wrapped rows, not string offsets.
+      const rangeFor = (startIndex: number, endIndex: number): IBufferRange => ({
+        start: logical.positions[startIndex]!,
+        end: logical.positions[endIndex - 1]!,
+      });
 
       const links: ILink[] = [
         ...parsed.map((item): ILink => ({
@@ -362,7 +388,7 @@ export function createTerminalLinkProvider(
         })),
       ];
 
-      callback(links);
+      callback(links.filter((link) => link.range.start.y <= bufferLineNumber && link.range.end.y >= bufferLineNumber));
     },
   };
 }

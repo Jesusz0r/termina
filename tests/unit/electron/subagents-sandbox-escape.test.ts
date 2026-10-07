@@ -79,6 +79,7 @@ function setup(opts: {
       releaseStream: () => {},
       attachSession: () => {},
       detachSession: () => {},
+      ownerRunsChanged: () => {},
       dispatchKeysFor: async () => ({ keys: new Set<string>(), root: "" }),
       canonicalPath: async (p) => {
         try {

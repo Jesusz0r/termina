@@ -84,6 +84,7 @@ async function makeManager(): Promise<{ manager: WorldlineManager; root: string;
   await mkdir(primaryRoot, { recursive: true });
   const manager = new WorldlineManager({
     worldsRoot,
+    recoverStaleComparisons: (sweep: () => Promise<void>) => sweep(),
     primaryRoot,
     primaryRootIdentity: { dev: "1", ino: "1" },
     realHome: root,

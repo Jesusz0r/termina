@@ -252,7 +252,7 @@ export class WorldlinesView {
   /** One candidate summary changed (push or initial list). */
   upsert(summary: WorldlineSummary): void {
     let pair = this.pairs.get(summary.comparisonId);
-    if (!pair) pair = this.makePair(summary.comparisonId);
+    if (!pair) pair = this.makePair(summary.comparisonId, summary.role === "moment");
     const card = pair.cards.get(summary.label)!;
     const prev = card.summary;
     if (summary.version < prev.version) return;
@@ -297,7 +297,7 @@ export class WorldlinesView {
     this.refreshCount();
   }
 
-  private makePair(comparisonId: string): PairView {
+  private makePair(comparisonId: string, moment: boolean): PairView {
     const block = document.createElement("div");
     block.className = "comparison";
     block.dataset.cmp = comparisonId;
@@ -333,7 +333,7 @@ export class WorldlinesView {
     moreBody.append(...challengeButtons, evidenceBtn, discardBtn);
     const rolesEl = document.createElement("div");
     rolesEl.className = "cmp-caption";
-    rolesEl.textContent = WORLDLINE_PAIR_ROLES_LINE;
+    rolesEl.textContent = moment ? "Continue from this moment in a separate tree" : WORLDLINE_PAIR_ROLES_LINE;
     head.append(idEl, runEl, spacer, abBtn, moreBtn, rolesEl);
 
     const verdictsEl = document.createElement("div");
@@ -343,7 +343,7 @@ export class WorldlinesView {
     row.className = "candidate-row";
 
     const pair: PairView = { comparisonId, block, runEl, verdictsEl, cards: new Map(), evidence: null };
-    for (const label of ["A", "B"] as const) {
+    for (const label of moment ? ["A"] as const : ["A", "B"] as const) {
       const card = this.makeCard(comparisonId, label);
       pair.cards.set(label, card);
       row.appendChild(card.el);
@@ -447,7 +447,7 @@ export class WorldlinesView {
     const promoteBtn = card.el.querySelector(".cand-promote") as HTMLButtonElement;
     const dead = ["creating", "discarding", "discarded", "promoted", "cancelled", "error"];
     verifyBtn.disabled = !s.sessionFile || dead.includes(s.state);
-    openBtn.disabled = !s.sessionFile;
+    openBtn.disabled = !s.sessionFile || s.state === "creating";
     promoteBtn.disabled = !s.sessionFile || dead.includes(s.state);
     promoteBtn.textContent = s.state === "promoting" ? "promoting…" : "Promote";
     if (!card.detailsBody.hidden && card.details && card.filledVersion !== card.detailsVersion) {

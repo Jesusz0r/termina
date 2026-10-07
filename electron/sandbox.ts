@@ -20,8 +20,9 @@
  *
  * Resource limits (WORLDLINES §6.6) are not expressible in the profile
  * language either. Candidate launches therefore put macOS taskpolicy outside
- * sandbox-exec for memory enforcement, and apply POSIX process-count/CPU/file
- * descriptor/file-size limits in the shell immediately before exec.
+ * sandbox-exec for memory enforcement, and apply POSIX CPU/file-descriptor/
+ * file-size limits in the shell immediately before exec. There is no hard
+ * numerical process-count budget per candidate.
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -49,17 +50,11 @@ export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 /** macOS's per-process memory-policy launcher. */
 export const TASKPOLICY_EXEC = "/usr/sbin/taskpolicy";
 
-/**
- * Resource budgets for a live candidate and every descendant it launches.
- * taskpolicy's memory budget is in MiB; the process budget is applied with
- * RLIMIT_NPROC by the candidate shell before it execs the agent.
- */
+/** Inherited taskpolicy memory budget in MiB. */
 export const CANDIDATE_MEMORY_LIMIT_MIB = 1024;
-export const CANDIDATE_PROCESS_LIMIT = 256;
 
 export interface SandboxResourceLimits {
   memoryLimitMiB: number;
-  processLimit: number;
 }
 
 /** The small child-process surface needed by process-group cleanup. */
@@ -72,16 +67,12 @@ export interface SandboxChildProcess {
 
 const DEFAULT_RESOURCE_LIMITS: SandboxResourceLimits = {
   memoryLimitMiB: CANDIDATE_MEMORY_LIMIT_MIB,
-  processLimit: CANDIDATE_PROCESS_LIMIT,
 };
 
 /** Validate limits before they become shell or argv values. */
 export function validateSandboxResourceLimits(limits: SandboxResourceLimits): void {
   if (!Number.isSafeInteger(limits.memoryLimitMiB) || limits.memoryLimitMiB < 1 || limits.memoryLimitMiB > 1024 * 1024) {
     throw new Error("candidate memory limit must be a positive integer number of MiB");
-  }
-  if (!Number.isSafeInteger(limits.processLimit) || limits.processLimit < 1 || limits.processLimit > 1_000_000) {
-    throw new Error("candidate process limit must be a positive integer");
   }
 }
 
@@ -116,8 +107,8 @@ export function taskpolicySupportsMemoryLimit(): boolean {
 
 /**
  * Candidate resource limits are currently implemented only by macOS's
- * taskpolicy plus POSIX RLIMIT_NPROC. Do not silently fall back to an
- * unbounded candidate on another platform or when the helper is unavailable.
+ * taskpolicy plus POSIX shell limits. Do not silently launch on another
+ * platform or when a required helper is unavailable.
  */
 export function platformHasSandboxResourceLimits(): boolean {
   return process.platform === "darwin" && executableAvailable(SANDBOX_EXEC) && executableAvailable(TASKPOLICY_EXEC);
@@ -143,7 +134,7 @@ export function sandboxResourceLimitPreflight(
       || !launch.args.includes(SANDBOX_EXEC)
       || !launch.args.includes("-f")
       || !launch.args.includes("/bin/zsh")
-      || !launch.args.at(-1)?.includes(`ulimit -SH -u ${CANDIDATE_PROCESS_LIMIT}`)
+      || !launch.args.at(-1)?.startsWith(`${sandboxShellPreamble()} exec `)
     ) {
       return "candidate resource-limit launch arguments are invalid";
     }
@@ -366,12 +357,11 @@ function sandboxDescendant(root: string, path: string): string {
  * callers append only shell-quoted argv values, so candidate-controlled text
  * cannot become shell syntax. A failed limit setup exits before the target is
  * exec'd (fail closed on platforms where this preamble is used).
+ * No process-count ulimit: macOS counts the whole UID, so unrelated desktop
+ * applications would consume a candidate's command headroom.
  */
-export function sandboxShellPreamble(processLimit = CANDIDATE_PROCESS_LIMIT): string {
-  if (!Number.isSafeInteger(processLimit) || processLimit < 1 || processLimit > 1_000_000) {
-    throw new Error("candidate process limit must be a positive integer");
-  }
-  return `ulimit -t 7200 && ulimit -n 1024 && ulimit -f 2097152 && ulimit -SH -u ${processLimit} || exit 126;`;
+export function sandboxShellPreamble(): string {
+  return "ulimit -t 7200 && ulimit -n 1024 && ulimit -f 2097152 || exit 126;";
 }
 
 /**
@@ -406,7 +396,7 @@ export function candidateSandboxLaunch(
       profilePath,
       "/bin/zsh",
       "-c",
-      `${sandboxShellPreamble(limits.processLimit)} exec ${command.map(quoteShellArg).join(" ")}`,
+      `${sandboxShellPreamble()} exec ${command.map(quoteShellArg).join(" ")}`,
     ],
   };
 }
@@ -516,6 +506,10 @@ export function buildSandboxProfile(p: SandboxPaths): string {
     deny("file-read*", sandboxPath(p.templateDir)),
     deny("file-write*", sandboxPath(p.primaryEventsDir)),
     deny("file-read*", sandboxPath(p.primaryEventsDir)),
+    // Canonical path resolution must stat the two trusted parent directories.
+    // Literal metadata access permits traversal, not listing their contents
+    // or reading any sibling, template, profile, or other comparison.
+    `(allow file-read-metadata (literal ${quote(sandboxPath(p.worldsRoot))}) (literal ${quote(sandboxPath(dirname(candidateRoot)))}))`,
     // The candidate reads and writes only its own tree and support dirs.
     allow("file-read*", candidateRoot),
     allow("file-read*", candidateSupport),

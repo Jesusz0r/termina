@@ -8,6 +8,7 @@ import { isErrno } from "../../../shared/guards.ts";
 import { syncParentDir } from "../../../shared/fsync.ts";
 import { evictOldest } from "../../../shared/evict-oldest.ts";
 import ts from "typescript";
+import { sourceTreesOverlap } from "../../../electron/main/source-admission.ts";
 
 /**
  * Save/revert write-lease, binary-exact revert, and lstat-guard tests.
@@ -84,6 +85,7 @@ type PrepareRunBaselines = (inst: FakeInst) => void;
 interface FakeWorkspace {
   id: string;
   root: string;
+  canonicalRoot: string;
   writerId: string | null;
   leaseDepth: number;
   generation: number;
@@ -131,6 +133,10 @@ const revertReviewFile = loadMethod(
   [lstat, mkdir, rm, writeFile, randomUUID, isErrno, relative, isAbsolute, dirname, syncParentDir],
 ) as RevertReviewFile;
 
+const realSourceWriter = loadMethod("sourceWorkspaceWriter", "private sourceWorkspaceWriter(", ["sourceTreesOverlap"], [sourceTreesOverlap]) as (
+  root: string,
+  except?: FakeWorkspace,
+) => FakeWorkspace | null;
 const realAcquire = loadMethod("acquireWriteLease", "private async acquireWriteLease(", [], []) as AcquireWriteLease;
 const realRelease = loadMethod("releaseWriteLease", "private releaseWriteLease(", [], []) as ReleaseWriteLease;
 const realGrant = loadMethod("grantLeaseWaiter", "private grantLeaseWaiter(", [], []) as (ws: FakeWorkspace) => void;
@@ -168,7 +174,7 @@ async function tolerantCanonical(p: string): Promise<string> {
 }
 
 function makeWorkspace(wsRoot: string): FakeWorkspace {
-  return { id: "ws-1", root: wsRoot, writerId: null, leaseDepth: 0, generation: 1 };
+  return { id: "ws-1", root: wsRoot, canonicalRoot: wsRoot, writerId: null, leaseDepth: 0, generation: 1 };
 }
 
 function makeInst(ws: FakeWorkspace): FakeInst {
@@ -200,11 +206,15 @@ function makeManagedPath(ws: FakeWorkspace, opts: { swapLeaf?: boolean } = {}) {
 
 function makeLeaseBroker(ws: FakeWorkspace) {
   const leaseApp: {
+    projects: Map<string, { workspaces: Map<string, FakeWorkspace> }>;
+    sourceWorkspaceWriter: (root: string, except?: FakeWorkspace) => FakeWorkspace | null;
     workspaceById: (id: string) => FakeWorkspace | null;
     kickWorkspaceMomentCapture: () => void;
     leaseWaiters: Map<string, Array<{ requesterId: string; settled: boolean; timer: ReturnType<typeof setTimeout> }>>;
     grantLeaseWaiter: (target: FakeWorkspace) => void;
   } = {
+    projects: new Map([["proj-1", { workspaces: new Map([[ws.id, ws]]) }]]),
+    sourceWorkspaceWriter: (root, except) => realSourceWriter.call(leaseApp, root, except),
     workspaceById: (id: string) => (id === ws.id ? ws : null),
     kickWorkspaceMomentCapture: () => undefined,
     leaseWaiters: new Map(),

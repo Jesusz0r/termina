@@ -13,6 +13,7 @@ import { HIDE_THINKING_CSI, SHOW_THINKING_CSI } from "../../../shared/terminal-c
 import { CHALLENGE_PROFILES, DEFAULT_SHORTCUTS, defaultAppPreferences } from "../../../shared/types.ts";
 import { isChallengeProfile, isWorldlineLabel } from "../../../electron/main/ipc-validate.ts";
 import ts from "typescript";
+import { sourceTreesOverlap } from "../../../electron/main/source-admission.ts";
 
 /**
  * Main hardening batch (refs #219): fourteen items, all in electron/main.ts.
@@ -296,9 +297,10 @@ describe("main hardening batch (refs #219)", () => {
         decodeEditorText,
       ],
     ) as (absPath: string, owner: unknown) => Promise<{ ok: boolean; error?: string }>;
+    const workspace = { id: "ws-1", changeLines: new Map() };
     const app = {
-      projectWorkspace: () => ({ project: {}, workspace: { id: "ws-1", changeLines: new Map() } }),
-      managedPath: async (abs: string) => ({ path: abs, workspace: { id: "ws-1", changeLines: new Map() } }),
+      projectWorkspace: () => ({ project: {}, workspace }),
+      managedPath: async (abs: string) => ({ path: abs, workspace }),
     };
     const grown = await openFile.call(app, "/proj/grown.txt", {});
     expect(grown.ok).toBe(false);
@@ -409,13 +411,20 @@ describe("main hardening batch (refs #219)", () => {
       leaseDepth?: number;
       generation: number;
     }) => void;
-    const ws = { id: "ws-1", writerId: null as string | null, leaseDepth: 0, generation: 7 };
+    const ws = { id: "ws-1", canonicalRoot: "/fixture/project", writerId: null as string | null, leaseDepth: 0, generation: 7 };
+    const sourceWriter = loadMethod("sourceWorkspaceWriter", "private sourceWorkspaceWriter(", ["sourceTreesOverlap"], [sourceTreesOverlap]) as (
+      root: string, except?: typeof ws,
+    ) => typeof ws | null;
     const app: {
+      projects: Map<string, { workspaces: Map<string, typeof ws> }>;
+      sourceWorkspaceWriter: (root: string, except?: typeof ws) => typeof ws | null;
       workspaceById: (id: string) => typeof ws | null;
       leaseWaiters: Map<string, Array<{ requesterId: string; settled: boolean; timer: ReturnType<typeof setTimeout> }>>;
       grantLeaseWaiter: (target: typeof ws) => void;
       kickWorkspaceMomentCapture: () => void;
     } = {
+      projects: new Map([["proj-1", { workspaces: new Map([[ws.id, ws]]) }]]),
+      sourceWorkspaceWriter: (root, except) => sourceWriter.call(app, root, except),
       workspaceById: (id: string) => (id === ws.id ? ws : null),
       leaseWaiters: new Map(),
       grantLeaseWaiter: (target) => grant.call(app, target),
@@ -493,12 +502,16 @@ describe("main hardening batch (refs #219)", () => {
       const acks: Array<{ requestId: string; body: unknown }> = [];
       const releases: string[] = [];
       const tracked: Array<Promise<unknown>> = [];
+      const recording: Array<{ state: string; detail?: string }> = [];
       const app = {
         workspaceOfTerminal: () => ({ id: "ws-1", primary: true, lastStateCommit: "s0" }),
         projectOfTerminal: () => ({ storePromise: Promise.resolve({}) }),
         acquireWriteLease: async () => ({ ok: true, generation: 1 }),
         captureStable: capture,
         setWorkspaceState: () => undefined,
+        setRecorderState: (_inst: { id: string }, state: string, _expected?: unknown, detail?: string) => {
+          recording.push({ state, detail });
+        },
         writeAck: (_terminalId: string, requestId: string, body: unknown) => {
           acks.push({ requestId, body });
         },
@@ -509,7 +522,7 @@ describe("main hardening batch (refs #219)", () => {
           releases.push(requester);
         },
       };
-      return { app, acks, releases, tracked };
+      return { app, acks, releases, tracked, recording };
     };
     // A wedged capture answers on the deadline and releases when it lands.
     let releaseCapture!: (state: { commit: string }) => void;
@@ -519,6 +532,7 @@ describe("main hardening batch (refs #219)", () => {
     const wedged = makeApp(() => hung);
     await checkpoint.call(wedged.app, { id: "term-1", currentRun: null }, "req-1", "checkpoint", "entry-1", null);
     expect(wedged.acks).toEqual([{ requestId: "req-1", body: { ok: false, error: "checkpoint capture timed out" } }]);
+    expect(wedged.recording).toEqual([{ state: "degraded", detail: "checkpoint capture timed out" }]);
     expect(wedged.releases).toEqual([]);
     expect(wedged.tracked).toHaveLength(1);
     releaseCapture({ commit: "late" });

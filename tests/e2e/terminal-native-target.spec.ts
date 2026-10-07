@@ -2,6 +2,7 @@ import { test, expect, type TerminaE2EFixtures } from "./fixtures.ts";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { quoteShellArg } from "../../shared/terminal-control.ts";
+import { lifecycleDialogs, mockLifecycleDialogs } from "./lifecycle-dialog.ts";
 
 async function nativeAction(app: TerminaE2EFixtures["electronApp"], label: string): Promise<void> {
   await app.evaluate(({ Menu, BrowserWindow }, label) => {
@@ -33,6 +34,7 @@ async function selectPane(page: TerminaE2EFixtures["page"], id: string): Promise
 
 test("native interrupt and close target the first selected terminal, not the last created", async ({ page, electronApp, projectRoot }) => {
   await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+  await mockLifecycleDialogs(electronApp, 0);
   const first = await shell(page);
   const second = await shell(page);
   for (const instance of [first, second]) {
@@ -48,6 +50,7 @@ test("native interrupt and close target the first selected terminal, not the las
   await nativeAction(electronApp, "Send Ctrl+C (abort)");
   await expect.poll(() => existsSync(join(projectRoot, `${first.id}-interrupted`))).toBe(true);
   expect(existsSync(join(projectRoot, `${second.id}-interrupted`))).toBe(false);
+  expect((await lifecycleDialogs(electronApp))[0].message).toBe(`Send Ctrl+C to ${first.id}?`);
   await nativeAction(electronApp, "Close Terminal");
   await expect.poll(() => page.evaluate(() => window.termina.getInstances().then((instances) => instances.map((instance) => instance.id))))
     .not.toContain(first.id);
@@ -57,6 +60,7 @@ test("native interrupt and close target the first selected terminal, not the las
 
 test("selection rejects stale generations and inactive-project targets", async ({ page, electronApp, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+  await mockLifecycleDialogs(electronApp, 0);
   const first = await shell(page);
   const second = await shell(page);
   await selectPane(page, first.id);

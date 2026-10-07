@@ -16,6 +16,23 @@ describe("file navigation ownership", () => {
     });
   });
 
+  it("uses the canonical macOS spelling for both file paths and visible project roots", () => {
+    const aliases = new Map([
+      ["parent", { id: "parent", cwd: "/var/source", workspaceId: "primary-parent" }],
+      ["nested", { id: "nested", cwd: "/var/source/nested", workspaceId: "primary-nested" }],
+    ]);
+    const physical = resolveFileNavigation("/private/var/source/nested/file.ts", aliases, parent);
+    const visible = resolveFileNavigation("/var/source/nested/file.ts", aliases, parent);
+    if (process.platform === "darwin") {
+      expect(physical).toEqual({ path: "/private/var/source/nested/file.ts", owner: { projectId: "nested", workspaceId: "primary-nested" } });
+      expect(visible).toEqual(physical);
+    } else {
+      // Those spellings are different directories on other platforms.
+      expect(physical?.owner).toEqual(parent);
+      expect(visible?.owner.projectId).toBe("nested");
+    }
+  });
+
   it("uses the longest matching root, not map insertion order", () => {
     expect(resolveFileNavigation("/projects/app/nested/file.ts", projects, parent)?.owner).toEqual({
       projectId: "nested", workspaceId: "primary-nested",

@@ -83,7 +83,6 @@ type TestComparisonFixture = {
   candidates: Map<string, TestCandidateFixture>;
   phase: string;
   error: string | null;
-  readyTimer: ReturnType<typeof setTimeout> | null;
 };
 
 type TestRetainedLayoutOptions = {
@@ -142,6 +141,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
     function deps(worldsRoot: string, overrides: Record<string, unknown> = {}) {
       return {
         worldsRoot,
+        recoverStaleComparisons: (sweep: () => Promise<void>) => sweep(),
         primaryRoot: worldsRoot,
         realHome: worldsRoot,
         userData: worldsRoot,
@@ -252,7 +252,6 @@ describe("Session Fork Teardown and Retention Probes", () => {
         ]),
         phase: "creating",
         error: null,
-        readyTimer: null,
       };
     }
     

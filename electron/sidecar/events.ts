@@ -99,6 +99,7 @@ export type SidecarEvent =
       thinkingLevel?: string | null;
       permissions?: string | null;
     })
+  | (SidecarMeta & { t: "agent_start_rejected"; error?: string | null })
   | (SidecarMeta & { t: "agent_settled"; error?: string | null })
   | (SidecarMeta & { t: "agent_settings"; model?: string | null; thinkingLevel?: string | null; usage?: string | null; permissions?: string | null })
   | (SidecarMeta & { t: "plan"; text?: string })
@@ -115,7 +116,7 @@ export type SidecarEvent =
       toolCallId?: string;
       entryId?: string | null;
     })
-  | (SidecarMeta & { t: "tool_end"; toolCallId?: string; isError?: boolean })
+  | (SidecarMeta & { t: "tool_end"; toolCallId?: string; isError?: boolean; entryId?: string | null })
   | (SidecarMeta & { t: "subagent_spawn"; runId?: string; taskFile?: string; userRequested?: boolean })
   | (SidecarMeta & { t: "subagent_cancel"; runId?: string });
 

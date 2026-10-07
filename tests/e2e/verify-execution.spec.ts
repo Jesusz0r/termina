@@ -4,6 +4,7 @@ import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { readVerifyStages, writeVerifyPackage } from "../fixtures/verify-package.ts";
+import { mockLifecycleDialogs } from "./lifecycle-dialog.ts";
 
 const scripts = {
   pretest: "termina-verify-fixture pre",
@@ -86,6 +87,61 @@ test("Verify executes npm lifecycle stages and requires reverify after a source 
   expect((await readVerifyStages(projectRoot))).toHaveLength(8);
   await expect.poll(() => verifyContext(runRoot, "term-1")).toContain(updated.source!.tree);
 });
+
+for (const writer of ["editor save", "shell command"] as const) {
+  test(`a real ${writer} invalidates a passing check and Attention opens its unchanged history`, async ({ page, projectRoot, electronApp }) => {
+    await expect(page.locator("#splash")).toBeHidden();
+    const project = (await page.evaluate(() => window.termina.projectList())).find((entry) => entry.active)!;
+    expect(await page.evaluate(() => window.termina.runVerify("term-1"))).toEqual({ ok: true });
+    await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("pass");
+    const previous = (await verifyInfo(page, "term-1"))!;
+    const path = join(projectRoot, "greeting.ts");
+    const content = `export const greeting = "${writer} mutation";\n`;
+    if (writer === "editor save") {
+      const original = await readFile(path, "utf8");
+      await page.locator("#explorer-tree .explorer-row").filter({ hasText: "greeting.ts" }).dblclick();
+      await expect.poll(() => page.evaluate(() => (window as unknown as {
+        __editorMgr: { editor: { getModel(): { getValue(): string } } };
+      }).__editorMgr.editor.getModel().getValue())).toBe(original);
+      await page.evaluate(async (text) => {
+        const manager = (window as unknown as {
+          __editorMgr: { editor: { getModel(): { getFullModelRange(): unknown }; executeEdits(source: string, edits: { range: unknown; text: string }[]): void }; saveActive(): Promise<void> };
+        }).__editorMgr;
+        manager.editor.executeEdits("verify-source-edit", [{ range: manager.editor.getModel().getFullModelRange(), text }]);
+        await manager.saveActive();
+      }, content);
+      expect(await readFile(path, "utf8")).toBe(content);
+      await expect(page.locator(".editor-tab").filter({ hasText: "greeting.ts" }).locator(".tab-dirty")).toBeHidden();
+    } else {
+      const shell = await page.evaluate(() => window.termina.createTerminal({ type: "shell", shell: "/bin/bash" }));
+      expect(shell).toMatchObject({ ok: true });
+      await page.evaluate(({ id, command }) => window.termina.writeTerminal(id, command), {
+        id: shell.id!, command: `printf '%s\\n' 'export const greeting = "shell command mutation";' > greeting.ts\r`,
+      });
+      await expect.poll(() => readFile(path, "utf8")).toBe(content);
+      const instance = (await page.evaluate(() => window.termina.getInstances())).find((entry) => entry.id === shell.id)!;
+      await mockLifecycleDialogs(electronApp, 0);
+      expect(await page.evaluate(({ id, generation }) => window.termina.closeTerminal(id, generation), instance)).toEqual({ ok: true });
+      await expect.poll(() => page.evaluate((id) => window.termina.getInstances().then((instances) => instances.some((entry) => entry.id === id)), shell.id!)).toBe(false);
+    }
+    await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("stale");
+    const stale = (await verifyInfo(page, "term-1"))!;
+    expect(stale.source).toEqual(previous.source);
+    expect(stale.result).toEqual(previous.result);
+    const item = (await page.evaluate(() => window.termina.getWorkOverview())).items.find((entry) => entry.projectId === project.id && entry.reason === "verify-stale")!;
+    expect(item).toMatchObject({ terminalId: "term-1", action: { kind: "evidence", terminalId: "term-1" } });
+    await page.locator("#btn-attention").click();
+    await page.locator(`#attention-list .attention-item[data-id="${item.id}"] .attention-inspect`).click();
+    await expect(page.locator(".work-summary-report")).toContainText("**Status:** ⚠️ OUTDATED");
+    await expect(page.locator(".work-summary-report")).toContainText("**Historical execution:** ✅ PASSED (exit code 0)");
+    await expect(page.locator(".work-summary-report")).not.toContainText("**Status:** ✅ PASSED");
+    expect(await readVerifyStages(projectRoot)).toHaveLength(4);
+    expect(await page.evaluate(() => window.termina.runVerify("term-1"))).toEqual({ ok: true });
+    await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("pass");
+    expect((await verifyInfo(page, "term-1"))?.source?.tree).not.toBe(previous.source?.tree);
+    expect(await readVerifyStages(projectRoot)).toHaveLength(8);
+  });
+}
 
 for (const failingStage of ["pretest", "test", "posttest"] as const) {
   test(`Verify reports a failing ${failingStage} instead of announcing green`, async ({ page, projectRoot, runRoot }) => {

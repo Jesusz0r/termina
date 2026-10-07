@@ -51,6 +51,7 @@ async function makeManager(trustHashes: () => Promise<Record<string, string>>) {
   await mkdir(primaryRoot, { recursive: true });
   const deps = {
     worldsRoot,
+    recoverStaleComparisons: (sweep: () => Promise<void>) => sweep(),
     primaryRoot,
     realHome: root,
     userData: root,

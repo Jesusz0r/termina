@@ -19,6 +19,7 @@ export type ActivitySignal =
   | { t: "preflight_timeout"; seq: number; at: number }
   | { t: "prompt"; seq: number; at: number }
   | { t: "agent_start"; seq: number; at: number }
+  | { t: "agent_start_rejected"; seq: number; at: number }
   | { t: "agent_settled"; seq: number; at: number; error: string | null }
   | { t: "tool"; seq: number; at: number; target: string }
   | { t: "tool_end"; seq: number; at: number; target: string; isError: boolean }
@@ -136,6 +137,9 @@ export function applyActivityEvent(input: AgentActivityInput, event: ActivitySig
     case "agent_start":
       resetRun(next, "agent_start", null);
       break;
+    case "agent_start_rejected":
+      if (next.lastBoundary !== "agent_start") resetRun(next, "none", null);
+      break;
     case "agent_settled":
       resetRun(next, "agent_settled", event.error);
       break;
@@ -175,6 +179,16 @@ export function applyActivityEvent(input: AgentActivityInput, event: ActivitySig
   return next;
 }
 
+/** A live run or admission, distinct from a blocked but already settled run. */
+export function hasLiveAgentWork(input: AgentActivityInput): boolean {
+  return !input.ptyExitedMidRun && (
+    input.lastBoundary === "agent_start"
+    || input.openToolIds.length > 0
+    || input.promptInFlight
+    || input.preflightInFlight
+  );
+}
+
 export function activityFor(input: AgentActivityInput): AgentActivity {
   const since = (seq: number, at: number): Pick<AgentActivity, "sinceSeq" | "updatedAt"> => ({
     sinceSeq: seq,
@@ -199,12 +213,7 @@ export function activityFor(input: AgentActivityInput): AgentActivity {
   ) {
     return { state: "blocked", reason: "tool-error-loop", ...since(input.lastSeq, input.lastAt) };
   }
-  if (
-    input.lastBoundary === "agent_start"
-    || input.openToolIds.length > 0
-    || input.promptInFlight
-    || input.preflightInFlight
-  ) {
+  if (hasLiveAgentWork(input)) {
     return { state: "working", reason: null, ...since(input.lastSeq || input.lastBoundarySeq, input.lastAt || input.lastBoundaryAt) };
   }
   return { state: "idle", reason: null, ...since(input.lastBoundarySeq, input.lastBoundaryAt) };

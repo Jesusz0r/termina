@@ -231,15 +231,20 @@ export class ProjectWatcher {
         }
         this.schedule(relPath, generation, true);
       });
+      watcher.on("close", () => {
+        if (generation !== this.generation || this.watcher !== watcher) return;
+        this.watcher = null;
+        this.markUnhealthy();
+      });
       watcher.on("error", (err) => {
         if (this.watcher !== watcher) return;
+        this.watcher = null;
+        this.markUnhealthy();
         try {
           watcher.close();
         } catch {
           /* already closed */
         }
-        this.watcher = null;
-        this.markUnhealthy();
         console.warn(`[watcher] watch failed: ${(err as Error).message}`);
       });
       this.watcher = watcher;

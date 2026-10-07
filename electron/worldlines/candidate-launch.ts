@@ -55,7 +55,7 @@ export interface CandidateLaunchHost {
 }
 
 export class CandidateLaunch {
-  /** Reopen readiness is a one-shot handshake keyed by the new terminal id. */
+  /** Fresh and reopened candidates share one exact startup handshake. */
   pendingCandidateReadies = new Map<string, PendingCandidateReady>();
   /** Fresh candidate startup attempts stay addressable through teardown and
    *  a late process-start identity result. */
@@ -67,11 +67,12 @@ export class CandidateLaunch {
 
   /** Launch one candidate inside its sandbox (A or a moment candidate). */
   async launchCandidate(cmp: ComparisonState, cand: CandidateState, headStateId: string | null): Promise<void> {
+    if (!cand.sessionFile) throw new Error("core candidate session fork did not commit");
+    if (!cand.startupControlOpId) throw new Error("candidate startup control is missing");
     const attempt: CandidateLaunchAttempt = {
       comparisonId: cmp.id,
       label: cand.label,
-      opId: cand.startupControlOpId ?? randomUUID(),
-      controlOpId: cand.startupControlOpId ?? null,
+      opId: cand.startupControlOpId,
       generation: ++this.candidateLaunchGeneration,
       controller: new AbortController(),
       terminalId: null,
@@ -82,8 +83,6 @@ export class CandidateLaunch {
       cleanupPromise: null,
       fallbackRequested: false,
       directCleanupRequested: false,
-      sessionReady: false,
-      sidecarGeneration: null,
       operation: null,
     };
     cand.startupAttemptId = attempt.opId;
@@ -107,7 +106,7 @@ export class CandidateLaunch {
           this.ensureLive(cmp, cand, attempt);
           routedTerminalId = terminalId;
           attempt.terminalId = terminalId;
-          this.installCandidateRouting(cmp, cand, terminalId, undefined, attempt.opId);
+          this.installCandidateRouting(cmp, cand, terminalId, attempt.opId);
         },
       });
       attempt.terminalId = attempt.terminalId ?? created.terminalId;
@@ -141,13 +140,19 @@ export class CandidateLaunch {
           }
         }
       }).catch(() => undefined);
-      const lstart = await awaitAbortable(identity, attempt.controller.signal);
+      const pending = this.pendingCandidateReadies.get(terminalId);
+      if (!pending) throw new Error("candidate startup handshake was not armed");
+      const [lstart] = await awaitAbortable(Promise.all([identity, pending.promise]), attempt.controller.signal);
       attempt.lstart = lstart;
       this.ensureLive(cmp, cand, attempt);
+      if (pending.state !== "accepted") throw new Error("candidate startup handshake did not complete");
       cand.lstart = lstart;
       await this.host.updateManifest(cmp, cand, attempt);
       this.ensureLive(cmp, cand, attempt);
-      this.host.pushUpdate(cmp, cand);
+      if (pending.state !== "accepted") throw new Error("candidate exited before ready was published");
+      this.publishReady(cmp, cand);
+      clearTimeout(pending.timer);
+      this.pendingCandidateReadies.delete(terminalId);
     })();
     attempt.operation = operation;
     try {
@@ -213,6 +218,15 @@ export class CandidateLaunch {
           attempt.fallbackRequested = true;
           this.host.terminateCandidate?.(attempt.terminalId);
         }
+        const pending = attempt.terminalId ? this.pendingCandidateReadies.get(attempt.terminalId) : undefined;
+        if (pending && pending.expectedOpId === attempt.opId) {
+          if (pending.state === "pending") {
+            pending.state = "failed";
+            pending.reject(new Error("candidate startup was cancelled"));
+          }
+          clearTimeout(pending.timer);
+          this.pendingCandidateReadies.delete(attempt.terminalId!);
+        }
         const hit = attempt.terminalId ? this.terminalToComparison.get(attempt.terminalId) : undefined;
         if (
           attempt.terminalId
@@ -271,29 +285,28 @@ export class CandidateLaunch {
     if (this.candidateLaunchAttempts.get(attempt.opId) === attempt) this.candidateLaunchAttempts.delete(attempt.opId);
   }
 
-  /** Install routing and, for a reopen, arm the exact startup handshake. */
+  /** Install routing and arm the exact startup handshake before spawn. */
   private installCandidateRouting(
     cmp: ComparisonState,
     cand: CandidateState,
     terminalId: string,
-    expectedOpId?: string,
-    startupAttemptId?: string,
+    expectedOpId: string,
+    startupAttemptId = expectedOpId,
   ): void {
     this.host.ensureComparisonLive(cmp);
     const existing = this.terminalToComparison.get(terminalId);
     if (existing && (existing.comparisonId !== cmp.id || existing.label !== cand.label)) {
       throw new Error(`candidate terminal id ${terminalId} is already routed`);
     }
-    if (expectedOpId && this.pendingCandidateReadies.has(terminalId)) {
+    if (this.pendingCandidateReadies.has(terminalId)) {
       throw new Error(`candidate terminal ${terminalId} already has a startup handshake`);
     }
     cand.terminalId = terminalId;
     this.terminalToComparison.set(terminalId, {
       comparisonId: cmp.id,
       label: cand.label,
-      ...(startupAttemptId || expectedOpId ? { startupAttemptId: startupAttemptId ?? expectedOpId } : {}),
+      startupAttemptId,
     });
-    if (!expectedOpId) return;
 
     let pending!: PendingCandidateReady;
     let resolvePromise!: () => void;
@@ -311,7 +324,7 @@ export class CandidateLaunch {
       timer: setTimeout(() => {
         if (pending.state !== "pending") return;
         pending.state = "failed";
-        rejectPromise(new Error("the reopened candidate did not become ready in time"));
+        rejectPromise(new Error("the candidate did not become ready in time"));
       }, READY_TIMEOUT_MS),
       promise,
       resolve: resolvePromise,
@@ -340,8 +353,8 @@ export class CandidateLaunch {
 
     const pending = this.pendingCandidateReadies.get(terminalId);
     if (pending) {
-      // Only the startup-control operation created for this reopen can settle
-      // it. Canonical sidecar metadata is required so a replayed line cannot
+      // Only this attempt's startup-control operation can settle it.
+      // Canonical sidecar metadata is required so a replayed line cannot
       // impersonate the new producer generation.
       const eventGeneration = event.generation;
       const eventSeq = event.seq;
@@ -350,6 +363,7 @@ export class CandidateLaunch {
         || pending.comparisonId !== cmp.id
         || pending.label !== cand.label
         || cand.terminalId !== terminalId
+        || cand.startupAttemptId !== hit.startupAttemptId
         || event.opId !== pending.expectedOpId
         || typeof event.bridgeId !== "string"
         || event.bridgeId.length === 0
@@ -366,49 +380,20 @@ export class CandidateLaunch {
       }
       pending.state = "accepted";
       pending.resolve();
-      // Keep the accepted record until openTerminal publishes ready. A
-      // replay arriving in that gap must not fall through to the ordinary
-      // (non-reopen) handler and publish early.
+      // Keep the accepted record until the launch publishes ready. Replays
+      // in that gap must not bypass identity lookup or manifest persistence.
       return;
     }
-    const launchAttempt = cand.startupAttemptId ? this.candidateLaunchAttempts.get(cand.startupAttemptId) : undefined;
-    // The route retains the completed startup identity for the terminal's
-    // lifetime. Once its attempt has been retired, a replayed startup record
-    // cannot re-enter the ordinary ready handler or emit another update.
-    if (!launchAttempt && hit.startupAttemptId) return;
-    if (launchAttempt) {
-      // Fresh startup accepts only the control operation and sidecar writer
-      // generation belonging to this exact attempt. A delayed record from a
-      // prior process must never fail or ready the replacement.
-      if (
-        launchAttempt.comparisonId !== cmp.id
-        || launchAttempt.label !== cand.label
-        || launchAttempt.terminalId !== terminalId
-        || launchAttempt.cancelled
-        || cand.startupGeneration !== launchAttempt.generation
-        || (launchAttempt.controlOpId && event.opId !== launchAttempt.controlOpId)
-        || typeof event.bridgeId !== "string"
-        || event.bridgeId.length === 0
-        || typeof event.generation !== "string"
-        || event.generation.length === 0
-        || typeof event.seq !== "number"
-        || !Number.isSafeInteger(event.seq)
-        || event.seq < 1
-      ) return;
-      if (launchAttempt.sidecarGeneration && launchAttempt.sidecarGeneration !== event.generation) return;
-      launchAttempt.sidecarGeneration = event.generation;
-      launchAttempt.sessionReady = ok;
-    }
-    if (!ok) {
-      void this.host.teardown(cmp.id, "error", `the candidate session failed to start: ${error ?? "unknown"}`);
-      return;
-    }
+    // A retired handshake cannot be satisfied again by a replayed record.
+  }
+
+  /** Publish only after process identity, confirmation and manifest persist. */
+  private publishReady(cmp: ComparisonState, cand: CandidateState): void {
     cand.state = "ready";
+    cand.error = null;
     cand.version++;
     this.host.pushUpdate(cmp, cand);
-      // Both ready: the pair is complete.
-      if ([...cmp.candidates.values()].every((c) => c.state === "ready")) {
-      if (cmp.readyTimer) clearTimeout(cmp.readyTimer);
+    if ([...cmp.candidates.values()].every((c) => c.state === "ready")) {
       void (async () => {
         try {
           if (!cmp.rootBinding || !cmp.templateBinding) return;
@@ -539,16 +524,13 @@ export class CandidateLaunch {
       // Publish ready only after routing, process identity, and the exact
       // session_ready handshake have all completed.
       this.host.ensureComparisonLive(cmp);
-      cand.state = "ready";
-      cand.version++;
-      cand.error = null;
       await this.host.updateManifest(cmp, cand);
       this.host.ensureComparisonLive(cmp);
       if (pending.state !== "accepted") throw new Error("candidate exited before ready was published");
       if (this.terminalToComparison.get(terminalId)?.comparisonId !== cmp.id || this.terminalToComparison.get(terminalId)?.label !== label) {
         throw new Error("candidate terminal routing changed before ready was published");
       }
-      this.host.pushUpdate(cmp, cand);
+      this.publishReady(cmp, cand);
       clearTimeout(pending.timer);
       this.pendingCandidateReadies.delete(terminalId);
       cand.startupAttemptId = undefined;
@@ -634,7 +616,7 @@ export class CandidateLaunch {
     if (terminalId) this.host.terminateCandidate?.(terminalId);
   }
 
-  /** Cancel reopen waiters when the owning comparison is closed. */
+  /** Cancel startup waiters when the owning comparison is closed. */
   cancelPending(comparisonId: string, error: string): void {
     for (const [terminalId, pending] of [...this.pendingCandidateReadies]) {
       if (pending.comparisonId !== comparisonId) continue;

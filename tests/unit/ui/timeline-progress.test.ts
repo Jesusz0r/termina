@@ -67,6 +67,23 @@ afterEach(() => {
 });
 
 describe("timeline progress across eviction (refs #145)", () => {
+  it("explains limited history without exposing recorder budgets", () => {
+    const h = makeHarness(fake.document);
+    h.view.setRecorder("budget");
+    const recorder = (h.view as unknown as { recorderEl: FakeEl }).recorderEl;
+    expect(recorder.textContent).toBe("Recent moments only");
+    expect(recorder.title).toContain("not the full session history");
+    expect(recorder.hidden).toBe(false);
+    h.view.setRecorder("ready");
+    expect(recorder.hidden).toBe(true);
+  });
+
+  it("does not call lazily omitted IPC content a missing snapshot", () => {
+    const h = makeHarness(fake.document);
+    h.view.push(toolEvent(1));
+    expect(h.dot(1).title).not.toContain("no snapshot");
+    expect(h.dot(1).title).toContain("edit a.ts");
+  });
   it("retries a surviving dot after an unrelated eviction strands its first lookup", async () => {
     const h = makeHarness(fake.document);
     h.view.push(toolEvent(1));

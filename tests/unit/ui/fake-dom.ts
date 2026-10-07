@@ -123,6 +123,15 @@ export class FakeEl {
   append(...nodes: FakeEl[]): void {
     for (const node of nodes) this.appendChild(node);
   }
+  insertBefore<T extends FakeEl>(child: T, reference: FakeEl | null): T {
+    if (reference === null) return this.appendChild(child);
+    if (reference.parent !== this) throw new Error("reference is not a child");
+    if (child === reference) return child;
+    child.parent?.removeChild(child);
+    child.parent = this;
+    this.children.splice(this.children.indexOf(reference), 0, child);
+    return child;
+  }
   removeChild(child: FakeEl): void {
     this.children = this.children.filter((c) => c !== child);
     if (child.parent === this) child.parent = null;

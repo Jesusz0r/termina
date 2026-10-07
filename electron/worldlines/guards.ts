@@ -14,10 +14,11 @@ export function parseStorageSeq(value: string | null | undefined): number | null
   return Number.isSafeInteger(n) ? n : null;
 }
 
-/** Fail closed when a session address is missing, unparseable, or zero. */
-export function requireStorageSeq(value: string | null | undefined, message: string): number {
+/** Missing/unparseable addresses always fail. Only a prompt parent may name
+ * the explicit empty-session root; actual entries must remain positive. */
+export function requireStorageSeq(value: string | null | undefined, message: string, opts?: { allowRoot: boolean }): number {
   const seq = parseStorageSeq(value);
-  if (seq === null || seq < 1) throw new Error(message);
+  if (seq === null || (seq === 0 && !opts?.allowRoot)) throw new Error(message);
   return seq;
 }
 

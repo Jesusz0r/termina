@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self' file:; style-src 'self' file:; font-src 'self' file:; img-src 'self' file: data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="description" content="An interactive, simulated Termina workspace design study. No agents, files, or repositories are modified.">
+  <title>Termina — Workspace concept</title>
+  <link rel="stylesheet" href="../../../src/styles.css">
+  <link rel="stylesheet" href="workspace.css">
+  <script defer src="workspace.js"></script>
+</head>
+<body class="prototype">
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
+  <div class="concept-shell">
+    <header class="window-bar">
+      <div class="brand"><svg viewBox="0 0 1024 1024" aria-hidden="true"><line x1="180" y1="636" x2="650" y2="636" stroke="currentColor" stroke-opacity="0.35" stroke-width="56" stroke-linecap="round"/><circle cx="250" cy="636" r="54" fill="currentColor"/><circle cx="410" cy="636" r="54" fill="currentColor"/><circle cx="568" cy="636" r="70" fill="currentColor"/><path d="M568 636Q612 566 692 506" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round"/><circle cx="800" cy="420" r="62" fill="none" stroke="currentColor" stroke-width="50"/></svg><span>termina</span><span class="study-tag">WORKSPACE STUDY</span></div>
+      <button class="search-trigger" data-action="search"><span>Find a project or task</span><kbd>⌘ K / Ctrl K</kbd></button>
+      <span class="demo-label"><span class="signal"></span> Simulated · local only</span>
+    </header>
+    <div class="workbench">
+      <aside class="project-rail" aria-label="Workspace navigation">
+        <div class="rail-heading">YOUR WORKSPACE</div>
+        <button class="overview-link" data-action="overview"><span class="nav-icon" aria-hidden="true">▦</span><span>All projects</span><span id="overview-count" class="count-pill"></span></button>
+        <div class="rail-section-heading"><span>Projects</span><button class="icon-button" data-action="add-project" aria-label="Add sample project">＋</button></div>
+        <nav id="project-list" aria-label="Projects"></nav>
+        <div class="rail-note"><span class="rail-note-icon" aria-hidden="true">↳</span><p>Switch your view.<br><strong>Not their work.</strong></p></div>
+        <div class="rail-bottom"><button class="quiet-button" data-action="guide">How this concept works <span aria-hidden="true">↗</span></button><span class="dim">No live agents connected</span></div>
+      </aside>
+      <main id="workspace" class="workspace" tabindex="-1">
+        <header class="workspace-heading"><div><div id="breadcrumb" class="eyebrow">WORKSPACE / ALL PROJECTS</div><h1 id="view-title">Keep the work moving.</h1><p id="view-subtitle" class="subtitle">Your attention is the bottleneck. Not the number of terminals.</p></div><button class="primary-button" data-action="new-task">＋ New task</button></header>
+        <section class="attention-section" aria-labelledby="attention-title"><div class="section-title"><h2 id="attention-title">Needs your attention <span id="attention-count" class="count-pill"></span></h2><span class="dim small">Across every project · stays until resolved</span></div><div id="attention-list" class="attention-list"></div></section>
+        <div class="workspace-tools"><div class="view-switch" aria-label="Work views"><button data-action="view-overview" aria-pressed="true">Work overview</button><button data-action="view-focus" aria-pressed="false">Focus task</button></div><span id="work-summary" class="dim small"></span></div>
+        <div id="work-content"></div>
+      </main>
+      <aside id="inspector" class="inspector" aria-label="Selected task details"></aside>
+    </div>
+    <footer class="concept-bar"><div><span class="study-tag">PROTOTYPE</span><span>Explore a real-world state:</span></div><div class="scenario-switch" aria-label="Demo scenarios"><button data-scenario="normal" aria-pressed="true">Daily work</button><button data-scenario="overlap" aria-pressed="false">File overlap</button><button data-scenario="recovery" aria-pressed="false">After restart</button><button data-scenario="empty" aria-pressed="false">First run</button></div><button class="quiet-button" data-action="reset">Reset demo ↻</button></footer>
+  </div>
+  <dialog id="task-dialog" aria-labelledby="task-dialog-title">
+    <form id="task-form"><div class="dialog-heading"><span class="eyebrow">START WITH AN OUTCOME</span><h2 id="task-dialog-title">What should get done?</h2><p class="dim">One task, one project, one clear place to work.</p></div><label for="task-project">Project</label><select id="task-project" required></select><label for="task-goal">Task</label><textarea id="task-goal" rows="3" maxlength="160" required placeholder="e.g. Add cancellation to the upload flow"></textarea><div class="work-area-note"><span aria-hidden="true">⑂</span><div><strong>Separate work area</strong><p>A proposed default for independent work. Applying changes requires review. This demo creates no files or sandbox.</p></div></div><div class="dialog-actions"><button type="button" class="quiet-button" data-action="close-dialog">Cancel</button><button type="submit" class="primary-button">Queue sample task</button></div></form>
+  </dialog>
+  <dialog id="search-dialog" aria-labelledby="search-title"><div class="dialog-heading"><h2 id="search-title">Jump to work</h2><p class="dim">Projects and tasks, not another panel to remember.</p></div><label for="workspace-search">Find a project or task</label><input id="workspace-search" type="search" autocomplete="off" placeholder="Search your workspace…"><div id="search-results" class="search-result-list"></div><div class="dialog-actions"><button class="quiet-button" data-action="close-dialog">Close</button><span class="dim small">Tab to a result · Enter to open · Esc to close</span></div></dialog>
+  <dialog id="info-dialog" aria-labelledby="info-title"><div class="dialog-heading"><span class="eyebrow">DESIGN STUDY · NOT PRODUCTION</span><h2 id="info-title"></h2><div id="info-content"></div></div><div class="dialog-actions"><button class="primary-button" data-action="close-dialog">Got it</button></div></dialog>
+  <div id="demo-status" class="demo-status" role="status" aria-live="polite"></div>
+</body>
+</html>

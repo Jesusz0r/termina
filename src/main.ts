@@ -40,7 +40,11 @@ import { createTerminalMenu } from "./main/terminal-menu";
 import { activateProjectContext } from "./main/project-activation";
 import { resolveFileNavigation } from "./main/file-navigation";
 import { createTimelinePane } from "./main/timeline-pane";
+import { createRunForkFeedback } from "./main/run-fork-feedback";
 import { createActivityPane } from "./main/activity-pane";
+import { createWorkSummary } from "./main/work-summary";
+import { createAttentionView } from "./main/attention-view";
+import { createProjectRail } from "./main/project-rail";
 import { createPreferences, applyEditorPreferences, applyReviewPreferences } from "./main/preferences";
 import { createLayout } from "./main/layout";
 import { createTerminalFind } from "./main/terminal-find";
@@ -84,7 +88,7 @@ import {
 } from "./activity-cue";
 import { attachTabReorder } from "./main/tab-reorder";
 import { CHALLENGE_PROFILES, isTuiOwnedShortcut, pathBasename } from "../shared/types";
-import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
+import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, UnsavedConfirmResult, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary, WorkSummaryAction } from "../shared/types";
 
 type EditorManagerInstance = import("./editor").EditorManager;
 type ReviewViewInstance = import("./review").ReviewView;
@@ -105,7 +109,6 @@ interface ProjectView {
   id: string;
   cwd: string;
   workspaceId: string;
-  tabEl: HTMLElement;
   editorMgr: EditorManagerInstance | null;
   editorEl: HTMLElement;
   tabsEl: HTMLElement;
@@ -157,6 +160,41 @@ Object.defineProperty(window, "__editorMgr", {
 });
 const projectTabsEl = document.getElementById("project-tabs")!;
 const btnNewProject = document.getElementById("btn-new-project") as HTMLButtonElement;
+const projectRail = createProjectRail({
+  list: projectTabsEl,
+  allProjects: document.getElementById("btn-all-projects") as HTMLButtonElement,
+  onActivate: (projectId) => {
+    void activateProject(projectId).catch((err) => {
+      toast(`could not switch projects: ${(err as Error).message}`, "warning");
+    });
+  },
+  onClose: (projectId) => {
+    void window.termina.projectClose(projectId).then((res) => {
+      if (res.ok) removeProjectView(projectId);
+      else if (!res.cancelled) toast(res.error ?? "could not close the project", "warning");
+    }).catch((err) => toast(`could not close the project: ${(err as Error).message}`, "warning"));
+  },
+  onAllProjects: (opener) => attentionView.open(opener),
+  onReorder: (ids) => { void persistProjectOrder(ids); },
+});
+let projectOrderRequest = 0;
+
+async function persistProjectOrder(ids: string[]): Promise<void> {
+  const request = ++projectOrderRequest;
+  try {
+    const result = await window.termina.reorderProjects(ids);
+    if (result.ok) return;
+    toast("could not save project order: the open projects changed", "warning");
+  } catch (err) {
+    toast(`could not save project order: ${(err as Error).message}`, "warning");
+  }
+  try {
+    const projects = await window.termina.projectList();
+    if (request === projectOrderRequest) projectRail.setOrder(projects.map((project) => project.id));
+  } catch {
+    toast("could not reload project order", "warning");
+  }
+}
 
 function createProjectView(project: { id: string; cwd: string; workspaceId: string; needsLogin?: boolean }): ProjectView {
   const existing = projectViews.get(project.id);
@@ -178,39 +216,12 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
   editorEl.style.display = "none";
   rightPaneEl.insertBefore(editorEl, rightPaneEl.firstElementChild);
 
-  const tabEl = document.createElement("div");
-  tabEl.className = "project-tab";
-  const nameEl = document.createElement("span");
-  nameEl.className = "tab-name";
-  nameEl.textContent = pathBasename(project.cwd);
-  nameEl.title = project.cwd;
-  const closeEl = document.createElement("span");
-  closeEl.className = "tab-close";
-  closeEl.textContent = "×";
-  closeEl.title = "Close this project";
-  const statusEl = document.createElement("span");
-  statusEl.className = "tab-status idle";
-  statusEl.title = "idle";
-  tabEl.append(statusEl, nameEl, closeEl);
-  tabEl.addEventListener("click", () => {
-    void activateProject(project.id).catch((err) => {
-      toast(`could not switch projects: ${(err as Error).message}`, "warning");
-    });
-  });
-  closeEl.addEventListener("click", (e) => {
-    e.stopPropagation();
-    void window.termina.projectClose(project.id).then((res) => {
-      if (res.ok) removeProjectView(project.id);
-      else if (!res.cancelled) toast(res.error ?? "could not close the project", "warning");
-    }).catch((err) => toast(`could not close the project: ${(err as Error).message}`, "warning"));
-  });
-  projectTabsEl.appendChild(tabEl);
+  projectRail.upsert(project);
 
   const view: ProjectView = {
     id: project.id,
     cwd: project.cwd,
     workspaceId: project.workspaceId,
-    tabEl,
     editorMgr: null,
     editorEl,
     tabsEl,
@@ -239,6 +250,9 @@ function ensureProjectEditor(view: ProjectView): EditorManagerInstance {
   };
   applyEditorPreferences(editorMgr, prefs.current);
   view.editorMgr = editorMgr;
+  void editorMgr.restoreDrafts(view.id).catch((error) => {
+    if (projectViews.get(view.id)?.editorMgr === editorMgr) toast(`could not recover editor drafts: ${(error as Error).message}`, "error");
+  });
   return editorMgr;
 }
 
@@ -266,7 +280,7 @@ function removeProjectView(projectId: string): void {
   const editorToggle = document.getElementById("btn-min-editor");
   if (editorToggle && view.editorEl.contains(editorToggle)) placeEditorToggle(null);
   view.editorMgr?.dispose();
-  view.tabEl.remove();
+  projectRail.remove(projectId);
   view.editorEl.remove();
   const projectIds = [...projectViews.keys()];
   const closingIndex = projectIds.indexOf(projectId);
@@ -281,7 +295,7 @@ function removeProjectView(projectId: string): void {
     hydrateWorldlines(next ?? null);
   }
   for (const pane of [...panes.values()]) {
-    if (pane.projectId === projectId) void closePane(pane.instanceId);
+    if (pane.projectId === projectId) disposePane(pane);
   }
 }
 
@@ -341,10 +355,9 @@ function setActiveProject(projectId: string | null): void {
   }
   for (const item of projectViews.values()) {
     const active = item.id === activeProjectId;
-    item.tabEl.classList.toggle("active", active);
     item.editorEl.style.display = active ? "" : "none";
-    updateProjectAttention(item.id);
   }
+  projectRail.setActive(activeProjectId);
   placeEditorToggle(activeProjectId);
   syncPaneVisibility();
   syncExplorerChanged();
@@ -377,9 +390,11 @@ function drainPendingToolTargets(projectId: string | null): void {
 function syncPaneVisibility(): void {
   for (const pane of panes.values()) {
     const on = pane.projectId === activeProjectId;
+    const visible = on && pane.instanceId === activeId;
     pane.tabEl.style.display = on ? "" : "none";
-    pane.container.style.display = on ? "" : "none";
-    pane.view.setVisible(on && pane.instanceId === activeId);
+    pane.container.style.visibility = visible ? "" : "hidden";
+    pane.container.inert = !visible;
+    pane.view.setVisible(visible);
   }
 }
 
@@ -590,6 +605,59 @@ const activityTabs = new ActivityTabs({
   },
   storage: localStorage,
 });
+const workSummaryView = createWorkSummary({
+  element: document.getElementById("work-summary") as HTMLDetailsElement,
+  bridge: window.termina,
+  getContext: () => {
+    const pane = activeId ? panes.get(activeId) : undefined;
+    return pane && activeProjectId && pane.projectId === activeProjectId ? {
+      projectId: activeProjectId, activationGeneration: activeProjectGeneration,
+      terminalId: pane.instanceId, generation: pane.generation,
+    } : null;
+  },
+  onNavigate: (action, projectId) => { void navigateWorkAction(action, projectId); },
+});
+
+async function navigateWorkAction(action: WorkSummaryAction, projectId: string): Promise<boolean> {
+  const pane = panes.get(action.terminalId);
+  if (activeProjectId !== projectId || pane?.projectId !== projectId || pane.generation !== action.generation) return false;
+  layout.revealTerminal();
+  if (activeId !== pane.instanceId) activatePane(pane.instanceId);
+  if (action.kind === "plan") {
+    activityTabs.select("plan");
+    planPanel.classList.remove("collapsed");
+    document.getElementById("activity-tab-plan")?.focus();
+  } else if (action.kind === "changes") {
+    layout.setModifiedVisible(true);
+    activityTabs.select("modified");
+    modifiedPanel.classList.remove("collapsed");
+    document.getElementById("activity-tab-modified")?.focus();
+  } else if (action.kind === "evidence") return workSummaryView.showCheck();
+  else pane.view.focus();
+  return true;
+}
+
+const attentionView = createAttentionView({
+  element: document.getElementById("attention-view")!,
+  toggle: document.getElementById("btn-attention") as HTMLButtonElement,
+  bridge: window.termina,
+  onOverview: (overview) => projectRail.setOverview(overview),
+  onInspect: async (result, isCurrent) => {
+    if (!isCurrent()) return false;
+    const activated = await activateProjectContext(result.folder.projectId, {
+      request: async () => result,
+      prepareRenderer: ensureEditorModule,
+      applyFolder: applyFolderOpened,
+      hasProject: (id) => isCurrent() && projectViews.has(id),
+      isCurrent: (folder) => isCurrent() && activeProjectId === folder.projectId
+        && latestProjectActivationGeneration === folder.activationGeneration
+        && appliedProjectFolder?.activationGeneration === folder.activationGeneration,
+    });
+    if (!activated || !isCurrent()) return false;
+    return navigateWorkAction(result.action, result.folder.projectId);
+  },
+});
+window.addEventListener("unload", () => { workSummaryView.dispose(); attentionView.dispose(); projectRail.dispose(); }, { once: true });
 let worldlineHydrationEpoch = 0;
 let worldlineHydrationTombstones: Set<string> | null = null;
 
@@ -768,6 +836,7 @@ const MAX_PENDING_TOOL_TARGETS = 20;
 /** Close fence keyed by the PTY generation that was closed. A later
  *  roster entry with a higher generation is a new life, not a stale push. */
 const closingPanes = new Map<string, { generation: number }>();
+const pendingTerminalCloses = new Set<Pane>();
 let activeId: string | null = null;
 let projectCwd: string | null = null;
 const prefs = await createPreferences({
@@ -976,38 +1045,6 @@ function applyTabActivity(
   else el.title = "idle";
 }
 
-/** Project tab: idle/working/blocked from its agents, plus unseen verify
- *  failures on background projects. The active project shows those on its
- *  own terminal dots. */
-function updateProjectAttention(projectId: string | null): void {
-  if (!projectId) return;
-  const view = projectViews.get(projectId);
-  const dot = view?.tabEl.querySelector(".tab-status") as HTMLElement | null;
-  if (!view || !dot) return;
-  let fail = false;
-  let blocked = false;
-  let working = false;
-  let blockedLabel = "blocked";
-  for (const pane of panes.values()) {
-    if (pane.projectId !== projectId) continue;
-    if (pane.verifyAttention && (pane.verify.state === "fail" || pane.verify.state === "timeout")) {
-      fail = true;
-    }
-    if (pane.error) continue;
-    const presented = presentActivity(pane);
-    if (presented.blocked) {
-      if (!blocked) blockedLabel = presented.blockedLabel;
-      blocked = true;
-    } else if (presented.working) {
-      working = true;
-    }
-  }
-  applyTabActivity(dot, { blocked, working, blockedLabel }, {
-    fail: fail && projectId !== activeProjectId,
-    timeout: false,
-  });
-}
-
 const activityCueToasts = new Map<string, { dismiss: () => void }>();
 
 function forgetPaneActivityCue(terminalId: string): void {
@@ -1071,7 +1108,6 @@ function activatePane(instanceId: string): void {
     pane.verifyAttention = false;
     updatePaneTab(pane);
   }
-  updateProjectAttention(pane.projectId);
   if (pane.projectId) lastActivePane.set(pane.projectId, instanceId);
   // Scope to this project: background projects keep their own active tab so
   // returning to them shows a pane instead of a blank frame (flicker).
@@ -1080,9 +1116,8 @@ function activatePane(instanceId: string): void {
     const on = p.instanceId === instanceId;
     p.container.classList.toggle("active", on);
     p.tabEl.classList.toggle("active", on);
-    p.container.style.display = on ? "" : "none";
-    p.view.setVisible(on);
   }
+  syncPaneVisibility();
   if (pendingActivateId === instanceId) pendingActivateId = null;
   // Measure after layout: fitting synchronously here reads the pre-toggle
   // size, resizes the pty, then the ResizeObserver resizes again — that
@@ -1120,6 +1155,16 @@ function lastCompletedRun(pane: Pane): RunSummary | null {
   return settled.length ? settled[settled.length - 1] : null;
 }
 
+const runForkFeedback = createRunForkFeedback({
+  getActivePane: () => activeId ? panes.get(activeId) : undefined,
+  getPaneById: (id) => panes.get(id),
+  getActiveProject: () => ({ id: activeProjectId, generation: activeProjectGeneration }),
+  onChange: () => {
+    const pane = activeId ? panes.get(activeId) : undefined;
+    if (pane) updateForkRunButton(pane);
+  },
+});
+
 /** Fork Run is enabled only for an eligible completed run; otherwise the
  *  button shows the exact ineligibility reason. */
 function updateForkRunButton(pane: Pane): void {
@@ -1129,32 +1174,34 @@ function updateForkRunButton(pane: Pane): void {
     for (const button of challengeRunButtons) button.hidden = true;
     return;
   }
+  const pending = runForkFeedback.isPending(pane);
   btnForkRun.hidden = false;
-  btnForkRun.disabled = !run.replayable;
-  btnForkRun.title = run.replayable
-    ? `Fork ${run.id} into candidates A (settled) and B (start) — ${run.promptText ?? ""}`.slice(0, 140)
-    : `Fork Run unavailable: ${run.reason ?? "the run is not replayable"}`;
+  btnForkRun.disabled = pending || !run.replayable;
+  btnForkRun.textContent = pending ? "Preparing…" : "Fork Run";
+  btnForkRun.setAttribute("aria-busy", String(pending));
+  btnForkRun.title = pending ? "Preparing candidates; waiting for confirmed startup"
+    : run.replayable
+      ? `Fork ${run.id} into candidates A (settled) and B (start) — ${run.promptText ?? ""}`.slice(0, 140)
+      : `Fork Run unavailable: ${run.reason ?? "the run is not replayable"}`;
   for (const button of challengeRunButtons) {
     button.hidden = false;
-    button.disabled = !run.replayable;
-    button.title = run.replayable
-      ? `Challenge ${run.id} with ${button.dataset.profile}`
-      : `Challenge unavailable: ${run.reason ?? "the run is not replayable"}`;
+    button.disabled = pending || !run.replayable;
+    button.title = pending ? "Candidate preparation is already in progress"
+      : run.replayable
+        ? `Challenge ${run.id} with ${button.dataset.profile}`
+        : `Challenge unavailable: ${run.reason ?? "the run is not replayable"}`;
   }
 }
 
 btnForkRun.addEventListener("click", () => {
   const pane = activeId ? panes.get(activeId) : undefined;
   const run = pane ? lastCompletedRun(pane) : null;
-  if (!run) return;
+  if (!pane || !run || runForkFeedback.isPending(pane)) return;
   if (!run.replayable) {
     toast(`Fork Run unavailable: ${run.reason ?? "the run is not replayable"}`, "warning");
     return;
   }
-  void window.termina.forkRun(run.id).then((res) => {
-    // Success needs no toast: the new candidate cards are the confirmation.
-    if (!res.ok) toast(`Fork Run failed: ${res.error ?? "unknown error"}`, "warning");
-  }).catch((err) => toast(`Fork Run failed: ${(err as Error).message}`, "warning"));
+  void runForkFeedback.request(pane, run.id);
 });
 
 for (const button of challengeRunButtons) {
@@ -1162,15 +1209,12 @@ for (const button of challengeRunButtons) {
     const pane = activeId ? panes.get(activeId) : undefined;
     const run = pane ? lastCompletedRun(pane) : null;
     const profile = button.dataset.profile as ChallengeProfile | undefined;
-    if (!run || !profile) return;
+    if (!pane || !run || !profile || runForkFeedback.isPending(pane)) return;
     if (!run.replayable) {
       toast(`Challenge unavailable: ${run.reason ?? "the run is not replayable"}`, "warning");
       return;
     }
-    void window.termina.challengeRun(run.id, profile).then((res) => {
-      // Success needs no toast: the challenger cards are the confirmation.
-      if (!res.ok) toast(`Challenge failed: ${res.error ?? "unknown error"}`, "warning");
-    }).catch((err) => toast(`Challenge failed: ${(err as Error).message}`, "warning"));
+    void runForkFeedback.request(pane, run.id, profile);
   });
 }
 
@@ -1195,41 +1239,53 @@ function refreshCandidateTestCommand(pane: Pane): void {
   }
 }
 
-async function closePane(instanceId: string): Promise<void> {
-  const pane = panes.get(instanceId);
-  if (!pane) return;
-  const terminalGeneration = pane.generation;
-  closingPanes.set(instanceId, { generation: terminalGeneration });
-  panes.delete(instanceId);
-  forgetPaneActivityCue(instanceId);
+/** Presentation cleanup only. Main has already accepted close or removed ownership. */
+function disposePane(pane: Pane): void {
+  if (panes.get(pane.instanceId) !== pane) return;
+  panes.delete(pane.instanceId);
+  forgetPaneActivityCue(pane.instanceId);
   for (const [projectId, activeInstanceId] of lastActivePane) {
-    if (activeInstanceId === instanceId) lastActivePane.delete(projectId);
+    if (activeInstanceId === pane.instanceId) lastActivePane.delete(projectId);
   }
-  // This pane's changed files leave with it; recompute so no dot outlives it.
-  syncExplorerChanged();
   pane.view.dispose();
   pane.container.remove();
   pane.tabEl.remove();
-  updateProjectAttention(pane.projectId);
+}
+
+async function closePane(instanceId: string): Promise<void> {
+  const pane = panes.get(instanceId);
+  if (!pane || pendingTerminalCloses.has(pane)) return;
+  const terminalGeneration = pane.generation;
+  pendingTerminalCloses.add(pane);
   try {
-    await window.termina.closeTerminal(instanceId, terminalGeneration);
-  } catch (err) {
-    closingPanes.delete(instanceId);
-    toast(`could not close the terminal: ${(err as Error).message}`, "warning");
-  }
-  if (activeId === instanceId) {
-    // Prefer another terminal of the same project. Never surface a
-    // background project's terminal: its view is not in front.
-    const candidates =
-      pane.projectId !== null
+    const result = await window.termina.closeTerminal(instanceId, terminalGeneration);
+    if (!result?.ok) {
+      if (result?.error) toast(`could not close the terminal: ${result.error}`, "warning");
+      return;
+    }
+    // A roster push can prune this pane before the reply. Never remove a new life.
+    const currentPane = panes.get(instanceId);
+    if ((currentPane && currentPane !== pane) || pane.generation !== terminalGeneration) return;
+    closingPanes.set(instanceId, { generation: terminalGeneration });
+    if (!currentPane) return;
+    disposePane(pane);
+    syncExplorerChanged();
+    if (activeId === instanceId) {
+      // Prefer this project's terminal, never a hidden background project.
+      const candidates = pane.projectId !== null
         ? [...panes.values()].filter((p) => p.projectId === pane.projectId)
         : [...panes.values()];
-    const next = candidates[candidates.length - 1];
-    if (next) activatePane(next.instanceId);
-    else {
-      activeId = null;
-      renderChrome();
+      const next = candidates[candidates.length - 1];
+      if (next) activatePane(next.instanceId);
+      else {
+        activeId = null;
+        renderChrome();
+      }
     }
+  } catch (err) {
+    toast(`could not close the terminal: ${(err as Error).message}`, "warning");
+  } finally {
+    pendingTerminalCloses.delete(pane);
   }
 }
 
@@ -1248,7 +1304,6 @@ function updatePaneTab(pane: Pane): void {
   const failDot = pane.verifyAttention && pane.verify.state === "fail";
   const timeoutDot = pane.verifyAttention && pane.verify.state === "timeout";
   applyTabActivity(pane.statusEl, presented, { fail: failDot, timeout: timeoutDot });
-  updateProjectAttention(pane.projectId);
   applyTypeBadge(pane);
   const wlineEl = pane.tabEl.querySelector(".tab-worldline") as HTMLElement;
   updateWorldlinePaneTab(
@@ -1276,6 +1331,7 @@ function updatePaneTab(pane: Pane): void {
 }
 
 function renderChrome(): void {
+  workSummaryView.syncContext();
   const pane = activeId ? panes.get(activeId) : undefined;
   if (!pane) {
     statusState.textContent = "no terminal";
@@ -1617,7 +1673,6 @@ layout = createLayout({
     btnMinExplorer: document.getElementById("btn-min-explorer") as HTMLButtonElement,
     btnMinTerminal: document.getElementById("btn-min-terminal") as HTMLButtonElement,
     btnMinEditor: document.getElementById("btn-min-editor") as HTMLButtonElement,
-    mainEl: document.getElementById("main")!,
   },
   editorOccupied: editorPaneOccupied,
   layoutEditors: () => {
@@ -1753,16 +1808,9 @@ function cycleTerminals(delta: 1 | -1): void {
   if (next) activatePane(next.instanceId);
 }
 
-/** Project ids in tab-strip order. Drag reorder moves nodes, not maps. */
+/** Project shortcuts follow the same visible order as the rail. */
 function orderedProjectIds(): string[] {
-  const byTab = new Map<HTMLElement, string>();
-  for (const view of projectViews.values()) byTab.set(view.tabEl, view.id);
-  const ids: string[] = [];
-  for (const el of projectTabsEl.children) {
-    const id = byTab.get(el as HTMLElement);
-    if (id) ids.push(id);
-  }
-  return ids;
+  return projectRail.orderedIds();
 }
 
 function cycleProjects(delta: 1 | -1): void {
@@ -1880,7 +1928,6 @@ function setupWheelCycling(el: HTMLElement, cycle: (delta: 1 | -1) => void): voi
     { passive: true },
   );
 }
-setupWheelCycling(projectTabsEl, cycleProjects);
 setupWheelCycling(termTabsList, cycleTerminals);
 
 // View & Layout commands
@@ -1893,6 +1940,7 @@ commands.register("toggle-explorer", () => layout.toggleExplorer());
 commands.register("toggle-terminal", () => layout.requestMinimize("terminal"));
 commands.register("toggle-editor", () => layout.requestMinimize("editor"));
 commands.register("toggle-modified", () => layout.toggleModified());
+commands.register("attention", () => attentionView.open(document.activeElement instanceof HTMLElement ? document.activeElement : undefined));
 commands.register("session-search", () => sessionSearch.open());
 quickOpen.bind({
   // An explicit modal pick is a direct gesture: take editor focus so the
@@ -1936,11 +1984,8 @@ createTerminalDropZone({
 
 attachTabReorder(projectTabsEl, {
   tabClass: "project-tab",
-  onCommit: () => {
-    void window.termina.reorderProjects(orderedProjectIds()).catch((err) => {
-      toast(`could not save project tab order: ${(err as Error).message}`, "warning");
-    });
-  },
+  axis: "vertical",
+  onCommit: () => persistProjectOrder(orderedProjectIds()),
 });
 attachTabReorder(termTabsList, {
   tabClass: "terminal-tab",
@@ -2078,7 +2123,7 @@ function editorsForUnsavedConfirm(projectId: string | null): EditorManagerInstan
 }
 
 /** Save / Discard / Cancel for dirty buffers. Save reuses flushAll → file:save. */
-async function confirmUnsavedEditors(projectId: string | null): Promise<{ ok: boolean; cancelled?: boolean; error?: string }> {
+async function confirmUnsavedEditors(projectId: string | null): Promise<UnsavedConfirmResult> {
   const editors = editorsForUnsavedConfirm(projectId);
   const dirty = editors.filter((editor) => editor.hasDirtyModels());
   const count = dirty.reduce((n, editor) => n + editor.dirtyCount(), 0);
@@ -2097,9 +2142,24 @@ async function confirmUnsavedEditors(projectId: string | null): Promise<{ ok: bo
       toast(`could not save: ${failed.map((p) => pathBasename(p)).join(", ")}`, "error");
       return { ok: false, error: "could not save editor changes" };
     }
+    if (editors.some((editor) => editor.hasDirtyModels())) {
+      toast("files changed while saving; close again after reviewing the latest edits", "warning");
+      return { ok: false, error: "files changed while saving" };
+    }
+    if (!(await Promise.all(editors.map((editor) => editor.flushDrafts()))).every(Boolean)) {
+      return { ok: false, error: "could not update editor recovery copies" };
+    }
   }
-  return { ok: true };
+  return decision === "proceed"
+    ? { ok: true, discardDraftTokens: editors.flatMap((editor) => editor.dirtyDraftTokens()) }
+    : { ok: true };
 }
+
+window.termina.onEditorRecoveryRefresh(({ projectId, error }) => {
+  const editors = editorsForUnsavedConfirm(projectId);
+  toast(`Close cancelled: ${error}. Rechecking unsaved recovery copies.`, "error");
+  void Promise.all(editors.map((editor) => editor.reprotectDrafts()));
+});
 
 window.termina.onUnsavedConfirm(({ requestId, projectId }) => {
   // Main awaits this report: a confirm throw reports failure instead of withholding it.
@@ -2195,7 +2255,6 @@ window.termina.onVerifyState(({ terminalId, verify }) => {
     pane.verifyAttention = false;
   }
   updatePaneTab(pane);
-  updateProjectAttention(pane.projectId);
   if (activeId === terminalId) renderStatus(pane);
 });
 
@@ -2343,6 +2402,7 @@ function applyFolderOpened(e: FolderOpenedPayload): void {
     view.needsLogin = e.needsLogin === true;
     view.editorMgr?.setProjectOpen(true, e.needsLogin);
   }
+  projectRail.upsert(view);
   baseEditorInstance?.setProjectOpen(true);
   setActiveProject(view.id);
   explorer.setProject(projectId, e.cwd);
@@ -2424,21 +2484,13 @@ window.termina.onInstances((list: InstanceSummary[]) => {
   let prunedPane = false;
   for (const [id, pane] of [...panes.entries()]) {
     if (liveIds.has(id) || !pane.fromRoster) continue;
-    panes.delete(id);
-    forgetPaneActivityCue(id);
+    disposePane(pane);
     prunedPane = true;
-    for (const [projId, activeInstId] of lastActivePane) {
-      if (activeInstId === id) lastActivePane.delete(projId);
-    }
-    pane.view.dispose();
-    pane.container.remove();
-    pane.tabEl.remove();
     if (activeId === id) activeId = null;
   }
   // A pruned pane takes its changed-file contributions with it.
   if (prunedPane) {
     syncExplorerChanged();
-    for (const view of projectViews.values()) updateProjectAttention(view.id);
   }
 
   handleWorldlineInstances(list, {

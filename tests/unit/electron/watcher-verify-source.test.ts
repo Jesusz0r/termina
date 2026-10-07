@@ -16,11 +16,17 @@ function fixture() {
   let emitter!: EventEmitter;
   const fakeWatch = ((_root: string, _options: unknown, listener: typeof notify) => {
     notify = listener;
-    emitter = new EventEmitter();
-    return Object.assign(emitter, { close() {} }) as FSWatcher;
+    const native = new EventEmitter();
+    emitter = native;
+    return Object.assign(native, { close() { native.emit("close"); } }) as FSWatcher;
   }) as typeof watch;
   const watcher = new ProjectWatcher(root, undefined, fakeWatch);
-  return { watcher, root, notify: (path: string | null) => notify("change", path), error: () => emitter.emit("error", new Error("observation lost")) };
+  return {
+    watcher, root, native: () => emitter,
+    notify: (path: string | null) => notify("change", path),
+    error: () => emitter.emit("error", new Error("observation lost")),
+    close: () => emitter.emit("close"),
+  };
 }
 
 function source(watcher: ProjectWatcher): VerifySource {
@@ -72,7 +78,7 @@ describe("Verify source observation", () => {
     }
   });
 
-  it("invalidates observation on loss and does not resurrect a certification after recovery", async () => {
+  it.each(["error", "close"] as const)("invalidates observation on native %s and does not resurrect a certification after recovery", async (loss) => {
     const f = fixture();
     let losses = 0;
     f.watcher.onObservationLost = () => { losses++; };
@@ -80,8 +86,9 @@ describe("Verify source observation", () => {
       f.watcher.start();
       expect(await f.watcher.waitForIdle(3000)).not.toBeNull();
       const before = source(f.watcher);
-      f.error();
-      expect(losses).toBeGreaterThan(0);
+      const beforeLosses = losses;
+      f[loss]();
+      expect(losses).toBe(beforeLosses + 1);
       expect(f.watcher.sourceVersion()).toBeNull();
       expect(await f.watcher.waitForIdle(3000)).toBeNull();
       const epoch = before.observationEpoch;
@@ -91,6 +98,27 @@ describe("Verify source observation", () => {
       expect(await f.watcher.waitForIdle(3000)).not.toBeNull();
       expect(source(f.watcher).observationEpoch).toBeGreaterThan(epoch);
       expect(isVerifySourceCurrent(before, source(f.watcher))).toBe(false);
+    } finally {
+      f.watcher.stop();
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a late close from a replaced native observer", async () => {
+    const f = fixture();
+    let losses = 0;
+    f.watcher.onObservationLost = () => { losses++; };
+    try {
+      f.watcher.start();
+      expect(await f.watcher.waitForIdle(3000)).not.toBeNull();
+      const previous = f.native();
+      f.watcher.start();
+      expect(await f.watcher.waitForIdle(3000)).not.toBeNull();
+      const current = f.watcher.sourceVersion();
+      const beforeLosses = losses;
+      previous.emit("close");
+      expect(f.watcher.sourceVersion()).toEqual(current);
+      expect(losses).toBe(beforeLosses);
     } finally {
       f.watcher.stop();
       rmSync(f.root, { recursive: true, force: true });

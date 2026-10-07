@@ -2010,8 +2010,8 @@ function applyMcpTools(session: McpSession): void {
   syncIndicators();
 }
 
-function flushMcpTools(): void {
-  if (!mcpToolsStale || running || !mcpSession) return;
+function flushMcpTools(beforeFirstRequest = false): void {
+  if (!mcpToolsStale || (running && !beforeFirstRequest) || !mcpSession) return;
   clientTools = mcpClientTools(TOOLS, mcpSession.tools);
   mcpToolsStale = false;
   syncIndicators();
@@ -4349,6 +4349,7 @@ async function runSubagentTask(taskPath: string): Promise<never> {
  *  frames the real error instead of "no settlement". */
 function abortPromptStart(message: string, draft?: string): void {
   lastRunOutcome = { status: "failure", failure: message };
+  sidecar.logEvent({ t: "agent_start_rejected", error: message });
   out(`(the run did not start: ${message})\n`);
   if (draft !== undefined) surface?.setDraft(draft);
   running = false;
@@ -4387,8 +4388,6 @@ async function runPrompt(
   // preflight failure before this prompt has built its own snapshot.
   activeRequestOverlay = null;
   protectedTaskApprovals.clear();
-  await ensureNamedMcp(prompt);
-  if (shutdownRequested) return;
   running = true;
   interrupted = shutdownRequested;
   currentAbort = new AbortController();
@@ -4447,6 +4446,14 @@ async function runPrompt(
       return;
     }
     preflight = { requestId, token: typeof ack.token === "string" ? ack.token : null };
+  }
+  // A server's startup can write project files; source admission comes first.
+  await ensureNamedMcp(prompt);
+  flushMcpTools(true);
+  if (interrupted || shutdownRequested) {
+    cancelPreflight();
+    abortStart("startup interrupted");
+    return;
   }
   const preparedImages = await preparePromptImages(extraImages);
   void refreshPendingImageCount();
@@ -4797,19 +4804,12 @@ async function runPrompt(
               if (follow) process.stdout.write(follow);
             }
             outcomes.push(outcome);
-            sidecar.logEvent({
-              t: "tool_end",
-              toolCallId: chunk[ci]!.id,
-              isError: outcome.isError,
-              ...toolOutcomeTraceFields(outcome),
-            });
           } else {
             const err = item.reason;
             const message = err instanceof Error ? err.message : String(err);
             if (handles[ci]) surface?.finishTool(handles[ci]!, "error", capDisplay(message, TOOL_DISPLAY_BYTES));
             const outcome = done(chunk[ci]!, message, true);
             outcomes.push(outcome);
-            sidecar.logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
           }
         }
       }
@@ -4824,7 +4824,6 @@ async function runPrompt(
           ? "(interrupted by user)"
           : "(not executed: user steering arrived; follow the next user message before choosing further tools)", true);
         outcomes.push(outcome);
-        if (interrupted) sidecar.logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
       }
       let resultBlocks = outcomes.map((o, i): ContentBlock => {
         const b = o.result as ContentBlock;
@@ -4853,6 +4852,14 @@ async function runPrompt(
         }
       }
       pushMessage("user", resultBlocks);
+      // A tool moment may fork only through the persisted, paired results,
+      // never through an assistant message with still-unanswered calls.
+      for (let i = 0; i < outcomes.length; i++) {
+        sidecar.logEvent({
+          t: "tool_end", toolCallId: uses[i]!.id, isError: outcomes[i]!.isError,
+          entryId: String(storageSeq), ...toolOutcomeTraceFields(outcomes[i]!),
+        });
+      }
       await writeMainTrace({
         status: stalled ? "stalled" : "ok",
         seqBefore,

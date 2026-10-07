@@ -144,7 +144,9 @@ export class AgentTerminalInstance {
     env: Record<string, string | undefined>,
     cols: number,
     rows: number,
+    beforeSpawn?: (target: { id: string; generation: number }) => void,
   ) {
+    beforeSpawn?.({ id, generation: this.generation });
     this.id = id;
     this.cwd = cwd;
     this.workspaceId = workspaceId;

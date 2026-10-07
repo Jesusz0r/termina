@@ -47,12 +47,12 @@ export function orderByStrip<T extends { id: string; projectId?: string | null }
     .map(({ terminal }) => terminal);
 }
 
-/** Index in `slots` where a pointer at `clientX` should land. `slots.length` means after the last. */
-export function insertionIndex(clientX: number, slots: readonly { left: number; width: number }[]): number {
+/** Index in `slots` where `position` should land along either axis. `slots.length` means after the last. */
+export function insertionIndex(position: number, slots: readonly { start: number; size: number }[]): number {
   for (let i = 0; i < slots.length; i++) {
     const slot = slots[i]!;
-    const mid = slot.left + slot.width / 2;
-    if (clientX < mid) return i;
+    const mid = slot.start + slot.size / 2;
+    if (position < mid) return i;
   }
   return slots.length;
 }

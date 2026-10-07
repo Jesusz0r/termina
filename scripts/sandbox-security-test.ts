@@ -13,7 +13,6 @@ import { fileURLToPath } from "node:url";
 import {
   CANDIDATE_PROVIDER_ENV,
   CANDIDATE_MEMORY_LIMIT_MIB,
-  CANDIDATE_PROCESS_LIMIT,
   SANDBOX_EXEC,
   TASKPOLICY_EXEC,
   buildSandboxProfile,
@@ -180,7 +179,7 @@ check(
 check("launcher constant is the verified absolute binary", SANDBOX_EXEC === "/usr/bin/sandbox-exec");
 check("candidate resource defaults are valid", (() => {
   try {
-    validateSandboxResourceLimits({ memoryLimitMiB: CANDIDATE_MEMORY_LIMIT_MIB, processLimit: CANDIDATE_PROCESS_LIMIT });
+    validateSandboxResourceLimits({ memoryLimitMiB: CANDIDATE_MEMORY_LIMIT_MIB });
     return true;
   } catch {
     return false;
@@ -188,16 +187,15 @@ check("candidate resource defaults are valid", (() => {
 })());
 check("candidate resource validation rejects unsafe values", (() => {
   try {
-    validateSandboxResourceLimits({ memoryLimitMiB: 0, processLimit: CANDIDATE_PROCESS_LIMIT });
+    validateSandboxResourceLimits({ memoryLimitMiB: 0 });
     return false;
   } catch {
     return true;
   }
 })());
 check(
-  "candidate shell preamble applies a process ceiling and fails closed",
-  sandboxShellPreamble().includes(`ulimit -SH -u ${CANDIDATE_PROCESS_LIMIT}`)
-    && sandboxShellPreamble().includes("|| exit 126;"),
+  "candidate shell preamble retains per-process limits and fails closed without a UID ceiling",
+  sandboxShellPreamble() === "ulimit -t 7200 && ulimit -n 1024 && ulimit -f 2097152 || exit 126;",
 );
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const mainSource = readFileSync(join(repoRoot, "electron", "main.ts"), "utf8");
@@ -262,41 +260,35 @@ if (process.platform === "darwin") {
     const hasMemoryLimit = taskpolicySupportsMemoryLimit();
     const constructed = candidateSandboxLaunch(liveProfilePath, ["/bin/echo", "$(touch injected)", "line\nwith text"], {
       memoryLimitMiB: 64,
-      processLimit: 8,
     });
     check(
-      "candidate launch constructs taskpolicy memory and process limits",
+      "candidate launch constructs taskpolicy memory and per-process shell limits",
       constructed.cmd === TASKPOLICY_EXEC
         && (!hasMemoryLimit || constructed.args.slice(0, 4).join(" ") === "-m 64 -P kill")
         && constructed.args.includes(SANDBOX_EXEC)
-        && constructed.args.at(-1)?.includes("ulimit -SH -u 8")
+        && constructed.args.at(-1)?.startsWith(`${sandboxShellPreamble()} exec `)
         && constructed.args.at(-1)?.includes("'$(touch injected)'")
         && constructed.args.at(-1)?.includes("'line\nwith text'"),
     );
 
-    // taskpolicy's process policy is inherited by descendants. The low test
-    // ceiling makes zsh refuse a fanout without leaving long-lived children.
-    const taskpolicyArgs = hasMemoryLimit ? ["-m", "256", "-P", "kill"] : [];
-    const fanout = spawnSync(
-      TASKPOLICY_EXEC,
-      [...taskpolicyArgs, "/bin/zsh", "-c", `${sandboxShellPreamble(8)} for i in {1..128}; do /usr/bin/true & done; wait`],
-      { encoding: "utf8", timeout: 15_000 },
-    );
+    const controlLaunch = candidateSandboxLaunch(writeSandboxProfile(liveProfilePath, paths), [
+      process.execPath,
+      "-e",
+      `const { spawnSync } = require("node:child_process");
+const child = spawnSync("/bin/bash", ["-c", "printf 'candidate child executed\\n'"], { encoding: "utf8", timeout: 5_000 });
+if (child.error) throw child.error;
+process.stdout.write(child.stdout);
+process.stderr.write(child.stderr);
+process.exit(child.status ?? 1);`,
+    ]);
+    const control = spawnSync(controlLaunch.cmd, controlLaunch.args, {
+      encoding: "utf8",
+      timeout: 15_000,
+      env: { ...filterCandidateEnvironment(process.env, null, ["/usr/bin", "/bin"]), HOME: candidateSupport, TMPDIR: candidateSupport },
+    });
     check(
-      "candidate process fanout is refused by the enforced ceiling",
-      fanout.status !== 0 && /fork failed|resource temporarily unavailable|process/i.test(`${fanout.stdout}\n${fanout.stderr}`),
-      `status=${fanout.status} stderr=${String(fanout.stderr).slice(0, 160)}`,
-    );
-
-    const controlArgs = hasMemoryLimit ? ["-m", String(CANDIDATE_MEMORY_LIMIT_MIB), "-P", "kill"] : [];
-    const control = spawnSync(
-      TASKPOLICY_EXEC,
-      [...controlArgs, "/bin/zsh", "-c", `${sandboxShellPreamble()} exec /usr/bin/true`],
-      { encoding: "utf8", timeout: 15_000 },
-    );
-    check(
-      "ordinary bounded candidate startup remains allowed",
-      control.status === 0 && control.signal === null,
+      "ordinary candidate Bash children execute through the canonical sandbox wrapper",
+      control.status === 0 && control.signal === null && control.stdout === "candidate child executed\n",
       `status=${control.status} signal=${control.signal} stderr=${String(control.stderr).slice(0, 160)}`,
     );
 
@@ -462,6 +454,46 @@ if (process.platform === "darwin") {
     const supportOwn = join(candidateSupport, "own.txt");
     const writeSupport = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/zsh", "-c", `echo support > ${JSON.stringify(supportOwn)}`], { encoding: "utf8" });
     check("macOS sandbox permits candidate support writes", writeSupport.status === 0 && readFileSync(supportOwn, "utf8").trim() === "support", writeSupport.stderr);
+    // Production supports worlds outside user-data/HOME. Broad metadata
+    // traversal in those roots must not accidentally mask the worlds policy.
+    const externalWorlds = join(externalFixture, "worlds");
+    const externalComparison = join(externalWorlds, "comparison");
+    const externalPaths = {
+      ...paths,
+      worldsRoot: externalWorlds,
+      candidateRoot: join(externalComparison, "A"),
+      candidateSupport: join(externalComparison, "A-support"),
+      siblingDir: join(externalComparison, "B"),
+      templateDir: join(externalComparison, "template"),
+      agentHomeDir: join(externalComparison, "A-support", "home", ".termina", "agent"),
+    };
+    const externalOther = join(externalWorlds, "other-comparison");
+    for (const dir of [externalPaths.candidateRoot, externalPaths.agentHomeDir, externalPaths.siblingDir, externalPaths.templateDir, externalOther]) {
+      mkdirSync(dir, { recursive: true });
+    }
+    const externalProbe = spawnSync(SANDBOX_EXEC, ["-p", buildSandboxProfile(externalPaths), process.execPath, "-e", `
+      const fs = require("node:fs");
+      const paths = ${JSON.stringify(externalPaths)};
+      const permitted = (operation) => { try { operation(); return true; } catch { return false; } };
+      const results = {
+        canonical: permitted(() => fs.realpathSync(paths.candidateRoot)),
+        write: permitted(() => fs.writeFileSync(paths.candidateRoot + "/new-file.txt", "candidate")),
+        worldsListing: permitted(() => fs.readdirSync(paths.worldsRoot)),
+        comparisonListing: permitted(() => fs.readdirSync(${JSON.stringify(externalComparison)})),
+        siblingMetadata: permitted(() => fs.statSync(paths.siblingDir)),
+        templateMetadata: permitted(() => fs.statSync(paths.templateDir)),
+        otherMetadata: permitted(() => fs.statSync(${JSON.stringify(externalOther)})),
+        primaryRead: permitted(() => fs.readFileSync(${JSON.stringify(primarySentinel)})),
+        primaryWrite: permitted(() => fs.writeFileSync(${JSON.stringify(primarySentinel)}, "forbidden")),
+      };
+      console.log(JSON.stringify(results));
+    `], { encoding: "utf8" });
+    const externalResults = externalProbe.status === 0 ? JSON.parse(externalProbe.stdout) : {};
+    check("external worlds permit canonical candidate paths and writes", externalResults.canonical === true && externalResults.write === true, externalProbe.stderr);
+    for (const key of ["worldsListing", "comparisonListing", "siblingMetadata", "templateMetadata", "otherMetadata", "primaryRead", "primaryWrite"]) {
+      check(`external worlds deny ${key}`, externalResults[key] === false, externalProbe.stderr);
+    }
+
     const authWrite = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/zsh", "-c", `echo refreshed > ${JSON.stringify(join(agentHomeDir, "auth.json"))}`], { encoding: "utf8" });
     const mcpWrite = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/zsh", "-c", `echo changed > ${JSON.stringify(join(agentHomeDir, "mcp.json"))}`], { encoding: "utf8" });
     check("macOS sandbox permits copied auth refresh", authWrite.status === 0 && readFileSync(join(agentHomeDir, "auth.json"), "utf8").includes("refreshed"), authWrite.stderr);

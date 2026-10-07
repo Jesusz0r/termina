@@ -9,6 +9,7 @@ import type { TimelineEvent, TimelinePrefix } from "../../shared/types";
 
 interface TimelinePaneState {
   instanceId: string;
+  generation: number;
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
   timelineRequestToken: number;
@@ -49,9 +50,35 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
 } {
   const view = new TimelineView(bindings.container);
   let jumpEpoch = 0;
+  let disposed = false;
+  // Sequence numbers are local to a terminal lifecycle, not globally unique.
+  type PendingFork = {
+    pane: TPane;
+    terminalGeneration: number;
+    projectId: string | null;
+    projectGeneration: number;
+    seq: number;
+  };
+  const pendingForks = new Set<PendingFork>();
+
+  function isActiveForkSource(fork: PendingFork): boolean {
+    const project = bindings.getActiveProject();
+    return !disposed
+      && bindings.getActivePane() === fork.pane
+      && bindings.getPaneById(fork.pane.instanceId) === fork.pane
+      && fork.pane.generation === fork.terminalGeneration
+      && project.id === fork.projectId
+      && project.generation === fork.projectGeneration;
+  }
+
+  function renderPendingForks(): void {
+    if (disposed) return;
+    view.setPendingForks([...pendingForks].filter(isActiveForkSource).map((fork) => fork.seq));
+  }
 
   /** Session Timeline: show the active pane's points, fetch once per pane. */
   function renderTimeline(): void {
+    renderPendingForks();
     const pane = bindings.getActivePane();
     if (!pane) {
       view.setEvents([]);
@@ -141,15 +168,31 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
     },
     onFork: (ev) => {
       const pane = bindings.getActivePane();
-      if (!pane) return;
+      if (!pane || disposed) return;
       if (!ev.stateId) {
         toast("this moment is not forkable yet", "warning");
         return;
       }
-      void window.termina.forkPoint(pane.instanceId, ev.seq).then((res) => {
-        // Success needs no toast: the new candidate cards are the confirmation.
-        if (!res.ok) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
-      }).catch((err) => toast(`fork at this moment failed: ${(err as Error).message}`, "warning"));
+      if ([...pendingForks].some((fork) => fork.seq === ev.seq && isActiveForkSource(fork))) return;
+      const project = bindings.getActiveProject();
+      const fork = {
+        pane, terminalGeneration: pane.generation,
+        projectId: project.id, projectGeneration: project.generation, seq: ev.seq,
+      };
+      pendingForks.add(fork);
+      renderPendingForks();
+      void (async () => {
+        try {
+          const res = await window.termina.forkPoint(pane.instanceId, ev.seq);
+          // Success needs no toast: the new candidate cards are the confirmation.
+          if (!res.ok && isActiveForkSource(fork)) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
+        } catch (err) {
+          if (isActiveForkSource(fork)) toast(`fork at this moment failed: ${(err as Error).message}`, "warning");
+        } finally {
+          pendingForks.delete(fork);
+          renderPendingForks();
+        }
+      })();
     },
     onProgress: (seq) => {
       const pane = bindings.getActivePane();
@@ -223,6 +266,9 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
   }
 
   function dispose(): void {
+    disposed = true;
+    pendingForks.clear();
+    view.setPendingForks([]);
     for (const unsub of unsubs) unsub();
   }
 

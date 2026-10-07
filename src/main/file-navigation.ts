@@ -1,4 +1,5 @@
 import type { ProjectWorkspaceRef } from "../../shared/types";
+import { canonicalizePath } from "../../shared/canonical-path";
 
 interface FileNavigationProject {
   id: string;
@@ -18,7 +19,7 @@ function normalizePath(inputPath: string): string {
       resolved.push(segment);
     }
   }
-  return (isAbs ? "/" : "") + resolved.join("/");
+  return canonicalizePath((isAbs ? "/" : "") + resolved.join("/"));
 }
 
 /** Absolute primary-tree links use the longest project root. An explicit
@@ -45,9 +46,12 @@ export function resolveFileNavigation(
   const candidate = requestedProject && owner?.workspaceId !== requestedProject.workspaceId;
   if (cleanPath.startsWith("/") && !candidate) {
     let best: FileNavigationProject | undefined;
+    let bestRootLength = -1;
     for (const project of projects.values()) {
-      if (cleanPath === project.cwd || cleanPath.startsWith(project.cwd + "/")) {
-        if (!best || project.cwd.length > best.cwd.length) best = project;
+      const root = normalizePath(project.cwd);
+      if ((cleanPath === root || cleanPath.startsWith(root + "/")) && root.length > bestRootLength) {
+        best = project;
+        bestRootLength = root.length;
       }
     }
     if (best) owner = { projectId: best.id, workspaceId: best.workspaceId };

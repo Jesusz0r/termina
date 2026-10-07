@@ -49,6 +49,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "toggle-explorer", label: "Toggle explorer", category: "View", description: "Minimize or restore the file explorer", defaultShortcut: "CmdOrCtrl+B", scope: "renderer" },
   { command: "toggle-terminal", label: "Toggle terminal", category: "View", description: "Minimize or restore the terminal", defaultShortcut: "CmdOrCtrl+Shift+E", scope: "renderer" },
   { command: "toggle-editor", label: "Toggle editor", category: "View", description: "Minimize or restore the editor", defaultShortcut: "CmdOrCtrl+E", scope: "renderer" },
+  { command: "attention", label: "Attention across all projects", category: "View", description: "Inspect recorded blockers, failed attempts and outdated checks without resolving them", defaultShortcut: "CmdOrCtrl+Alt+A", scope: "renderer" },
   { command: "toggle-modified", label: "Toggle modified panel", category: "View", description: "Show or hide changed files", defaultShortcut: "", scope: "renderer" },
   { command: "next-project", label: "Next project", category: "View", description: "Activate the next project tab", defaultShortcut: "CmdOrCtrl+Shift+]", scope: "renderer" },
   { command: "previous-project", label: "Previous project", category: "View", description: "Activate the previous project tab", defaultShortcut: "CmdOrCtrl+Shift+[", scope: "renderer" },

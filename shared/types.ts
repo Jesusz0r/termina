@@ -210,6 +210,88 @@ export interface VerifyInfo {
   staleReason?: string;
 }
 
+/** Assigned source scope, not a claim about arbitrary process writes. */
+export interface WorkAreaSummary {
+  workspaceId: string;
+  root: string;
+  kind: "project" | "candidate";
+  comparisonId: string | null;
+}
+
+export type WorkAttentionReason =
+  | "blocked"
+  | "verify-failed"
+  | "verify-timeout"
+  | "verify-stale"
+  | "verify-cancelled"
+  | "task-incomplete"
+  | "task-failed"
+  | "task-interrupted"
+  | "worker-unavailable";
+
+/** Navigation only. It never authorizes execution, review acceptance, or promotion. */
+export interface WorkSummaryAction {
+  kind: "terminal" | "plan" | "changes" | "evidence";
+  terminalId: string;
+  generation: number;
+}
+
+export interface PlanWorkSummary {
+  /** Plan Board identifies tasks by owner terminal and exact task text. */
+  task: PlanTask;
+  /** Live assignment only; dispatchResult remains historical when this is null. */
+  worker: { terminalId: string; generation: number } | null;
+  attention: WorkAttentionReason[];
+  nextAction: WorkSummaryAction;
+}
+
+export interface TerminalWorkSummary {
+  terminalId: string;
+  generation: number;
+  type: "agent" | "shell";
+  model: string | null;
+  /** Shell execution is unknown, never inferred idle. */
+  activity: AgentActivityView | null;
+  workArea: WorkAreaSummary | null;
+  verify: VerifyInfo | null;
+  /** Cumulative tracked review paths, not Git dirtiness or unread changes. */
+  trackedChanges: number;
+  tasks: PlanWorkSummary[];
+  attention: WorkAttentionReason[];
+  nextAction: WorkSummaryAction;
+}
+
+/** Small, on-demand projection of one project's canonical owners. No terminal buffers or diffs. */
+export interface ProjectWorkSummary {
+  projectId: string;
+  name: string;
+  root: string;
+  terminals: TerminalWorkSummary[];
+}
+
+/** One factual reason to inspect an open project's work. */
+export interface WorkAttentionItem {
+  id: string;
+  projectId: string;
+  terminalId: string;
+  generation: number;
+  model: string | null;
+  taskText: string | null;
+  reason: WorkAttentionReason;
+  detail: string | null;
+  workArea: WorkAreaSummary | null;
+  action: WorkSummaryAction;
+}
+
+export interface WorkOverview {
+  projects: Array<{ projectId: string; name: string; root: string; working: number; attentionCount: number }>;
+  items: WorkAttentionItem[];
+}
+
+export type WorkAttentionInspectResult =
+  | { ok: true; folder: FolderOpenedPayload; action: WorkSummaryAction }
+  | { ok: false; error: string };
+
 /** One lossless, sequenced PTY egress quantum. */
 export interface PtyDataPayload {
   id: string;
@@ -247,6 +329,12 @@ export interface PtyModesPayload {
   modifierReporting: boolean;
   /** DECSET 1, application cursor keys. */
   applicationCursor: boolean;
+}
+
+export interface TerminalCloseResult {
+  ok: boolean;
+  cancelled?: boolean;
+  error?: string;
 }
 
 export interface InstanceSummary {
@@ -633,6 +721,18 @@ export interface ContentHit {
   matchLength: number;
 }
 
+export interface UnsavedConfirmResult {
+  ok: boolean;
+  cancelled?: boolean;
+  error?: string;
+  discardDraftTokens?: string[];
+}
+
+export type EditorFileResult =
+  | { ok: true; path: string; content: string; recoveredDraft?: string; deleted?: boolean; recoveryDiskError?: string; recoverySaveBlocked?: boolean; changedLines?: number[] }
+  | { ok: true; path: string; preview: "image" | "pdf"; version: number }
+  | { ok: false; path: string; error: string };
+
 export interface TerminaBridge {
   // push events (main → renderer)
   onPtyData(cb: (e: PtyDataPayload) => void): () => void;
@@ -663,6 +763,7 @@ export interface TerminaBridge {
   onFlushRequest(cb: (p: { requestId: string; writerId: string; projectId: string; workspaceId: string }) => void): () => void;
   /** Main asks the renderer to confirm dirty buffers before project close or quit. */
   onUnsavedConfirm(cb: (p: { requestId: string; projectId: string | null }) => void): () => void;
+  onEditorRecoveryRefresh(cb: (p: { projectId: string | null; error: string }) => void): () => void;
   onUpdateState(cb: (state: AppUpdateState) => void): () => void;
 
   // terminals (agent = core TUI, shell = a real shell like zsh)
@@ -674,7 +775,7 @@ export interface TerminaBridge {
   acknowledgePtyData(payload: Pick<PtyDataPayload, "id" | "generation" | "windowGeneration" | "rendererGeneration" | "sequence">): void;
   /** Report the selected pane for native actions; main validates ownership and generation. */
   selectTerminal(id: string, generation: number): Promise<{ ok: boolean }>;
-  closeTerminal(id: string, generation: number): Promise<void>;
+  closeTerminal(id: string, generation: number): Promise<TerminalCloseResult>;
   writeTerminal(id: string, data: string): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   getInstances(): Promise<InstanceSummary[]>;
@@ -705,6 +806,12 @@ export interface TerminaBridge {
   getTimelineProgress(terminalId: string, seq: number): Promise<TimelineProgress>;
   /** The current run's plan tasks (Plan Board). */
   getPlan(terminalId: string): Promise<PlanTask[]>;
+  /** Factual project/task context without heavy history or renderer notification state. */
+  getProjectWorkSummary(projectId: string): Promise<ProjectWorkSummary | null>;
+  getWorkOverview(): Promise<WorkOverview>;
+  inspectWorkAttention(id: string): Promise<WorkAttentionInspectResult>;
+  /** Inspect a live terminal generation's current verdict and bounded historical output. */
+  getVerifyReport(terminalId: string, generation: number): Promise<string | null>;
   /** Full-text search over the project's past sessions. */
   searchSessions(query: string): Promise<{ hits: SessionHit[]; error?: string }>;
   /** Fuzzy file search over the active project tree (quick open, explorer filter). */
@@ -728,7 +835,7 @@ export interface TerminaBridge {
   /** The renderer's answer to a flush request. */
   reportFlush(requestId: string, result: { ok: boolean; failed: string[] }): Promise<void>;
   /** The renderer's answer to an unsaved-buffer confirm (save / discard / cancel). */
-  reportUnsavedConfirm(requestId: string, result: { ok: boolean; cancelled?: boolean; error?: string }): Promise<void>;
+  reportUnsavedConfirm(requestId: string, result: UnsavedConfirmResult): Promise<void>;
   /** Save a dirty model on behalf of the write-lease holder (the flush).
    *  Pass restore to recreate a missing regular file under that same lease. */
   flushSave(path: string, content: string, writerId: string, owner: ProjectWorkspaceRef, restore?: boolean): Promise<{ ok: boolean; error?: string }>;
@@ -802,7 +909,11 @@ export interface TerminaBridge {
   /** Open an http(s) URL in the system browser. */
   openExternal(url: string): Promise<{ ok: boolean; error?: string }>;
   onProjectClosed(cb: (e: { projectId: string; activationGeneration: number }) => void): () => void;
-  openFile(path: string, owner: ProjectWorkspaceRef): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: true; path: string; preview: "image" | "pdf"; version: number } | { ok: false; path: string; error: string }>;
+  openFile(path: string, owner: ProjectWorkspaceRef, purpose?: "editor"): Promise<EditorFileResult>;
+  claimEditorDraft(path: string, owner: ProjectWorkspaceRef, modelId: string): Promise<{ ok: true; token: string; revision: number } | { ok: false; error: string }>;
+  getEditorDrafts(projectId: string): Promise<{ ok: boolean; files: { path: string; owner: ProjectWorkspaceRef }[]; error?: string }>;
+  checkpointEditorDraft(token: string, revision: number, content: string | null, owner: ProjectWorkspaceRef): Promise<{ ok: boolean; error?: string }>;
+  releaseEditorDraft(token: string, owner: ProjectWorkspaceRef): Promise<void>;
   /** Persist an editor buffer. Pass restore to recreate a missing regular
    *  file (and parents) under the same write lease; ordinary save still
    *  refuses a missing path. */

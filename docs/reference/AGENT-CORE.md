@@ -213,6 +213,16 @@ Stubs recover through the reproducing command and the append-only session
 JSONL, which keeps originals. The kernel does not call the snapshot store
 and does not put a timeline sequence in the stub.
 
+Captured mutation moments use the paired tool-result message's persisted
+storage sequence. `agent-core/main.ts` emits ordinary `tool_end` records only
+after that message is stored, carrying its exact `entryId`; a tool start is
+not a session-fork address. Main joins that address to the existing captured
+source state before publishing the moment. Forking through an unanswered
+assistant tool call would break structural pairing and is not allowed.
+Timeline IPC deliberately omits file content, so absent content in a push
+is not proof of an absent snapshot. Retention limits and unavailable content
+must be disclosed without substituting current source as historical evidence.
+
 ## P5 — Measure waste as money, attribute it to causes
 
 **Invariant**: cache hit rate alone is vanity. The number that matters is

@@ -17,6 +17,7 @@ const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
   "checkpoint_result",
   "session_ready",
   "agent_start",
+  "agent_start_rejected",
   "agent_settled",
   "agent_settings",
   "plan",
@@ -125,6 +126,8 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
         thinkingLevel: optionalStringOrNull(rec.thinkingLevel),
         permissions: optionalPermissionMode(rec.permissions),
       };
+    case "agent_start_rejected":
+      return { ...meta, t: "agent_start_rejected", error: optionalStringOrNull(rec.error) };
     case "agent_settled":
       return { ...meta, t: "agent_settled", error: optionalStringOrNull(rec.error) };
     case "agent_settings":
@@ -155,7 +158,7 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
       };
     }
     case "tool_end":
-      return { ...meta, t: "tool_end", toolCallId: optionalString(rec.toolCallId), isError: optionalBoolean(rec.isError) };
+      return { ...meta, t: "tool_end", toolCallId: optionalString(rec.toolCallId), isError: optionalBoolean(rec.isError), entryId: optionalStringOrNull(rec.entryId) };
     case "subagent_spawn":
       return { ...meta, t: "subagent_spawn", runId: optionalString(rec.runId), taskFile: optionalString(rec.taskFile), userRequested: optionalBoolean(rec.userRequested) };
     case "subagent_cancel":

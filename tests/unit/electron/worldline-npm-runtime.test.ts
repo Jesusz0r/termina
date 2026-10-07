@@ -1,16 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 import { PathLookup } from "../../../electron/path-lookup.ts";
 import { worldlineAppReadPaths } from "../../../electron/worldlines/bootstrap.ts";
-import { CANDIDATE_PROCESS_LIMIT, candidateSandboxLaunch, filterCandidateEnvironment, terminateSandboxProcessGroup, writeSandboxProfile } from "../../../electron/sandbox.ts";
+import { candidateSandboxLaunch, filterCandidateEnvironment, terminateSandboxProcessGroup, writeSandboxProfile } from "../../../electron/sandbox.ts";
 import { readVerifyStages, writeVerifyPackage } from "../../fixtures/verify-package.ts";
-
-const execFileAsync = promisify(execFile);
 
 function toolPaths(node: string, npm: string, npmCli: string): PathLookup {
   const paths = new PathLookup();
@@ -44,16 +41,7 @@ describe("candidate npm runtime read paths", () => {
 
   for (const packageRun of [false, true]) {
     const action = packageRun ? "runs the package lifecycle" : "loads npm and preserves filesystem isolation";
-    it.skipIf(process.platform !== "darwin")(`${action} with npm installed below the denied home`, async (context) => {
-      if (packageRun) {
-        // RLIMIT_NPROC counts every process for the user's uid, not just
-        // this candidate. Keep the production limit; report the prerequisite.
-        const { stdout } = await execFileAsync("/bin/ps", ["-u", String(process.getuid!()), "-o", "pid="]);
-        const count = stdout.trim().split("\n").length;
-        if (count >= CANDIDATE_PROCESS_LIMIT) {
-          context.skip(`host has ${count} user processes; candidate limit is ${CANDIDATE_PROCESS_LIMIT}`);
-        }
-      }
+    it.skipIf(process.platform !== "darwin")(`${action} with npm installed below the denied home`, async () => {
       const root = await realpath(await mkdtemp(join(tmpdir(), "termina-candidate-npm-")));
       let cleanupConfirmed = true;
       try {

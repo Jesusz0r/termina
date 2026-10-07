@@ -3,7 +3,7 @@
  * handlers and calls these before any fs/pty/snapshot work.
  */
 import { isRecord } from "../../shared/guards.js";
-import { CHALLENGE_PROFILES, type ChallengeProfile, type RendererIpcCapability } from "../../shared/types.js";
+import { CHALLENGE_PROFILES, type ChallengeProfile, type RendererIpcCapability, type UnsavedConfirmResult } from "../../shared/types.js";
 
 export function isChallengeProfile(value: unknown): value is ChallengeProfile {
   return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
@@ -15,12 +15,15 @@ export function isFlushResult(value: unknown): value is { ok: boolean; failed: s
   return typeof rec.ok === "boolean" && Array.isArray(rec.failed) && rec.failed.every((item) => typeof item === "string");
 }
 
-export function isUnsavedConfirmResult(value: unknown): value is { ok: boolean; cancelled?: boolean; error?: string } {
-  if (typeof value !== "object" || value === null) return false;
-  const rec = value as { ok?: unknown; cancelled?: unknown; error?: unknown };
+export function isUnsavedConfirmResult(value: unknown): value is UnsavedConfirmResult {
+  if (!isRecord(value)) return false;
+  const rec = value;
   if (typeof rec.ok !== "boolean") return false;
   if (rec.cancelled !== undefined && typeof rec.cancelled !== "boolean") return false;
   if (rec.error !== undefined && typeof rec.error !== "string") return false;
+  if (rec.discardDraftTokens !== undefined && (!Array.isArray(rec.discardDraftTokens)
+    || rec.discardDraftTokens.length > 2000
+    || !rec.discardDraftTokens.every((token) => typeof token === "string" && token.length === 36))) return false;
   return true;
 }
 

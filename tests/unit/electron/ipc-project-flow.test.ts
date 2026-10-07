@@ -296,7 +296,7 @@ check("closing terminals cannot be rehydrated", main.includes("filter((t) => !t.
 
 check("project close and quit share the unsaved-buffer gate", main.includes("async confirmClose(projectId?: string)")
   && main.includes("await this.confirmUnsavedEditorBuffers(projectId)")
-  && main.includes("return this.confirmDiscardActiveCandidates(projectId)")
+  && main.includes("if (!unsaved.ok || !(await this.confirmCloseConsequences(projectId))) return false")
   && main.includes("if (!(await this.confirmClose(projectId)))")
   && main.includes(".confirmClose()")
   && main.includes('this.send("editor:unsaved-confirm"')

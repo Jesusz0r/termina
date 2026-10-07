@@ -6,6 +6,7 @@ import {
   activityView,
   applyActivityEvent,
   emptyActivityInput,
+  hasLiveAgentWork,
   type ActivitySignal,
   type AgentActivityInput,
 } from "../../../electron/agent-activity.ts";
@@ -27,6 +28,18 @@ describe("agent activity reducer (issue #291)", () => {
 
   it("is idle before any run", () => {
     expect(activityView(activityFor(emptyActivityInput()))).toEqual({ state: "idle", reason: null });
+    expect(hasLiveAgentWork(emptyActivityInput())).toBe(false);
+  });
+
+  it("distinguishes live blocked work from settled or exited blocked work", () => {
+    const started = fold([{ t: "agent_start", ...at(1) }, { t: "sidecar_hold", ...at(2), held: true }]);
+    expect(hasLiveAgentWork(started)).toBe(true);
+    const settled = fold([{ t: "agent_settled", ...at(3), error: "stalled" }], started);
+    expect(hasLiveAgentWork(settled)).toBe(false);
+    const exited = fold([{ t: "pty_exit", ...at(3) }], started);
+    expect(hasLiveAgentWork(exited)).toBe(false);
+    expect(hasLiveAgentWork(fold([{ t: "prompt", ...at(1) }]))).toBe(true);
+    expect(hasLiveAgentWork(fold([{ t: "preflight_request", ...at(1) }]))).toBe(true);
   });
 
   it("is working after agent_start and idle after a clean settle", () => {
@@ -42,6 +55,19 @@ describe("agent activity reducer (issue #291)", () => {
       state: "working",
       reason: null,
     });
+  });
+
+  it("clears rejected startup without inventing a settlement or clearing live work", () => {
+    const rejected = fold([
+      { t: "prompt", ...at(1) },
+      { t: "preflight_request", ...at(2) },
+      { t: "agent_start_rejected", ...at(3) },
+    ]);
+    expect(rejected.lastBoundary).toBe("none");
+    expect(hasLiveAgentWork(rejected)).toBe(false);
+    expect(activityView(activityFor(rejected))).toEqual({ state: "idle", reason: null });
+    const live = fold([{ t: "agent_start", ...at(1) }, { t: "agent_start_rejected", ...at(2) }]);
+    expect(hasLiveAgentWork(live)).toBe(true);
   });
 
   it("blocks on a preflight lease timeout", () => {

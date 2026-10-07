@@ -468,8 +468,4 @@ describe("promote refreshes workspace state after apply", () => {
     expect(success.indexOf("store.captureIncremental")).toBe(-1);
   });
 
-  it("forks fail when a new trust-sensitive path appears after the run", () => {
-    const fork = methodBody(worldlines, "async forkRun(", "const uncertaintyAdmission");
-    expect(fork).toContain("[...new Set([...Object.keys(run.trustHashes), ...Object.keys(now)])]");
-  });
 });

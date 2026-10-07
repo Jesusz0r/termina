@@ -7,6 +7,7 @@ import { isErrno } from "../../../shared/guards.ts";
 import { randomUUID } from "node:crypto";
 import { syncParentDir } from "../../../shared/fsync.ts";
 import ts from "typescript";
+import { sourceTreesOverlap } from "../../../electron/main/source-admission.ts";
 
 /**
  * Flush-save lease gate (refs #168) and dispatch genuine-holder flush
@@ -100,6 +101,7 @@ type FlushSave = (
 interface FakeWorkspace {
   id: string;
   root: string;
+  canonicalRoot: string;
   writerId: string | null;
   leaseDepth?: number;
   generation: number;
@@ -107,6 +109,8 @@ interface FakeWorkspace {
 
 interface FakeApp {
   disposed: boolean;
+  projects: Map<string, { workspaces: Map<string, FakeWorkspace> }>;
+  sourceWorkspaceWriter: (root: string, except?: FakeWorkspace) => FakeWorkspace | null;
   workspaceById: (id: string) => FakeWorkspace | undefined;
   projectWorkspace: (value: unknown) => { project: { id: string }; workspace: FakeWorkspace } | null;
   managedPath: (absPath: string, workspaceId: string) => Promise<{ path: string; workspace: FakeWorkspace } | null>;
@@ -124,6 +128,10 @@ interface FakeApp {
   kickWorkspaceMomentCapture: (ws: FakeWorkspace) => void;
 }
 
+const realSourceWriter = loadMethod("sourceWorkspaceWriter", "private sourceWorkspaceWriter(", ["sourceTreesOverlap"], [sourceTreesOverlap]) as (
+  root: string,
+  except?: FakeWorkspace,
+) => FakeWorkspace | null;
 const realAcquire = loadMethod("acquireWriteLease", "private async acquireWriteLease(", [], []) as (
   wsId: string,
   requesterId: string,
@@ -156,10 +164,12 @@ const flushSave = loadFlushSave(["MAX_OPEN_FILE_SIZE"], [MAX_OPEN_FILE_SIZE]) as
 
 function makeHarness(opts: { durableReplace?: (path: string, data: string | Buffer, mode?: number) => Promise<void> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "termina-flush-gate-"));
-  const ws: FakeWorkspace = { id: "ws-1", root: dir, writerId: null, generation: 1 };
+  const ws: FakeWorkspace = { id: "ws-1", root: dir, canonicalRoot: dir, writerId: null, generation: 1 };
   const owner = { projectId: "proj-1", workspaceId: ws.id };
   const app: FakeApp = {
     disposed: false,
+    projects: new Map([["proj-1", { workspaces: new Map([[ws.id, ws]]) }]]),
+    sourceWorkspaceWriter: (root, except) => realSourceWriter.call(app, root, except),
     workspaceById: (id: string) => (id === ws.id ? ws : undefined),
     projectWorkspace: (value: unknown) =>
       value && typeof value === "object" && (value as { workspaceId?: string }).workspaceId === ws.id
@@ -192,6 +202,37 @@ function makeHarness(opts: { durableReplace?: (path: string, data: string | Buff
   const cleanup = () => rmSync(dir, { recursive: true, force: true });
   return { dir, ws, owner, app, call, cleanup };
 }
+
+describe("physical source scopes for privileged writes", () => {
+  it.each([
+    ["alias", (root: string) => root],
+    ["ancestor", (root: string) => dirname(root)],
+    ["nested", (root: string) => join(root, "nested")],
+  ] as const)("rejects an independently held %s workspace", async (_name, scope) => {
+    const h = makeHarness();
+    try {
+      const foreign: FakeWorkspace = {
+        id: "foreign", root: "/display-alias", canonicalRoot: scope(h.dir), writerId: "promotion:foreign", generation: 1,
+      };
+      h.app.projects.set("foreign-project", { workspaces: new Map([[foreign.id, foreign]]) });
+      expect(await h.app.acquireWriteLease(h.ws.id, "editor"))
+        .toMatchObject({ ok: false, error: expect.stringContaining("Source files overlap") });
+      expect(h.ws.writerId).toBeNull();
+    } finally { h.cleanup(); }
+  });
+
+  it("does not confuse a sibling name prefix with a nested source tree", async () => {
+    const h = makeHarness();
+    try {
+      const foreign: FakeWorkspace = {
+        id: "foreign", root: `${h.dir}-sibling`, canonicalRoot: `${h.dir}-sibling`, writerId: "promotion:foreign", generation: 1,
+      };
+      h.app.projects.set("foreign-project", { workspaces: new Map([[foreign.id, foreign]]) });
+      expect(await h.app.acquireWriteLease(h.ws.id, "editor")).toMatchObject({ ok: true });
+      h.app.releaseWriteLease(h.ws.id, "editor");
+    } finally { h.cleanup(); }
+  });
+});
 
 describe("flush-save lease gate (refs #168)", () => {
   it("rejects a null writer on an idle workspace without touching bytes", async () => {
