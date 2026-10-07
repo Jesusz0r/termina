@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { activityFor, activityView, emptyActivityInput, type AgentActivityInput } from "../../../electron/agent-activity.ts";
 import { parseTerminalTarget } from "../../../electron/main/ipc-validate.ts";
-import { planCreationError } from "../../../electron/plan-board.ts";
+import { planCreationError, planOwnerError, planStartError } from "../../../electron/plan-board.ts";
 import { projectWorkSummary, workOverview } from "../../../electron/main/work-summary.ts";
 import { formatVerifyContext, invalidateVerify } from "../../../electron/main/verify-source.ts";
 import type { FolderOpenedPayload, PlanTask, ProjectWorkSummary, VerifyInfo, WorkAttentionInspectResult, WorkOverview } from "../../../shared/types.ts";
@@ -11,7 +11,7 @@ import type { FolderOpenedPayload, PlanTask, ProjectWorkSummary, VerifyInfo, Wor
 // Run the actual main methods with in-memory owners, without importing Electron,
 // instantiating an app/provider, or reading session files from the host.
 const sourceFile = ts.createSourceFile("main.ts", readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-const methodNames = ["planCreationError", "workSummary", "workOverview", "inspectWorkAttention", "verifyReport", "projectOfTerminal", "workspaceOfTerminal", "registerIpc",
+const methodNames = ["planOwnerFacts", "planCreationError", "workSummary", "workOverview", "inspectWorkAttention", "verifyReport", "projectOfTerminal", "workspaceOfTerminal", "registerIpc",
   "activateProject", "sendFolderOpened", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration"];
 const methods = new Map<string, ts.MethodDeclaration>();
 function visit(node: ts.Node): void {
@@ -85,8 +85,8 @@ function fixture() {
     id: "project-1", cwd: primary.root, terminalIds: new Set(),
     workspaces: new Map([[primary.id, primary], [candidate.id, candidate]]), activationGeneration: 0,
   };
-  const main = new Function("activityFor", "activityView", "emptyActivityInput", "parseTerminalTarget", "projectWorkSummary", "workOverview", "formatVerifyContext", "planCreationError", compiled)(
-    activityFor, activityView, emptyActivityInput, parseTerminalTarget, projectWorkSummary, workOverview, formatVerifyContext, planCreationError,
+  const main = new Function("activityFor", "activityView", "emptyActivityInput", "parseTerminalTarget", "projectWorkSummary", "workOverview", "formatVerifyContext", "planCreationError", "planOwnerError", compiled)(
+    activityFor, activityView, emptyActivityInput, parseTerminalTarget, projectWorkSummary, workOverview, formatVerifyContext, planCreationError, planOwnerError,
   ) as MainHarness;
   Object.assign(main, {
     projects: new Map([[project.id, project]]), runtime: new Map(), activityInputs: new Map(),
@@ -195,7 +195,9 @@ describe("main project work-summary orchestration", () => {
       })),
     ];
     let tasks = main.workSummary(project.id)!.terminals[0]!.tasks;
-    expect(tasks[0]).toEqual({ task: finished, worker: null, attention: [], nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation } });
+    expect(tasks[0]).toEqual({ task: finished, worker: null, attention: [],
+      startError: planStartError(null, owner.plan, finished),
+      nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation } });
     expect(tasks[1]).toMatchObject({ worker: null, attention: ["task-incomplete"], task: { dispatchResult: { outcome: "incomplete" } } });
     expect(tasks[2]).toMatchObject({ worker: { terminalId: "term-worker", generation: 9 }, attention: [], nextAction: { kind: "terminal", terminalId: "term-worker", generation: 9 } });
     for (const task of tasks.slice(3)) expect(task).toMatchObject({ worker: null, attention: ["worker-unavailable"], nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation } });

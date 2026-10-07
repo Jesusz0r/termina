@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWorkInspector } from "../../../src/main/work-inspector.ts";
-import type { OverviewWorkCard } from "../../../src/main/project-overview.ts";
-import { projectWorkSummary, type WorkSummaryTerminalFacts } from "../../../electron/main/work-summary.ts";
+import { projectCards, type OverviewWorkCard } from "../../../src/main/project-overview.ts";
+import { projectWorkSummary, workOverview, type WorkSummaryTerminalFacts } from "../../../electron/main/work-summary.ts";
 import type { InstanceSummary, ProjectWorkSummary, TerminaBridge, WorkSummaryAction } from "../../../shared/types.ts";
 import { installFakeDom, type FakeEl } from "./fake-dom.ts";
 
@@ -16,7 +16,7 @@ function terminal(id: string, overrides: Partial<WorkSummaryTerminalFacts> = {})
   return {
     id, generation: 4, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: "ws-1", root: "/projects/example", primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], planCreationError: null, ...overrides,
+    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, ...overrides,
   };
 }
 function selection(kind: WorkSummaryAction["kind"] = "evidence", shell = false): { project: ProjectWorkSummary; card: OverviewWorkCard } {
@@ -40,6 +40,14 @@ function selection(kind: WorkSummaryAction["kind"] = "evidence", shell = false):
     owner, terminal: effective, task: owner.tasks[0]!,
   } };
 }
+function pendingSelection(): { project: ProjectWorkSummary; card: OverviewWorkCard } {
+  const project = projectWorkSummary({ id: "project-1", cwd: "/projects/displayed" }, [
+    terminal("owner", { generation: 7, plan: [{ text: "Repair parser", state: "pending", paths: ["src/parser.ts"] }] }),
+  ]);
+  const card = projectCards(workOverview([project]).projects[0]!)[0]!;
+  if ("recovery" in card) throw new Error("Expected a Plan Board task");
+  return { project, card };
+}
 function deferred() {
   let resolve!: (value: string | null) => void;
   let reject!: (reason: Error) => void;
@@ -57,17 +65,128 @@ function harness(value = selection()) {
   const getReviewFiles = vi.fn<TerminaBridge["getReviewFiles"]>().mockResolvedValue({ ok: true, files: [], total: 0 });
   const getReviewDiff = vi.fn<TerminaBridge["getReviewDiff"]>().mockResolvedValue({ ok: false, error: "Baseline unavailable" });
   const onTerminalControl = vi.fn<Parameters<typeof createWorkInspector>[0]["onTerminalControl"]>().mockResolvedValue({ ok: true });
-  view = createWorkInspector({ element: element as unknown as HTMLElement, getVerifyReport, getReviewFiles, getReviewDiff, onNavigate, onClose, onFocus, onTerminalControl, onCandidateRecovery });
+  const startPlanTask = vi.fn<TerminaBridge["startPlanTask"]>().mockResolvedValue({ ok: true, dispatched: 1 });
+  view = createWorkInspector({ element: element as unknown as HTMLElement, getVerifyReport, getReviewFiles, getReviewDiff, startPlanTask, onNavigate, onClose, onFocus, onTerminalControl, onCandidateRecovery });
   view.render(value.project, value.card);
   const node = (name: string): FakeEl => {
     const found = element.querySelector(`.overview-inspector-${name}`);
     expect(found, `inspector ${name}`).not.toBeNull();
     return found!;
   };
-  return { ...value, element, node, getVerifyReport, getReviewFiles, getReviewDiff, onNavigate, onClose, onFocus, onTerminalControl, onCandidateRecovery };
+  return { ...value, element, node, getVerifyReport, getReviewFiles, getReviewDiff, startPlanTask, onNavigate, onClose, onFocus, onTerminalControl, onCandidateRecovery };
 }
 
 describe("selected work inspector", () => {
+  it("starts only the exact selected pending task without navigating or marking execution", async () => {
+    const h = harness(pendingSelection());
+    const before = JSON.stringify({ project: h.project, card: h.card });
+    expect(h.startPlanTask).not.toHaveBeenCalled();
+    expect(h.node("start").hidden).toBe(false);
+    expect(h.node("start").disabled).toBe(false);
+    expect(h.node("start-status").textContent).toContain("shared project files");
+    expect(h.node("primary").classList.contains("is-secondary")).toBe(true);
+    h.node("start").click(); h.node("start").click(); await flush();
+    expect(h.startPlanTask).toHaveBeenCalledExactlyOnceWith({
+      projectRoot: "/projects/displayed", owner: { projectId: "project-1", workspaceId: "ws-1",
+        root: "/projects/example", terminalId: "owner", generation: 7 }, task: h.card.task!.task,
+    });
+    expect(h.startPlanTask.mock.calls[0]![0].task).not.toBe(h.card.task!.task);
+    expect(h.node("start-status").textContent).toContain("dispatched");
+    expect(h.node("start-status").textContent).not.toMatch(/working|completed|verified/);
+    expect(h.node("start").disabled).toBe(true);
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(h.onFocus).not.toHaveBeenCalled();
+    expect(h.getVerifyReport).not.toHaveBeenCalled();
+    expect(JSON.stringify({ project: h.project, card: h.card })).toBe(before);
+  });
+
+  it("retains the pending control, inspector focus and feedback through unrelated factual refreshes", async () => {
+    const h = harness(pendingSelection());
+    let resolve!: (value: { ok: boolean; error?: string }) => void;
+    h.startPlanTask.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const control = h.node("start"); control.focus(); control.click();
+    const next = structuredClone({ project: h.project, card: h.card });
+    next.card.terminal.trackedChanges++;
+    view.render(next.project, next.card);
+    expect(h.node("start")).toBe(control);
+    expect(control.disabled).toBe(true);
+    expect(dom.document.activeElement).toBe(h.node("title"));
+    expect(h.node("start-status").textContent).toContain("Starting only this task");
+    control.click(); expect(h.startPlanTask).toHaveBeenCalledOnce();
+    resolve({ ok: false, error: "That task overlaps a running dispatch <literal>" }); await flush();
+    expect(h.node("start-status").textContent).toContain("<literal>");
+    expect(h.node("start-status").children).toHaveLength(0);
+    expect(control.disabled).toBe(false);
+  });
+
+  it("reports a transport failure without changing the task and allows another explicit attempt", async () => {
+    const h = harness(pendingSelection());
+    h.startPlanTask.mockRejectedValueOnce(new Error("bridge unavailable"));
+    h.node("start").click(); await flush();
+    expect(h.node("start-status").textContent).toContain("could not be started");
+    expect(h.node("start").disabled).toBe(false);
+    h.node("start").click(); await flush();
+    expect(h.startPlanTask).toHaveBeenCalledTimes(2);
+    expect(h.node("start").getAttribute("aria-busy")).toBe("false");
+    expect(h.card.task!.task.state).toBe("pending");
+  });
+
+  it.each(["busy owner", "duplicate", "active", "done", "worker", "prior attempt", "no task", "no source"])(
+    "does not start %s even with a programmatic click", (change) => {
+      const value = pendingSelection();
+      if (change === "busy owner" || change === "duplicate") value.card.task!.startError = change;
+      if (change === "active" || change === "done") value.card.task!.task.state = change;
+      if (change === "worker") value.card.task!.task.workerId = "assigned";
+      if (change === "prior attempt") value.card.task!.task.dispatchResult = { workerId: "previous", outcome: "incomplete" };
+      if (change === "no task") value.card.task = null;
+      if (change === "no source") value.card.owner.workArea = null;
+      const h = harness(value);
+      expect(h.node("start").hidden || h.node("start").disabled).toBe(true);
+      h.node("start").click(); expect(h.startPlanTask).not.toHaveBeenCalled();
+      if (change === "busy owner" || change === "duplicate") expect(h.node("start-status").textContent).toBe(change);
+    });
+
+  it.each(["project", "project-root", "owner-generation", "workspace", "paths", "model", "state", "attempt", "selection", "unavailable", "clear", "dispose", "plan event", "leave view"])(
+    "fences pending start feedback after %s", async (change) => {
+      const h = harness(pendingSelection());
+      let resolve!: (result: { ok: boolean; error?: string }) => void;
+      h.startPlanTask.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+      h.node("start").click();
+      const next = structuredClone({ project: h.project, card: h.card });
+      switch (change) {
+        case "project": next.project.projectId = "other"; break;
+        case "project-root": next.project.root = "/other/project"; break;
+        case "owner-generation": next.card.owner.generation++; break;
+        case "workspace": next.card.owner.workArea!.workspaceId = "new-workspace"; break;
+        case "paths": next.card.task!.task.paths.push("new.ts"); break;
+        case "model": next.card.task!.task.model = "provider/changed"; break;
+        case "state": next.card.task!.task.state = "done"; break;
+        case "attempt": next.card.task!.task.dispatchResult = { workerId: "other", outcome: "failed" }; break;
+        case "selection": next.card.key = "other-card"; break;
+        case "unavailable": view.unavailable("Work unavailable"); break;
+        case "clear": view.clear(); break;
+        case "dispose": view.dispose(); break;
+        case "plan event": view.invalidateStart("owner"); break;
+        case "leave view": view.invalidateStart(); break;
+      }
+      if (!["unavailable", "clear", "dispose", "plan event", "leave view"].includes(change)) view.render(next.project, next.card);
+      resolve({ ok: false, error: "obsolete start error" }); await flush();
+      expect(h.node("start-status").textContent).not.toContain("obsolete start error");
+      expect(h.onNavigate).not.toHaveBeenCalled();
+    });
+
+  it("only invalidates a start for its exact plan owner or workspace", async () => {
+    const h = harness(pendingSelection());
+    let resolve!: (value: { ok: boolean; error?: string }) => void;
+    h.startPlanTask.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    h.node("start").click();
+    view.invalidateStart("other-owner");
+    view.invalidateStart(undefined, { projectId: "other-project", workspaceId: "ws-1" });
+    view.invalidateStart(undefined, { projectId: "project-1", workspaceId: "other-workspace" });
+    resolve({ ok: false, error: "current response" }); await flush();
+    expect(h.node("start-status").textContent).toBe("current response");
+  });
+
   it("reveals retry in the exact existing plan without dispatching or substituting a worker", () => {
     const value = selection("plan");
     value.card.task!.worker = null;

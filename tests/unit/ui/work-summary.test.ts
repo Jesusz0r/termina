@@ -8,7 +8,7 @@ function summary(projectId = "proj-1", generation = 3): ProjectWorkSummary {
   return projectWorkSummary({ id: projectId, cwd: `/projects/${projectId}` }, [{
     id: "term-1", generation, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: "ws-1", root: "/projects/proj-1", primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 2, planCreationError: null,
+    verify: { state: "untested", command: null, summary: null }, trackedChanges: 2, planCreationError: null, planStartOwnerError: null,
     plan: [{ text: "Fix hello.txt", paths: ["hello.txt"], state: "pending", dispatchResult: { workerId: "term-2", outcome: "incomplete" } }],
   }]);
 }

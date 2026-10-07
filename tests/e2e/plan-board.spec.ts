@@ -249,9 +249,16 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     expect(realpathSync(projects[0]!.cwd)).toBe(realpathSync(projectRoot));
     const select = page.locator(`#project-tabs .project-tab[data-project-id="${original.id}"] .project-select`);
     await expect(select).toContainText(original.cwd);
-    expect((await page.evaluate(() => window.termina.getWorkOverview())).projects).toEqual([
+    const overview = await page.evaluate(() => window.termina.getWorkOverview());
+    expect(overview.projects.map(({ projectId, name, root, working, attentionCount }) => ({ projectId, name, root, working, attentionCount }))).toEqual([
       { projectId: original.id, name: basename(original.cwd), root: original.cwd, working: 1, attentionCount: 0 },
     ]);
+    expect(overview.projects[0]!.terminals).toHaveLength(1);
+    expect(overview.projects[0]!.terminals[0]).toMatchObject({ terminalId: ownerId,
+      workArea: { kind: "project", root: original.cwd }, activity: { state: "working" },
+      tasks: [{ task: { text: "Edit greeting.ts", paths: ["greeting.ts"], state: "pending" }, startError: expect.stringContaining("busy") }],
+    });
+    expect(realpathSync(overview.projects[0]!.terminals[0]!.workArea!.root)).toBe(realpathSync(projectRoot));
     const greeting = readFileSync(join(projectRoot, "greeting.ts"), "utf8");
     const other = await page.evaluate((projectId) => window.termina.createTerminal({ type: "agent", projectId }), original.id);
     expect(other).toMatchObject({ ok: true });

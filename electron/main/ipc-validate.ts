@@ -127,6 +127,32 @@ export function parsePlanTaskCreateRequest(value: unknown): import("../../shared
     projectRoot: value.projectRoot, text: value.text };
 }
 
+export function parsePlanTaskStartRequest(value: unknown): import("../../shared/types.js").PlanTaskStartRequest | null {
+  if (!isRecord(value) || !isRecord(value.task)) return null;
+  // Reuse the exact owner/source envelope validator; task text has no creation-only rules.
+  const envelope = parsePlanTaskCreateRequest({ ...value, text: "" });
+  if (!envelope) return null;
+  const task = value.task;
+  const bounded = (v: unknown, cap: number): v is string => typeof v === "string" && v.length > 0 && v.length <= cap;
+  const paths = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 5 && v.every((p) => bounded(p, 4096));
+  if (!bounded(task.text, 16_384) || !paths(task.paths)
+    || (task.state !== "pending" && task.state !== "active" && task.state !== "done")
+    || (task.model !== undefined && !bounded(task.model, 256))
+    || (task.workerId !== undefined && !bounded(task.workerId, 64))
+    || (task.claimed !== undefined && !paths(task.claimed))) return null;
+  const result = task.dispatchResult;
+  if (result !== undefined && (!isRecord(result) || !bounded(result.workerId, 64)
+    || typeof result.outcome !== "string" || !["completed", "incomplete", "failed", "interrupted"].includes(result.outcome))) return null;
+  return { owner: envelope.owner, projectRoot: envelope.projectRoot, task: {
+    text: task.text, paths: [...task.paths], state: task.state,
+    ...(task.model !== undefined ? { model: task.model } : {}),
+    ...(task.workerId !== undefined ? { workerId: task.workerId } : {}),
+    ...(task.claimed !== undefined ? { claimed: [...task.claimed] } : {}),
+    ...(isRecord(result) ? { dispatchResult: { workerId: result.workerId as string,
+      outcome: result.outcome as import("../../shared/types.js").DispatchOutcome } } : {}),
+  } };
+}
+
 export type PtyAckPayload = {
   id: string;
   generation: number;

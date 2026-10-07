@@ -41,6 +41,10 @@ export function createAttentionView(bindings: {
     getReviewFiles: (target, offset) => bridge.getReviewFiles(target, offset),
     getReviewDiff: (target, path) => bridge.getReviewDiff(target, path),
     createPlanTask: (request) => bridge.createPlanTask(request),
+    startPlanTask: async (request) => {
+      try { return await bridge.startPlanTask(request); }
+      finally { refresh(); }
+    },
     onTaskCreated: (request, task) => { void revealCreatedTask(request, task); },
     onSelectionChange: () => { inspectSequence++; },
     onFocusTerminal: bindings.onFocusTerminal,
@@ -363,14 +367,14 @@ export function createAttentionView(bindings: {
       }
       refresh();
     }),
-    bridge.onPlanUpdate(({ instanceId }) => { projectOverview.invalidateEvidence(instanceId); projectOverview.invalidateChanges(instanceId); refresh(); }),
+    bridge.onPlanUpdate(({ instanceId }) => { projectOverview.invalidateEvidence(instanceId); projectOverview.invalidateChanges(instanceId); projectOverview.invalidateStart(instanceId); refresh(); }),
     bridge.onModifiedList(({ instanceId }) => { projectOverview.invalidateEvidence(instanceId); projectOverview.invalidateChanges(instanceId); refresh(); }),
     bridge.onFileChanged((owner) => { projectOverview.invalidateChanges(undefined, owner); }),
     bridge.onFileDeleted((owner) => { projectOverview.invalidateChanges(undefined, owner); }),
     bridge.onVerifyState(({ terminalId }) => { projectOverview.invalidateEvidence(terminalId); refresh(); }),
     bridge.onTimelineClear(({ terminalId }) => { projectOverview.invalidateEvidence(terminalId); projectOverview.invalidateChanges(terminalId); refresh(); }),
     bridge.onFolderOpened(refresh),
-    bridge.onProjectClosed(() => { projectOverview.invalidateEvidence(); projectOverview.invalidateChanges(); refresh(); }),
+    bridge.onProjectClosed(() => { projectOverview.invalidateEvidence(); projectOverview.invalidateChanges(); projectOverview.invalidateStart(); refresh(); }),
     bridge.onAgentStatus(({ terminalId, model }) => {
       if (models.has(terminalId) && models.get(terminalId) === model) return;
       models.set(terminalId, model);

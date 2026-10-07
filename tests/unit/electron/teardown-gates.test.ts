@@ -82,6 +82,7 @@ type DispatchRun = (ownerId: string, taskText?: string) => Promise<{ ok: boolean
 type TerminalsCreate = (event: unknown, opts?: unknown) => Promise<{ ok: boolean; id?: string; error?: string }>;
 
 const dispatchRun = loadMethod("dispatchRun", "private async dispatchRun(", [], []) as DispatchRun;
+const dispatchPreparedRun = loadMethod("dispatchPreparedRun", "private async dispatchPreparedRun(", [], []);
 const terminalsCreate = loadHandler("terminals:create", "_e, opts", ["detectShells", "parseTerminalCreateOptions"], [
   async () => [{ path: "/bin/zsh", name: "zsh" }],
   parseTerminalCreateOptions,
@@ -103,6 +104,8 @@ function makeHarness(opts: { switching: Set<string>; activeId: string | null }) 
   const terminalProjects = new Map<string, string>([["term-1", "proj-live"]]);
   const app = {
     disposed: false,
+    dispatchPreparations: new Set<string>(),
+    dispatchPreparedRun,
     projects,
     terminals,
     runtime: { get: (id: string) => terminals.get(id), subscribe() { return true; } },
@@ -141,7 +144,7 @@ describe("mid-teardown creation gates (refs #214)", () => {
   });
 
   it("re-checks the gate after the pick and flush awaits", () => {
-    const source = extractMethod(main, "private async dispatchRun(");
+    const source = extractMethod(main, "private async dispatchPreparedRun(");
     const gates = source.match(/the project is changing/g) ?? [];
     expect(gates.length).toBeGreaterThanOrEqual(2);
     const flushAt = source.indexOf("flushDirtyModels(dispatchWriter");

@@ -326,8 +326,9 @@ existing agent **Plan Board**, and describe the outcome in one line. Project
 paths distinguish repeated names; the destination remains visible beside the
 draft. **Create task** adds a pending task to that board without activating its
 project, creating a terminal or worker, or running anything. The new task is
-shown in Overview and is searchable through **Jump to work**. Use the existing
-Plan Board controls when you explicitly want to dispatch it.
+shown in Overview and is searchable through **Jump to work**. Select its inspector
+and choose **Start task**, or use the existing Plan Board controls, when you
+explicitly want to dispatch it.
 
 The destination is checked again when you create the task. A closed or changed
 owner is not replaced silently; choose its current Plan Board explicitly.
@@ -342,6 +343,29 @@ attempt results are preserved.
 **New task**. Once creation has been submitted, the controls are disabled while
 its result is pending; canceling is no longer offered as if it could undo the
 request. Canonical refreshes preserve the draft and its selected destination.
+
+### Start task from the inspector
+
+Select a pending task in **All projects** and choose **Start task** to dispatch
+only that task through its existing Plan Board. Selection, creation and refresh
+never start work automatically. The owner must be an available, idle, persistent
+primary agent; Start does not interrupt a busy owner or substitute another board.
+A full board can still start an existing task. Previous attempts keep **Retry in
+plan** rather than being silently restarted.
+
+Start creates one dispatch worker in the owner's **shared project files**, with
+the task's model pin or the owner's inherited model. It is not an isolated
+candidate. The normal checks for overlapping files and unsaved edits still
+apply. Starting a background task does not activate its project or save another
+project's dirty editor buffer.
+
+The exact owner, project/source roots, workspace, generations and task snapshot
+are checked again during preparation and before spawning. Changed or closed
+contexts are rejected. Pending clicks are coalesced; stale replies do not update
+a different selection or reopen a closed inspector. A dispatch acknowledgement
+is not proof that the worker is working, that the task is complete, or that its
+changes were reviewed. The inspector shows the worker's reported activity and
+check evidence separately.
 
 ### Jump to work
 

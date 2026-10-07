@@ -98,17 +98,45 @@ export async function parsePlanTasks(text: string, cwd: string | null, canonical
   return tasks;
 }
 
-/** Admission is shared by the authoritative overview and the create handler. */
-export function planCreationError(facts: {
+export interface PlanOwnerFacts {
   available: boolean; primary: boolean; persistent: boolean; agent: boolean;
-  dispatchWorker: boolean; busy: boolean; taskCount: number;
-}): string | null {
+  dispatchWorker: boolean; busy: boolean;
+}
+
+/** Shared owner admission, independent of creation capacity. */
+export function planOwnerError(facts: PlanOwnerFacts): string | null {
   if (!facts.available) return "The Plan Board owner is unavailable.";
   if (!facts.agent || !facts.persistent || !facts.primary || facts.dispatchWorker) {
     return "Choose a persistent primary agent Plan Board.";
   }
   if (facts.busy) return "The Plan Board owner is busy.";
-  return planCapacityError(facts.taskCount);
+  return null;
+}
+
+/** Admission is shared by the authoritative overview and the create handler. */
+export function planCreationError(facts: PlanOwnerFacts & { taskCount: number }): string | null {
+  return planOwnerError(facts) ?? planCapacityError(facts.taskCount);
+}
+
+/** Initial Start only: historical attempts must use the Plan Board's Retry. */
+export function planStartError(ownerError: string | null, plan: readonly PlanTask[], task: PlanTask): string | null {
+  if (ownerError) return ownerError;
+  const matches = plan.filter((entry) => entry.text === task.text);
+  if (matches.length !== 1 || matches[0] !== task) return "The task is not uniquely on the Plan Board.";
+  if (task.state !== "pending" || task.workerId !== undefined || task.dispatchResult !== undefined) {
+    return "Only an initial pending task can be started here. Use the Plan Board for retries.";
+  }
+  return null;
+}
+
+/** Compare all execution-relevant fields, not merely the named row. */
+export function samePlanTaskSnapshot(task: PlanTask, snapshot: PlanTask): boolean {
+  return task.text === snapshot.text && task.state === snapshot.state && task.model === snapshot.model
+    && task.workerId === snapshot.workerId
+    && JSON.stringify(task.paths) === JSON.stringify(snapshot.paths)
+    && JSON.stringify(task.claimed) === JSON.stringify(snapshot.claimed)
+    && task.dispatchResult?.workerId === snapshot.dispatchResult?.workerId
+    && task.dispatchResult?.outcome === snapshot.dispatchResult?.outcome;
 }
 
 function planCapacityError(taskCount: number): string | null {

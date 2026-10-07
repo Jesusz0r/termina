@@ -9,7 +9,7 @@ import { installFakeDom, type FakeEl } from "./fake-dom.ts";
 function facts(id: string, root: string, overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummaryTerminalFacts {
   return { id, generation: 3, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: `ws-${root}`, root, primary: true }, verify: { state: "untested", command: null, summary: null },
-    trackedChanges: 0, plan: [{ text: "Repair <parser> & tokens", paths: ["parser.ts"], state: "pending" }], planCreationError: null, ...overrides };
+    trackedChanges: 0, plan: [{ text: "Repair <parser> & tokens", paths: ["parser.ts"], state: "pending" }], planCreationError: null, planStartOwnerError: null, ...overrides };
 }
 function overview(): WorkOverview {
   return workOverview([
@@ -240,7 +240,7 @@ describe("Command Palette work integration", () => {
     const h = mount(); await flush();
     const value = overview();
     value.projects[0]!.terminals[0]!.tasks = Array.from({ length: 80 }, (_, index) => ({
-      task: { text: `Saved task ${index}`, paths: [], state: "pending" }, worker: null, attention: [],
+      task: { text: `Saved task ${index}`, paths: [], state: "pending" }, worker: null, attention: [], startError: null,
       nextAction: { kind: "plan", terminalId: "owner-1", generation: 3 },
     }));
     qo.setWorkOverview(value); h.search("Saved");

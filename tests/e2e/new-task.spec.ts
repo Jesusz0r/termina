@@ -1,13 +1,10 @@
 import { test, expect } from "./fixtures.ts";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { Page } from "@playwright/test";
 import type { editor } from "monaco-editor";
 import type { PlanTask } from "../../shared/types.ts";
-import { sanitizeSessionDir } from "../../electron/main/project-workspace.ts";
-import { rosterFilePath } from "../../electron/roster-store.ts";
+import { activeProject, savedPlanProject } from "./saved-plan-project.ts";
 
 const chord = process.platform === "darwin" ? "Meta+k" : "Control+k";
 type EditorWindow = Window & { __editorMgr: {
@@ -15,26 +12,6 @@ type EditorWindow = Window & { __editorMgr: {
   openFile(path: string, options: { preview: boolean }): Promise<void>;
   flushDrafts(): Promise<boolean>;
 } };
-async function activeProject(page: Page) {
-  const project = (await page.evaluate(() => window.termina.projectList())).find((entry) => entry.active);
-  expect(project).toBeTruthy();
-  return project!;
-}
-async function savedProject(page: Page, projectRoot: string, runRoot: string, index: number, plans: PlanTask[][] = [[], []]) {
-  const parent = join(runRoot, `new-task-${index}-<saved>&`);
-  await mkdir(parent);
-  const root = join(parent, basename(projectRoot));
-  execFileSync("git", ["clone", "-q", "--no-hardlinks", projectRoot, root]);
-  const instances = await page.evaluate(() => window.termina.getInstances());
-  const next = Math.max(0, ...instances.map((instance) => Number(instance.id.slice(5)))) + 1;
-  const boards = plans.length ? plans.map((plan, owner) => ({ id: `term-${next + owner}`, type: "agent", engine: "core", plan }))
-    : [{ id: `term-${next}`, type: "shell", engine: "core", plan: [] }];
-  const roster = rosterFilePath(join(runRoot, "user-data"), sanitizeSessionDir(realpathSync(root)));
-  await writeFile(roster, JSON.stringify({ terminals: boards }));
-  expect(await page.evaluate((root) => window.termina.projectOpenPath(root), root)).toMatchObject({ cwd: root });
-  await expect.poll(() => page.evaluate(async (ids) => Promise.all(ids.map((id) => window.termina.getPlan(id))), boards.map((board) => board.id))).toEqual(boards.map((board) => board.plan));
-  return { project: await activeProject(page), owners: boards.map((board) => board.id), roster };
-}
 async function openComposer(page: Page) {
   await page.locator("#btn-all-projects").click();
   await expect(page.getByRole("region", { name: "All projects", exact: true })).toBeVisible();
@@ -62,8 +39,8 @@ async function identities(page: Page) {
 test("queues on the exact background owner and preserves the active dirty editor without executing work", async ({ page, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const previous: PlanTask = { text: "Previous incomplete task", paths: [], state: "pending", dispatchResult: { workerId: "term-999", outcome: "incomplete" } };
-  const first = await savedProject(page, projectRoot, runRoot, 1, [[previous], []]);
-  const second = await savedProject(page, projectRoot, runRoot, 2);
+  const first = await savedPlanProject(page, projectRoot, runRoot, 1, [[previous], []]);
+  const second = await savedPlanProject(page, projectRoot, runRoot, 2);
   expect(basename(first.project.cwd)).toBe(basename(second.project.cwd));
   await page.locator("#explorer-tree .explorer-row").filter({ hasText: "greeting.ts" }).dblclick();
   await page.evaluate((path) => (window as unknown as EditorWindow).__editorMgr.openFile(path, { preview: false }), join(second.project.cwd, "greeting.ts"));
@@ -118,7 +95,7 @@ test("queues on the exact background owner and preserves the active dirty editor
 
 test("Cancel and Escape preserve plans, project and terminals at native 200 percent zoom", async ({ page, projectRoot, runRoot, electronApp }) => {
   await expect(page.locator("#splash")).toBeHidden();
-  const target = await savedProject(page, projectRoot, runRoot, 1);
+  const target = await savedPlanProject(page, projectRoot, runRoot, 1);
   const before = await identities(page);
   await electronApp.evaluate(({ BrowserWindow }) => {
     const window = BrowserWindow.getAllWindows()[0]!;
@@ -147,7 +124,7 @@ test("Cancel and Escape preserve plans, project and terminals at native 200 perc
 test("rejects duplicate and automatic schedule text without changing previous plan or executing", async ({ page, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const previous: PlanTask = { text: "Existing outcome", paths: [], state: "done" };
-  const target = await savedProject(page, projectRoot, runRoot, 1, [[previous]]);
+  const target = await savedPlanProject(page, projectRoot, runRoot, 1, [[previous]]);
   const before = await identities(page);
   const form = await openComposer(page);
   await selectDestination(page, target.project.id, target.owners[0]!);
@@ -167,8 +144,8 @@ test("rejects duplicate and automatic schedule text without changing previous pl
 test("full Plan Boards and projects without an existing agent do not create a terminal", async ({ page, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const tasks: PlanTask[] = Array.from({ length: 20 }, (_, index) => ({ text: `Task ${index}`, paths: [], state: "pending" }));
-  const target = await savedProject(page, projectRoot, runRoot, 1, [tasks]);
-  const emptyProject = (await savedProject(page, projectRoot, runRoot, 2, [])).project;
+  const target = await savedPlanProject(page, projectRoot, runRoot, 1, [tasks]);
+  const emptyProject = (await savedPlanProject(page, projectRoot, runRoot, 2, [])).project;
   const before = await identities(page);
   const form = await openComposer(page);
   await form.getByRole("combobox", { name: "Project", exact: true }).selectOption(target.project.id);
@@ -184,8 +161,8 @@ test("full Plan Boards and projects without an existing agent do not create a te
 
 test("a closed background destination invalidates the draft rather than retargeting another board", async ({ page, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
-  const target = await savedProject(page, projectRoot, runRoot, 1);
-  const current = await savedProject(page, projectRoot, runRoot, 2);
+  const target = await savedPlanProject(page, projectRoot, runRoot, 1);
+  const current = await savedPlanProject(page, projectRoot, runRoot, 2);
   const before = await identities(page);
   const form = await openComposer(page);
   await selectDestination(page, target.project.id, target.owners[1]!);

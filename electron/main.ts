@@ -84,8 +84,8 @@ import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProject
 import { formatProjectSnapshot, MAX_PROJECT_SNAPSHOT_BYTES } from "./main/project-snapshot.js";
 import { projectWorkSummary, workOverview } from "./main/work-summary.js";
 import { appendPlanTask } from "./main/plan-create.js";
-import { planCreationError } from "./plan-board.js";
-import { parsePlanTaskCreateRequest } from "./main/ipc-validate.js";
+import { planCreationError, planOwnerError, planStartError, samePlanTaskSnapshot } from "./plan-board.js";
+import { parsePlanTaskCreateRequest, parsePlanTaskStartRequest } from "./main/ipc-validate.js";
 import { formatVerifyContext, invalidateVerify, isVerifySourceCurrent, verifyOutputTail } from "./main/verify-source.js";
 import { closeConfirmation, closeTaskText, type CandidateCloseImpact, type TerminalCloseImpact } from "./main/close-confirm.js";
 import { SourceAdmissions, sourceTreesOverlap, type SourceClaim } from "./main/source-admission.js";
@@ -739,6 +739,8 @@ class TerminaApp {
   private dispatchWorkers = new Map<string, string>();
   /** Dispatch runs: worker terminal id → owner + the dispatched task text. */
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
+  /** Covers pick, leases, private startup files and spawn for every dispatch caller. */
+  private dispatchPreparations = new Set<string>();
   /** Dispatch mailbox notes per terminal, flushed to mailbox-<id>.md. */
   private dispatchMailbox = new Map<string, string[]>();
   /** Background schedule tick; main supplies live reads into app state. */
@@ -3123,11 +3125,14 @@ class TerminaApp {
       resume?: { sessionId: string | null; sessionFile: string | null };
       /** Roster-pinned model for core resume: the session's own last model. */
       model?: string | null;
+      /** Internal strict dispatch fence, checked again immediately before PTY spawn. */
+      spawnGuard?: () => void;
     },
   ): Promise<AgentTerminalInstance> {
     // Terminal creation crosses several awaits (provider/session setup and
     // process spawn). Preserve the requesting document so a late completion
     // cannot publish its list into a replacement renderer.
+    opts?.spawnGuard?.();
     const rendererTarget = this.captureRendererSendTarget();
     const type = opts?.type ?? "agent";
     const persist = opts?.persist ?? (!opts?.launch && !opts?.id);
@@ -3163,6 +3168,7 @@ class TerminaApp {
       env = { ...opts.launch.env, TERMINA_TERMINAL_ID: id };
     } else if (type === "shell") {
       const shells = await detectShells();
+      opts?.spawnGuard?.();
       const chosen = opts?.shell && existsSync(opts.shell) ? { path: opts.shell, name: basename(opts.shell) } : shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       cmd = chosen.path;
       args = [];
@@ -3180,11 +3186,16 @@ class TerminaApp {
       ];
       if (persist) {
         const sessionCwd = terminalRoot;
-        await this.reclaimUnusedEmptyCoreSessions(await this.coreProjectSessionDir(sessionCwd));
+        const sessionDir = await this.coreProjectSessionDir(sessionCwd);
+        opts?.spawnGuard?.();
+        await this.reclaimUnusedEmptyCoreSessions(sessionDir);
+        opts?.spawnGuard?.();
         sessionFile = sessionId && isCoreSessionId(sessionId) ? await this.coreSessionFile(sessionId, sessionCwd) : null;
+        opts?.spawnGuard?.();
         if (!sessionFile || this.sessionFileInUse(sessionFile)) {
           sessionId = `core-${randomUUID()}`;
           sessionFile = await this.coreSessionFile(sessionId, sessionCwd);
+          opts?.spawnGuard?.();
         }
       } else {
         sessionId = null;
@@ -3250,6 +3261,7 @@ class TerminaApp {
         skipSidecarWatch: opts?.skipSidecarWatch,
         rendererTarget,
         beforeSpawn: (target) => {
+          opts?.spawnGuard?.();
           if (this.disposed || (owner && this.projects.get(owner.id) !== owner)) throw new Error("project closed before terminal startup");
           if (!shellRoot) return;
           const writer = this.sourceWorkspaceWriter(shellRoot);
@@ -3899,8 +3911,8 @@ class TerminaApp {
   }
 
   /** Callers supply current ownership already validated against the runtime. */
-  private planCreationError(inst: AgentTerminalInstance, project: ProjectState, workspace: WorkspaceState | null): string | null {
-    return planCreationError({
+  private planOwnerFacts(inst: AgentTerminalInstance, project: ProjectState, workspace: WorkspaceState | null) {
+    return {
       available: !this.disposed && !inst.closed && !inst.pty.hasExited
         && this.projects.get(project.id) === project && inst.projectId === project.id
         && project.terminalIds.has(inst.id) && !this.projectIsSwitching(project.id)
@@ -3908,8 +3920,45 @@ class TerminaApp {
         && inst.workspaceId === workspace.id && project.workspaces.get(workspace.id) === workspace
         && inst.cwd === workspace.root,
       primary: workspace?.primary === true, persistent: inst.persist, agent: inst.type === "agent",
-      dispatchWorker: this.dispatchWorkers.has(inst.id), busy: inst.busy, taskCount: inst.plan.length,
-    });
+      dispatchWorker: this.dispatchWorkers.has(inst.id), busy: inst.busy,
+    };
+  }
+
+  private planCreationError(inst: AgentTerminalInstance, project: ProjectState, workspace: WorkspaceState | null): string | null {
+    return planCreationError({ ...this.planOwnerFacts(inst, project, workspace), taskCount: inst.plan.length });
+  }
+
+  private async startPlanTask(value: unknown): Promise<import("../shared/types.js").PlanTaskStartResult> {
+    const request = parsePlanTaskStartRequest(value);
+    if (!request) return { ok: false, error: "Invalid task request." };
+    const { owner } = request;
+    const project = this.projects.get(owner.projectId);
+    const inst = this.runtime.get(owner.terminalId);
+    const workspace = project?.workspaces.get(owner.workspaceId);
+    const expected = this.captureRendererSendTarget();
+    if (!project || !inst || !workspace || !expected) return { ok: false, error: "The Plan Board owner is unavailable." };
+    const plan = inst.plan;
+    const task = plan.find((entry) => entry.text === request.task.text);
+    const workspaceGeneration = workspace.generation;
+    const projectGeneration = project.activationGeneration;
+    const canonicalRoot = project.canonicalRoot;
+    const currentError = (): string | null => {
+      if (this.projects.get(owner.projectId) !== project || project.cwd !== request.projectRoot
+        || project.activationGeneration !== projectGeneration || project.canonicalRoot !== canonicalRoot
+        || this.projectOfTerminal(inst.id) !== project || inst.projectId !== owner.projectId
+        || !project.terminalIds.has(inst.id) || this.runtime.get(owner.terminalId) !== inst
+        || inst.generation !== owner.generation || inst.workspaceId !== owner.workspaceId
+        || project.workspaces.get(owner.workspaceId) !== workspace || this.workspaceOfTerminal(inst) !== workspace
+        || workspace.generation !== workspaceGeneration || workspace.root !== owner.root || inst.cwd !== owner.root
+        || inst.plan !== plan || !task || !samePlanTaskSnapshot(task, request.task)
+        || !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), expected)) {
+        return "The Plan Board context has changed.";
+      }
+      return planStartError(planOwnerError(this.planOwnerFacts(inst, project, workspace)), plan, task);
+    };
+    const error = currentError();
+    if (error) return { ok: false, error };
+    return this.dispatchRun(inst.id, request.task.text, undefined, currentError);
   }
 
   private async createPlanTask(value: unknown): Promise<import("../shared/types.js").PlanTaskCreateResult> {
@@ -4181,6 +4230,29 @@ class TerminaApp {
     ownerId: string,
     taskText?: string,
     model?: string,
+    currentError?: () => string | null,
+  ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
+    if (this.dispatchPreparations.has(ownerId)) return { ok: false, error: "A dispatch is already preparing for this Plan Board." };
+    this.dispatchPreparations.add(ownerId);
+    const assertCurrent = (): void => {
+      const error = currentError?.();
+      if (error) throw new Error(error);
+    };
+    try {
+      assertCurrent();
+      return await this.dispatchPreparedRun(ownerId, taskText, model, assertCurrent);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      this.dispatchPreparations.delete(ownerId);
+    }
+  }
+
+  private async dispatchPreparedRun(
+    ownerId: string,
+    taskText: string | undefined,
+    model: string | undefined,
+    assertCurrent: () => void,
   ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     const owner = this.runtime.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
@@ -4208,13 +4280,16 @@ class TerminaApp {
       }
     }
     const dispatchRoot = ownerWs?.root ?? owner.cwd;
+    const inFlightPathKeys = await this.dispatchPathKeysInFlight(owner.id, dispatchRoot);
+    assertCurrent();
     const picked = await pickDispatchTasks({
       plan: owner.plan,
       remainingSlots: MAX_DISPATCH_WORKERS - this.ownerDispatchCount(owner.id),
-      inFlightPathKeys: await this.dispatchPathKeysInFlight(owner.id, dispatchRoot),
+      inFlightPathKeys,
       pathKey: (p) => this.taskPathKey(p, dispatchRoot),
       taskText,
     });
+    assertCurrent();
     if (picked.error) return { ok: false, error: picked.error };
     const chosen = picked.tasks;
     const alreadyDispatching = this.ownerDispatchCount(ownerId) > 0;
@@ -4227,7 +4302,9 @@ class TerminaApp {
       const dispatchLease = await this.acquireWriteLease(ownerWs.id, dispatchWriter, 5000);
       if (!dispatchLease.ok) return { ok: false, error: dispatchLease.error ?? "the workspace is busy" };
       try {
+        assertCurrent();
         const flush = await this.flushDirtyModels(dispatchWriter, ownerWs.id, 5000, rendererTarget);
+        assertCurrent();
         if (!flush.ok) return { ok: false, error: "could not save editor changes" };
       } finally {
         this.releaseWriteLease(ownerWs.id, dispatchWriter);
@@ -4240,31 +4317,41 @@ class TerminaApp {
     }
     const jobs = chosen.map((task) => ({ task, id: this.allocateTerminalId() }));
     try {
+      assertCurrent();
       this.ensureEventsDir();
       const briefingJobs = this.dispatchJobsForBriefing(owner, jobs);
       for (const job of jobs) {
+        assertCurrent();
         await this.writeDispatchBriefing(job.id, job.task, briefingJobs);
+        assertCurrent();
         await this.writeDispatchStartupControl(job.id, job.task.text);
+        assertCurrent();
       }
     } catch (err) {
       for (const job of jobs) {
-        this.clearMailbox(job.id);
-        await this.removeDispatchStartupControl(job.id);
+        await Promise.all([this.clearMailbox(job.id), this.removeDispatchStartupControl(job.id)]);
       }
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
     let dispatched = 0;
+    let startError: string | undefined;
     for (const job of jobs) {
+      let worker: AgentTerminalInstance | undefined;
       try {
+        assertCurrent();
         const workerModel = dispatchWorkerModel(job.task, ipcModel);
-        const worker = await this.createTerminal(undefined, {
+        worker = await this.createTerminal(undefined, {
           type: "agent",
           engine: "core",
+          projectId: owner.projectId ?? undefined,
           workspaceId: owner.workspaceId,
           id: job.id,
           fromTerminalId: ownerId,
+          spawnGuard: assertCurrent,
           ...(workerModel ? { model: workerModel } : {}),
         });
+        assertCurrent();
+        if (this.runtime.get(worker.id) !== worker || worker.closed || worker.pty.hasExited) throw new Error("The dispatch worker exited before assignment.");
         this.dispatchWorkers.set(worker.id, job.task.text);
         this.dispatchRuns.set(worker.id, { ownerId, taskText: job.task.text });
         this.runtime.subscribe(worker.id, dispatchViewerId(ownerId));
@@ -4273,17 +4360,17 @@ class TerminaApp {
         job.task.state = "active";
         dispatched++;
       } catch (err) {
-        this.clearMailbox(job.id);
-        await this.removeDispatchStartupControl(job.id);
+        startError = err instanceof Error ? err.message : String(err);
+        if (worker && this.runtime.get(worker.id) === worker) this.closeTerminal(worker.id);
+        await Promise.all([this.clearMailbox(job.id), this.removeDispatchStartupControl(job.id)]);
         console.warn(`[main] dispatch worker failed: ${(err as Error).message}`);
       }
     }
     if (dispatched === 0) {
       for (const job of jobs) {
-        this.clearMailbox(job.id);
-        await this.removeDispatchStartupControl(job.id);
+        await Promise.all([this.clearMailbox(job.id), this.removeDispatchStartupControl(job.id)]);
       }
-      return { ok: false, error: "no dispatch worker started" };
+      return { ok: false, error: startError ?? "no dispatch worker started" };
     }
     this.sendPlan(owner, rendererTarget);
     return { ok: true, dispatched };
@@ -4554,13 +4641,11 @@ class TerminaApp {
     }
   }
 
-  private clearMailbox(terminalId: string): void {
-    if (!this.dispatchMailbox.has(terminalId)) return;
+  private clearMailbox(terminalId: string): Promise<void> {
+    if (!this.dispatchMailbox.has(terminalId)) return Promise.resolve();
     this.dispatchMailbox.delete(terminalId);
     const path = this.mailboxFile(terminalId);
-    if (path) {
-      void this.removeEventsLeaf(basename(path));
-    }
+    return path ? this.removeEventsLeaf(basename(path)) : Promise.resolve();
   }
 
   private writeDispatchSettleNote(worker: AgentTerminalInstance, status: NonNullable<PlanTask["dispatchResult"]>["outcome"], startError?: string): void {
@@ -5092,6 +5177,7 @@ class TerminaApp {
         activity: activityView(activityFor(this.activityInputs.get(id) ?? emptyActivityInput())),
         workspace, verify: inst.verify,
         trackedChanges: inst.modified.size, plan: inst.plan, planCreationError: this.planCreationError(inst, project, workspace),
+        planStartOwnerError: planOwnerError(this.planOwnerFacts(inst, project, workspace)),
       }];
     });
     return projectWorkSummary(project, terminals, project.worldlines?.recoverySummaries() ?? []);
@@ -8875,6 +8961,7 @@ class TerminaApp {
     // ---- Plan Board ----
     ipcMain.handle("plan:get", (_e, terminalId: string) => this.runtime.get(terminalId)?.plan ?? []);
     ipcMain.handle("plan:create", (_e, request: unknown) => this.createPlanTask(request));
+    ipcMain.handle("plan:start", (_e, request: unknown) => this.startPlanTask(request));
 
     // ---- Session Timeline ----
     ipcMain.handle("timeline:get", (_e, terminalId: string) => {

@@ -27,6 +27,13 @@ export interface PlanTaskCreateRequest {
 }
 export type PlanTaskCreateResult = { ok: true; task: PlanTask } | { ok: false; error: string };
 
+export interface PlanTaskStartRequest {
+  owner: ReviewTarget;
+  projectRoot: string;
+  task: PlanTask;
+}
+export interface PlanTaskStartResult { ok: boolean; error?: string; dispatched?: number }
+
 export type ReviewFilesResult = { ok: true; files: ModifiedFile[]; total: number } | { ok: false; error: string };
 export type ReviewDiffResult = {
   ok: true; path: string; relPath: string; status: ModifiedFile["status"];
@@ -264,6 +271,8 @@ export interface PlanWorkSummary {
   worker: { terminalId: string; generation: number } | null;
   attention: WorkAttentionReason[];
   nextAction: WorkSummaryAction;
+  /** Initial explicit Start admission; retry remains on the Plan Board. */
+  startError: string | null;
 }
 
 export interface TerminalWorkSummary {
@@ -843,6 +852,7 @@ export interface TerminaBridge {
   /** The current run's plan tasks (Plan Board). */
   getPlan(terminalId: string): Promise<PlanTask[]>;
   createPlanTask(request: PlanTaskCreateRequest): Promise<PlanTaskCreateResult>;
+  startPlanTask(request: PlanTaskStartRequest): Promise<PlanTaskStartResult>;
   /** Factual project/task context without heavy history or renderer notification state. */
   getProjectWorkSummary(projectId: string): Promise<ProjectWorkSummary | null>;
   getWorkOverview(): Promise<WorkOverview>;

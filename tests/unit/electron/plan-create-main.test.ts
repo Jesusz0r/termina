@@ -7,7 +7,7 @@ import { parsePlanTaskCreateRequest } from "../../../electron/main/ipc-validate.
 import type { PlanTask, PlanTaskCreateRequest, PlanTaskCreateResult } from "../../../shared/types.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-const names = ["createPlanTask", "planCreationError", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching"];
+const names = ["createPlanTask", "planCreationError", "planOwnerFacts", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching"];
 const methods: string[] = [];
 function visit(node: ts.Node): void {
   if (ts.isMethodDeclaration(node) && names.includes(node.name.getText(source))) methods.push(node.getText(source));

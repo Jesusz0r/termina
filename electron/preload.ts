@@ -117,6 +117,7 @@ const bridge: TerminaBridge = {
   getTimelineProgress: (terminalId, seq) => ipcRenderer.invoke("timeline:progress", terminalId, seq),
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
   createPlanTask: (request) => ipcRenderer.invoke("plan:create", request),
+  startPlanTask: (request) => ipcRenderer.invoke("plan:start", request),
   getProjectWorkSummary: (projectId) => ipcRenderer.invoke("project:work-summary", projectId),
   getWorkOverview: () => ipcRenderer.invoke("work:overview"),
   inspectWorkAttention: (id) => ipcRenderer.invoke("work:inspect", id),

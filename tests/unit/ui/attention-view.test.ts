@@ -84,7 +84,8 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
   const getReviewFiles = vi.fn<TerminaBridge["getReviewFiles"]>().mockResolvedValue({ ok: true, files: [], total: 0 });
   const getReviewDiff = vi.fn<TerminaBridge["getReviewDiff"]>().mockResolvedValue({ ok: false, error: "Baseline unavailable" });
   const createPlanTask = vi.fn<TerminaBridge["createPlanTask"]>().mockResolvedValue({ ok: false, error: "Fixture rejection" });
-  const bridge = { getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, createPlanTask } as unknown as TerminaBridge;
+  const startPlanTask = vi.fn<TerminaBridge["startPlanTask"]>().mockResolvedValue({ ok: true, dispatched: 1 });
+  const bridge = { getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, createPlanTask, startPlanTask } as unknown as TerminaBridge;
   hooks.forEach((hook, index) => {
     bridge[hook] = ((callback: (payload: unknown) => void) => {
       callbacks.set(hook, callback);
@@ -112,7 +113,7 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
     element, toggle, overviewToggle, workspace, title, projectContent, attentionHeading,
     onNavigate, onReveal, onViewChange, onNewProject, onCandidateRecovery, onRevealCandidate,
     count, list, status, message, close, refresh, more, outside,
-    getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, createPlanTask, onOverview, onInspect, unsubs,
+    getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, createPlanTask, startPlanTask, onOverview, onInspect, unsubs,
     emit: (hook: typeof hooks[number], payload: unknown = {}) => callbacks.get(hook)!(payload),
     open: async () => { view!.open(); await refreshDelay(); },
     inspectButton: (index = 0) => list.children[index]!.querySelector("button")!,
@@ -123,7 +124,7 @@ function overviewWithTask(extra: PlanTask[] = []): WorkOverview {
   const project = projectWorkSummary({ id: "proj-1", cwd: "/projects/first" }, [{
     id: "term-1", generation: 3, type: "agent", model: "provider/model",
     activity: { state: "idle", reason: null }, workspace: { id: "ws-1", root: "/projects/first", primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, planCreationError: null,
+    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, planCreationError: null, planStartOwnerError: null,
     plan: [{ text: "Repair the parser", paths: [], state: "pending" }, ...extra],
   }]);
   const value = workOverview([project]);
@@ -132,6 +133,57 @@ function overviewWithTask(extra: PlanTask[] = []): WorkOverview {
 }
 
 describe("integrated All projects surface", () => {
+  it("refreshes the actual selected task assignment after explicit Start without activation or fabricated progress", async () => {
+    const h = harness(overviewWithTask()); view!.open(undefined, "overview"); await refreshDelay();
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    const start = h.projectContent.querySelector(".overview-inspector-start")!;
+    expect(start.hidden).toBe(false); expect(start.disabled).toBe(false);
+    expect(h.startPlanTask).not.toHaveBeenCalled();
+    const next = overviewWithTask(); const owner = next.projects[0]!.terminals[0]!;
+    owner.tasks[0]!.task.state = "active"; owner.tasks[0]!.task.workerId = "term-worker";
+    owner.tasks[0]!.worker = { terminalId: "term-worker", generation: 8 };
+    owner.tasks[0]!.startError = "Only an initial pending task can be started here.";
+    next.projects[0]!.terminals.push({ ...structuredClone(owner), terminalId: "term-worker", generation: 8,
+      tasks: [], activity: { state: "working", reason: null } });
+    const actual = workOverview(next.projects);
+    h.getWorkOverview.mockResolvedValue(actual);
+    const reads = h.getWorkOverview.mock.calls.length;
+    start.click(); start.click(); await flush(); await refreshDelay();
+    expect(h.startPlanTask).toHaveBeenCalledExactlyOnceWith({ projectRoot: "/projects/first",
+      owner: { projectId: "proj-1", workspaceId: "ws-1", root: "/projects/first", terminalId: "term-1", generation: 3 },
+      task: { text: "Repair the parser", paths: [], state: "pending" } });
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(reads + 1);
+    const inspector = h.projectContent.querySelector("#project-work-inspector")!;
+    expect(inspector.hidden).toBe(false);
+    expect(text(inspector)).toContain("term-worker"); expect(text(inspector)).toContain("working");
+    expect(inspector.querySelector(".overview-inspector-start")!.hidden).toBe(true);
+    expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.onInspect).not.toHaveBeenCalled();
+    expect(h.getVerifyReport).not.toHaveBeenCalled(); expect(h.getReviewFiles).not.toHaveBeenCalled();
+  });
+
+  it("invalidates pending Start immediately on a plan update, before debounced facts arrive", async () => {
+    const h = harness(overviewWithTask()); view!.open(undefined, "overview"); await refreshDelay();
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    const pending = deferred<{ ok: boolean; error?: string }>(); h.startPlanTask.mockReturnValueOnce(pending.promise);
+    const start = h.projectContent.querySelector(".overview-inspector-start")!;
+    start.click(); h.emit("onPlanUpdate", { instanceId: "term-1" });
+    start.click(); expect(h.startPlanTask).toHaveBeenCalledOnce();
+    pending.resolve({ ok: false, error: "obsolete feedback before refresh" }); await flush();
+    expect(h.projectContent.querySelector(".overview-inspector-start-status")!.textContent).not.toContain("obsolete feedback");
+  });
+
+  it("does not reopen or mark execution from a Start reply received after Overview closes", async () => {
+    const h = harness(overviewWithTask()); view!.open(undefined, "overview"); await refreshDelay();
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    const pending = deferred<{ ok: boolean; error?: string }>(); h.startPlanTask.mockReturnValueOnce(pending.promise);
+    h.projectContent.querySelector(".overview-inspector-start")!.click(); view!.close();
+    pending.resolve({ ok: false, error: "closed feedback" }); await flush(); await refreshDelay();
+    expect(h.element.hidden).toBe(true); expect(h.workspace.inert).toBe(false);
+    expect(h.projectContent.querySelector("#project-work-inspector")!.hidden).toBe(true);
+    expect(h.projectContent.querySelector(".overview-inspector-start-status")!.textContent).not.toContain("closed feedback");
+    expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.onInspect).not.toHaveBeenCalled();
+  });
+
   it("refreshes the canonical overview and reveals the newly queued task without activating or executing", async () => {
     const h = harness(overviewWithTask()); view!.open(undefined, "overview"); await refreshDelay();
     const queued: PlanTask = { text: "New queue outcome", paths: [], state: "pending" };

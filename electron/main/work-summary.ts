@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { createHash } from "node:crypto";
+import { planStartError } from "../plan-board.js";
 import type {
   AgentActivityView, CandidateRecoverySummary, PlanTask, ProjectWorkSummary, TerminalWorkSummary,
   VerifyInfo, WorkAreaSummary, WorkAttentionItem, WorkAttentionReason, WorkOverview, WorkSummaryAction,
@@ -16,6 +17,7 @@ export interface WorkSummaryTerminalFacts {
   trackedChanges: number;
   plan: readonly PlanTask[];
   planCreationError: string | null;
+  planStartOwnerError: string | null;
 }
 
 /** Presentation projection only. Activity, tasks, source validity and lifecycle stay with their owners. */
@@ -59,6 +61,7 @@ export function projectWorkSummary(
         task,
         worker,
         attention: taskAttention,
+        startError: planStartError(terminal.planStartOwnerError, terminal.plan, task),
         nextAction: worker ? { kind: "terminal" as const, ...worker } : action("plan"),
       };
     });

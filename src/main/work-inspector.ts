@@ -12,6 +12,7 @@ export function createWorkInspector(bindings: {
   getVerifyReport: TerminaBridge["getVerifyReport"];
   getReviewFiles: TerminaBridge["getReviewFiles"];
   getReviewDiff: TerminaBridge["getReviewDiff"];
+  startPlanTask: TerminaBridge["startPlanTask"];
   onNavigate(projectId: string, action: WorkSummaryAction): void;
   onTerminalControl(target: ReviewTarget, action: "interrupt" | "close"): Promise<TerminalCloseResult>;
   onCandidateRecovery(projectId: string, recovery: CandidateRecoverySummary): void;
@@ -24,6 +25,7 @@ export function createWorkInspector(bindings: {
   invalidateEvidence(terminalId?: string): void;
   invalidateChanges(terminalId?: string, owner?: ProjectWorkspaceRef): void;
   invalidateChangesForInstances(instances: InstanceSummary[]): void;
+  invalidateStart(terminalId?: string, owner?: ProjectWorkspaceRef): void;
   focus(): void;
   setFocused(focused: boolean): void;
   dispose(): void;
@@ -67,6 +69,13 @@ export function createWorkInspector(bindings: {
     return node;
   };
   const focusTask = button("overview-inspector-focus", "Focus task");
+  const start = button("overview-inspector-start", "Start task");
+  const startStatus = document.createElement("p");
+  startStatus.className = "overview-inspector-start-status";
+  startStatus.setAttribute("role", "status");
+  startStatus.id = "overview-inspector-start-status";
+  start.setAttribute("aria-describedby", startStatus.id);
+  start.title = "Start only this task through Plan Board. The worker uses shared project files, not a separate candidate.";
   const primary = button("overview-inspector-primary", "");
   const terminal = button("overview-inspector-terminal", "Open terminal");
   const plan = button("overview-inspector-plan", "Open plan");
@@ -91,14 +100,18 @@ export function createWorkInspector(bindings: {
   foot.className = "overview-inspector-foot";
   foot.textContent = "Selecting or inspecting does not resolve attention. Marked task state, agent activity and check evidence are separate facts.";
   header.append(caption, close);
-  element.append(header, title, status, facts, actions, changesElement, report, foot);
-  let selected: { projectId: string; card: OverviewWorkCard } | null = null;
+  element.append(header, title, status, facts, actions, startStatus, changesElement, report, foot);
+  let selected: { projectId: string; projectRoot: string; card: OverviewWorkCard } | null = null;
   let selectedRecovery: { projectId: string; card: OverviewCandidateCard } | null = null;
   let evidenceKey = "";
   let reportSequence = 0;
   let controlKey = "";
   let controlSequence = 0;
   let controlPending = false;
+  let startKey = "";
+  let startSequence = 0;
+  let startPending = false;
+  let startAvailable = false;
   let available = false;
   let focused = false;
   let disposed = false;
@@ -169,6 +182,67 @@ export function createWorkInspector(bindings: {
     }
   }
 
+  function setStartDisabled(disabled: boolean): void {
+    const hadFocus = document.activeElement === start;
+    start.disabled = disabled;
+    // Native disabled/hidden buttons lose keyboard focus; keep it in the inspector.
+    if (disabled && hadFocus && !disposed && !element.hidden) title.focus({ preventScroll: true });
+  }
+
+  function resetStart(): void {
+    startSequence++;
+    startPending = false;
+    startAvailable = false;
+    setStartDisabled(true);
+    startStatus.textContent = "";
+    startStatus.hidden = true;
+    start.setAttribute("aria-busy", "false");
+  }
+
+  function invalidateStart(terminalId?: string, owner?: ProjectWorkspaceRef): void {
+    if (disposed || !selected) return;
+    const target = selected.card.owner;
+    if (terminalId && terminalId !== target.terminalId) return;
+    if (owner && (owner.projectId !== selected.projectId || owner.workspaceId !== target.workArea?.workspaceId)) return;
+    resetStart();
+  }
+
+  async function startTask(): Promise<void> {
+    const task = selected?.card.task;
+    const area = selected?.card.owner.workArea;
+    if (disposed || !available || !startAvailable || !selected || !task || !area || start.hidden || start.disabled || startPending) return;
+    const request = { projectRoot: selected.projectRoot,
+      owner: { projectId: selected.projectId, workspaceId: area.workspaceId, root: area.root,
+        terminalId: selected.card.owner.terminalId, generation: selected.card.owner.generation },
+      task: structuredClone(task.task) };
+    const key = startKey;
+    const sequence = ++startSequence;
+    const isCurrent = (): boolean => !disposed && available && startAvailable && !element.hidden
+      && sequence === startSequence && key === startKey;
+    startPending = true;
+    setStartDisabled(true);
+    start.setAttribute("aria-busy", "true");
+    startStatus.hidden = false;
+    startStatus.textContent = "Starting only this task through Plan Board…";
+    let accepted = false;
+    try {
+      const result = await bindings.startPlanTask(request);
+      if (!isCurrent()) return;
+      accepted = result.ok;
+      startStatus.textContent = result.ok ? "Task dispatched. Its worker reports startup and execution separately."
+        : result.error ?? "The task could not be started. Refresh work and try again.";
+    } catch {
+      if (isCurrent()) startStatus.textContent = "The task could not be started. Refresh work and try again.";
+    } finally {
+      if (isCurrent()) {
+        // Keep an accepted request disabled until its canonical assignment refreshes.
+        startPending = accepted;
+        setStartDisabled(startPending || selected?.card.task?.startError !== null);
+        start.setAttribute("aria-busy", "false");
+      }
+    }
+  }
+
   function navigate(action: WorkSummaryAction): void {
     if (disposed || !available || !selected) return;
     bindings.onNavigate(selected.projectId, action);
@@ -200,12 +274,14 @@ export function createWorkInspector(bindings: {
     const terminal = selected?.card.terminal;
     if (terminal && !verifyControl.hidden && !verifyControl.disabled) navigate({ kind: "verify", terminalId: terminal.terminalId, generation: terminal.generation });
   };
+  const onStart = (): void => { void startTask(); };
   const onInterrupt = (): void => { void controlTerminal("interrupt"); };
   const onCloseTerminal = (): void => { void controlTerminal("close"); };
   const onCheck = (): void => { void inspectEvidence(); };
   const onFocus = (): void => { if (!disposed && available && !focusTask.disabled) bindings.onFocus(); };
   const onChanges = (): void => { if (!disposed && available) changes.open(); };
   const onClose = (): void => { if (!disposed) bindings.onClose(); };
+  start.addEventListener("click", onStart);
   primary.addEventListener("click", onPrimary);
   terminal.addEventListener("click", onTerminal);
   plan.addEventListener("click", onPlan);
@@ -221,6 +297,9 @@ export function createWorkInspector(bindings: {
   function renderRecovery(project: ProjectWorkSummary, card: OverviewCandidateCard): void {
     clearReport();
     resetControl();
+    resetStart();
+    start.hidden = true;
+    primary.classList.remove("is-secondary");
     changes.clear();
     selected = null;
     selectedRecovery = { projectId: project.projectId, card };
@@ -262,8 +341,20 @@ export function createWorkInspector(bindings: {
         card.terminal.generation, card.terminal.workArea, verify]);
       if (key !== evidenceKey || !available) clearReport();
       evidenceKey = key;
+      const nextStartKey = JSON.stringify([project.projectId, project.root, card.key, card.owner.terminalId,
+        card.owner.generation, card.owner.workArea, card.task?.task, card.task?.startError]);
+      if (nextStartKey !== startKey || !available) resetStart();
+      startKey = nextStartKey;
+      startAvailable = true;
+      start.hidden = !card.task || card.task.task.state !== "pending" || !!card.task.task.workerId
+        || !!card.task.worker || !!card.task.task.dispatchResult;
+      setStartDisabled(startPending || !card.owner.workArea || card.task?.startError !== null);
+      startStatus.hidden = start.hidden;
+      if (!start.hidden && !startStatus.textContent) startStatus.textContent = card.task?.startError
+        ?? "Starts one worker through Plan Board in shared project files. It does not create an isolated candidate.";
+      primary.classList.toggle("is-secondary", !start.hidden);
       const previousTrackedChanges = selected?.card.terminal.trackedChanges;
-      selected = { projectId: project.projectId, card };
+      selected = { projectId: project.projectId, projectRoot: project.root, card };
       const area = card.terminal.workArea;
       changes.render(area ? {
         projectId: project.projectId, workspaceId: area.workspaceId, root: area.root,
@@ -315,6 +406,7 @@ export function createWorkInspector(bindings: {
       if (disposed || !selected && !selectedRecovery) return;
       available = false;
       resetControl();
+      resetStart();
       clearReport();
       for (const control of [retry, verifyControl, interrupt, closeTerminal]) control.disabled = true;
       changes.unavailable();
@@ -326,6 +418,8 @@ export function createWorkInspector(bindings: {
     },
     clear: () => {
       resetControl();
+      resetStart();
+      startKey = "";
       controlKey = "";
       clearReport();
       changes.clear();
@@ -355,10 +449,12 @@ export function createWorkInspector(bindings: {
         if (!current || !terminal.workArea || current.generation !== terminal.generation || current.projectId !== selected.projectId
           || current.workspaceId !== terminal.workArea.workspaceId || current.cwd !== terminal.workArea.root) {
           changes.invalidate();
+          invalidateStart();
           return;
         }
       }
     },
+    invalidateStart,
     focus: () => { if (!disposed && !element.hidden) title.focus(); },
     setFocused: (nextFocused) => {
       focused = nextFocused;
@@ -371,10 +467,12 @@ export function createWorkInspector(bindings: {
       if (disposed) return;
       disposed = true;
       resetControl();
+      resetStart();
       clearReport();
       changes.dispose();
       selected = null;
       selectedRecovery = null;
+      start.removeEventListener("click", onStart);
       primary.removeEventListener("click", onPrimary);
       terminal.removeEventListener("click", onTerminal);
       plan.removeEventListener("click", onPlan);

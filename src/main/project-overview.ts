@@ -132,6 +132,7 @@ export function createProjectOverview(bindings: {
   getReviewFiles: TerminaBridge["getReviewFiles"];
   getReviewDiff: TerminaBridge["getReviewDiff"];
   createPlanTask: TerminaBridge["createPlanTask"];
+  startPlanTask: TerminaBridge["startPlanTask"];
   onTaskCreated(request: PlanTaskCreateRequest, task: PlanTask): void;
   onSelectionChange(): void;
   onFocusTerminal(target: ReviewTarget, slot: HTMLElement, isCurrent: () => boolean): Promise<(() => void) | null>;
@@ -148,6 +149,7 @@ export function createProjectOverview(bindings: {
   invalidateEvidence(terminalId?: string): void;
   invalidateChanges(terminalId?: string, owner?: ProjectWorkspaceRef): void;
   invalidateChangesForInstances(instances: InstanceSummary[]): void;
+  invalidateStart(terminalId?: string, owner?: ProjectWorkspaceRef): void;
   dispose(): void;
 } {
   const { element } = bindings;
@@ -211,6 +213,7 @@ export function createProjectOverview(bindings: {
     getVerifyReport: bindings.getVerifyReport,
     getReviewFiles: bindings.getReviewFiles,
     getReviewDiff: bindings.getReviewDiff,
+    startPlanTask: bindings.startPlanTask,
     onNavigate: bindings.onNavigate,
     onTerminalControl: bindings.onTerminalControl,
     onCandidateRecovery: bindings.onCandidateRecovery,
@@ -526,10 +529,11 @@ export function createProjectOverview(bindings: {
       inspector.focus();
       return true;
     },
-    leaveFocus: () => { newTask.close(false); returnToOverview(false); },
+    leaveFocus: () => { newTask.close(false); inspector.invalidateStart(); returnToOverview(false); },
     setUnavailable: () => { if (!disposed) { available = false; newTask.setOverview(null); render(); } },
     invalidateEvidence: inspector.invalidateEvidence,
     invalidateChanges: inspector.invalidateChanges,
+    invalidateStart: inspector.invalidateStart,
     invalidateChangesForInstances: (instances) => {
       if (focusTarget && !instances.some((instance) => instance.id === focusTarget!.terminalId
         && instance.generation === focusTarget!.generation && instance.projectId === focusTarget!.projectId
