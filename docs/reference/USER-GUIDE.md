@@ -319,6 +319,30 @@ The view initially shows up to 50 items; **Show more** reveals the next page.
 are marked potentially outdated, not replaced with a false empty-success state.
 `Escape` or **Close** returns focus to the opener when it is still available.
 
+### New task from Overview
+
+In **All projects**, choose **New task**, select the exact project and an
+existing agent **Plan Board**, and describe the outcome in one line. Project
+paths distinguish repeated names; the destination remains visible beside the
+draft. **Create task** adds a pending task to that board without activating its
+project, creating a terminal or worker, or running anything. The new task is
+shown in Overview and is searchable through **Jump to work**. Use the existing
+Plan Board controls when you explicitly want to dispatch it.
+
+The destination is checked again when you create the task. A closed or changed
+owner is not replaced silently; choose its current Plan Board explicitly.
+Only an available, idle, persistent primary agent board can receive a task;
+candidate and dispatch-worker boards are not creation destinations. Full boards
+and projects without an eligible existing agent show why creation is unavailable.
+Task text is limited to 500 characters; exact duplicate tasks and automatic
+schedule markers (`@every`, `@at`) are rejected. Existing tasks and their prior
+attempt results are preserved.
+
+**Cancel** or `Escape` before submission creates nothing and restores focus to
+**New task**. Once creation has been submitted, the controls are disabled while
+its result is pending; canceling is no longer offered as if it could undo the
+request. Canonical refreshes preserve the draft and its selected destination.
+
 ### Jump to work
 
 Open the **Command palette** with `Cmd/Ctrl+K` to find an open project or an

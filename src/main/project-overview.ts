@@ -1,7 +1,8 @@
-import type { CandidateRecoverySummary, InstanceSummary, PlanWorkSummary, ProjectWorkspaceRef, ReviewTarget, TerminalWorkSummary, TerminaBridge, WorkOverview, WorkSummaryAction } from "../../shared/types";
+import type { CandidateRecoverySummary, InstanceSummary, PlanTask, PlanTaskCreateRequest, PlanWorkSummary, ProjectWorkspaceRef, ReviewTarget, TerminalWorkSummary, TerminaBridge, WorkOverview, WorkSummaryAction } from "../../shared/types";
 import { presentBlockedLabel } from "../known-state";
 import { ATTENTION_LABELS } from "./work-summary";
 import { createWorkInspector } from "./work-inspector";
+import { createNewTaskComposer } from "./new-task";
 
 const PAGE_SIZE = 50;
 type Project = WorkOverview["projects"][number];
@@ -130,6 +131,8 @@ export function createProjectOverview(bindings: {
   getVerifyReport: TerminaBridge["getVerifyReport"];
   getReviewFiles: TerminaBridge["getReviewFiles"];
   getReviewDiff: TerminaBridge["getReviewDiff"];
+  createPlanTask: TerminaBridge["createPlanTask"];
+  onTaskCreated(request: PlanTaskCreateRequest, task: PlanTask): void;
   onSelectionChange(): void;
   onFocusTerminal(target: ReviewTarget, slot: HTMLElement, isCurrent: () => boolean): Promise<(() => void) | null>;
   onFocusChange(focused: boolean): void;
@@ -167,12 +170,21 @@ export function createProjectOverview(bindings: {
   newProject.type = "button";
   newProject.className = "overview-new-project";
   newProject.textContent = "Open a project";
-  toolbar.append(heading, filter);
+  const newTaskButton = document.createElement("button");
+  newTaskButton.type = "button";
+  newTaskButton.className = "overview-new-task";
+  newTaskButton.textContent = "New task";
+  newTaskButton.setAttribute("aria-controls", "overview-new-task-form");
+  toolbar.append(heading, filter, newTaskButton);
+  const newTaskElement = document.createElement("section");
+  newTaskElement.id = "overview-new-task-form";
+  const newTask = createNewTaskComposer({ element: newTaskElement, createPlanTask: bindings.createPlanTask,
+    onCreated: bindings.onTaskCreated });
   const workspace = document.createElement("div");
   workspace.className = "overview-workspace";
   const content = document.createElement("div");
   content.className = "overview-work-list";
-  content.append(toolbar, status, empty, newProject, list);
+  content.append(toolbar, newTaskElement, status, empty, newProject, list);
   const focusContent = document.createElement("section");
   focusContent.className = "focus-task";
   focusContent.hidden = true;
@@ -281,6 +293,7 @@ export function createProjectOverview(bindings: {
   }
 
   function clearSelection(restoreFocus = false): boolean {
+    newTask.close(false);
     if (!selection) return false;
     returnToOverview();
     selectedWork = null;
@@ -455,6 +468,11 @@ export function createProjectOverview(bindings: {
     if (disposed) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest(".overview-new-project")) { bindings.onNewProject(); return; }
+    if (target?.closest(".overview-new-task")) {
+      bindings.onSelectionChange();
+      newTask.open(selection?.projectId, newTaskButton);
+      return;
+    }
     const projectId = target?.closest<HTMLElement>(".overview-project")?.dataset.projectId;
     const lane = projectId ? lanes.get(projectId) : undefined;
     if (!projectId || !lane) return;
@@ -489,7 +507,7 @@ export function createProjectOverview(bindings: {
   element.addEventListener("click", onClick);
   element.addEventListener("keydown", onKey);
   return {
-    render: (value) => { if (!disposed) { overview = value; available = true; render(); } },
+    render: (value) => { if (!disposed) { overview = value; available = true; newTask.setOverview(value); render(); } },
     clearSelection,
     selectTask: (target) => {
       if (disposed || !available || !overview || !findOverviewTask(overview, target)) return false;
@@ -508,8 +526,8 @@ export function createProjectOverview(bindings: {
       inspector.focus();
       return true;
     },
-    leaveFocus: () => returnToOverview(false),
-    setUnavailable: () => { if (!disposed) { available = false; render(); } },
+    leaveFocus: () => { newTask.close(false); returnToOverview(false); },
+    setUnavailable: () => { if (!disposed) { available = false; newTask.setOverview(null); render(); } },
     invalidateEvidence: inspector.invalidateEvidence,
     invalidateChanges: inspector.invalidateChanges,
     invalidateChangesForInstances: (instances) => {
@@ -526,6 +544,7 @@ export function createProjectOverview(bindings: {
       filter.removeEventListener("input", onInput);
       element.removeEventListener("click", onClick);
       element.removeEventListener("keydown", onKey);
+      newTask.dispose();
       inspector.dispose();
       lanes.clear(); overview = null; selection = null;
     },

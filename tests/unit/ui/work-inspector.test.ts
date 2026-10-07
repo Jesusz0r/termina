@@ -16,7 +16,7 @@ function terminal(id: string, overrides: Partial<WorkSummaryTerminalFacts> = {})
   return {
     id, generation: 4, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: "ws-1", root: "/projects/example", primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], ...overrides,
+    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], planCreationError: null, ...overrides,
   };
 }
 function selection(kind: WorkSummaryAction["kind"] = "evidence", shell = false): { project: ProjectWorkSummary; card: OverviewWorkCard } {

@@ -15,7 +15,7 @@ function terminal(id: string, overrides: Partial<WorkSummaryTerminalFacts> = {})
   return {
     id, generation: 4, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: "ws-1", root: "/projects/first", primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], ...overrides,
+    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], planCreationError: null, ...overrides,
   };
 }
 function overview(facts = [terminal("term-1", { plan: [{ text: "Repair the parser", paths: ["parser.ts"], state: "pending" }] })]): WorkOverview {
@@ -38,14 +38,16 @@ function harness(value = overview()) {
   const onFocusChange = vi.fn();
   const onTerminalControl = vi.fn().mockResolvedValue({ ok: true });
   const onCandidateRecovery = vi.fn();
+  const createPlanTask = vi.fn<TerminaBridge["createPlanTask"]>().mockResolvedValue({ ok: false, error: "Fixture rejection" });
+  const onTaskCreated = vi.fn();
   view = createProjectOverview({ element: element as unknown as HTMLElement, onNavigate, onNewProject, onSelectionChange,
     getVerifyReport, getReviewFiles, getReviewDiff, onFocusTerminal, onFocusChange,
-    onTerminalControl, onCandidateRecovery });
+    onTerminalControl, onCandidateRecovery, createPlanTask, onTaskCreated });
   view.render(value);
   const filter = element.querySelector("input")!;
   const lanes = () => element.querySelectorAll(".overview-project");
   const cards = () => element.querySelectorAll(".overview-work-card");
-  return { element, filter, lanes, cards, onNavigate, onNewProject, onSelectionChange, getVerifyReport, onFocusTerminal, onFocusChange, releaseTerminal, onTerminalControl, onCandidateRecovery,
+  return { element, filter, lanes, cards, onNavigate, onNewProject, onSelectionChange, getVerifyReport, onFocusTerminal, onFocusChange, releaseTerminal, onTerminalControl, onCandidateRecovery, createPlanTask, onTaskCreated,
     inspector: element.querySelector(".overview-work-inspector")!,
     primary: () => element.querySelector(".overview-inspector-primary")!,
     search: (query: string) => { filter.value = query; filter.dispatch("input"); } };

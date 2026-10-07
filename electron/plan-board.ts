@@ -98,6 +98,38 @@ export async function parsePlanTasks(text: string, cwd: string | null, canonical
   return tasks;
 }
 
+/** Admission is shared by the authoritative overview and the create handler. */
+export function planCreationError(facts: {
+  available: boolean; primary: boolean; persistent: boolean; agent: boolean;
+  dispatchWorker: boolean; busy: boolean; taskCount: number;
+}): string | null {
+  if (!facts.available) return "The Plan Board owner is unavailable.";
+  if (!facts.agent || !facts.persistent || !facts.primary || facts.dispatchWorker) {
+    return "Choose a persistent primary agent Plan Board.";
+  }
+  if (facts.busy) return "The Plan Board owner is busy.";
+  return planCapacityError(facts.taskCount);
+}
+
+function planCapacityError(taskCount: number): string | null {
+  return taskCount >= MAX_PLAN_TASKS ? `The Plan Board is full (${MAX_PLAN_TASKS} tasks).` : null;
+}
+
+export function planTaskTextError(text: string, plan: readonly PlanTask[]): string | null {
+  if (!text.trim()) return "Enter a task.";
+  if (text.length > 500) return "Task text must be at most 500 characters.";
+  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(text)) return "Task text must be one line without control characters.";
+  if (/@(every|at)\b/i.test(text)) return "New tasks cannot include automatic schedule markers.";
+  if (plan.some((task) => task.text === text)) return "That task is already on the Plan Board.";
+  return planCapacityError(plan.length);
+}
+
+/** Derive paths/model with the same parser as agent-authored plans; never dispatch. */
+export async function createPendingPlanTask(text: string, cwd: string, canonicalize: CanonicalizePath): Promise<PlanTask> {
+  const model = parsePlanModelMarker(text);
+  return { text, paths: await planTaskPaths(text, cwd, canonicalize), state: "pending", ...(model ? { model } : {}) };
+}
+
 export function markPlanProgress(plan: PlanTask[], relPath: string): boolean {
   if (plan.length === 0 || !relPath) return false;
   let changed = false;

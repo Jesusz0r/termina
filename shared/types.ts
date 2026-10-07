@@ -20,6 +20,13 @@ export interface ReviewTarget extends ProjectWorkspaceRef {
   root: string;
 }
 
+export interface PlanTaskCreateRequest {
+  owner: ReviewTarget;
+  projectRoot: string;
+  text: string;
+}
+export type PlanTaskCreateResult = { ok: true; task: PlanTask } | { ok: false; error: string };
+
 export type ReviewFilesResult = { ok: true; files: ModifiedFile[]; total: number } | { ok: false; error: string };
 export type ReviewDiffResult = {
   ok: true; path: string; relPath: string; status: ModifiedFile["status"];
@@ -270,6 +277,7 @@ export interface TerminalWorkSummary {
   verify: VerifyInfo | null;
   /** Cumulative tracked review paths, not Git dirtiness or unread changes. */
   trackedChanges: number;
+  planCreationError: string | null;
   tasks: PlanWorkSummary[];
   attention: WorkAttentionReason[];
   nextAction: WorkSummaryAction;
@@ -834,6 +842,7 @@ export interface TerminaBridge {
   getTimelineProgress(terminalId: string, seq: number): Promise<TimelineProgress>;
   /** The current run's plan tasks (Plan Board). */
   getPlan(terminalId: string): Promise<PlanTask[]>;
+  createPlanTask(request: PlanTaskCreateRequest): Promise<PlanTaskCreateResult>;
   /** Factual project/task context without heavy history or renderer notification state. */
   getProjectWorkSummary(projectId: string): Promise<ProjectWorkSummary | null>;
   getWorkOverview(): Promise<WorkOverview>;

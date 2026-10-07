@@ -113,6 +113,20 @@ export function parseTerminalCreateOptions(opts: unknown):
   };
 }
 
+export function parsePlanTaskCreateRequest(value: unknown): import("../../shared/types.js").PlanTaskCreateRequest | null {
+  if (!isRecord(value) || !isRecord(value.owner)) return null;
+  const owner = value.owner;
+  const target = parseTerminalTarget(owner.terminalId, owner.generation);
+  const bounded = (v: unknown, cap: number): v is string => typeof v === "string" && v.length > 0 && v.length <= cap;
+  if (!target || !bounded(owner.projectId, 64) || !bounded(owner.workspaceId, 128)
+    || !bounded(owner.root, 4096) || !bounded(value.projectRoot, 4096) || typeof value.text !== "string"
+    || value.text.length > 500) return null;
+  // Copy the renderer snapshot, never retain mutable unknown input across awaits.
+  return { owner: { projectId: owner.projectId, workspaceId: owner.workspaceId,
+    terminalId: target.id, generation: target.generation, root: owner.root },
+    projectRoot: value.projectRoot, text: value.text };
+}
+
 export type PtyAckPayload = {
   id: string;
   generation: number;

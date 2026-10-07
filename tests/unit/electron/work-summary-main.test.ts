@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { activityFor, activityView, emptyActivityInput, type AgentActivityInput } from "../../../electron/agent-activity.ts";
 import { parseTerminalTarget } from "../../../electron/main/ipc-validate.ts";
+import { planCreationError } from "../../../electron/plan-board.ts";
 import { projectWorkSummary, workOverview } from "../../../electron/main/work-summary.ts";
 import { formatVerifyContext, invalidateVerify } from "../../../electron/main/verify-source.ts";
 import type { FolderOpenedPayload, PlanTask, ProjectWorkSummary, VerifyInfo, WorkAttentionInspectResult, WorkOverview } from "../../../shared/types.ts";
@@ -10,7 +11,7 @@ import type { FolderOpenedPayload, PlanTask, ProjectWorkSummary, VerifyInfo, Wor
 // Run the actual main methods with in-memory owners, without importing Electron,
 // instantiating an app/provider, or reading session files from the host.
 const sourceFile = ts.createSourceFile("main.ts", readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-const methodNames = ["workSummary", "workOverview", "inspectWorkAttention", "verifyReport", "projectOfTerminal", "workspaceOfTerminal", "registerIpc",
+const methodNames = ["planCreationError", "workSummary", "workOverview", "inspectWorkAttention", "verifyReport", "projectOfTerminal", "workspaceOfTerminal", "registerIpc",
   "activateProject", "sendFolderOpened", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration"];
 const methods = new Map<string, ts.MethodDeclaration>();
 function visit(node: ts.Node): void {
@@ -30,6 +31,7 @@ interface Workspace {
   root: string;
   primary: boolean;
   comparisonId?: string;
+  terminalIds: Set<string>;
 }
 interface Terminal {
   id: string;
@@ -39,6 +41,9 @@ interface Terminal {
   cwd: string;
   type: "agent" | "shell";
   closed: boolean;
+  busy: boolean;
+  persist: boolean;
+  pty: { hasExited: boolean };
   model: string | null;
   modified: Map<string, object>;
   plan: PlanTask[];
@@ -74,18 +79,19 @@ interface MainHarness {
 }
 
 function fixture() {
-  const primary: Workspace = { id: "ws-primary", root: "/projects/active", primary: true };
-  const candidate: Workspace = { id: "ws-candidate", root: "/worlds/candidate-A", primary: false, comparisonId: "comparison-1" };
+  const primary: Workspace = { id: "ws-primary", root: "/projects/active", primary: true, terminalIds: new Set() };
+  const candidate: Workspace = { id: "ws-candidate", root: "/worlds/candidate-A", primary: false, comparisonId: "comparison-1", terminalIds: new Set() };
   const project: Project = {
     id: "project-1", cwd: primary.root, terminalIds: new Set(),
     workspaces: new Map([[primary.id, primary], [candidate.id, candidate]]), activationGeneration: 0,
   };
-  const main = new Function("activityFor", "activityView", "emptyActivityInput", "parseTerminalTarget", "projectWorkSummary", "workOverview", "formatVerifyContext", compiled)(
-    activityFor, activityView, emptyActivityInput, parseTerminalTarget, projectWorkSummary, workOverview, formatVerifyContext,
+  const main = new Function("activityFor", "activityView", "emptyActivityInput", "parseTerminalTarget", "projectWorkSummary", "workOverview", "formatVerifyContext", "planCreationError", compiled)(
+    activityFor, activityView, emptyActivityInput, parseTerminalTarget, projectWorkSummary, workOverview, formatVerifyContext, planCreationError,
   ) as MainHarness;
   Object.assign(main, {
     projects: new Map([[project.id, project]]), runtime: new Map(), activityInputs: new Map(),
     switchingProjects: new Set(), projectClosePromises: new Map(), disposed: false,
+    terminalCloseRequests: new WeakMap(), dispatchWorkers: new Map(),
     activeProjectId: null, projectSelectionAction: 0, projectSelectionActionSeq: 0, projectActivationGeneration: 0,
     primaryWorkspace: (project: Project) => [...project.workspaces.values()].find((workspace) => workspace.primary),
     captureRendererSendTarget: () => null, agentNeedsLogin: async () => false,
@@ -94,12 +100,13 @@ function fixture() {
   function add(id: string, overrides: Partial<Terminal> = {}): Terminal {
     const terminal: Terminal = {
       id, generation: 7, projectId: project.id, workspaceId: primary.id, cwd: primary.root,
-      type: "agent", closed: false, model: "test-model", modified: new Map(), plan: [],
+      type: "agent", closed: false, busy: false, persist: true, pty: { hasExited: false }, model: "test-model", modified: new Map(), plan: [],
       verify: { state: "untested", command: null, summary: null }, verifyOutput: null,
       ...overrides,
     };
     main.runtime.set(id, terminal);
     project.terminalIds.add(id);
+    project.workspaces.get(terminal.workspaceId)?.terminalIds.add(id);
     return terminal;
   }
   return { main, project, primary, candidate, add };

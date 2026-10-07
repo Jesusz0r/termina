@@ -83,6 +83,9 @@ import { ScheduleRunner, type ScheduleTickTask } from "./schedule.js";
 import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { formatProjectSnapshot, MAX_PROJECT_SNAPSHOT_BYTES } from "./main/project-snapshot.js";
 import { projectWorkSummary, workOverview } from "./main/work-summary.js";
+import { appendPlanTask } from "./main/plan-create.js";
+import { planCreationError } from "./plan-board.js";
+import { parsePlanTaskCreateRequest } from "./main/ipc-validate.js";
 import { formatVerifyContext, invalidateVerify, isVerifySourceCurrent, verifyOutputTail } from "./main/verify-source.js";
 import { closeConfirmation, closeTaskText, type CandidateCloseImpact, type TerminalCloseImpact } from "./main/close-confirm.js";
 import { SourceAdmissions, sourceTreesOverlap, type SourceClaim } from "./main/source-admission.js";
@@ -3895,6 +3898,49 @@ class TerminaApp {
     if (project && !this.projectIsSwitching(project.id)) this.saveTerminalRoster(project);
   }
 
+  /** Callers supply current ownership already validated against the runtime. */
+  private planCreationError(inst: AgentTerminalInstance, project: ProjectState, workspace: WorkspaceState | null): string | null {
+    return planCreationError({
+      available: !this.disposed && !inst.closed && !inst.pty.hasExited
+        && this.projects.get(project.id) === project && inst.projectId === project.id
+        && project.terminalIds.has(inst.id) && !this.projectIsSwitching(project.id)
+        && !this.terminalCloseRequests.has(inst) && !!workspace && workspace.terminalIds.has(inst.id)
+        && inst.workspaceId === workspace.id && project.workspaces.get(workspace.id) === workspace
+        && inst.cwd === workspace.root,
+      primary: workspace?.primary === true, persistent: inst.persist, agent: inst.type === "agent",
+      dispatchWorker: this.dispatchWorkers.has(inst.id), busy: inst.busy, taskCount: inst.plan.length,
+    });
+  }
+
+  private async createPlanTask(value: unknown): Promise<import("../shared/types.js").PlanTaskCreateResult> {
+    const request = parsePlanTaskCreateRequest(value);
+    if (!request) return { ok: false, error: "Invalid task request." };
+    const { owner } = request;
+    const project = this.projects.get(owner.projectId);
+    const inst = this.runtime.get(owner.terminalId);
+    const workspace = project?.workspaces.get(owner.workspaceId);
+    const expected = this.captureRendererSendTarget();
+    if (!project || !inst || !workspace || !expected) return { ok: false, error: "The Plan Board owner is unavailable." };
+    const plan = inst.plan;
+    const workspaceGeneration = workspace.generation;
+    const currentError = (): string | null => {
+      if (this.projects.get(owner.projectId) !== project || project.cwd !== request.projectRoot
+        || this.projectOfTerminal(inst.id) !== project || inst.projectId !== owner.projectId
+        || !project.terminalIds.has(inst.id) || this.runtime.get(owner.terminalId) !== inst
+        || inst.generation !== owner.generation || inst.workspaceId !== owner.workspaceId
+        || project.workspaces.get(owner.workspaceId) !== workspace || this.workspaceOfTerminal(inst) !== workspace
+        || workspace.generation !== workspaceGeneration || workspace.root !== owner.root || inst.cwd !== owner.root || inst.plan !== plan
+        || !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), expected)) {
+        return "The Plan Board context has changed.";
+      }
+      return this.planCreationError(inst, project, workspace);
+    };
+    return appendPlanTask({ text: request.text, root: owner.root, plan, currentError,
+      canonicalize: (path) => this.canonicalPath(path),
+      publish: () => { this.savePlanRoster(inst); this.sendPlan(inst, expected); },
+    });
+  }
+
   private async applyPlanMessage(
     inst: AgentTerminalInstance,
     text: string,
@@ -5040,11 +5086,12 @@ class TerminaApp {
     const terminals = [...project.terminalIds].flatMap((id) => {
       const inst = this.runtime.get(id);
       if (!inst || inst.closed || inst.projectId !== project.id) return [];
+      const workspace = project.workspaces.get(inst.workspaceId) ?? null;
       return [{
         id: inst.id, generation: inst.generation, type: inst.type, model: inst.model,
         activity: activityView(activityFor(this.activityInputs.get(id) ?? emptyActivityInput())),
-        workspace: this.workspaceOfTerminal(inst), verify: inst.verify,
-        trackedChanges: inst.modified.size, plan: inst.plan,
+        workspace, verify: inst.verify,
+        trackedChanges: inst.modified.size, plan: inst.plan, planCreationError: this.planCreationError(inst, project, workspace),
       }];
     });
     return projectWorkSummary(project, terminals, project.worldlines?.recoverySummaries() ?? []);
@@ -8827,6 +8874,7 @@ class TerminaApp {
 
     // ---- Plan Board ----
     ipcMain.handle("plan:get", (_e, terminalId: string) => this.runtime.get(terminalId)?.plan ?? []);
+    ipcMain.handle("plan:create", (_e, request: unknown) => this.createPlanTask(request));
 
     // ---- Session Timeline ----
     ipcMain.handle("timeline:get", (_e, terminalId: string) => {

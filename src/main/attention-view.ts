@@ -1,7 +1,7 @@
-import type { AgentActivityView, CandidateRecoverySummary, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../shared/types";
+import type { AgentActivityView, CandidateRecoverySummary, PlanTask, PlanTaskCreateRequest, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../shared/types";
 import { presentBlockedLabel } from "../known-state";
 import { ACTION_LABELS, ATTENTION_LABELS } from "./work-summary";
-import { createProjectOverview, findOverviewTask } from "./project-overview";
+import { createProjectOverview, findOverviewTask, projectCards, taskTarget } from "./project-overview";
 import type { WorkSearchTarget } from "./work-search";
 
 const PAGE_SIZE = 50;
@@ -40,6 +40,8 @@ export function createAttentionView(bindings: {
     getVerifyReport: (id, generation) => bridge.getVerifyReport(id, generation),
     getReviewFiles: (target, offset) => bridge.getReviewFiles(target, offset),
     getReviewDiff: (target, path) => bridge.getReviewDiff(target, path),
+    createPlanTask: (request) => bridge.createPlanTask(request),
+    onTaskCreated: (request, task) => { void revealCreatedTask(request, task); },
     onSelectionChange: () => { inspectSequence++; },
     onFocusTerminal: bindings.onFocusTerminal,
     onTerminalControl: bindings.onTerminalControl,
@@ -85,6 +87,29 @@ export function createAttentionView(bindings: {
     restoreWorkspace();
     bindings.onViewChange(false);
     if (restoreFocus) (opener.isConnected ? opener : toggle).focus();
+  }
+
+  async function revealCreatedTask(request: PlanTaskCreateRequest, task: PlanTask): Promise<void> {
+    if (disposed || element.hidden) return;
+    const sequence = ++inspectSequence;
+    const revision = loadSequence;
+    try {
+      const value = await bridge.getWorkOverview();
+      if (disposed || element.hidden || sequence !== inspectSequence || revision !== loadSequence) return;
+      const project = value.projects.find((entry) => entry.projectId === request.owner.projectId && entry.root === request.projectRoot);
+      const card = project && projectCards(project).find((entry) => !("recovery" in entry)
+        && entry.owner.terminalId === request.owner.terminalId && entry.owner.generation === request.owner.generation
+        && entry.owner.workArea?.workspaceId === request.owner.workspaceId && entry.owner.workArea.root === request.owner.root
+        && entry.task?.task.text === task.text);
+      receiveOverview(value);
+      render();
+      if (project && card && !("recovery" in card)) projectOverview.selectTask(taskTarget(project, card));
+      else message.textContent = "Task was added, but its owner changed or closed. Refresh to inspect current work.";
+    } catch {
+      if (!disposed && !element.hidden && sequence === inspectSequence) {
+        message.textContent = "Task was added. Refresh to load its current Plan Board.";
+      }
+    }
   }
 
   async function navigateCandidate(projectId: string, recovery: CandidateRecoverySummary): Promise<void> {

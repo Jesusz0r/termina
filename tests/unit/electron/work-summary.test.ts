@@ -9,7 +9,7 @@ function terminal(overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummar
     activity: { state: "idle", reason: null },
     workspace: { id: "ws-1", root: project.cwd, primary: true },
     verify: { state: "untested", command: null, summary: null },
-    trackedChanges: 0, plan: [], ...overrides,
+    trackedChanges: 0, plan: [], planCreationError: null, ...overrides,
   };
 }
 function task(outcome?: DispatchOutcome): PlanTask {

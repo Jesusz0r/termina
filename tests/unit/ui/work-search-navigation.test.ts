@@ -9,7 +9,7 @@ function overview(): WorkOverview {
   return workOverview(["first", "other"].map((name, index) => projectWorkSummary({ id: `p${index}`, cwd: `/${name}/same-name` }, [{
     id: `owner-${index}`, generation: 3, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: `ws-${index}`, root: `/${name}/same-name`, primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0,
+    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, planCreationError: null,
     plan: [{ text: "Repair the parser", paths: ["parser.ts"], state: "pending" }],
   }])));
 }

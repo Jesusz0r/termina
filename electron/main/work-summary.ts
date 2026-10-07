@@ -15,6 +15,7 @@ export interface WorkSummaryTerminalFacts {
   verify: VerifyInfo;
   trackedChanges: number;
   plan: readonly PlanTask[];
+  planCreationError: string | null;
 }
 
 /** Presentation projection only. Activity, tasks, source validity and lifecycle stay with their owners. */
@@ -69,7 +70,7 @@ export function projectWorkSummary(
       terminalId: terminal.id, generation: terminal.generation, type: terminal.type,
       model: terminal.type === "agent" ? terminal.model : null,
       activity, workArea: area, verify, trackedChanges: terminal.trackedChanges,
-      tasks, attention, nextAction,
+      tasks, attention, nextAction, planCreationError: terminal.planCreationError,
     };
   });
   return { projectId: project.id, name: basename(project.cwd) || project.cwd, root: project.cwd, terminals, candidateRecoveries };

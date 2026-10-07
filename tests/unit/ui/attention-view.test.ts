@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAttentionView } from "../../../src/main/attention-view.ts";
-import type { TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../../shared/types.ts";
+import type { PlanTask, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../../shared/types.ts";
 import { projectWorkSummary, workOverview } from "../../../electron/main/work-summary.ts";
 import { FakeEl, installFakeDom } from "./fake-dom.ts";
 
@@ -83,7 +83,8 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
   const getVerifyReport = vi.fn(async (_id: string, _generation: number): Promise<string | null> => "Check output");
   const getReviewFiles = vi.fn<TerminaBridge["getReviewFiles"]>().mockResolvedValue({ ok: true, files: [], total: 0 });
   const getReviewDiff = vi.fn<TerminaBridge["getReviewDiff"]>().mockResolvedValue({ ok: false, error: "Baseline unavailable" });
-  const bridge = { getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff } as unknown as TerminaBridge;
+  const createPlanTask = vi.fn<TerminaBridge["createPlanTask"]>().mockResolvedValue({ ok: false, error: "Fixture rejection" });
+  const bridge = { getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, createPlanTask } as unknown as TerminaBridge;
   hooks.forEach((hook, index) => {
     bridge[hook] = ((callback: (payload: unknown) => void) => {
       callbacks.set(hook, callback);
@@ -111,19 +112,19 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
     element, toggle, overviewToggle, workspace, title, projectContent, attentionHeading,
     onNavigate, onReveal, onViewChange, onNewProject, onCandidateRecovery, onRevealCandidate,
     count, list, status, message, close, refresh, more, outside,
-    getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, onOverview, onInspect, unsubs,
+    getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, createPlanTask, onOverview, onInspect, unsubs,
     emit: (hook: typeof hooks[number], payload: unknown = {}) => callbacks.get(hook)!(payload),
     open: async () => { view!.open(); await refreshDelay(); },
     inspectButton: (index = 0) => list.children[index]!.querySelector("button")!,
   };
 }
 
-function overviewWithTask(): WorkOverview {
+function overviewWithTask(extra: PlanTask[] = []): WorkOverview {
   const project = projectWorkSummary({ id: "proj-1", cwd: "/projects/first" }, [{
     id: "term-1", generation: 3, type: "agent", model: "provider/model",
     activity: { state: "idle", reason: null }, workspace: { id: "ws-1", root: "/projects/first", primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0,
-    plan: [{ text: "Repair the parser", paths: [], state: "pending" }],
+    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, planCreationError: null,
+    plan: [{ text: "Repair the parser", paths: [], state: "pending" }, ...extra],
   }]);
   const value = workOverview([project]);
   value.items = [item({ projectId: "proj-2" })];
@@ -131,6 +132,43 @@ function overviewWithTask(): WorkOverview {
 }
 
 describe("integrated All projects surface", () => {
+  it("refreshes the canonical overview and reveals the newly queued task without activating or executing", async () => {
+    const h = harness(overviewWithTask()); view!.open(undefined, "overview"); await refreshDelay();
+    const queued: PlanTask = { text: "New queue outcome", paths: [], state: "pending" };
+    h.getWorkOverview.mockResolvedValue(overviewWithTask([queued]));
+    h.createPlanTask.mockResolvedValue({ ok: true, task: queued });
+    const opener = h.projectContent.querySelector(".overview-new-task")!;
+    h.projectContent.dispatch("click", { target: opener });
+    const form = h.projectContent.querySelector(".overview-task-composer")!;
+    const input = form.querySelector("input")!;
+    input.value = queued.text; input.dispatch("input"); form.dispatch("submit"); await flush(); await flush();
+    expect(form.hidden).toBe(true);
+    expect(h.createPlanTask).toHaveBeenCalledExactlyOnceWith({ text: queued.text, projectRoot: "/projects/first",
+      owner: { projectId: "proj-1", workspaceId: "ws-1", root: "/projects/first", terminalId: "term-1", generation: 3 } });
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(3);
+    expect(h.message.textContent).toBe("");
+    expect(h.onOverview).toHaveBeenLastCalledWith(overviewWithTask([queued]));
+    expect(h.projectContent.querySelectorAll(".overview-work-card")).toHaveLength(2);
+    const inspector = h.projectContent.querySelector("#project-work-inspector")!;
+    expect(inspector.hidden).toBe(false); expect(text(inspector)).toContain(queued.text);
+    expect(text(inspector)).toContain("No live worker assigned");
+    expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.onInspect).not.toHaveBeenCalled();
+    expect(h.getVerifyReport).not.toHaveBeenCalled(); expect(h.getReviewFiles).not.toHaveBeenCalled();
+  });
+  it("does not reopen Overview when the post-create canonical refresh completes after leaving", async () => {
+    const h = harness(overviewWithTask()); view!.open(undefined, "overview"); await refreshDelay();
+    const queued: PlanTask = { text: "Pending after close", paths: [], state: "pending" };
+    const loading = deferred<WorkOverview>();
+    h.getWorkOverview.mockReturnValueOnce(loading.promise); h.createPlanTask.mockResolvedValue({ ok: true, task: queued });
+    h.projectContent.dispatch("click", { target: h.projectContent.querySelector(".overview-new-task")! });
+    const form = h.projectContent.querySelector(".overview-task-composer")!; const input = form.querySelector("input")!;
+    input.value = queued.text; input.dispatch("input"); form.dispatch("submit"); await flush();
+    view!.close(); loading.resolve(overviewWithTask([queued])); await flush(); await flush();
+    expect(h.element.hidden).toBe(true); expect(h.workspace.inert).toBe(false);
+    expect(h.projectContent.querySelector("#project-work-inspector")!.hidden).toBe(true);
+    expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.onReveal).not.toHaveBeenCalled();
+    expect(h.createPlanTask).toHaveBeenCalledOnce();
+  });
   it("forwards retained recovery navigation, reveals only after current hydration, and preserves selection", async () => {
     const value = overview([]);
     const recovery = { comparisonId: "cmp-failed", label: "B" as const, root: "/worlds/B", version: 4,
