@@ -18,6 +18,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -218,16 +219,17 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         stderr += chunk;
       });
     
+      const acknowledgedRequestIds = new Set<string>();
       const ackTimer = setInterval(() => {
         try {
           const sidecar = readJsonLines(join(events, `${terminalId}.jsonl`));
           const request = sidecar.filter((record) => record.t === "preflight_request").at(-1);
-          if (request?.requestId) {
-            writeFileSync(
-              join(events, `ack-${terminalId}-${request.requestId}.json`),
-              JSON.stringify({ ok: true }),
-              { mode: 0o600 },
-            );
+          if (request?.requestId && !acknowledgedRequestIds.has(request.requestId)) {
+            const ack = join(events, `ack-${terminalId}-${request.requestId}.json`);
+            // The child claims this file by rename; publish complete JSON only once.
+            writeFileSync(`${ack}.tmp`, JSON.stringify({ ok: true }), { mode: 0o600 });
+            renameSync(`${ack}.tmp`, ack);
+            acknowledgedRequestIds.add(request.requestId);
           }
         } catch {
           /* Wait until the child writes its preflight request. */
@@ -869,7 +871,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         scenario: "fallback",
       });
       assert.equal(result.code, 0, result.stderr || result.stdout);
-      assert.equal(result.requests.length, 2);
+      assert.equal(result.requests.length, 2, `${result.stdout}\n${result.stderr}`);
       const first = result.requests[0].body;
       const second = result.requests[1].body;
       assert.equal(first.prompt_cache_options?.mode, "explicit");
