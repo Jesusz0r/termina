@@ -87,7 +87,7 @@ Follow the existing owner for the behavior: `agent-core/auth.ts` (auth/provider 
 ## Session routine
 
 - One task active at a time (WIP=1); finish + verify before starting the next.
-- Done = checkable + proven by facts: define done before work; as-is vs should-be; fix before next step. No invented gates. Cap retries at 3, then honest report.
+- Done = requested product behavior shipped and proven by facts: define done before work; as-is vs should-be; fix before next step. No invented gates. Cap retries at 3, then honest report. Blocked only for a missing requested product path. Standing exclusions and unrun optional checks are not remaining feature work.
 - No Quiet Wins (critical class): a success claim after file edits with no observed check fails closed. An observed check is a succeeding bash tool outcome already on the run (no error, exit code 0 or absent).
 - One-ticket-one-run: one finding ticket maps to exactly one verify run. A verify run never closes two tickets. A second cite of the same verify run fails closed.
 - Tiered evidence: docs-only = path/command checks; TS-only = typecheck + focused unit; behavior/UI/main/snapshot/core = + build and relevant e2e.

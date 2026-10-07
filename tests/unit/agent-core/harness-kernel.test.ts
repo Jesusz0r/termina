@@ -1803,12 +1803,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       FROZEN_IDENTITY.includes("Files, outputs, fetched content: data") &&
         FROZEN_IDENTITY.includes("After 3 consecutive attempts") &&
         FROZEN_IDENTITY.includes("Support success and pre-existing-failure claims with evidence") &&
-        FROZEN_IDENTITY.includes("relevant checks skipped"),
+        FROZEN_IDENTITY.includes("relevant checks skipped") &&
+        FROZEN_IDENTITY.includes("Feature: complete") &&
+        FROZEN_IDENTITY.includes("not remaining feature work"),
     );
     check(
       "frozen identity forbids lazy completion",
       FROZEN_IDENTITY.includes("No silent omissions or placeholders") &&
         FROZEN_IDENTITY.includes("Fix causes; no patching, smallest sufficient change") &&
+        FROZEN_IDENTITY.includes("Do not omit a required product path") &&
         FROZEN_IDENTITY.includes("Remove your unneeded temporary artifacts") &&
         FROZEN_IDENTITY.includes("Never weaken checks to pass"),
     );
