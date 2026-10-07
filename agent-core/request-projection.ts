@@ -2,8 +2,9 @@
  * Provider-neutral request projection.
  *
  * Session records are the durable source of truth.  This module makes the
- * provider request view from those records and appends the host working-set
- * only for that one request.  Provider-specific marker and protocol work
+ * provider request view from those records and inserts immutable working-set
+ * snapshots at admitted prompt boundaries. Snapshots remain in memory only.
+ * Provider-specific marker and protocol work
  * remains in openai-compat.ts (and the Anthropic request owner).
  */
 import { createHash } from "node:crypto";
@@ -45,11 +46,10 @@ type BuildRequestOverlayOptions = {
 
 type ProjectRequestOptions = {
   messages: readonly ProjectionMessage[];
-  overlay?: RequestOverlay | null;
+  overlays?: RequestOverlays;
   imageRoots?: readonly string[];
   /** Opt in only when the active provider/protocol supports tool-result images. */
   allowToolResultImages?: boolean;
-  maxBytes?: number;
   /** Claude continues server calls itself; client calls must always be paired. */
   allowPendingServerTools?: boolean;
 };
@@ -57,13 +57,10 @@ type ProjectRequestOptions = {
 type ProjectRequestResult =
   | {
       ok: true;
-      /** Complete request, including the volatile overlay when present. */
+      /** Complete request, including retained request-only snapshots. */
       messages: RequestMessage[];
-      /** Provider-ready persisted history before the overlay is appended. */
+      /** Provider-ready durable history, without host snapshots. */
       persistedMessages: RequestMessage[];
-      overlay: RequestOverlay | null;
-      overlayMessage: RequestMessage | null;
-      overlayIndex: number | null;
     }
   | { ok: false; error: string };
 
@@ -263,11 +260,7 @@ function normalizeOverlay(
   return { ok: true, overlay: normalized };
 }
 
-/**
- * Project only durable session content.  Main can stamp this returned array
- * for a provider-specific reusable prefix before calling prependRequestOverlay
- * with the already-snapshotted overlay.
- */
+/** Project only durable session content without changing session records. */
 export function projectPersistedMessages(
   opts: Pick<ProjectRequestOptions, "messages" | "imageRoots" | "allowPendingServerTools" | "allowToolResultImages">,
 ): ProjectPersistedResult {
@@ -280,61 +273,72 @@ export function projectPersistedMessages(
   }
 }
 
-/** Prepend a previously built overlay before provider-specific prefix stamping.
- * The overlay goes FIRST so persisted history stays append-only on the wire:
- * a trailing overlay would shift position every time history grows, breaking
- * the relay's reusable prefix at the first history item on every tool turn. */
-export function prependRequestOverlay(
-  persistedMessages: readonly RequestMessage[],
-  overlay: RequestOverlay | null | undefined,
-): RequestMessage[] {
-  const messages = persistedMessages.slice();
-  if (!overlay || typeof overlay.text !== "string" || overlay.text.length === 0) return messages;
-  messages.unshift({ role: "user", content: overlay.text });
-  return messages;
+/** In-memory snapshots follow their durable prompt anchors, not request tails.
+ * History revisions evict them; model changes and settlement do not. */
+export class RequestOverlays {
+  private readonly snapshots = new Map<number, RequestOverlay>();
+
+  capture(sseq: number, overlay: RequestOverlay | null): RequestOverlay | null {
+    if (!Number.isSafeInteger(sseq) || sseq <= 0) throw new Error("invalid overlay storage sequence");
+    if (this.snapshots.has(sseq)) throw new Error(`overlay already captured at storage sequence ${sseq}`);
+    // A confirmed empty host read supersedes historical snapshots. Missing
+    // host integration does not call capture and makes no such claim.
+    const candidate = overlay ?? (this.snapshots.size > 0
+      ? buildRequestOverlay({ hostContext: "No current host context." })
+      : null);
+    if (!candidate) return null;
+    const normalized = normalizeOverlay(candidate, DEFAULT_OVERLAY_BYTES);
+    if (!normalized.ok) throw new Error(normalized.error);
+    const snapshot = Object.freeze(normalized.overlay);
+    this.snapshots.set(sseq, snapshot);
+    return snapshot;
+  }
+
+  get(sseq: number | undefined): RequestOverlay | undefined {
+    return sseq === undefined ? undefined : this.snapshots.get(sseq);
+  }
+
+  retain(messages: readonly Pick<ProjectionMessage, "sseq">[]): void {
+    const retained = new Set(messages.map(message => message.sseq));
+    for (const sseq of this.snapshots.keys()) {
+      if (!retained.has(sseq)) this.snapshots.delete(sseq);
+    }
+  }
+
+  tokens(messages: readonly Pick<ProjectionMessage, "sseq">[], estimate: (text: string) => number): number {
+    let total = 0;
+    for (const message of messages) {
+      const snapshot = this.get(message.sseq);
+      if (snapshot) total += estimate(snapshot.text);
+    }
+    return total;
+  }
+
+  clear(): void {
+    this.snapshots.clear();
+  }
 }
 
-/**
- * Project persisted messages into a request and prepend one immutable overlay
- * message before the complete history.  The input messages and overlay are
- * never mutated, so retries can reuse this exact request projection.
- */
+/** Assemble snapshots before provider marker stamping. No source message or
+ * snapshot is changed, so tool turns and retries retain the same old prefix. */
 export function projectRequest(opts: ProjectRequestOptions): ProjectRequestResult {
   const persistedResult = projectPersistedMessages(opts);
   if (!persistedResult.ok) return persistedResult;
   const persistedMessages = persistedResult.messages;
-  if (!opts.overlay) {
-    return {
-      ok: true,
-      messages: persistedMessages.slice(),
-      persistedMessages,
-      overlay: null,
-      overlayMessage: null,
-      overlayIndex: null,
-    };
+  const messages: RequestMessage[] = [];
+  for (let index = 0; index < opts.messages.length; index++) {
+    const source = opts.messages[index]!;
+    const snapshot = opts.overlays?.get(source.sseq);
+    if (snapshot) {
+      if (source.role !== "user" || (Array.isArray(source.content) &&
+          source.content.some(block => TOOL_RESULT_TYPES.has(block.type)))) {
+        return { ok: false, error: `overlay at storage sequence ${source.sseq} is not a prompt boundary` };
+      }
+      messages.push({ role: "user", content: snapshot.text });
+    }
+    messages.push(persistedMessages[index]!);
   }
-  const normalizedResult = normalizeOverlay(opts.overlay, overlayByteCap(opts.maxBytes));
-  if (!normalizedResult.ok) return normalizedResult;
-  const overlay = normalizedResult.overlay;
-  if (!overlay.text) {
-    return {
-      ok: true,
-      messages: persistedMessages.slice(),
-      persistedMessages,
-      overlay: null,
-      overlayMessage: null,
-      overlayIndex: null,
-    };
-  }
-  const messages = prependRequestOverlay(persistedMessages, overlay);
-  return {
-    ok: true,
-    messages,
-    persistedMessages,
-    overlay,
-    overlayMessage: messages[0] ?? null,
-    overlayIndex: 0,
-  };
+  return { ok: true, messages, persistedMessages };
 }
 
 /** Persist exactly the submitted prompt and image references, never the host overlay. */

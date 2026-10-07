@@ -490,13 +490,16 @@ describe("Agent Core Cache", () => {
 
   describe("Extracted cache owners (#324)", () => {
     it("treats a null write as exact only on writeless routes", () => {
-      expect(cache.cacheWriteSupportedFor("xai", null)).toBe(false);
-      expect(cache.cacheWriteSupportedFor("openai", null)).toBe(false);
-      expect(cache.cacheWriteSupportedFor("google", null)).toBe(false);
-      expect(cache.cacheWriteSupportedFor("opencode-go", null)).toBe(false);
-      expect(cache.cacheWriteSupportedFor("opencode-zen", null)).toBe(false);
-      expect(cache.cacheWriteSupportedFor("anthropic", null)).toBeNull();
-      expect(cache.cacheWriteSupportedFor("openai-codex", 0)).toBe(true);
+      expect(cache.cacheWriteSupportedFor("xai", null, "grok-4.6")).toBe(false);
+      expect(cache.cacheWriteSupportedFor("openai", null, "gpt-5.4")).toBe(false);
+      expect(cache.cacheWriteSupportedFor("openai", null, "gpt-5.6-sol")).toBe(true);
+      expect(cache.cacheWriteSupportedFor("openai", null, "gpt-6-astra")).toBe(true);
+      expect(cache.cacheWriteSupportedFor("openai", null, "unknown-model")).toBeNull();
+      expect(cache.cacheWriteSupportedFor("google", null, "gemini-3.7-flash")).toBe(false);
+      expect(cache.cacheWriteSupportedFor("opencode-go", null, "fixture-model")).toBeNull();
+      expect(cache.cacheWriteSupportedFor("opencode-zen", null, "claude-sonnet-5")).toBeNull();
+      expect(cache.cacheWriteSupportedFor("anthropic", null, "claude-sonnet-5")).toBeNull();
+      expect(cache.cacheWriteSupportedFor("openai-codex", 0, "gpt-5.6-sol")).toBe(true);
     });
 
     it("forwards capability observations without inventing a second mapper", () => {

@@ -101,15 +101,17 @@ import {
   type RateSnapshotInput,
 } from "./rates.ts";
 import {
-  prependRequestOverlay,
+  RequestOverlays,
   buildRequestOverlay,
   projectRequest,
-  type RequestMessage,
   type RequestOverlay,
   userPromptContent as projectedUserPromptContent,
 } from "./request-projection.ts";
 import { salvageAssistantBlocks, type SalvageBlock } from "./main/stream-salvage.ts";
+import { UsageIndicators } from "./main/usage-indicators.ts";
+export { formatUsageIndicators } from "./main/usage-indicators.ts";
 import {
+  cacheInputTokens,
   cacheWriteSupportedFor,
   classifyCacheMiss,
   emptyCacheFlipTally,
@@ -1050,6 +1052,7 @@ function ensureFreshSession(): void {
     openSessionWriter();
   }
   storageSeq = 0;
+  requestOverlays.clear();
   streamPrepared = true;
 }
 
@@ -2248,6 +2251,7 @@ interface Message {
 }
 
 const history: Message[] = [];
+const requestOverlays = new RequestOverlays();
 
 export function compactStreamBlocks<T>(slots: Array<T | undefined>): T[] {
   return slots.filter((b): b is T => b !== undefined);
@@ -2259,23 +2263,6 @@ function pushMessage(role: Message["role"], content: Message["content"]): Messag
   history.push(m);
   syncIndicators();
   return m;
-}
-
-/** Provider-neutral projection used by main and focused integration tests. */
-export function projectMainRequest(
-  messages: Message[],
-  hostContext = "",
-): { messages: RequestMessage[]; persistedMessages: RequestMessage[]; overlay: RequestOverlay | null } {
-  const projection = projectRequest({
-    messages,
-    overlay: buildRequestOverlay({ hostContext }),
-  });
-  if (!projection.ok) throw new Error(projection.error);
-  return {
-    messages: projection.messages,
-    persistedMessages: projection.persistedMessages,
-    overlay: projection.overlay,
-  };
 }
 
 function pushUserPrompt(
@@ -2300,6 +2287,7 @@ let pendingReclaimEvidence: Record<string, unknown> | null = null;
 let pruneCooldown: PruneCooldown | null = null;
 
 function recordRevision(kind: RevisionKind): void {
+  requestOverlays.retain(history);
   revisions++;
   revisionKinds.push(kind);
   postRevision = true;
@@ -2314,8 +2302,8 @@ function toolSchemaTokens(): number {
   return estimateReclaimTokens(requestTools(clientTools, route.provider, route.model));
 }
 
-function activeOverlayTokens(): number {
-  return activeRequestOverlay ? estimateReclaimTokens(activeRequestOverlay.text) : 0;
+function retainedOverlayTokens(): number {
+  return requestOverlays.tokens(history, estimateReclaimTokens);
 }
 
 function replayStateForHistory() {
@@ -2340,6 +2328,7 @@ function installReplayedMessages(replayed: {
   maxSeq: number;
 }): void {
   history.length = 0;
+  requestOverlays.clear();
   for (const rm of replayed.messages) {
     const m: Message = { role: rm.role, content: rm.content as Message["content"], tokens: 0, sseq: rm.sseq };
     m.tokens = estimateReclaimTokens(m.content);
@@ -2487,9 +2476,9 @@ async function reclaim(ignoreCooldown = false): Promise<number> {
       tokens: message.tokens,
     })),
     {
-      // The overlay is not durable and is never a prune target, but it still
-      // occupies the provider window for this logical prompt.
-      systemTokens: estimateReclaimTokens(frontMatter.systemPrompt()) + activeOverlayTokens(),
+      // Snapshots are not prune targets, but all retained snapshots occupy
+      // the provider window until their prompt anchors are evicted.
+      systemTokens: estimateReclaimTokens(frontMatter.systemPrompt()) + retainedOverlayTokens(),
       toolSchemaTokens: toolSchemaTokens(),
       usable,
       protectTokens: protectTokens(),
@@ -2585,7 +2574,7 @@ function truncate(protectTurns: number = PROTECT_TURNS): boolean {
 let lastHandoff: string | null = null;
 
 function totalTokens(): number {
-  return estimateReclaimTokens(frontMatter.systemPrompt()) + toolSchemaTokens() + activeOverlayTokens() + history.reduce((s, m) => s + m.tokens, 0);
+  return estimateReclaimTokens(frontMatter.systemPrompt()) + toolSchemaTokens() + retainedOverlayTokens() + history.reduce((s, m) => s + m.tokens, 0);
 }
 
 /** Estimates of messages appended after the bill. The bill does not include them. */
@@ -2593,7 +2582,7 @@ function tokensSinceBill(): number {
   if (lastBilledTokens === null || billedHistoryLength >= history.length) return 0;
   let sum = 0;
   for (let i = billedHistoryLength; i < history.length; i++) sum += history[i]!.tokens;
-  return sum;
+  return sum + requestOverlays.tokens(history.slice(billedHistoryLength), estimateReclaimTokens);
 }
 
 /**
@@ -2628,6 +2617,8 @@ async function summarize(required = false): Promise<boolean> {
   try {
     const summarySystem = "You compress coding-agent session history. Only output the structured handoff.";
     let folded: Awaited<ReturnType<typeof completeText>>;
+    let summaryProvider = summaryRoute.provider;
+    let summaryModel = summaryRoute.model;
     try {
       folded = await completeText(summaryRoute.provider, summaryRoute.model, summarySystem, prompt, currentAbort.signal);
     } catch (err) {
@@ -2635,12 +2626,14 @@ async function summarize(required = false): Promise<boolean> {
       // (e.g. a 401 on the summary model). Retry once on the current model
       // before giving up; skip the retry when both routes already match.
       if (summaryRoute.provider === route.provider && summaryRoute.model === route.model) throw err;
+      summaryProvider = route.provider;
+      summaryModel = route.model;
       folded = await completeText(route.provider, route.model, summarySystem, prompt, currentAbort.signal);
     }
     foldedResult = folded;
     const u = folded.usage;
+    usageIndicators.record(u, summaryProvider, summaryModel, "summary");
     if (u) {
-      accumulateUsage(u);
       lastUsd = null;
       syncIndicators();
     }
@@ -2744,72 +2737,8 @@ export function toolResultsWithRecovery(
 
 type Usage = ProviderUsage;
 
-const COMPACT_TOKEN_FORMAT = new Intl.NumberFormat("en-US", {
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
-
-function safeTokenCount(value: number | null): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
-}
-
-function compactTokenCount(value: number | null): string {
-  return COMPACT_TOKEN_FORMAT.format(safeTokenCount(value));
-}
-
-export function formatUsageIndicators(
-  usage: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "output">,
-  contextTokens: number,
-  maxContext: number,
-  usd: number | null = null,
-  flips: CacheFlipTally | null = null,
-  provider: ProviderId | null = null,
-): string {
-  const uncachedInput = safeTokenCount(usage.input);
-  const cacheRead = safeTokenCount(usage.cacheRead);
-  const cacheWrite = safeTokenCount(usage.cacheWrite);
-  const input = uncachedInput + cacheRead + cacheWrite;
-  const known = (value: number | null): boolean =>
-    typeof value === "number" && Number.isFinite(value) && value >= 0;
-  // Providers without a cache-write concept report no write count; a null
-  // write from them is a zero, not an unknown. Anywhere else it stays unknown.
-  const writeKnown = known(usage.cacheWrite) ||
-    (provider !== null && cacheWriteSupportedFor(provider, usage.cacheWrite) === false);
-  const inputKnown = known(usage.input) && known(usage.cacheRead) && writeKnown;
-  const cache = inputKnown && input > 0 ? `${Math.round((cacheRead / input) * 100)}%` : "--";
-  const context = safeTokenCount(contextTokens);
-  const limit = Math.max(1, safeTokenCount(maxContext));
-  const contextPct = Math.round((context / limit) * 100);
-  const cost = usd !== null && Number.isFinite(usd) && usd >= 0 ? ` · last $${usd.toFixed(4)}` : "";
-  // Stable-prefix breaks per evaluated attempt. Working-set churn is expected
-  // (host context moves most turns) and stays in the tally only, so the
-  // indicator flags prefix breaks without training users to ignore it.
-  const flipCount = flips && Number.isInteger(flips.evaluations) && flips.evaluations > 0
-    && Number.isInteger(flips.prefixFlips) && flips.prefixFlips >= 0
-    ? ` · flips ${flips.prefixFlips}/${flips.evaluations}`
-    : "";
-  const inputDisplay = inputKnown ? compactTokenCount(input) : "?";
-  const outputDisplay = typeof usage.output === "number" && Number.isFinite(usage.output) && usage.output >= 0
-    ? compactTokenCount(usage.output)
-    : "?";
-  return `tokens ${inputDisplay} in/${outputDisplay} out · cache ${cache} · context ~${compactTokenCount(context)}/${compactTokenCount(limit)} ${contextPct}%${cost}${flipCount}`;
-}
-
-let sessionUsage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
+const usageIndicators = new UsageIndicators();
 let lastUsd: number | null = null;
-
-function addKnownUsage(previous: number | null, next: number | null): number | null {
-  if (previous === null || next === null) return null;
-  return previous + next;
-}
-
-function accumulateUsage(usage: Usage): void {
-  sessionUsage.input = addKnownUsage(sessionUsage.input, usage.input);
-  sessionUsage.cacheRead = addKnownUsage(sessionUsage.cacheRead, usage.cacheRead);
-  sessionUsage.cacheWrite = addKnownUsage(sessionUsage.cacheWrite, usage.cacheWrite);
-  sessionUsage.output = addKnownUsage(sessionUsage.output, usage.output);
-  sessionUsage.reasoning = addKnownUsage(sessionUsage.reasoning, usage.reasoning);
-}
 
 interface CallResult {
   blocks: Block[];
@@ -3395,17 +3324,15 @@ async function callModel(
     ? buildCachedPrefix(sys, clientTools)
     : { system: [{ type: "text", text: sys }], tools: clientTools.map((tool) => ({ ...tool })) };
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
-  const persistedProjection = projectRequest({ messages, imageRoots, overlay: null, allowPendingServerTools: proto === "anthropic-messages" });
-  if (!persistedProjection.ok) throw new Error(`request projection failed: ${persistedProjection.error}`);
-  const persistedMessages = persistedProjection.persistedMessages;
+  const projection = projectRequest({ messages, imageRoots, overlays: requestOverlays, allowPendingServerTools: proto === "anthropic-messages" });
+  if (!projection.ok) throw new Error(`request projection failed: ${projection.error}`);
   const prefixMarkerCount = proto === "anthropic-messages" && anthropicCacheSupported
-    ? cacheMarkerDetails({ system: prefix.system, tools: prefix.tools, messages: persistedMessages }).count
+    ? cacheMarkerDetails({ system: prefix.system, tools: prefix.tools, messages: projection.messages }).count
     : 0;
-  const stampedMessages =
+  const providerMessages =
     proto === "anthropic-messages" && anthropicCacheSupported && prefixMarkerCount < 4
-      ? stampHistoryCache(persistedMessages)
-      : persistedMessages;
-  const providerMessages = prependRequestOverlay(stampedMessages as RequestMessage[], overlay);
+      ? stampHistoryCache(projection.messages)
+      : projection.messages;
   const kernelMessages = providerMessages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content as string | Array<Record<string, unknown>>,
@@ -4054,6 +3981,7 @@ function cacheFlipStats(): CacheFlipTally {
 
 function resetCacheContinuity(): void {
   resetUsageContinuity();
+  usageIndicators.resetRecent();
   currentHostContext = null;
   activeRequestOverlay = null;
   codexTurnState = "";
@@ -4096,12 +4024,6 @@ function rateSnapshotFor(
     cacheWriteTtlClass: cacheTtlClass(cache),
   };
   return normalizeRateSnapshot(scoped);
-}
-
-function usageTotal(usage: Usage): number | null {
-  const values = [usage.input, usage.cacheRead, usage.cacheWrite];
-  if (values.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)) return null;
-  return (values[0] as number) + (values[1] as number) + (values[2] as number);
 }
 
 function traceCostForUsage(
@@ -4174,18 +4096,18 @@ function reportUsage(
   cost: TraceRecordCostInput;
   cache: TraceCacheDiagnostics;
 } {
-  const cur = usageTotal(usage);
   const snapshot: CacheAttemptSnapshot = {
     atMs: turnStarted,
     usage: {
       inputTokens: usage.input,
       cacheReadTokens: usage.cacheRead,
       cacheWriteTokens: usage.cacheWrite,
-      cacheWriteSupported: cacheWriteSupportedFor(route.provider, usage.cacheWrite),
+      cacheWriteSupported: cacheWriteSupportedFor(route.provider, usage.cacheWrite, route.model),
     },
     diagnostics: cache,
     postRevision,
   };
+  const cur = cacheInputTokens(snapshot.usage);
   let waste: { tokens: number; cause: string } | null = null;
   const classification = classifyCacheMiss({
     previous: previousCacheAttempt,
@@ -4248,7 +4170,7 @@ function logSettings(): void {
     t: "agent_settings",
     model: `${route.provider}/${route.model}`,
     thinkingLevel: clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model), routeReasoningLevels()),
-    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats(), route.provider),
+    usage: usageIndicators.format(statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
     permissions: permissionMode,
   });
 }
@@ -4510,7 +4432,10 @@ async function runPrompt(
   // Build once for this logical prompt. Retries and cache-field fallbacks
   // reuse the same exact bytes instead of observing a changed host snapshot.
   try {
-    activeRequestOverlay = buildRequestOverlay({ hostContext: context });
+    const snapshot = buildRequestOverlay({ hostContext: context });
+    activeRequestOverlay = contextResult && (snapshot || contextResult.state === "complete")
+      ? requestOverlays.capture(userMsg.sseq, snapshot)
+      : null;
   } catch (err) {
     cancelPreflight();
     const message = err instanceof Error ? err.message : String(err);
@@ -4696,7 +4621,7 @@ async function runPrompt(
             cache: result.cache,
           };
       const traceCache = waste.cache;
-      if (result.usage) accumulateUsage(result.usage);
+      usageIndicators.record(result.usage, route.provider, route.model, "main");
       lastUsd = waste.usd != null && Number.isFinite(waste.usd) && waste.usd >= 0 ? waste.usd : null;
       const assistantMsg: Message = { role: "assistant", content: result.blocks as ContentBlock[], tokens: 0, sseq: 0 };
       assistantMsg.tokens = estimateReclaimTokens(assistantMsg.content);
@@ -4954,6 +4879,7 @@ async function runPrompt(
 function abortResume(message: string, file: string | null = sessionFile): void {
   out(`${message}\n`);
   history.length = 0;
+  requestOverlays.clear();
   syncIndicators();
   closeSessionWriter();
   if (file) {
@@ -4979,6 +4905,7 @@ function abortResume(message: string, file: string | null = sessionFile): void {
 function abortResumeKeepBundle(message: string): void {
   out(`${message}\n`);
   history.length = 0;
+  requestOverlays.clear();
   syncIndicators();
   closeSessionWriter();
   storageSeq = 0;
@@ -5114,10 +5041,11 @@ function resetLiveSessionState(): void {
   planPublishPending = false;
   planToolsRestricted = false;
   history.length = 0;
+  requestOverlays.clear();
   lastHandoff = null;
   clearSubagentApprovals();
   resetCacheContinuity();
-  sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
+  usageIndicators.reset();
   lastUsd = null;
   postRevision = false;
   revisions = 0;

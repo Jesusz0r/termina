@@ -61,11 +61,14 @@ Rules:
   from byte zero.
 - Corrections are new messages, never edits of old ones. A request may stamp
   `cache_control` on a copy of the last stable history block. That copy is not
-  stored. The working-set overlay is a separate user message prepended before
-  persisted history, built once per logical prompt and reused on its tool turns
-  and retries. It is not stored in the session log. A changed overlay on the
-  next prompt breaks input-prefix equality before that persisted history,
-  although the system and tool prefix can remain unchanged.
+  stored. Each admitted prompt captures a request-only working-set snapshot
+  immediately before that prompt's durable message. Older snapshots remain
+  at their original anchors, so a changed working set on a later prompt
+  appends to the request instead of rewriting its earlier prefix. Tool turns
+  and retries reuse the frozen snapshots. They are not stored in session logs
+  or fork bundles, and resume starts without historical host snapshots.
+  Revisions remove snapshots whose anchors leave visible history; all retained
+  snapshots count toward context pressure.
   Do not send top-level automatic `cache_control`: that pins the suffix.
   Anthropic markers are `{ type: "ephemeral" }` with no `ttl`, so the
   cache uses the 5-minute default
@@ -117,14 +120,46 @@ Observed on 2026-09-23 in this working tree:
   project instructions 13,978; separators 6. No user instructions were included.
 - Synthetic MCP contribution: 35,981 serialized tool bytes eager versus 995
   deferred; first schema search result 1,132 bytes. Built-ins are excluded.
-- Synthetic next prompt with the same overlay: 17 complete matching input items
-  (34,051 serialized item bytes). With the changed overlay: zero complete
-  matching input items, while instructions and tools remain identical.
+- With the former single prepended overlay, the synthetic next prompt with
+  the same overlay retained 17 complete matching input items (34,051 serialized
+  item bytes). A changed overlay retained zero complete matching input items,
+  while instructions and tools remained identical.
+
+Observed on 2026-10-05 after anchoring request-only snapshots: both unchanged
+and changed working sets retain all 17 prior input items (34,051 serialized
+item bytes) in that same synthetic fixture. The new snapshot sits before the
+new prompt, not at a moving tail on every tool turn.
 
 These are structural measurements, not an end-to-end savings claim. Discovery
-adds model turns and history content. Keep prompt wording and overlay placement
-unchanged until representative provider traces and quality checks justify a
-change; moving the overlay to the tail can damage reuse on every tool turn.
+adds model turns and history content. Exact content-prefix equality permits
+reuse but cannot prove a provider cache hit, routing decision, or retention.
+Diagnostics compare the full post-protocol sequence, including snapshots,
+while ignoring only provider cache-marker metadata. Google coalescing can
+change the final serialized item despite a shared token prefix, so whole-item
+evidence remains conservative.
+
+### Cache indicator semantics
+
+The settings indicator shows `cache last`, `recent10`, and `session` shares
+for main-model requests. Each share is cache-read tokens divided by total
+input tokens; `recent10` is token-weighted across up to ten completed main
+requests, not a percentage of requests that hit. Session totals are local to
+this process, not restored lifetime billing. Model changes reset the recent
+window; `/clear` resets all usage totals. Summary requests contribute to overall
+token counts and appear separately as `summary … in/… out`, without diluting
+main-model cache shares.
+
+Unknown input or cache-read counters make the corresponding share `--`.
+Missing cache writes count as zero only on a known writeless route; otherwise
+they remain unknown. Direct OpenAI GPT-5.6+ supports write accounting, so
+unreported writes remain unknown there, as on Codex and unverified relay
+schemas. Normalization uses the provider and model of each request. Unknown
+requests stay in the recent window until eviction rather than disappearing
+from the sample.
+
+Provider references: [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
+[xAI usage and pricing](https://docs.x.ai/developers/advanced-api-usage/prompt-caching/usage-and-pricing),
+and [Anthropic prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
 Existing `scripts/trace-baseline.ts` and the opt-in live cache probe provide the
 next measurement layer. Provider-measured savings remain unknown here.
 

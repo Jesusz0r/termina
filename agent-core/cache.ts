@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import { cacheRouteDomain } from "./auth.ts";
 import { evictOldest } from "../shared/evict-oldest.ts";
+import { gptVersion, isGpt56OrLaterModel } from "./models/families/identity.ts";
 import type {
   CacheCapabilityObservation,
   CacheCapabilityProvenance,
@@ -450,7 +451,7 @@ export function cacheRequestDiagnostics(input: CacheRequestDiagnosticsInput): Ca
   };
 }
 
-interface CacheUsageSnapshot {
+export interface CacheUsageSnapshot {
   /** Uncached input tokens as reported by the provider. */
   inputTokens: number | null;
   cacheReadTokens: number | null;
@@ -500,20 +501,23 @@ function missingUsageFields(usage: CacheUsageSnapshot): string[] {
   const missing: string[] = [];
   if (finiteNonnegative(usage.inputTokens) === null) missing.push("inputTokens");
   if (finiteNonnegative(usage.cacheReadTokens) === null) missing.push("cacheReadTokens");
-  if (usage.cacheWriteSupported !== false && finiteNonnegative(usage.cacheWriteTokens) === null) {
+  const absentWriteIsExact = usage.cacheWriteTokens === null && usage.cacheWriteSupported === false;
+  if (!absentWriteIsExact && finiteNonnegative(usage.cacheWriteTokens) === null) {
     missing.push("cacheWriteTokens");
   }
   return missing;
 }
 
-function totalUsage(usage: CacheUsageSnapshot): number | null {
-  const missing = missingUsageFields(usage);
-  if (missing.length) return null;
-  const cacheWrite = finiteNonnegative(usage.cacheWriteTokens) ?? (usage.cacheWriteSupported === false ? 0 : null);
-  if (cacheWrite === null) return null;
-  return (
-    finiteNonnegative(usage.inputTokens) as number
-  ) + (finiteNonnegative(usage.cacheReadTokens) as number) + cacheWrite;
+/** Total disjoint input components. Only a documented writeless route may
+ * treat a null write count as zero; missing input/read always stays unknown. */
+export function cacheInputTokens(usage: CacheUsageSnapshot): number | null {
+  if (missingUsageFields(usage).length) return null;
+  const cacheWrite = usage.cacheWriteTokens === null && usage.cacheWriteSupported === false
+    ? 0 : finiteNonnegative(usage.cacheWriteTokens) as number;
+  return finiteNonnegative(
+    (finiteNonnegative(usage.inputTokens) as number) +
+    (finiteNonnegative(usage.cacheReadTokens) as number) + cacheWrite,
+  );
 }
 
 function metadataMissing(previous: CacheRequestDiagnostics, current: CacheRequestDiagnostics): string[] {
@@ -600,8 +604,8 @@ export function classifyCacheMiss(input: {
     ...missingUsageFields(input.current.usage).map((field) => `current.${field}`),
     ...metadataMissing(input.previous.diagnostics, input.current.diagnostics),
   ];
-  const previousTotal = totalUsage(input.previous.usage);
-  const currentTotal = totalUsage(input.current.usage);
+  const previousTotal = cacheInputTokens(input.previous.usage);
+  const currentTotal = cacheInputTokens(input.current.usage);
   if (previousTotal === null || currentTotal === null) {
     return { attributed: false, primary: "unknown", contributing: [], missedTokens: null, gapMs, missingFields };
   }
@@ -639,8 +643,9 @@ export function classifyCacheMiss(input: {
   }
   if (changed(input.previous.diagnostics, input.current.diagnostics, "toolsHash")) causes.push("tool-schema-changed");
   if (changed(input.previous.diagnostics, input.current.diagnostics, "stablePrefixHash")) causes.push("stable-prefix-changed");
-  if (prefixChanged(input.previous.diagnostics, input.current.diagnostics) === true) causes.push("message-prefix-changed");
-  if (changed(input.previous.diagnostics, input.current.diagnostics, "workingSetHash")) {
+  const wirePrefixChanged = prefixChanged(input.previous.diagnostics, input.current.diagnostics);
+  if (wirePrefixChanged === true) causes.push("message-prefix-changed");
+  if (wirePrefixChanged === true && changed(input.previous.diagnostics, input.current.diagnostics, "workingSetHash")) {
     causes.push("working-set-changed");
   }
   if (input.current.postRevision) causes.push("post-revision");
@@ -680,26 +685,22 @@ export function emptyCacheFlipTally(): CacheFlipTally {
   return { evaluations: 0, prefixFlips: 0, workingSetChanges: 0 };
 }
 
-/**
- * Whether a null cache-write count is exact for one provider route. xAI
- * and the OpenCode relays report cached reads only (255 Go+Zen turns on
- * 2026-09-07 carried reads up to 451k tokens without a single write
- * count, and the usage parser probes `cache_write_tokens` in two places
- * without ever finding it there), so null means no write component. The
- * same holds for OpenAI (writes are free and unreported before GPT-5.6;
- * 5.6+ reports `cache_write_tokens`, which takes the non-null branch) and
- * Google (implicit caching has no write-token concept). A reported count
- * means support trivially; other providers stay strict.
+/** A missing write count is exact only for a known writeless usage schema.
+ * OpenAI GPT-5.6+ has write accounting; earlier GPT versions do not. Reuse
+ * the canonical model-family parser rather than infer support from an absent
+ * field. Codex, unknown models and relay schemas remain unknown.
  *
- * https://docs.x.ai/developers/advanced-api-usage/prompt-caching
+ * https://developers.openai.com/api/docs/guides/prompt-caching
+ * https://docs.x.ai/developers/advanced-api-usage/prompt-caching/usage-and-pricing
  * https://ai.google.dev/gemini-api/docs/caching
  */
-export function cacheWriteSupportedFor(provider: ProviderId, cacheWrite: number | null): boolean | null {
-  if (cacheWrite !== null) return true;
-  return provider === "xai" || provider === "openai" || provider === "google" ||
-      provider === "opencode-go" || provider === "opencode-zen"
-    ? false
-    : null;
+export function cacheWriteSupportedFor(provider: ProviderId, cacheWrite: number | null, model: string | null): boolean | null {
+  if (finiteNonnegative(cacheWrite) !== null) return true;
+  if (provider === "xai" || provider === "google") return false;
+  if (provider === "openai" && model !== null && gptVersion(model) !== null) {
+    return isGpt56OrLaterModel(model);
+  }
+  return null;
 }
 
 /** Fold one classified attempt into the tally. Pure; the caller owns reset. */

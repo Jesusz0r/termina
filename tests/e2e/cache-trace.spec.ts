@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Page, TestInfo } from "@playwright/test";
 import { test, expect } from "./fixtures.ts";
 import { readTraceDirectory, summarizeTraces } from "../unit/agent-core/trace-report.ts";
+import { stripResponsesBreakpoints } from "../../agent-core/openai-compat/responses.ts";
 
 const TURNS = 10;
 const LIVE_MODEL = process.env.TERMINA_LIVE_CACHE_MODEL ?? "anthropic/claude-sonnet-5";
@@ -299,6 +300,12 @@ test.describe("deterministic Core cache traces", () => {
     try {
       await submitTurns(page, runRoot);
       expect(providerCalls).toBe(TURNS);
+      await expect(page.locator("#status-usage")).toContainText("cache last 47% · recent10 31% · session 31%");
+      const inputs = requests.map(body => stripResponsesBreakpoints(body).input as unknown[]);
+      for (let index = 1; index < inputs.length; index++) {
+        const previous = inputs[index - 1]!;
+        expect(inputs[index]!.slice(0, previous.length)).toEqual(previous);
+      }
     } finally {
       await closeElectron();
     }

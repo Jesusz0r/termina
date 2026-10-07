@@ -15,6 +15,7 @@ describe("Agent Core Main P0 Invariants", () => {
     const compat = await import("../../../agent-core/openai-compat.ts");
     const session = await import("../../../agent-core/session.ts");
     const { traceWriteDisposition } = await import("../../../agent-core/trace.ts");
+    const { projectRequest, RequestOverlays, buildRequestOverlay } = await import("../../../agent-core/request-projection.ts");
     
     const failures = [];
     function check(name: string, fn: () => void) {
@@ -57,21 +58,23 @@ describe("Agent Core Main P0 Invariants", () => {
         100,
       );
       assert.match(text, /tokens \? in\/\? out/);
-      assert.match(text, /cache --/);
+      assert.match(text, /cache session --/);
     });
 
     check("usage indicators treat unsupported cache write as zero", () => {
       // xAI/Grok shape: input and cache read known, write never reported.
       const shaped = { input: 3, cacheRead: 128, cacheWrite: null, output: 624 };
-      for (const provider of ["xai", "openai", "google", "opencode-go", "opencode-zen"] as const) {
+      for (const provider of ["xai", "google"] as const) {
         const text = core.formatUsageIndicators(shaped, 0, 128_000, null, null, provider);
         assert.match(text, /tokens 131 in\/624 out/);
-        assert.match(text, /cache 98%/);
+        assert.match(text, /cache session 98%/);
       }
-      // Without a provider the same null write stays an honest unknown.
+      assert.match(core.formatUsageIndicators(shaped, 0, 128_000, null, null, "openai", "gpt-5.4"), /cache session 98%/);
+      assert.match(core.formatUsageIndicators(shaped, 0, 128_000, null, null, "openai", "gpt-5.6-sol"), /cache session --/);
+      // Without a known schema the same null write stays an honest unknown.
       const unknown = core.formatUsageIndicators(shaped, 0, 128_000);
       assert.match(unknown, /tokens \? in\/624 out/);
-      assert.match(unknown, /cache --/);
+      assert.match(unknown, /cache session --/);
     });
 
     check("settings pins prepare only an empty, writerless stream", () => {
@@ -112,16 +115,16 @@ describe("Agent Core Main P0 Invariants", () => {
       });
     });
     
-    check("main request projection keeps host context volatile", () => {
-      assert.equal(typeof core.projectMainRequest, "function");
+    check("canonical request projection keeps host snapshots out of durable history", () => {
       const messages = [{ role: "user" as const, content: "inspect", sseq: 1, tokens: 1 }];
-      const first = core.projectMainRequest(messages, "one");
-      const second = core.projectMainRequest(messages, "two");
+      const overlays = new RequestOverlays();
+      overlays.capture(1, buildRequestOverlay({ hostContext: "one" }));
+      const first = projectRequest({ messages, overlays });
+      assert.ok(first.ok);
       assert.equal(first.persistedMessages.length, 1);
       assert.equal(first.messages.length, 2);
       assert.equal(first.messages[0].content, "<working-set>\none\n</working-set>");
       assert.equal(first.messages[1].content, "inspect");
-      assert.notEqual(first.overlay?.hash, second.overlay?.hash);
       assert.equal(JSON.stringify(messages).includes("working-set"), false);
     });
     

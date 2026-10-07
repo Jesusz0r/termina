@@ -34,7 +34,8 @@ describe("prefix measurement", () => {
       const { unchangedOverlay, changedOverlay } = report.crossPromptFixture;
       expect(unchangedOverlay.matchingInputPrefix.items).toBe(17);
       expect(unchangedOverlay.matchingInputPrefix.serializedItemBytes).toBeGreaterThan(32_000);
-      expect(changedOverlay.matchingInputPrefix).toEqual({ items: 0, serializedItemBytes: 0 });
+      expect(changedOverlay.matchingInputPrefix).toEqual(unchangedOverlay.matchingInputPrefix);
+      expect(changedOverlay.matchingInputPrefix.items).toBe(changedOverlay.previousInputItems);
       expect(changedOverlay.instructionsIdentical).toBe(true);
       expect(changedOverlay.toolsIdentical).toBe(true);
       expect(report.providerMeasuredCacheHitRate).toBeNull();

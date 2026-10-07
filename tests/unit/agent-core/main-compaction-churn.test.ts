@@ -127,7 +127,7 @@ describe("compaction churn in the main loop", () => {
         if (!summary && ++turn > 5) throw new Error("fixture request bound");
         const text = summary ? "handoff" : turn <= 2 ? "a".repeat(40_000) : "done";
         const usage = { input_tokens: !summary && turn === 1 ? 15_000 : 30_000, output_tokens: 10,
-          input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } };
+          input_tokens_details: { cached_tokens: summary ? 0 : 10_000, cache_write_tokens: 0 } };
         const events = [{ type: "response.output_text.delta", delta: text }];
         events.push({ type: "response.completed", response: { status: "completed", output: [], usage } });
         return new Response(events.map(e => "data: " + JSON.stringify(e) + "\\n\\n").join(""),
@@ -173,6 +173,10 @@ describe("compaction churn in the main loop", () => {
       const revisions = rows(sessionFile).filter(row => row.type === "revision");
       expect(revisions.map(row => row.kind), output).toContain("summarize");
       expect(output).not.toContain("(summarization failed");
+      const indicators = rows(eventFile).filter(row => row.t === "agent_settings").at(-1)?.usage;
+      expect(indicators).toContain("tokens 105K in/40 out");
+      expect(indicators).toContain("cache last 33% · recent10 40% · session 40%");
+      expect(indicators).toContain("summary 30K in/10 out");
     } finally {
       clearInterval(ackTimer);
       clearTimeout(timeout);

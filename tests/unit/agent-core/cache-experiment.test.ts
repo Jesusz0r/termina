@@ -1,5 +1,12 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import {
+  cacheRequestDiagnostics,
+  classifyCacheMiss,
+  emptyCacheFlipTally,
+  tallyCacheFlip,
+  type CacheRequestDiagnostics,
+} from "../../../agent-core/cache.ts";
 
 import {
   analyzeCacheExperiment,
@@ -7,6 +14,77 @@ import {
   compareTtlBuckets,
   run,
 } from "./cache-experiment.ts";
+
+describe("anchored full-wire prefix diagnostics", () => {
+  const firstWire = [
+    { role: "developer", content: [{ type: "input_text", text: "initial working set" }] },
+    { role: "user", content: [{ type: "input_text", text: "first task" }] },
+  ];
+  const appendedWire = [
+    ...firstWire,
+    { role: "assistant", content: [{ type: "output_text", text: "first result" }] },
+    { role: "developer", content: [{ type: "input_text", text: "updated working set" }] },
+    { role: "user", content: [{ type: "input_text", text: "next task" }] },
+  ];
+  function diagnostics(reusablePrefix: unknown[], workingSet: string, previous?: CacheRequestDiagnostics) {
+    return cacheRequestDiagnostics({
+      identity: { key: "anchored-wire" },
+      policy: {
+        provider: "xai", protocol: "openai-responses", model: "fixture-model",
+        requestedMode: "implicit", effectiveMode: "implicit",
+        requestedTtlMs: null, effectiveTtlMs: null, retentionKnown: null, fallbackReason: null,
+      },
+      modelSettings: { temperature: 1 }, tools: [], stablePrefix: "stable instructions",
+      reusablePrefix, workingSet, previous,
+    });
+  }
+  const before = diagnostics(firstWire, "initial working set");
+  function classify(current: CacheRequestDiagnostics) {
+    return classifyCacheMiss({
+      previous: {
+        atMs: 0, postRevision: false, diagnostics: before,
+        usage: { inputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: null, cacheWriteSupported: false },
+      },
+      current: {
+        atMs: 1_000, postRevision: false, diagnostics: current,
+        usage: { inputTokens: 30, cacheReadTokens: 70, cacheWriteTokens: null, cacheWriteSupported: false },
+      },
+    });
+  }
+
+  it("does not attribute appended working-set changes when the complete old wire prefix survives", () => {
+    const current = diagnostics(appendedWire, "updated working set", before);
+    assert.equal(current.comparedPrefixHash, before.reusablePrefixHash);
+    assert.equal(current.workingSetChanged, true);
+    const miss = classify(current);
+    assert.equal(miss.attributed, false);
+    assert.equal(miss.primary, "backend-or-unknown");
+    assert.ok(!miss.contributing.includes("working-set-changed"));
+    assert.deepEqual(tallyCacheFlip(emptyCacheFlipTally(), miss, current.workingSetChanged), {
+      evaluations: 1, prefixFlips: 0, workingSetChanges: 1,
+    });
+  });
+
+  it("attributes working-set changes only when the old full wire prefix is proven broken", () => {
+    const rewrittenWire = [
+      { role: "developer", content: [{ type: "input_text", text: "rewritten working set" }] },
+      ...appendedWire.slice(1),
+    ];
+    const miss = classify(diagnostics(rewrittenWire, "updated working set", before));
+    assert.equal(miss.attributed, true);
+    assert.equal(miss.primary, "message-prefix-changed");
+    assert.ok(miss.contributing.includes("working-set-changed"));
+  });
+
+  it("does not attribute working-set changes when the old full wire boundary is unknown", () => {
+    const current = diagnostics(appendedWire, "updated working set");
+    assert.equal(current.comparedPrefixHash, null);
+    const miss = classify(current);
+    assert.equal(miss.attributed, false);
+    assert.ok(!miss.contributing.includes("working-set-changed"));
+    assert.ok(miss.missingFields.includes("comparedPrefixHash"));
+  });
+});
 
 describe("Agent Core Cache Experiment Invariants", () => {
   it("passes cache experiment tests", async () => {

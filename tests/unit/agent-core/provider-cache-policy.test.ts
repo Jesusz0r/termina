@@ -420,17 +420,19 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(usageField(invalid.usage, "reportedUsd"), null);
     });
 
-    await test("writeless relay routes treat a null cache write as exact", () => {
+    await test("null cache writes are exact only for known writeless schemas", () => {
       assert.equal(typeof cache.cacheWriteSupportedFor, "function");
-      for (const provider of ["xai", "openai", "google", "opencode-go", "opencode-zen"] as const) {
-        assert.equal(cache.cacheWriteSupportedFor(provider, null), false);
+      for (const provider of ["xai", "google"] as const) {
+        assert.equal(cache.cacheWriteSupportedFor(provider, null, null), false);
       }
-      for (const provider of ["openai-codex", "anthropic", "openrouter"] as const) {
-        assert.equal(cache.cacheWriteSupportedFor(provider, null), null);
+      assert.equal(cache.cacheWriteSupportedFor("openai", null, "gpt-5.4"), false);
+      assert.equal(cache.cacheWriteSupportedFor("openai", null, "gpt-5.6"), true);
+      for (const provider of ["openai", "openai-codex", "anthropic", "openrouter", "opencode-go", "opencode-zen"] as const) {
+        assert.equal(cache.cacheWriteSupportedFor(provider, null, null), null);
       }
       for (const provider of ["xai", "opencode-go", "opencode-zen", "openai-codex"] as const) {
-        assert.equal(cache.cacheWriteSupportedFor(provider, 0), true);
-        assert.equal(cache.cacheWriteSupportedFor(provider, 12), true);
+        assert.equal(cache.cacheWriteSupportedFor(provider, 0, null), true);
+        assert.equal(cache.cacheWriteSupportedFor(provider, 12, null), true);
       }
     });
 

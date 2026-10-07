@@ -7,7 +7,7 @@
  * Extracted from agent-core/main.ts (issue #324).
  */
 import { createHash } from "node:crypto";
-import type { CacheIdentity, ProviderId } from "../auth.ts";
+import { cacheSessionHeaders, type CacheIdentity, type ProviderId } from "../auth.ts";
 import {
   cacheRequestDiagnostics,
   type CachePolicyDiagnostics,
@@ -73,6 +73,7 @@ export function cachePolicyFromBody(
   identity: { provider: ProviderId; protocol: string; model: string },
   prior: CachePolicyDiagnostics | null,
   fallbackReason: string | null,
+  hasHeaderIdentity = false,
 ): { policy: CachePolicyDiagnostics; markers: CacheMarkerDetails } {
   const markers = cacheMarkerDetails(body);
   const options = body.prompt_cache_options;
@@ -81,7 +82,7 @@ export function cachePolicyFromBody(
   const hasSessionId = typeof body.session_id === "string" && body.session_id.length > 0;
   const requestedMode = hasExplicitOptions
     ? "explicit"
-    : hasCacheKey || hasSessionId
+    : hasCacheKey || hasSessionId || hasHeaderIdentity
       ? "implicit"
         : markers.count > 0
           ? identity.protocol === "anthropic-messages"
@@ -199,23 +200,17 @@ export function buildCacheRequestDiagnostics(input: {
   delete settings.prompt_cache_key;
   delete settings.session_id;
   const modelSettings = { ...identity, request: settings };
-  const policyDetails = cachePolicyFromBody(body, identity, priorPolicy, fallbackReason);
-  // `toGoogleContents` coalesces adjacent user turns into one contents item,
-  // so its first array element is not a reliable overlay boundary. Leave that
-  // reusable-prefix hash unknown rather than claiming a prefix we cannot
-  // reconstruct byte-for-byte after serialization.
-  const persistedMessages = identity.protocol === "google-generate" && overlay
-    ? undefined
-    : Array.isArray(messages) && overlay ? messages.slice(1) : messages;
-  // A session seed is useful for deriving provider headers, but it is not a
-  // provider-facing cache key on every route (for example direct Anthropic or
-  // Gemini). Only report the identity hash when this request actually emits
-  // a supported body/header identity.
+  // Report only identities actually emitted in the body or by the canonical
+  // header owner. This includes Codex session headers without claiming they
+  // are a documented prompt-cache key or guaranteed cache retention.
+  const hasHeaderIdentity = cacheIdentity !== null &&
+    Object.values(cacheSessionHeaders(cacheIdentity)).includes(cacheIdentity.key);
   const diagnosticIdentity = cacheIdentity && (
-    identity.provider === "openrouter" ||
-    identity.provider === "xai" ||
-    cacheKeySupported
+    hasHeaderIdentity ||
+    (cacheKeySupported && body.prompt_cache_key === cacheIdentity.key) ||
+    body.session_id === cacheIdentity.key
   ) ? cacheIdentity : null;
+  const policyDetails = cachePolicyFromBody(body, identity, priorPolicy, fallbackReason, hasHeaderIdentity);
   const base = cacheRequestDiagnostics({
     identity: diagnosticIdentity,
     policy: policyDetails.policy,
@@ -223,14 +218,16 @@ export function buildCacheRequestDiagnostics(input: {
     tools,
     serializedToolsText: memoizedTools?.text ?? null,
     stablePrefix: { system: stableSystem, tools, settings: modelSettings },
-    reusablePrefix: persistedMessages,
+    // Hash the complete post-protocol wire sequence, including all snapshots.
+    // Google coalescing can grow the last item, making this evidence
+    // conservative; item equality does not promise provider cache reuse.
+    reusablePrefix: messages,
     previous: cacheIdentity?.role === "main" ? input.previousDiagnostics ?? null : null,
     // Prefix evidence takes one bounded pass and checkpoints the previous
     // request's boundary. Do not compute a second whole-history diagnostic.
-    // An absent overlay is complete evidence (no working set was sent), so
-    // report it as an explicit null that hashes to a stable sentinel. Only
-    // an undefined value stays unknown, as for routes where the prefix
-    // cannot be reconstructed after serialization.
+    // The latest capture is telemetry, distinct from complete wire-prefix
+    // evidence. An absent latest capture hashes to a stable null sentinel;
+    // earlier snapshots can still remain in the wire sequence.
     workingSet: overlay ? overlay.text : null,
     markerCount: policyDetails.markers.count,
     markerPositions: policyDetails.markers.positions,

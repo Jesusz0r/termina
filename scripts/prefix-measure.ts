@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildFrozenSystem } from "../agent-core/main/front-matter.ts";
-import { buildRequestOverlay, projectRequest } from "../agent-core/request-projection.ts";
+import { buildRequestOverlay, projectRequest, RequestOverlays } from "../agent-core/request-projection.ts";
 import { mcpClientTools, mcpToolDefs, searchMcpTools, selectMcpTools } from "../agent-core/mcp.ts";
 import { responsesBody } from "../agent-core/openai-compat/responses.ts";
 import type { KernelMessage, ToolDef } from "../agent-core/openai-compat/types.ts";
@@ -43,17 +43,21 @@ export function measurePrefix(opts: Parameters<typeof buildFrozenSystem>[0]) {
   const eagerBytes = bytes(toolsOnlyBody(mcpToolDefs(catalog)).tools);
   const deferredBytes = bytes(toolsOnlyBody(deferred).tools);
   const discoveryBytes = Buffer.byteLength(searchMcpTools(catalog, { query: catalog[0]!.name }), "utf8");
-  const history: Array<{ role: "user" | "assistant"; content: string }> = Array.from({ length: 16 }, (_, i) => ({
+  const history: Array<{ role: "user" | "assistant"; content: string; sseq: number }> = Array.from({ length: 16 }, (_, i) => ({
     role: i % 2 ? "assistant" : "user",
     content: `Message ${i}: ${"stable history. ".repeat(128)}`,
+    sseq: i + 1,
   }));
   const body = (messages: typeof history, context: string) => {
-    const projected = projectRequest({ messages, overlay: buildRequestOverlay({ hostContext: context }) });
+    const overlays = new RequestOverlays();
+    overlays.capture(1, buildRequestOverlay({ hostContext: "file.ts: revision A" }));
+    if (messages.length > history.length) overlays.capture(17, buildRequestOverlay({ hostContext: context }));
+    const projected = projectRequest({ messages, overlays });
     if (!projected.ok) throw new Error(projected.error);
     return responsesBody("measurement-only", frozen.system, projected.messages as KernelMessage[], deferred as ToolDef[], {});
   };
   const before = body(history, "file.ts: revision A");
-  const nextHistory: typeof history = [...history, { role: "user", content: "Next task" }];
+  const nextHistory: typeof history = [...history, { role: "user", content: "Next task", sseq: 17 }];
   const compare = (after: Record<string, unknown>) => ({
     instructionsIdentical: before.instructions === after.instructions,
     toolsIdentical: JSON.stringify(before.tools) === JSON.stringify(after.tools),

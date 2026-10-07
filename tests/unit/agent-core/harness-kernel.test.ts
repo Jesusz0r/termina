@@ -4162,7 +4162,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     // Copilot is billed as OpenAI but serves its own model list (claude, grok,
     // gemini, kimi) and a different gpt-5-mini window (264k vs 400k). Reusing
     // the pricing mapping for context left 18 Copilot models with no entry.
-    check("writeless routes treat null cache writes as exact", cache.cacheWriteSupportedFor("xai", null) === false && cache.cacheWriteSupportedFor("anthropic", null) === null);
+    check("writeless routes treat null cache writes as exact", cache.cacheWriteSupportedFor("xai", null, "grok-4.6") === false && cache.cacheWriteSupportedFor("anthropic", null, "claude-sonnet-5") === null);
     check("catalog: copilot bills as openai", models.catalogProviderId("github-copilot") === "openai");
     check("catalog: copilot resolves context as itself", models.contextCatalogProviderId("github-copilot") === "github-copilot");
     check("catalog: codex resolves context as itself", models.contextCatalogProviderId("openai-codex") === "openai-codex");
@@ -4208,12 +4208,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check(
       "usage indicators show tokens, cache, context, and cost",
-      usageIndicators === "tokens 1.5K in/250 out · cache 67% · context ~20K/200K 10% · last $0.0123",
+      usageIndicators === "tokens 1.5K in/250 out · cache session 67% · context ~20K/200K 10% · last $0.0123",
     );
     check(
       "usage indicators handle unknown and invalid values",
       formatUsageIndicators({ input: Number.NaN, cacheRead: Number.POSITIVE_INFINITY, cacheWrite: -1, output: -2 }, Number.NaN, Number.POSITIVE_INFINITY, Number.NaN) ===
-        "tokens ? in/? out · cache -- · context ~0/1 0%",
+        "tokens ? in/? out · cache session -- · context ~0/1 0%",
     );
     check("outputTokenBudget off is output cap", outputTokenBudget({ thinking: false }) === 16_384);
     check("outputTokenBudget on is a single cap", outputTokenBudget({ thinking: true }) === 64_000);

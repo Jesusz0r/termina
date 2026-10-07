@@ -7,7 +7,7 @@ import * as session from "../../../agent-core/session.ts";
 
 let projectRequest: any;
 let projectPersistedMessages: any;
-let prependRequestOverlay: any;
+let RequestOverlays: any;
 let buildRequestOverlay: any;
 let userPromptContent: any;
 
@@ -58,13 +58,15 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     const mod = await import("../../../agent-core/request-projection.ts");
     projectRequest = mod.projectRequest;
     projectPersistedMessages = mod.projectPersistedMessages;
-    prependRequestOverlay = mod.prependRequestOverlay;
+    RequestOverlays = mod.RequestOverlays;
     buildRequestOverlay = mod.buildRequestOverlay;
     userPromptContent = mod.userPromptContent;
   });
 
-  const projection = (input: any) => {
-    const result = projectRequest(input);
+  const projection = ({ messages, overlay }: any) => {
+    const overlays = new RequestOverlays();
+    if (overlay) overlays.capture(messages[0]?.sseq ?? 1, overlay);
+    const result = projectRequest({ messages, overlays });
     expect(result).toBeTruthy();
     return result;
   };
@@ -99,43 +101,31 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     const firstRequest = jsonBytes(requestMessages(first));
     const secondRequest = jsonBytes(requestMessages(second));
     expect(firstRequest).toEqual(secondRequest);
-    expect(first.overlay?.text).toBe(overlay.text);
-    expect(first.overlay?.bytes).toBe(Buffer.byteLength(overlay.text, "utf8"));
-    expect(first.overlay?.hash).toBe(createHash("sha256").update(Buffer.from(overlay.text, "utf8")).digest("hex"));
-    expect(first.overlay).toEqual(second.overlay);
+    expect(first.messages[0].content).toBe(overlay.text);
+    expect(overlay.bytes).toBe(Buffer.byteLength(overlay.text, "utf8"));
+    expect(overlay.hash).toBe(createHash("sha256").update(Buffer.from(overlay.text, "utf8")).digest("hex"));
   });
 
-  it("stamps persisted projection before prepending overlay", () => {
+  it("assembles snapshots before provider marker stamping", async () => {
+    const { stampHistoryCache } = await import("../../../agent-core/main/anthropic-cache.ts");
     const overlay = overlayFor();
-    expect(overlay).toBeTruthy();
-    const persisted = projectPersistedMessages({ messages: baseHistory });
-    expect(persisted.ok).toBe(true);
-    const stamped = persisted.messages.map((entry: any) => ({
-      ...entry,
-      content: typeof entry.content === "string"
-        ? entry.content
-        : entry.content.map((block: any) => ({ ...block, cache_control: { type: "ephemeral" } })),
-    }));
-    const assembled = prependRequestOverlay(stamped, overlay);
-    expect(assembled.length).toBe(stamped.length + 1);
-    expect(assembled.at(0)?.content).toBe(overlay.text);
-    expect(JSON.stringify(assembled.at(0))).not.toContain("cache_control");
+    const projected = projection({ messages: baseHistory, overlay });
+    const stamped = stampHistoryCache(projected.messages);
+    expect(stamped).toHaveLength(baseHistory.length + 1);
+    expect(stamped[0].content).toBe(overlay.text);
+    expect(JSON.stringify(stamped.at(-1))).toContain("cache_control");
+    expect(JSON.stringify(projected.messages)).not.toContain("cache_control");
   });
 
-  it("enforces exact metadata on caller-supplied overlays", () => {
+  it("enforces exact metadata and the per-snapshot byte cap", () => {
     const overlay = overlayFor("caller overlay");
-    expect(overlay).toBeTruthy();
-    const exact = projection({ messages: [], overlay, maxBytes: overlay.bytes });
-    expect(exact.ok).toBe(true);
-    expect(exact.overlay).toEqual(overlay);
-
-    const tooSmall = projection({ messages: [], overlay, maxBytes: overlay.bytes - 1 });
-    expect(tooSmall.ok).toBe(false);
-    expect(tooSmall.error).toMatch(/exceeds/);
-
-    const tampered = projection({ messages: [], overlay: { ...overlay, bytes: overlay.bytes + 1 } });
-    expect(tampered.ok).toBe(false);
-    expect(tampered.error).toMatch(/bytes\/hash/);
+    const snapshots = new RequestOverlays();
+    expect(snapshots.capture(1, overlay)).toEqual(overlay);
+    expect(() => snapshots.capture(2, { ...overlay, bytes: overlay.bytes + 1 })).toThrow(/bytes\/hash/);
+    const text = "x".repeat(64 * 1024 + 1);
+    expect(() => snapshots.capture(2, {
+      text, bytes: Buffer.byteLength(text), hash: createHash("sha256").update(text).digest("hex"),
+    })).toThrow(/exceeds/);
   });
 
   it("does not duplicate file inventories into model requests", () => {
