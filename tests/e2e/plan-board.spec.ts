@@ -677,6 +677,17 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     await expect.poll(() => workerResponse !== null).toBe(true);
     const workerId = (await page.evaluate((id) => window.termina.getPlan(id), ownerId))[0]!.workerId!;
     expect((await page.evaluate((id) => window.termina.getRuns(id), workerId)).at(-1)).toMatchObject({ replayable: true, overlap: false });
+    await page.locator("#btn-all-projects").click();
+    const card = page.locator(".overview-work-card").filter({ hasText: taskText });
+    await card.getByRole("button", { name: "Task details", exact: true }).click();
+    const inspector = page.locator("#project-work-inspector");
+    await expect(inspector).toContainText(`working · worker ${workerId}`);
+    await expect(inspector).toContainText(`Plan owner ${ownerId}`);
+    await expect(inspector).toContainText("Shared project files");
+    await expect(inspector).toContainText("Worker check: Not run");
+    await expect(inspector.getByRole("button", { name: "Open terminal", exact: true })).toBeVisible();
+    await expect(inspector.getByRole("button", { name: "Open plan", exact: true })).toBeVisible();
+    expect((await page.evaluate((id) => window.termina.getPlan(id), ownerId))[0]!.workerId).toBe(workerId);
     complete(workerResponse!, "No changes made; this task remains incomplete.");
     workerResponse = null;
     await expect.poll(() => page.evaluate((id) => window.termina.getPlan(id).then((tasks) => tasks[0]?.dispatchResult?.outcome), ownerId)).toBe("incomplete");
@@ -684,6 +695,18 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     const run = (await page.evaluate((id) => window.termina.getRuns(id), workerId)).at(-1)!;
     expect(run, JSON.stringify(run, null, 2)).toMatchObject({ replayable: true, overlap: false, reason: null });
     expect(run.startStateId).toBe(run.settledStateId);
+    await expect(inspector).toContainText(`Previous attempt incomplete (${workerId})`);
+    await expect(inspector).toContainText("No live worker assigned");
+    await expect(inspector).toContainText("Owner check:");
+    await expect(page.locator(".overview-inspector-title")).toHaveText(taskText);
+    await expect(page.locator("#attention-view")).toBeVisible();
+    await expect(card.locator(".overview-inspect")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#attention-list")).toContainText("Task attempt incomplete");
+    const attention = (await page.evaluate(() => window.termina.getWorkOverview())).items;
+    await inspector.getByRole("button", { name: "Open plan", exact: true }).click();
+    await expect(page.locator("#attention-view")).toBeHidden();
+    await expect(page.locator("#plan-list")).toContainText(taskText);
+    expect((await page.evaluate(() => window.termina.getWorkOverview())).items).toEqual(attention);
   });
 
   test("an incomplete worker can be closed and the task retried without losing the last result", async ({ page, runRoot, electronApp }) => {

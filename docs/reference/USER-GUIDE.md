@@ -319,6 +319,30 @@ The view initially shows up to 50 items; **Show more** reveals the next page.
 are marked potentially outdated, not replaced with a false empty-success state.
 `Escape` or **Close** returns focus to the opener when it is still available.
 
+### Jump to work
+
+Open the **Command palette** with `Cmd/Ctrl+K` to find an open project or an
+existing Plan Board task, as well as run commands. Search by project name,
+full path, or task text. Words are matched without case sensitivity; results
+include the project path and Plan Board owner to distinguish repeated names.
+Use `↑` / `↓`, `Home` / `End`, and `Enter`, or click a result. `Escape` cancels
+and restores focus to the opener.
+
+A project result activates that project's existing workspace. A task result
+activates its project, opens **All projects**, and selects its exact
+**Work Inspector**, without automatically focusing or starting its worker.
+An explicit jump clears the local Overview filter to reveal the task,
+including tasks beyond its first page. **Focus task** is a separate action
+and requires a valid existing worker. Previous projects retain their editor
+buffers and background work when you switch back.
+
+Navigation never creates tasks or terminals, dispatches or retries work,
+answers permissions, or marks anything reviewed. Targets are checked again
+before opening. If the project, owner, assigned source, or task changed or
+closed, search again to choose its current context. The palette shows at most
+50 matching project/task results and asks you to refine broader searches;
+commands remain usable if project/task data is unavailable.
+
 ### Factual work context
 
 Expand **Project work** beside the terminal to inspect its project path,

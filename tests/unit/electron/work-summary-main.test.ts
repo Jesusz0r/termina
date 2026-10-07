@@ -51,6 +51,7 @@ interface Project {
   terminalIds: Set<string>;
   workspaces: Map<string, Workspace>;
   activationGeneration: number;
+  worldlines?: { recoverySummaries(): ProjectWorkSummary["candidateRecoveries"] };
 }
 interface MainHarness {
   projects: Map<string, Project>;
@@ -113,6 +114,16 @@ function historicalPass(): VerifyInfo {
 }
 
 describe("main project work-summary orchestration", () => {
+  it("projects canonical retained candidate recovery even without a terminal", () => {
+    const { main, project } = fixture();
+    const recovery = { comparisonId: "cmp-failed", label: "B" as const, root: "/worlds/failed", version: 2,
+      error: "Session did not start", recovery: "open" as const };
+    project.worldlines = { recoverySummaries: vi.fn(() => [recovery]) };
+    expect(main.workSummary(project.id)).toMatchObject({ terminals: [], candidateRecoveries: [recovery] });
+    expect(project.worldlines.recoverySummaries).toHaveBeenCalledOnce();
+    expect(main.runtime.size).toBe(0);
+  });
+
   it.each([undefined, null, 1, {}, [], "", "missing-project", "p".repeat(65)])("rejects invalid or missing project %j", (projectId) => {
     const { main, add } = fixture();
     add("term-1");
@@ -121,7 +132,7 @@ describe("main project work-summary orchestration", () => {
 
   it("returns an empty summary for an existing project with no live terminals", () => {
     const { main, project } = fixture();
-    expect(main.workSummary(project.id)).toEqual({ projectId: project.id, name: "active", root: project.cwd, terminals: [] });
+    expect(main.workSummary(project.id)).toEqual({ projectId: project.id, name: "active", root: project.cwd, terminals: [], candidateRecoveries: [] });
   });
 
   it("includes only live terminals in the requested project's authoritative roster", () => {
@@ -215,6 +226,33 @@ describe("main global attention and validated inspection", () => {
     expect(lookups.mock.calls.length).toBeLessThanOrEqual(6);
     expect(main.workOverview().items[0]).toMatchObject({ projectId: project.id, terminalId: owner.id, workArea: { root: candidate.root } });
     expect(main.workOverview().projects[1]).toMatchObject({ projectId: second.id, working: 1, attentionCount: 0 });
+  });
+
+  it("reads all canonical tasks and source areas without mutation or heavy runtime payloads", () => {
+    const { main, project, primary, candidate, add } = fixture();
+    const pending: PlanTask = { text: "Pending task", paths: ["pending.ts"], state: "pending" };
+    const done: PlanTask = { text: "Done task", paths: ["done.ts"], state: "done", dispatchResult: { workerId: "gone", outcome: "completed" } };
+    const owner = add("term-owner", { plan: [pending, done], modified: new Map([["private.ts", { diff: "large private diff" }]]), verifyOutput: "large verification output" });
+    Object.assign(owner, { buffer: "large terminal buffer", diff: "large source diff" });
+    add("term-candidate", { workspaceId: candidate.id, cwd: primary.root });
+    add("term-shell", { type: "shell", workspaceId: candidate.id });
+    main.activityInputs.set("term-shell", { ...emptyActivityInput(), lastBoundary: "agent_start" });
+    const before = structuredClone({ runtime: main.runtime, activity: main.activityInputs, project });
+    const single = main.workSummary(project.id)!;
+    const overview = main.workOverview();
+    expect(overview).toEqual({ projects: [{ ...single, working: 0, attentionCount: 0 }], items: [] });
+    expect(overview.projects[0]!.terminals[0]!.tasks.map(({ task }) => task)).toEqual([pending, done]);
+    expect(overview.projects[0]!.terminals[1]!.workArea).toEqual({ workspaceId: candidate.id, root: candidate.root, kind: "candidate", comparisonId: candidate.comparisonId });
+    expect(overview.projects[0]!.terminals[2]).toMatchObject({ type: "shell", activity: null, verify: null, model: null });
+    for (const terminal of overview.projects[0]!.terminals) {
+      for (const key of ["buffer", "diff", "modified", "verifyOutput"]) expect(terminal).not.toHaveProperty(key);
+    }
+    expect(JSON.stringify(overview)).not.toContain("large");
+    expect(JSON.stringify(overview)).not.toContain("private.ts");
+    expect(main.workOverview()).toEqual(overview);
+    expect({ runtime: main.runtime, activity: main.activityInputs, project }).toEqual(before);
+    expect(main.send).not.toHaveBeenCalled();
+    expect(main.persistOpenProjects).not.toHaveBeenCalled();
   });
 
   it("uses actual activation, returns exact navigation, and never resolves recorded attention", async () => {

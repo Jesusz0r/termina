@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAttentionView } from "../../../src/main/attention-view.ts";
-import type { TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview } from "../../../shared/types.ts";
+import type { TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../../shared/types.ts";
+import { projectWorkSummary, workOverview } from "../../../electron/main/work-summary.ts";
 import { FakeEl, installFakeDom } from "./fake-dom.ts";
 
 function item(overrides: Partial<WorkAttentionItem> = {}): WorkAttentionItem {
@@ -15,8 +16,8 @@ function item(overrides: Partial<WorkAttentionItem> = {}): WorkAttentionItem {
 function overview(items: WorkAttentionItem[] = [item()]): WorkOverview {
   return {
     projects: [
-      { projectId: "proj-1", name: "First project", root: "/projects/full/path/first", working: 0, attentionCount: items.filter((row) => row.projectId === "proj-1").length },
-      { projectId: "proj-2", name: "Other project", root: "/projects/full/path/other", working: 1, attentionCount: items.filter((row) => row.projectId === "proj-2").length },
+      { projectId: "proj-1", name: "First project", root: "/projects/full/path/first", terminals: [], candidateRecoveries: [], working: 0, attentionCount: items.filter((row) => row.projectId === "proj-1").length },
+      { projectId: "proj-2", name: "Other project", root: "/projects/full/path/other", terminals: [], candidateRecoveries: [], working: 1, attentionCount: items.filter((row) => row.projectId === "proj-2").length },
     ],
     items,
   };
@@ -40,7 +41,7 @@ function deferred<T>() {
 const flush = async (): Promise<void> => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 const refreshDelay = async (): Promise<void> => { await vi.advanceTimersByTimeAsync(150); await flush(); };
 const text = (node: FakeEl): string => [node.textContent, ...node.children.map(text)].join("\n");
-const hooks = ["onInstances", "onPlanUpdate", "onVerifyState", "onTimelineClear", "onFolderOpened", "onProjectClosed", "onAgentStatus", "onTimelinePrefix"] as const;
+const hooks = ["onInstances", "onPlanUpdate", "onModifiedList", "onFileChanged", "onFileDeleted", "onVerifyState", "onTimelineClear", "onFolderOpened", "onProjectClosed", "onAgentStatus", "onTimelinePrefix"] as const;
 let dom: ReturnType<typeof installFakeDom>;
 let view: ReturnType<typeof createAttentionView> | undefined;
 
@@ -61,6 +62,11 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
     element.append(node);
     return node;
   };
+  const title = child("h2", "work-view-title");
+  const projectContent = child("div", "project-overview");
+  const attentionHeading = child("h3", "overview-attention-heading");
+  const overviewToggle = dom.document.createElement("button");
+  const workspace = dom.document.createElement("div");
   const list = child("ul", "attention-list");
   const status = child("p", "attention-status");
   const message = child("p", "attention-message");
@@ -68,13 +74,16 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
   const refresh = child("button", "btn-refresh-attention");
   const more = child("button", "btn-more-attention");
   const outside = dom.document.createElement("button");
-  dom.document.body.append(toggle, element, outside);
+  dom.document.body.append(toggle, overviewToggle, element, workspace, outside);
   const callbacks = new Map<string, (payload: unknown) => void>();
   const unsubs = hooks.map(() => vi.fn());
   const getWorkOverview = vi.fn(async (): Promise<WorkOverview> => initial);
   if (pending) getWorkOverview.mockReturnValueOnce(pending);
   const inspectWorkAttention = vi.fn(async (_id: string): Promise<WorkAttentionInspectResult> => inspectResult());
-  const bridge = { getWorkOverview, inspectWorkAttention } as unknown as TerminaBridge;
+  const getVerifyReport = vi.fn(async (_id: string, _generation: number): Promise<string | null> => "Check output");
+  const getReviewFiles = vi.fn<TerminaBridge["getReviewFiles"]>().mockResolvedValue({ ok: true, files: [], total: 0 });
+  const getReviewDiff = vi.fn<TerminaBridge["getReviewDiff"]>().mockResolvedValue({ ok: false, error: "Baseline unavailable" });
+  const bridge = { getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff } as unknown as TerminaBridge;
   hooks.forEach((hook, index) => {
     bridge[hook] = ((callback: (payload: unknown) => void) => {
       callbacks.set(hook, callback);
@@ -82,19 +91,284 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
     }) as never;
   });
   const onOverview = vi.fn<(value: WorkOverview | null) => void>();
+  const onNavigate = vi.fn(async (_projectId: string, _action: WorkSummaryAction | null, _isCurrent: () => boolean): Promise<boolean> => false);
+  const onReveal = vi.fn();
+  const onViewChange = vi.fn();
+  const onNewProject = vi.fn();
+  const onCandidateRecovery = vi.fn().mockResolvedValue(false);
+  const onRevealCandidate = vi.fn();
   const onInspect = vi.fn(async (_result: Extract<WorkAttentionInspectResult, { ok: true }>, _isCurrent: () => boolean): Promise<boolean> => false);
   view = createAttentionView({
     element: element as unknown as HTMLElement, toggle: toggle as unknown as HTMLButtonElement,
-    bridge, onOverview, onInspect,
+    overviewToggle: overviewToggle as unknown as HTMLButtonElement,
+    workspace: [workspace as unknown as HTMLElement],
+    bridge, onOverview, onInspect, onNavigate, onReveal, onViewChange, onNewProject,
+    onFocusTerminal: vi.fn().mockResolvedValue(null),
+    onTerminalControl: vi.fn().mockResolvedValue({ ok: true }),
+    onCandidateRecovery, onRevealCandidate,
   });
   return {
-    element, toggle, count, list, status, message, close, refresh, more, outside,
-    getWorkOverview, inspectWorkAttention, onOverview, onInspect, unsubs,
+    element, toggle, overviewToggle, workspace, title, projectContent, attentionHeading,
+    onNavigate, onReveal, onViewChange, onNewProject, onCandidateRecovery, onRevealCandidate,
+    count, list, status, message, close, refresh, more, outside,
+    getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, onOverview, onInspect, unsubs,
     emit: (hook: typeof hooks[number], payload: unknown = {}) => callbacks.get(hook)!(payload),
     open: async () => { view!.open(); await refreshDelay(); },
     inspectButton: (index = 0) => list.children[index]!.querySelector("button")!,
   };
 }
+
+function overviewWithTask(): WorkOverview {
+  const project = projectWorkSummary({ id: "proj-1", cwd: "/projects/first" }, [{
+    id: "term-1", generation: 3, type: "agent", model: "provider/model",
+    activity: { state: "idle", reason: null }, workspace: { id: "ws-1", root: "/projects/first", primary: true },
+    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0,
+    plan: [{ text: "Repair the parser", paths: [], state: "pending" }],
+  }]);
+  const value = workOverview([project]);
+  value.items = [item({ projectId: "proj-2" })];
+  return value;
+}
+
+describe("integrated All projects surface", () => {
+  it("forwards retained recovery navigation, reveals only after current hydration, and preserves selection", async () => {
+    const value = overview([]);
+    const recovery = { comparisonId: "cmp-failed", label: "B" as const, root: "/worlds/B", version: 4,
+      error: "Session startup failed", recovery: "open" as const };
+    value.projects[0]!.candidateRecoveries = [recovery];
+    const h = harness(value);
+    h.onCandidateRecovery.mockResolvedValue(true);
+    view!.open(undefined, "overview"); await refreshDelay();
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    h.projectContent.querySelector(".overview-inspector-primary")!.click(); await flush();
+    expect(h.onCandidateRecovery).toHaveBeenCalledExactlyOnceWith("proj-1", recovery, expect.any(Function));
+    expect(h.onRevealCandidate).toHaveBeenCalledExactlyOnceWith(recovery);
+    expect(h.element.hidden).toBe(true);
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(h.inspectWorkAttention).not.toHaveBeenCalled();
+    view!.open(undefined, "overview"); await refreshDelay();
+    expect(h.projectContent.querySelector(".overview-work-card")!.classList.contains("is-selected")).toBe(true);
+  });
+
+  it("does not reveal recovery when the user exits during its navigation", async () => {
+    const value = overview([]);
+    value.projects[0]!.candidateRecoveries = [{ comparisonId: "cmp-failed", label: "A", root: "/worlds/A", version: 4,
+      error: "Session startup failed", recovery: "discard" }];
+    const h = harness(value);
+    const pending = deferred<boolean>();
+    h.onCandidateRecovery.mockReturnValueOnce(pending.promise);
+    view!.open(undefined, "overview"); await refreshDelay();
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    h.projectContent.querySelector(".overview-inspector-primary")!.click();
+    view!.close();
+    pending.resolve(true); await flush();
+    expect(h.onRevealCandidate).not.toHaveBeenCalled();
+    expect(h.element.hidden).toBe(true);
+  });
+
+  it.each(["onFileChanged", "onFileDeleted"] as const)("invalidates a pending diff on %s in its source, preserving global attention and workspace", async (hook) => {
+    const value = overviewWithTask(); const before = JSON.stringify(value);
+    const h = harness(value); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview"); await refreshDelay();
+    const recorded = { path: "/projects/first/actual.ts", relPath: "actual.ts", status: "modified" as const };
+    h.getReviewFiles.mockResolvedValue({ ok: true, files: [recorded], total: 1 });
+    const pending = deferred<Awaited<ReturnType<TerminaBridge["getReviewDiff"]>>>();
+    h.getReviewDiff.mockReturnValueOnce(pending.promise);
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    h.projectContent.querySelector(".overview-inspector-inspect-changes")!.click(); await flush();
+    const list = h.projectContent.querySelector(".overview-changes-list")!;
+    list.querySelector("button")!.click();
+    expect(h.getReviewDiff).toHaveBeenCalledExactlyOnceWith({ projectId: "proj-1", workspaceId: "ws-1", root: "/projects/first", terminalId: "term-1", generation: 3 }, recorded.path);
+    h.emit(hook, { projectId: "proj-2", workspaceId: "other-tree", path: recorded.path });
+    expect(list.children).toHaveLength(1);
+    h.emit(hook, { projectId: "proj-1", workspaceId: "ws-1", path: recorded.path });
+    expect(list.children).toHaveLength(0);
+    pending.resolve({ ok: true, ...recorded, baseline: "before", current: "obsolete", deleted: false }); await flush();
+    expect(h.projectContent.querySelector(".overview-changes-diff-section")!.hidden).toBe(true);
+    expect(h.element.hidden).toBe(false);
+    expect(h.workspace.inert).toBe(true);
+    expect(h.list.children).toHaveLength(1);
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(JSON.stringify(value)).toBe(before);
+  });
+
+  it("lets the diff's nested controls consume Escape before closing selected work", async () => {
+    const h = harness(overviewWithTask()); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview"); await refreshDelay();
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    const control = h.projectContent.querySelector(".overview-inspector-inspect-changes")!;
+    control.addEventListener("keydown", (event) => event.preventDefault());
+    control.dispatch("keydown", { key: "Escape" });
+    expect(h.projectContent.querySelector(".overview-work-inspector")!.hidden).toBe(false);
+    expect(h.element.hidden).toBe(false);
+  });
+
+  it("opens the real card overview without activating a project, and keeps attention global while filtering", async () => {
+    const h = harness(overviewWithTask()); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview"); await refreshDelay();
+    expect(h.element.getAttribute("aria-label")).toBe("All projects");
+    expect(h.title.textContent).toBe("All projects");
+    expect(h.overviewToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(h.toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(h.workspace.inert).toBe(true);
+    expect(h.onViewChange).toHaveBeenLastCalledWith(true);
+    expect(h.projectContent.hidden).toBe(false);
+    expect(text(h.projectContent)).toContain("Repair the parser");
+    expect(h.list.children[0]!.dataset.projectId).toBe("proj-2");
+    const filter = h.projectContent.querySelector("input")!;
+    filter.value = "no matching task"; filter.dispatch("input");
+    expect(h.projectContent.querySelectorAll(".overview-work-card")).toHaveLength(0);
+    expect(h.list.children).toHaveLength(1);
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(h.inspectWorkAttention).not.toHaveBeenCalled();
+    h.element.dispatch("keydown", { key: "Escape" });
+    expect(h.workspace.inert).toBe(false);
+    expect(h.onViewChange).toHaveBeenLastCalledWith(false);
+    expect(dom.document.activeElement).toBe(h.overviewToggle);
+  });
+
+  it("restores the exact workspace inert state when changing mode or disposing", async () => {
+    const h = harness(overviewWithTask()); await flush();
+    h.workspace.inert = true;
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview");
+    h.toggle.click();
+    expect(h.element.getAttribute("aria-label")).toBe("Attention across all projects");
+    expect(h.workspace.inert).toBe(true);
+    expect(h.projectContent.hidden).toBe(true);
+    h.workspace.inert = false;
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview");
+    view!.dispose();
+    expect(h.workspace.inert).toBe(false);
+  });
+
+  it("refreshes card facts on tracked-change events without replacing focused actions", async () => {
+    const h = harness(overviewWithTask()); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview"); await refreshDelay();
+    const button = h.projectContent.querySelector(".overview-inspect")!; button.focus();
+    const next = overviewWithTask(); next.projects[0]!.terminals[0]!.trackedChanges = 9;
+    h.getWorkOverview.mockResolvedValue(next);
+    h.emit("onModifiedList", { instanceId: "term-1" }); await refreshDelay();
+    expect(text(h.projectContent)).toContain("9 tracked paths");
+    expect(h.projectContent.querySelector(".overview-inspect")).toBe(button);
+    expect(dom.document.activeElement).toBe(button);
+  });
+
+  it("reveals the workspace before handing focus to a successfully opened, generation-fenced task owner", async () => {
+    const h = harness(overviewWithTask()); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview");
+    h.onNavigate.mockImplementation(async (_projectId, _action, isCurrent) => isCurrent());
+    h.onReveal.mockImplementation(() => {
+      expect(h.workspace.inert).toBe(false);
+      expect(h.element.hidden).toBe(true);
+      h.outside.focus();
+    });
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(h.element.hidden).toBe(false);
+    h.projectContent.querySelector(".overview-inspector-primary")!.click(); await flush();
+    expect(h.onNavigate).toHaveBeenCalledExactlyOnceWith("proj-1", { kind: "plan", terminalId: "term-1", generation: 3 }, expect.any(Function));
+    expect(h.onReveal).toHaveBeenCalledExactlyOnceWith("proj-1", { kind: "plan", terminalId: "term-1", generation: 3 });
+    expect(dom.document.activeElement).toBe(h.outside);
+    expect(h.inspectWorkAttention).not.toHaveBeenCalled();
+  });
+
+  it.each(["close", "new inspection", "select context", "close details", "change mode", "dispose"] as const)("fences pending project navigation after %s", async (action) => {
+    const h = harness(overviewWithTask()); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview");
+    const pending = deferred<boolean>(); h.onNavigate.mockReturnValueOnce(pending.promise);
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    h.projectContent.querySelector(".overview-inspector-primary")!.click();
+    const isCurrent = h.onNavigate.mock.calls[0]![2];
+    expect(isCurrent()).toBe(true);
+    if (action === "close") h.close.click();
+    else if (action === "new inspection") h.inspectButton().click();
+    else if (action === "select context") h.projectContent.querySelector(".overview-inspect")!.click();
+    else if (action === "close details") h.projectContent.querySelector(".overview-inspector-close")!.click();
+    else if (action === "change mode") h.toggle.click();
+    else view!.dispose();
+    expect(isCurrent()).toBe(false);
+    pending.resolve(true); await flush();
+    expect(h.onReveal).not.toHaveBeenCalled();
+  });
+
+  it("keeps prior cards with an explicit unavailable status, rather than claiming an empty current workspace", async () => {
+    const h = harness(overviewWithTask()); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview");
+    h.getWorkOverview.mockRejectedValue(new Error("IPC unavailable"));
+    await refreshDelay();
+    expect(text(h.projectContent)).toContain("Repair the parser");
+    expect(h.status.textContent).toContain("Previous rows may be outdated");
+    expect(h.onOverview).toHaveBeenLastCalledWith(null);
+    h.onNavigate.mockResolvedValue(false);
+    h.projectContent.querySelector(".overview-inspect")!.click(); await flush();
+    expect(h.element.hidden).toBe(false);
+    expect(h.projectContent.querySelector(".overview-inspector-status")!.textContent).toContain("overview unavailable");
+    expect(h.projectContent.querySelector(".overview-inspector-primary")!.disabled).toBe(true);
+    expect(h.onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("closes selected details before the overview and preserves global attention and workspace context", async () => {
+    const value = overviewWithTask(); const before = JSON.stringify(value);
+    const h = harness(value); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview"); await refreshDelay();
+    const card = h.projectContent.querySelector(".overview-inspect")!;
+    card.click();
+    const inspector = h.projectContent.querySelector(".overview-work-inspector")!;
+    expect(inspector.hidden).toBe(false);
+    expect(h.list.children).toHaveLength(1);
+    expect(h.workspace.inert).toBe(true);
+    inspector.querySelector(".overview-inspector-title")!.dispatch("keydown", { key: "Escape" });
+    expect(inspector.hidden).toBe(true);
+    expect(h.element.hidden).toBe(false);
+    expect(h.workspace.inert).toBe(true);
+    expect(dom.document.activeElement).toBe(card);
+    expect(JSON.stringify(value)).toBe(before);
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(h.inspectWorkAttention).not.toHaveBeenCalled();
+    card.dispatch("keydown", { key: "Escape" });
+    expect(h.element.hidden).toBe(true);
+    expect(h.workspace.inert).toBe(false);
+    expect(dom.document.activeElement).toBe(h.overviewToggle);
+  });
+
+  it("loads check details without activation and invalidates pending output before a verify refresh", async () => {
+    const h = harness(overviewWithTask()); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview"); await refreshDelay();
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    const pending = deferred<string | null>(); h.getVerifyReport.mockReturnValueOnce(pending.promise);
+    h.projectContent.querySelector(".overview-inspector-check")!.click();
+    expect(h.getVerifyReport).toHaveBeenCalledExactlyOnceWith("term-1", 3);
+    h.emit("onVerifyState", { terminalId: "term-1" });
+    pending.resolve("Obsolete report"); await flush();
+    const report = h.projectContent.querySelector(".overview-inspector-report")!;
+    expect(report.hidden).toBe(true);
+    expect(report.textContent).toBe("");
+    await refreshDelay();
+    h.projectContent.querySelector(".overview-inspector-check")!.click(); await flush();
+    expect(report.textContent).toBe("Check output");
+    expect(h.element.hidden).toBe(false);
+    expect(h.list.children).toHaveLength(1);
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(h.inspectWorkAttention).not.toHaveBeenCalled();
+  });
+
+  it("fences pending navigation when refresh removes the selected task", async () => {
+    const h = harness(overviewWithTask()); await flush();
+    view!.open(h.overviewToggle as unknown as HTMLElement, "overview"); await refreshDelay();
+    const pending = deferred<boolean>(); h.onNavigate.mockReturnValueOnce(pending.promise);
+    h.projectContent.querySelector(".overview-inspect")!.click();
+    h.projectContent.querySelector(".overview-inspector-primary")!.click();
+    const isCurrent = h.onNavigate.mock.calls[0]![2];
+    const next = overviewWithTask(); next.projects[0]!.terminals[0]!.tasks = [];
+    h.getWorkOverview.mockResolvedValue(next);
+    h.emit("onPlanUpdate", { instanceId: "term-1" }); await refreshDelay();
+    expect(isCurrent()).toBe(false);
+    pending.resolve(true); await flush();
+    expect(h.onReveal).not.toHaveBeenCalled();
+    expect(h.element.hidden).toBe(false);
+    expect(h.projectContent.querySelector(".overview-inspector-status")!.textContent).toContain("changed or closed");
+  });
+});
 
 describe("global attention projection", () => {
   it("loads global facts while closed and updates disclosure accessibility on explicit open/close", async () => {

@@ -133,7 +133,10 @@ describe("dispatch success toasts", () => {
     // The durable surface: the row renders the worker and claimed files.
     expect(plan).toContain("plan-meta");
     expect(plan).toContain("task.workerId");
-    expect(rowDispatch).toContain("dispatchTask(pane, task)");
+    const activateTask = methodBody(activityPane, "const activateTask = ");
+    expect(rowDispatch).toContain("activateTask()");
+    expect(activateTask).toContain("dispatchTask(pane, task)");
+    expect(hasInfoToast(activateTask)).toBe(false);
     expect(rowDispatch).toContain('closest?.(".plan-model")');
     expect(activityPane).toContain("dispatchRun(pane.instanceId, task.text, selectedDispatchModel(pane, task))");
     expect(bulkDispatch).toContain("selectedDispatchModel(pane, task)");

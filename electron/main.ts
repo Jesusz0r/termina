@@ -148,6 +148,7 @@ import {
 } from "./main/project-workspace.js";
 import { isPdfPreviewUrl, previewContentType, previewKind } from "../shared/preview-media.js";
 import { decodeEditorText, readEditorFile } from "./main/editor-file.js";
+import { reviewBaseline, reviewFiles, reviewDiff } from "./main/change-review.js";
 import { EditorDraftStore } from "./editor-drafts.js";
 import { EditorDraftSession } from "./main/editor-draft-session.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
@@ -831,7 +832,7 @@ class TerminaApp {
    * The last watcher change per path. A single physical write can produce
    * several fs events; the duplicates must not count as fresh user edits.
    */
-  private lastWatchChange = new Map<string, { identity: string; at: number }>();
+  private lastWatchChange = new Map<string, { workspaceId: string; identity: string; at: number }>();
   private static readonly LAST_WATCH_MAX = 500;
   private disposed = false;
   /** The project ids with an open or close in progress. Events of these
@@ -2264,9 +2265,9 @@ class TerminaApp {
     }
   }
 
-  /** A candidate source tree workspace (no recording, own watcher). The
-   *  lineage base seeds its moment-capture chain (nested worldlines keep
-   *  the root promotion base). */
+  /** A candidate workspace has its own source tree and watcher, and records
+   *  in the project's shared snapshot store. The lineage base seeds its
+   *  moment-capture chain (nested worldlines keep the root promotion base). */
   private createCandidateWorkspace(project: ProjectState, root: string, baseStateId: string | null, comparisonId: string): string {
     const ws = this.createWorkspace(project, root, false);
     ws.comparisonId = comparisonId;
@@ -2432,6 +2433,35 @@ class TerminaApp {
       }
     }
     return match?.workspace ?? null;
+  }
+
+  private reviewScope(target: unknown) {
+    const pair = this.projectWorkspace(target);
+    if (!pair || !target || typeof target !== "object") return null;
+    const value = target as { terminalId?: unknown; generation?: unknown; root?: unknown };
+    if (typeof value.terminalId !== "string" || typeof value.generation !== "number"
+      || !Number.isSafeInteger(value.generation) || value.root !== pair.workspace.root) return null;
+    const inst = this.runtime.get(value.terminalId);
+    if (!inst || inst.closed || inst.generation !== value.generation || inst.projectId !== pair.project.id
+      || inst.workspaceId !== pair.workspace.id || !pair.workspace.terminalIds.has(inst.id)) return null;
+    const root = pair.workspace.root;
+    const canonicalRoot = pair.workspace.canonicalRoot;
+    const generation = pair.workspace.generation;
+    const watcher = pair.workspace.watcher;
+    const observation = watcher?.sourceVersion();
+    const live = () => {
+      const current = this.projectWorkspace(target);
+      const version = watcher?.sourceVersion();
+      return this.runtime.get(inst.id) === inst && !inst.closed && inst.generation === value.generation
+        && inst.projectId === pair.project.id && inst.workspaceId === pair.workspace.id
+        && current?.project === pair.project && current.workspace === pair.workspace
+        && pair.workspace.terminalIds.has(inst.id) && pair.workspace.root === root
+        && pair.workspace.canonicalRoot === canonicalRoot && pair.workspace.generation === generation
+        && pair.workspace.watcher === watcher && version?.revision === observation?.revision
+        && version?.observationEpoch === observation?.observationEpoch
+        && version?.activityRevision === observation?.activityRevision;
+    };
+    return { inst, workspace: pair.workspace, live };
   }
 
   /** Resolve a renderer-provided owner to the live project/workspace pair. */
@@ -3102,6 +3132,7 @@ class TerminaApp {
     const workspaceId =
       opts?.workspaceId ?? requestedProject?.workspaces.values().next().value?.id ?? this.primaryWorkspace(requestedProject ?? undefined)?.id ?? this.primaryWorkspace()?.id ?? "";
     const owner = this.projectOfWorkspace(workspaceId) ?? requestedProject ?? this.project();
+    const terminalRoot = cwd ?? owner?.workspaces.get(workspaceId)?.root ?? owner?.cwd ?? this.terminalCwd();
     let id = opts?.id;
     if (id && this.runtime.has(id)) {
       // Two projects both restore term-1. Keep the session; never overwrite a live pty.
@@ -3145,7 +3176,7 @@ class TerminaApp {
         ...thinkingStartupArgs(this.preferences.showThinking),
       ];
       if (persist) {
-        const sessionCwd = cwd ?? owner?.cwd ?? this.terminalCwd();
+        const sessionCwd = terminalRoot;
         await this.reclaimUnusedEmptyCoreSessions(await this.coreProjectSessionDir(sessionCwd));
         sessionFile = sessionId && isCoreSessionId(sessionId) ? await this.coreSessionFile(sessionId, sessionCwd) : null;
         if (!sessionFile || this.sessionFileInUse(sessionFile)) {
@@ -3199,7 +3230,6 @@ class TerminaApp {
       throw new Error("this project already has the maximum number of saved terminals");
     }
     const sidecarTailer = opts?.sidecarTailer ?? this.tailer;
-    const terminalRoot = cwd ?? this.terminalCwd();
     const shellRoot = type === "shell" ? await fsRealpath(terminalRoot) : null;
     let admittedGeneration: number | undefined;
     let inst: AgentTerminalInstance;
@@ -4931,29 +4961,44 @@ class TerminaApp {
     }
   }
 
+  private async requestTerminalInterrupt(id: string, generation: number, ownsSelection: () => boolean = () => true): Promise<TerminalCloseResult> {
+    const inst = this.runtime.get(id);
+    if (!inst || inst.closed || inst.generation !== generation) return { ok: false, error: "the terminal is no longer available" };
+    const rendererTarget = this.captureRendererSendTarget();
+    const project = this.projectOfTerminal(id);
+    const workspaceId = inst.workspaceId;
+    const cwd = inst.cwd;
+    if (!rendererTarget) return { ok: false, error: "the terminal context is unavailable" };
+    const current = (): boolean => !this.disposed && !inst.closed && this.runtime.get(id) === inst
+      && inst.generation === generation && inst.workspaceId === workspaceId && inst.cwd === cwd
+      && this.projectOfTerminal(id) === project && !this.projectIsSwitching(project?.id) && ownsSelection()
+      && isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget);
+    if (!current()) return { ok: false, error: "the terminal context has changed" };
+    const impact = this.terminalCloseImpact(inst);
+    const options = closeConfirmation({ kind: "interrupt", id }, [impact]);
+    if (options) {
+      const win = this.win;
+      if (!win || win.isDestroyed()) return { ok: false, error: "confirmation is unavailable" };
+      try {
+        const result = await dialog.showMessageBox(win, options);
+        if (result.response !== 0) return { ok: false, cancelled: true };
+      } catch (error) {
+        return { ok: false, error: `could not confirm interrupt: ${(error as Error).message}` };
+      }
+    }
+    if (!current() || JSON.stringify(this.terminalCloseImpact(inst)) !== JSON.stringify(impact)) {
+      return { ok: false, error: "the terminal's work changed while confirming; try again to review it" };
+    }
+    inst.interruptedAt = Date.now();
+    inst.pty.interrupt();
+    return { ok: true };
+  }
+
   private async abortActive(): Promise<void> {
     const inst = this.selectedTerminal();
     if (!inst) return;
-    const rendererTarget = this.captureRendererSendTarget();
-    if (!rendererTarget) return;
-    const impact = this.terminalCloseImpact(inst);
-    const options = closeConfirmation({ kind: "interrupt", id: inst.id }, [impact]);
-    if (options) {
-      const win = this.win;
-      if (!win || win.isDestroyed()) return;
-      try {
-        const result = await dialog.showMessageBox(win, options);
-        if (result.response !== 0) return;
-      } catch (error) {
-        console.warn(`[main] could not confirm interrupt: ${(error as Error).message}`);
-        return;
-      }
-    }
-    if (this.selectedTerminal() !== inst || this.disposed
-      || !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget)
-      || JSON.stringify(this.terminalCloseImpact(inst)) !== JSON.stringify(impact)) return;
-    inst.interruptedAt = Date.now();
-    inst.pty.interrupt();
+    const result = await this.requestTerminalInterrupt(inst.id, inst.generation, () => this.selectedTerminal() === inst);
+    if (!result.ok && result.error) console.warn(`[main] ${result.error}`);
   }
 
   private instanceList(): InstanceSummary[] {
@@ -5002,7 +5047,7 @@ class TerminaApp {
         trackedChanges: inst.modified.size, plan: inst.plan,
       }];
     });
-    return projectWorkSummary(project, terminals);
+    return projectWorkSummary(project, terminals, project.worldlines?.recoverySummaries() ?? []);
   }
 
   private workOverview(): WorkOverview {
@@ -5478,6 +5523,9 @@ class TerminaApp {
   ): Promise<{ ok: boolean; failed: string[] }> {
     const project = this.projectOfWorkspace(workspaceId);
     if (!project) return Promise.resolve({ ok: false, failed: ["workspace is no longer owned by a project"] });
+    // Only the primary workspace has an editable project view. Candidate files
+    // are inspected read-only; there is no candidate editor to flush.
+    if (project.workspaces.get(workspaceId)?.primary === false) return Promise.resolve({ ok: true, failed: [] });
     return new Promise((resolve) => {
       // Random per-request id: sequential ids let a stale or foreign report
       // resolve another request's waiter.
@@ -5629,12 +5677,6 @@ class TerminaApp {
       acknowledgeFailure("preflight deadline expired during source admission");
       return;
     }
-    if (!ws.primary) {
-      // Candidate scopes participate in admission, but primary runs alone record.
-      this.writeAck(inst.id, requestId, { ok: true, token: null });
-      report("ok");
-      return;
-    }
     const preflightOwner = this.projectOfTerminal(inst.id);
     if (!preflightOwner || preflightOwner.workspaces.get(ws.id) !== ws) {
       acknowledgeFailure("terminal project ownership is unavailable");
@@ -5726,7 +5768,11 @@ class TerminaApp {
       }
       // gitHead is a single-flight core op: awaiting it outside the race
       // would let a busy core burn the bridge's wait with the lease held.
-      const capturePromise = (async () => store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null))();
+      const capturePromise = (async () => {
+        // The project store also records candidates, but must read their own tree.
+        const source = ws.primary ? undefined : { root: ws.root, gitDir: (await gitCommonDir(ws.root)) ?? ws.root };
+        return store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null, {}, {}, source);
+      })();
       const budgetMs = Math.max(0, remainingBudget());
       const captured = await Promise.race([
         capturePromise.then((state) => ({ ok: true as const, state })),
@@ -5854,8 +5900,9 @@ class TerminaApp {
         trustHashes: pending ? pending.trustHashes : null,
         model: event.model ?? null,
         thinkingLevel: event.thinkingLevel ?? null,
-        replayable: true,
-        reason: null,
+        // Candidate start states support review, not primary-run replay.
+        replayable: ws?.primary !== false,
+        reason: ws?.primary === false ? "candidate runs cannot be replayed" : null,
         interrupted: false,
         steering: false,
         overlap: this.overlapInWorkspace(inst.workspaceId, inst.id),
@@ -7575,7 +7622,6 @@ class TerminaApp {
     // Capture the project's ids before teardown removes candidate workspaces
     // and exited terminals leave the sets.
     const closingWorkspaceIds = new Set(project.workspaces.keys());
-    const closingRoots = await Promise.all([...project.workspaces.values()].map((ws) => this.canonicalPath(ws.root)));
     const closingIds = [...project.terminalIds];
     // Snapshot identity before the awaits below. Roster restore can reuse a
     // free term-N; a late unfenced stop/close/drain would hit the new session.
@@ -7628,10 +7674,8 @@ class TerminaApp {
       // Scope every remaining cleanup to this project. Other open projects
       // keep their user edits, dispatch workers, and watch dedupe state.
       for (const wsId of closingWorkspaceIds) this.userEditsByWorkspace.delete(wsId);
-      for (const key of [...this.lastWatchChange.keys()]) {
-        if (closingRoots.some((root) => key === root || key.startsWith(root + sep))) {
-          this.lastWatchChange.delete(key);
-        }
+      for (const [key, change] of this.lastWatchChange) {
+        if (closingWorkspaceIds.has(change.workspaceId)) this.lastWatchChange.delete(key);
       }
       for (const { id, inst } of closingTerminals) {
         if (!closingInstanceOurs(id, inst) && this.runtime.has(id)) continue;
@@ -7834,9 +7878,12 @@ class TerminaApp {
       // window must outlive that delay, or the duplicate re-records an edit
       // the run already consumed. Identity is the full payload so a
       // suffix-only edit is not treated as the same write.
-      const lastWatch = this.lastWatchChange.get(path);
+      // Reopened candidates can retain a prior workspace observing the same
+      // tree. Each live workspace must receive its own source notification.
+      const watchKey = JSON.stringify([ws.id, path]);
+      const lastWatch = this.lastWatchChange.get(watchKey);
       const isDupWatch = lastWatch !== undefined && lastWatch.identity === watchIdentity && now - lastWatch.at < 5000;
-      this.lastWatchChange.set(path, { identity: watchIdentity, at: now });
+      this.lastWatchChange.set(watchKey, { workspaceId: ws.id, identity: watchIdentity, at: now });
       evictOldest(this.lastWatchChange, TerminaApp.LAST_WATCH_MAX);
       if (isDupWatch) return;
       // The generation moves only on a real tree change. A duplicate event
@@ -8579,6 +8626,11 @@ class TerminaApp {
       if (!ref) return { ok: false, error: "invalid terminal target" };
       return this.requestTerminalClose(ref.id, ref.generation);
     });
+    ipcMain.handle("terminals:interrupt", (_event, id: unknown, generation: unknown) => {
+      const ref = parseTerminalTarget(id, generation);
+      if (!ref) return { ok: false, error: "invalid terminal target" };
+      return this.requestTerminalInterrupt(ref.id, ref.generation);
+    });
     ipcMain.handle("terminals:write", (_e, id: unknown, data: unknown) => {
       if (typeof id !== "string" || typeof data !== "string") return;
       const inst = this.runtime.get(id);
@@ -8820,20 +8872,47 @@ class TerminaApp {
     // ---- Change Review ----
     ipcMain.handle("review:baseline", async (_e, terminalId: string, path: string) => {
       const inst = this.runtime.get(terminalId);
+      const workspace = inst ? this.workspaceById(inst.workspaceId) : null;
+      const root = workspace?.root;
+      const generation = workspace?.generation;
+      const workspaceId = inst?.workspaceId;
+      const live = () => !!inst && !inst.closed && this.runtime.get(terminalId) === inst
+        && inst.workspaceId === workspaceId && this.workspaceById(inst.workspaceId) === workspace
+        && workspace?.root === root && workspace?.generation === generation;
       const managed = inst ? await this.managedPath(path, inst.workspaceId) : null;
-      if (!inst || !managed || managed.workspace.id !== inst.workspaceId) return { status: "modified", baseline: undefined };
-      // A lazy capture can still be in flight when the user clicks the
-      // modified entry. Wait for it so the diff does not show a false
-      // "no baseline" state.
-      if (!inst.baselines.has(managed.path)) {
-        const pending = inst.baselineFills.get(managed.path);
-        if (pending) await pending;
+      if (!inst || !live() || !managed || managed.workspace !== workspace) return { status: "modified", baseline: undefined };
+      return reviewBaseline(inst, managed.path, live);
+    });
+    ipcMain.handle("review:files", (_e, target: unknown, offset: unknown) => {
+      const scope = this.reviewScope(target);
+      return scope ? reviewFiles(scope.inst.modified, offset) : { ok: false, error: "invalid review target" };
+    });
+    ipcMain.handle("review:diff", async (_e, target: unknown, path: unknown) => {
+      const scope = this.reviewScope(target);
+      if (!scope || typeof path !== "string") return { ok: false, error: "invalid review target or path" };
+      const file = scope.inst.modified.get(path);
+      if (!file) return { ok: false, error: "file is not in this terminal's modified list" };
+      const status = file.status;
+      const relPath = file.relPath;
+      const live = () => scope.live() && scope.inst.modified.get(path) === file
+        && file.status === status && file.relPath === relPath && file.path === path;
+      try {
+        const managed = await this.managedPath(path, scope.inst.workspaceId);
+        if (!live() || !managed || managed.path !== path || managed.workspace !== scope.workspace) {
+          return { ok: false, error: "review path is no longer managed by this workspace" };
+        }
+        const result = await reviewDiff(scope.inst, file, live, MAX_OPEN_FILE_SIZE);
+        if (!live()) return { ok: false, error: "review target changed while reading" };
+        if (!result.ok) return result;
+        const after = await this.managedPath(path, scope.inst.workspaceId);
+        if (!live() || !after || after.path !== path || after.workspace !== scope.workspace
+          || scope.inst.baselines.get(path) !== result.baseline) {
+          return { ok: false, error: "review path changed while reading" };
+        }
+        return result;
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : "could not read review diff" };
       }
-      const status = inst.modified.get(managed.path)?.status;
-      const b = inst.baselines.get(managed.path);
-      if (b === undefined) return { status: status === "deleted" ? "deleted" : "modified", baseline: undefined };
-      if (b === null) return { status: "created", baseline: null };
-      return { status: status === "deleted" ? "deleted" : "modified", baseline: b };
     });
     ipcMain.handle("review:revert", (_e, terminalId: string, path: string) => this.revertReviewFile(terminalId, path));
 

@@ -14,6 +14,18 @@ export interface ProjectWorkspaceRef {
   workspaceId: string;
 }
 
+export interface ReviewTarget extends ProjectWorkspaceRef {
+  terminalId: string;
+  generation: number;
+  root: string;
+}
+
+export type ReviewFilesResult = { ok: true; files: ModifiedFile[]; total: number } | { ok: false; error: string };
+export type ReviewDiffResult = {
+  ok: true; path: string; relPath: string; status: ModifiedFile["status"];
+  baseline: string | null; current: string; deleted: boolean;
+} | { ok: false; error: string };
+
 /** Main-issued capability bound to one renderer document and its main frame. */
 export interface RendererIpcCapability {
   windowGeneration: number;
@@ -231,9 +243,11 @@ export type WorkAttentionReason =
 
 /** Navigation only. It never authorizes execution, review acceptance, or promotion. */
 export interface WorkSummaryAction {
-  kind: "terminal" | "plan" | "changes" | "evidence";
+  kind: "terminal" | "plan" | "changes" | "evidence" | "verify";
   terminalId: string;
   generation: number;
+  /** Reveal the exact existing Plan Board row, without dispatching it. */
+  taskText?: string;
 }
 
 export interface PlanWorkSummary {
@@ -261,11 +275,23 @@ export interface TerminalWorkSummary {
   nextAction: WorkSummaryAction;
 }
 
+/** Failed retained candidate context; never a fabricated terminal or Plan Board task. */
+export interface CandidateRecoverySummary {
+  comparisonId: string;
+  label: "A" | "B";
+  root: string;
+  version: number;
+  error: string | null;
+  /** Comparison-level teardown failures cannot be reopened. */
+  recovery: "open" | "discard";
+}
+
 /** Small, on-demand projection of one project's canonical owners. No terminal buffers or diffs. */
 export interface ProjectWorkSummary {
   projectId: string;
   name: string;
   root: string;
+  candidateRecoveries: CandidateRecoverySummary[];
   terminals: TerminalWorkSummary[];
 }
 
@@ -284,7 +310,7 @@ export interface WorkAttentionItem {
 }
 
 export interface WorkOverview {
-  projects: Array<{ projectId: string; name: string; root: string; working: number; attentionCount: number }>;
+  projects: Array<ProjectWorkSummary & { working: number; attentionCount: number }>;
   items: WorkAttentionItem[];
 }
 
@@ -776,6 +802,8 @@ export interface TerminaBridge {
   /** Report the selected pane for native actions; main validates ownership and generation. */
   selectTerminal(id: string, generation: number): Promise<{ ok: boolean }>;
   closeTerminal(id: string, generation: number): Promise<TerminalCloseResult>;
+  /** Confirm and send Ctrl+C to one exact terminal; does not stop separate workers or checks. */
+  interruptTerminal(id: string, generation: number): Promise<TerminalCloseResult>;
   writeTerminal(id: string, data: string): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   getInstances(): Promise<InstanceSummary[]>;
@@ -891,6 +919,8 @@ export interface TerminaBridge {
   /** Clear the terminal's modified-file list. Main owns the list; the
    *  next change re-adds only files that change after the clear. */
   clearModified(terminalId: string): Promise<{ ok: boolean; error?: string }>;
+  getReviewFiles(target: ReviewTarget, offset: number): Promise<ReviewFilesResult>;
+  getReviewDiff(target: ReviewTarget, path: string): Promise<ReviewDiffResult>;
   reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified" | "deleted"; baseline: string | null | undefined }>;
   reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 

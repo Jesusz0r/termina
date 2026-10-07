@@ -15,7 +15,7 @@ export const ATTENTION_LABELS: Record<WorkAttentionReason, string> = {
   "task-interrupted": "Task attempt interrupted", "worker-unavailable": "Assigned worker unavailable",
 };
 export const ACTION_LABELS: Record<WorkSummaryAction["kind"], string> = {
-  terminal: "Inspect terminal", plan: "Inspect plan", changes: "Inspect changes", evidence: "Inspect check",
+  terminal: "Inspect terminal", plan: "Inspect plan", changes: "Inspect changes", evidence: "Inspect check", verify: "Open Verify controls",
 };
 
 /** One transient project projection; no execution, evidence or review ownership. */

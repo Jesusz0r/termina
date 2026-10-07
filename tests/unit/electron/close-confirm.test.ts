@@ -61,6 +61,7 @@ function harness() {
     confirmCloseConsequences: method("confirmCloseConsequences", bindings),
     confirmClose: method("confirmClose", bindings),
     abortActive: method("abortActive", bindings),
+    requestTerminalInterrupt: method("requestTerminalInterrupt", bindings),
     confirmUnsavedEditorBuffers: vi.fn(async () => ({ ok: true, discardDraftTokens: ["draft-token"] })),
     discardEditorDrafts: vi.fn(async () => undefined),
   };
@@ -210,6 +211,47 @@ describe("main terminal close and interrupt gates", () => {
     h.children.set("term-1", ["bg-1", "bg-2"]);
     h.app.verifyJobs.set("term-1", { child: { pid: 123 } });
     expect(h.app.terminalCloseImpact(h.first)).toMatchObject({ dispatchTask: "Specific task", childRunIds: ["bg-1", "bg-2"], verifying: true, verifyPid: 123 });
+  });
+
+  it("contextual interrupt targets a background worker, not the selected owner", async () => {
+    const h = harness();
+    h.app.selected = h.first;
+    expect(await h.app.requestTerminalInterrupt(h.second.id, 2)).toMatchObject({ ok: false });
+    expect(h.showMessageBox).not.toHaveBeenCalled();
+    expect(await h.app.requestTerminalInterrupt(h.second.id, 1)).toEqual({ ok: true });
+    expect(h.second.pty.interrupt).toHaveBeenCalledOnce();
+    expect(h.first.pty.interrupt).not.toHaveBeenCalled();
+    expect(h.app.closeUserTerminal).not.toHaveBeenCalled();
+    expect(h.app.selected).toBe(h.first);
+  });
+
+  it.each(["document", "replacement", "workspace", "cwd", "project", "switching", "closed", "new run"])("rejects a changed %s during contextual interrupt confirmation", async (change) => {
+    const h = harness();
+    const d = deferred(); h.showMessageBox.mockReturnValueOnce(d.promise);
+    const request = h.app.requestTerminalInterrupt(h.second.id, h.second.generation);
+    if (change === "document") h.app.target = {};
+    if (change === "replacement") h.terminals.set(h.second.id, { ...h.second, generation: 2 });
+    if (change === "workspace") Object.assign(h.second, { workspaceId: "replacement-workspace" });
+    if (change === "cwd") h.second.cwd = "/moved";
+    if (change === "project") h.projects.set("p2", { ...h.projects.get("p2")! });
+    if (change === "switching") h.app.switching.add("p2");
+    if (change === "closed") h.second.closed = true;
+    if (change === "new run") h.second.currentRun = { id: "replacement-run" };
+    d.resolve({ response: 0 });
+    expect(await request).toMatchObject({ ok: false, error: expect.any(String) });
+    expect(h.first.pty.interrupt).not.toHaveBeenCalled();
+    expect(h.second.pty.interrupt).not.toHaveBeenCalled();
+  });
+
+  it("contextual interrupt respects cancel and dialog failure, and remains explicitly retryable", async () => {
+    const h = harness();
+    h.showMessageBox.mockResolvedValueOnce({ response: 1 });
+    expect(await h.app.requestTerminalInterrupt(h.second.id, 1)).toEqual({ ok: false, cancelled: true });
+    h.showMessageBox.mockRejectedValueOnce(new Error("dialog unavailable"));
+    expect(await h.app.requestTerminalInterrupt(h.second.id, 1)).toMatchObject({ ok: false, error: expect.stringContaining("dialog unavailable") });
+    expect(h.second.pty.interrupt).not.toHaveBeenCalled();
+    expect(await h.app.requestTerminalInterrupt(h.second.id, 1)).toEqual({ ok: true });
+    expect(h.second.pty.interrupt).toHaveBeenCalledOnce();
   });
 
   it("native interrupt dialog failure fails closed", async () => {

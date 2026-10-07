@@ -28,9 +28,9 @@ describe("global factual attention", () => {
     ];
     const overview = workOverview(summaries);
     expect(overview.projects).toEqual([
-      { projectId: "proj-1", name: "same-name", root: project.cwd, working: 0, attentionCount: 3 },
-      { projectId: "proj-2", name: "same-name", root: "/other/same-name", working: 0, attentionCount: 1 },
-      { projectId: "empty", name: "empty", root: "/empty", working: 0, attentionCount: 0 },
+      { ...summaries[0], working: 0, attentionCount: 3 },
+      { ...summaries[1], working: 0, attentionCount: 1 },
+      { ...summaries[2], working: 0, attentionCount: 0 },
     ]);
     expect(overview.items.map((item) => item.reason)).toEqual(["worker-unavailable", "blocked", "task-incomplete", "verify-failed"]);
     expect(overview.items[0]).toMatchObject({ projectId: project.id, terminalId: "term-1", generation: 3,
@@ -48,7 +48,26 @@ describe("global factual attention", () => {
       terminal({ id: "worker", activity: { state: "working", reason: null } }),
       terminal({ id: "shell", type: "shell", activity: { state: "blocked", reason: "stalled" }, verify: { state: "fail", command: "test", summary: "bad" } }),
     ])];
-    expect(workOverview(summaries)).toEqual({ projects: [{ projectId: project.id, name: "same-name", root: project.cwd, working: 1, attentionCount: 0 }], items: [] });
+    expect(workOverview(summaries)).toEqual({ projects: [{ ...summaries[0], working: 1, attentionCount: 0 }], items: [] });
+  });
+
+  it("retains pending and done tasks without attention, with canonical shell and candidate attribution", () => {
+    const pending = task();
+    const done = { ...task("completed"), text: "Finished task", state: "done" as const };
+    const summary = projectWorkSummary(project, [
+      terminal({ plan: [pending, done] }),
+      terminal({ id: "candidate", workspace: { id: "ws-candidate", root: "/worlds/candidate", primary: false, comparisonId: "cmp-1" } }),
+      terminal({ id: "shell", type: "shell", activity: { state: "working", reason: null } }),
+    ]);
+    const before = structuredClone(summary);
+    const overview = workOverview([summary]);
+    expect(overview).toEqual({ projects: [{ ...summary, working: 0, attentionCount: 0 }], items: [] });
+    expect(overview.projects[0]!.terminals).toBe(summary.terminals);
+    expect(overview.projects[0]!.terminals[0]!.tasks.map(({ task }) => task)).toEqual([pending, done]);
+    expect(overview.projects[0]!.terminals[1]!.workArea).toEqual({ workspaceId: "ws-candidate", root: "/worlds/candidate", kind: "candidate", comparisonId: "cmp-1" });
+    expect(overview.projects[0]!.terminals[2]).toMatchObject({ type: "shell", activity: null, verify: null, model: null });
+    expect(workOverview([summary])).toEqual(overview);
+    expect(summary).toEqual(before);
   });
 
   it("scopes deterministic opaque IDs to project, generation, source, task index/text and reason", () => {

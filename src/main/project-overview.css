@@ -1,0 +1,124 @@
+/* The global projection owns this surface; production theme tokens own its palette. */
+#attention-view.work-overview {
+  inset: 0 0 0 var(--project-rail-width);
+  width: auto;
+  max-height: none;
+  padding: 28px;
+  background: var(--bg);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+#attention-view.work-overview [hidden] { display: none; }
+#attention-view.work-overview .attention-header h2 { font-size: 26px; font-weight: 500; letter-spacing: -.025em; }
+#overview-attention-heading { margin: 18px 0 12px; font-size: 13px; font-weight: 500; }
+.work-overview #attention-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.work-overview .attention-item {
+  padding: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--yellow);
+  border-radius: 5px;
+}
+.work-overview .attention-context { font-family: var(--font-chrome); font-size: 10px; }
+.work-overview #btn-more-attention { margin-top: 12px; }
+#btn-all-projects[aria-current="page"] { background: var(--bg-raised); border-color: var(--accent); }
+#project-overview { margin-top: 26px; }
+.overview-toolbar, .overview-project-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; }
+.overview-toolbar h2 { font-size: 14px; font-weight: 500; }
+.overview-toolbar input {
+  width: min(320px, 55%);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+.overview-toolbar input::placeholder { color: var(--text-dim); }
+.overview-status { margin: 12px 0 22px; color: var(--text-dim); font-size: 11px; line-height: 1.8; }
+.overview-projects { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; align-items: start; }
+.overview-project { margin-bottom: 8px; min-width: 0; }
+.overview-project-heading { margin-bottom: 12px; }
+.overview-project-heading > div { min-width: 0; }
+.overview-project-heading h3 { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.overview-project-path { font: 10px/1.8 var(--font-chrome); color: var(--text-dim); overflow-wrap: anywhere; }
+.overview-project-counts { font-size: 11px; line-height: 1.8; color: var(--text-dim); }
+.overview-task-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.overview-work-card { padding: 16px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 5px; min-width: 0; }
+.overview-work-card.has-attention { border-left: 2px solid var(--yellow); }
+.overview-work-card h4 { font-size: 14px; font-weight: 500; margin: 10px 0 8px; line-height: 1.5; overflow-wrap: anywhere; }
+.overview-work-card p { font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.overview-work-card .overview-work-state { font-family: var(--font-chrome); font-size: 10px; color: var(--text-dim); }
+.overview-work-context, .overview-work-evidence { color: var(--text-dim); white-space: pre-line; margin-top: 10px; }
+.overview-work-context { font-family: var(--font-chrome); }
+.overview-work-evidence { border-top: 1px solid var(--border); padding-top: 10px; }
+.overview-work-attention { margin-top: 10px; color: var(--yellow); }
+.overview-inspect { margin-top: 14px; }
+.overview-more { margin-top: 12px; }
+.overview-empty { padding: 18px; background: var(--bg-panel); border: 1px dashed var(--border); border-radius: 5px; color: var(--text-dim); font-size: 12px; line-height: 1.8; }
+.overview-new-project { margin-top: 12px; }
+.overview-toolbar input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.overview-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; align-items: start; }
+.overview-workspace.has-inspector { grid-template-columns: minmax(0, 1fr) minmax(360px, 42%); }
+.overview-work-list { min-width: 0; }
+.overview-work-card { cursor: pointer; }
+.overview-work-card:hover { background: var(--bg-raised); }
+.overview-work-card.is-selected { outline: 1px solid var(--accent); background: var(--bg-raised); }
+.overview-work-inspector {
+  position: sticky;
+  top: 0;
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+  min-width: 0;
+  padding: 20px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  user-select: text;
+}
+.overview-work-inspector header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.overview-inspector-caption { font: 10px var(--font-chrome); color: var(--text-dim); }
+.overview-work-inspector .overview-inspector-title { margin: 20px 0 12px; font-size: 21px; font-weight: 500; letter-spacing: -.025em; line-height: 1.4; overflow-wrap: anywhere; }
+.overview-inspector-status { font-size: 11px; line-height: 1.8; color: var(--text-dim); }
+.overview-inspector-facts { margin: 16px 0 20px; }
+.overview-inspector-facts dt { margin-top: 16px; font: 10px var(--font-chrome); color: var(--text-dim); }
+.overview-inspector-facts dd { margin: 5px 0 0; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; white-space: pre-line; }
+.overview-inspector-actions { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+#attention-view .overview-inspector-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.overview-inspector-report { margin-top: 16px; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; font: 10px/1.8 var(--font-chrome); white-space: pre-wrap; overflow-wrap: anywhere; }
+.overview-inspector-foot { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 11px; line-height: 1.8; color: var(--text-dim); }
+.overview-inspector-title:focus-visible, .overview-inspector-report:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.overview-work-changes { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.overview-work-changes h3, .overview-work-changes h4 { font-size: 12px; font-weight: 500; line-height: 1.6; }
+.overview-changes-scope, .overview-changes-filename { margin: 8px 0; font: 10px/1.8 var(--font-chrome); overflow-wrap: anywhere; }
+.overview-changes-description, .overview-changes-status, .overview-changes-diff-status { margin: 8px 0 12px; font-size: 11px; line-height: 1.8; color: var(--text-dim); }
+.overview-changes-list { list-style: none; margin: 12px 0; padding: 0; }
+#attention-view .overview-changes-list button { display: flex; align-items: baseline; gap: 8px; width: 100%; margin: 4px 0; padding: 8px; text-align: left; }
+.overview-changes-path { min-width: 0; font: 11px/1.6 var(--font-chrome); overflow-wrap: anywhere; }
+#attention-view .overview-changes-list button[aria-current="true"] { border-color: var(--accent); background: var(--bg-raised); }
+.overview-changes-diff-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+.overview-changes-diff { width: 100%; height: clamp(240px, 40vh, 440px); margin-top: 12px; border: 1px solid var(--border); }
+/* Focus borrows the existing terminal pane; it never constructs a second TUI. */
+.overview-workspace.is-focused { grid-template-columns: minmax(0, 1fr) minmax(360px, 40%); }
+.focus-task { min-width: 0; }
+.focus-task h2 { margin: 18px 0 10px; font-size: 24px; font-weight: 500; letter-spacing: -.025em; }
+.focus-task-context { font: 11px/1.8 var(--font-chrome); overflow-wrap: anywhere; white-space: pre-line; }
+.focus-task-status { margin: 10px 0 16px; font-size: 11px; line-height: 1.8; color: var(--text-dim); }
+.focus-task-terminal { position: relative; height: clamp(320px, 58vh, 760px); min-width: 0; overflow: hidden; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 5px; }
+.task-focus #attention-list { max-height: 180px; overflow: auto; }
+@media (max-width: 1000px) {
+  #attention-view.work-overview { padding: 20px; }
+  .work-overview #attention-list, .overview-projects { grid-template-columns: 1fr; }
+  .overview-workspace.has-inspector, .overview-workspace.is-focused { grid-template-columns: minmax(0, 1fr); }
+  .overview-work-inspector { grid-row: 1; position: static; max-height: none; }
+  .is-focused .overview-work-inspector { grid-row: auto; }
+  .focus-task-terminal { height: 360px; }
+}
+@media (max-width: 600px) {
+  #attention-view.work-overview { padding: 14px; }
+  .overview-toolbar, .overview-project-heading { flex-wrap: wrap; }
+  .overview-toolbar input { width: 100%; }
+}

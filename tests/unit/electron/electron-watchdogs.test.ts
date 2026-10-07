@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
+import { reviewBaseline } from "../../../electron/main/change-review.ts";
 
 /**
  * Watchdog / race contracts for #252–#255 and the #259 main mapping.
@@ -317,14 +318,16 @@ describe("SIGKILL watchdog (refs #254)", () => {
 describe("Change Review baseline and revert (refs #255)", () => {
   it("awaits the real baseline fill instead of a 2s race", () => {
     const handler = extractMethod(main, 'ipcMain.handle("review:baseline"');
-    expect(handler).toContain("if (pending) await pending;");
-    expect(handler).not.toContain("Promise.race");
-    expect(handler).not.toContain("setTimeout(r, 2000)");
+    expect(handler).toContain("return reviewBaseline(inst, managed.path,");
+    const baselineHelper = readFileSync(join(root, "electron", "main", "change-review.ts"), "utf8");
+    expect(baselineHelper).toContain("if (pending) await pending;");
+    expect(baselineHelper).not.toContain("Promise.race");
+    expect(baselineHelper).not.toContain("setTimeout(r, 2000)");
     expect(extractMethod(main, "private fillBaseline(")).toContain("baseline fill failed");
   });
 
   it("does not return an empty baseline while the fill is still in flight", async () => {
-    const handler = loadHandler("review:baseline", "_e, terminalId, path");
+    const handler = loadHandler("review:baseline", "_e, terminalId, path", ["reviewBaseline"], [reviewBaseline]);
     const path = "/proj/a.ts";
     let resolveFill!: () => void;
     const pending = new Promise<void>((r) => { resolveFill = r; });
@@ -335,10 +338,12 @@ describe("Change Review baseline and revert (refs #255)", () => {
       modified: new Map([[path, { status: "modified" }]]),
     };
     const terminals = new Map([["term-1", inst]]);
+    const workspace = { id: "ws-1" };
     const app = {
       terminals,
       runtime: { get: (id: string) => terminals.get(id) },
-      managedPath: async () => ({ path, workspace: { id: "ws-1" } }),
+      workspaceById: () => workspace,
+      managedPath: async () => ({ path, workspace }),
     };
     const request = handler.call(app, {}, "term-1", path);
     let settled = false;

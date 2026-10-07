@@ -44,7 +44,7 @@ async function waitForItem(page: Page, projectId: string, reason: WorkAttentionR
 
 async function openAttention(page: Page, opener = "#btn-attention") {
   await page.locator(opener).click();
-  await expect(page.getByRole("region", { name: "Attention across all projects", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: opener === "#btn-all-projects" ? "All projects" : "Attention across all projects", exact: true })).toBeVisible();
   await expect(page.locator("#attention-status")).not.toContainText("Loading", { timeout: 15_000 });
 }
 
@@ -92,7 +92,7 @@ test("startup stays in the workspace; empty global attention is keyboard-accessi
   const allProjects = page.locator("#btn-all-projects");
   await allProjects.focus();
   await page.keyboard.press("Space");
-  await expect(page.getByRole("region", { name: "Attention across all projects", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "All projects", exact: true })).toBeVisible();
   expect((await activeProject(page)).id).toBe(project.id);
   await page.locator("#btn-refresh-attention").click();
   await expect(page.locator("#attention-list .attention-item")).toHaveCount(0);
@@ -419,10 +419,18 @@ test("attention and rail navigation preserve an unsaved editor buffer without wr
   await page.keyboard.press("Escape");
   const other = await openSameNameProject(page, join(runRoot, "draft-other", basename(projectRoot)));
   await openAttention(page, "#btn-all-projects");
-  await projectTab(page, original.id).locator(".project-select").click();
+  await page.locator(`.overview-project[data-project-id="${original.id}"] .overview-inspect`).click();
+  await expect(page.locator("#project-work-inspector")).toContainText(original.cwd);
   await expect(page.locator("#attention-view")).toBeVisible();
+  expect((await activeProject(page)).id).toBe(other.id);
+  await page.locator("#project-work-inspector").getByRole("button", { name: "Open terminal", exact: true }).click();
+  await expect(page.locator("#attention-view")).toBeHidden();
+  await expect.poll(bufferText).toBe(draft);
+  await expect(greetingTab.locator(".tab-dirty")).toBeVisible();
+  await openAttention(page, "#btn-all-projects");
+  await projectTab(page, original.id).locator(".project-select").click();
+  await expect(page.locator("#attention-view")).toBeHidden();
   expect((await activeProject(page)).id).toBe(original.id);
-  await page.locator("#btn-close-attention").click();
   await expect.poll(bufferText).toBe(draft);
   await expect(greetingTab.locator(".tab-dirty")).toBeVisible();
   expect(await readFile(path, "utf8")).toBe(diskText);
@@ -687,8 +695,8 @@ test("keyboard inspection reflows at native 200 percent zoom with enlarged inher
   const opener = page.locator("#btn-all-projects");
   await opener.focus();
   await page.keyboard.press("Enter");
-  const region = page.getByRole("region", { name: "Attention across all projects", exact: true });
-  const close = page.getByRole("button", { name: "Close attention", exact: true });
+  const region = page.getByRole("region", { name: "All projects", exact: true });
+  const close = page.getByRole("button", { name: "Return to workspace", exact: true });
   await expect(region).toBeVisible();
   await expect(close).toBeFocused();
   await page.keyboard.press("Tab");
@@ -715,7 +723,7 @@ test("keyboard inspection reflows at native 200 percent zoom with enlarged inher
   expect(geometry.reducedMotion).toBe(true);
   expect(geometry.animations).toBe(0);
   const semantics = await region.ariaSnapshot();
-  expect(semantics).toContain('heading "Attention across all projects" [level=2]');
+  expect(semantics).toContain('heading "All projects" [level=2]');
   expect(semantics).toContain(project.cwd);
   expect(semantics).toContain('button "Inspect check"');
   await testInfo.attach("attention-accessibility-geometry", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });

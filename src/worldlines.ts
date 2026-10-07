@@ -137,6 +137,18 @@ export class WorldlinesView {
     this.quiet = quiet;
   }
 
+  /** Reveal existing recovery controls without opening a session or deciding its outcome. */
+  revealRecovery(comparisonId: string, label: "A" | "B", recovery: "open" | "discard"): boolean {
+    const pair = this.pairs.get(comparisonId);
+    const control = recovery === "open" ? pair?.cards.get(label)?.el.querySelector<HTMLButtonElement>(".cand-open")
+      : pair?.block.querySelector<HTMLButtonElement>(".cmp-discard");
+    if (!control || control.disabled) return false;
+    if (recovery === "discard") control.parentElement!.hidden = false;
+    control.scrollIntoView({ block: "nearest" });
+    control.focus();
+    return true;
+  }
+
   /** The candidate label owning a path, or null. */
   labelOfPath(path: string): "A" | "B" | null {
     for (const [root, label] of this.byRoot) {

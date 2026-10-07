@@ -54,6 +54,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
   bindings: ActivityPaneBindings<TPane>,
 ): {
   renderPlan(pane: TPane, announce?: boolean): void;
+  focusTask(pane: TPane, taskText: string): void;
   renderModified(pane: TPane, announce?: boolean): void;
   pruneReviewMarks(pane: TPane): void;
   dropStaleAcceptMarks(path: string): void;
@@ -63,6 +64,13 @@ export function createActivityPane<TPane extends ActivityPaneState>(
   const { elements } = bindings;
   let modifiedRenderedPaneId: string | null = null;
   const modelOverrides = new Map<string, string>();
+  let pendingPlanFocus: { pane: TPane; taskText: string } | null = null;
+
+  function focusTask(pane: TPane, taskText: string): void {
+    if (bindings.getActivePane() !== pane) return;
+    pendingPlanFocus = { pane, taskText };
+    renderPlan(pane, false);
+  }
 
   function overrideKey(instanceId: string, taskText: string): string {
     return `${instanceId}\0${taskText}`;
@@ -188,15 +196,29 @@ export function createActivityPane<TPane extends ActivityPaneState>(
         li.addEventListener("click", (e) => {
           e.stopPropagation();
           if ((e.target as HTMLElement | null)?.closest?.(".plan-model")) return;
-          if (task.workerId) {
-            bindings.onShowWorker(task.workerId);
-            return;
-          }
-          // Success needs no toast: main re-sends the plan and the row shows the worker.
-          dispatchTask(pane, task);
+          activateTask();
         });
+        const activateTask = (): void => {
+          if (bindings.getActivePane() !== pane || bindings.getPaneById(pane.instanceId) !== pane || !pane.plan.includes(task)) return;
+          if (task.workerId) bindings.onShowWorker(task.workerId);
+          else dispatchTask(pane, task);
+        };
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = "plan-task-action";
+        action.textContent = task.workerId ? "Show worker" : task.dispatchResult ? "Retry task" : "Dispatch task";
+        action.setAttribute("aria-label", `${action.textContent}: ${task.text}`);
+        action.addEventListener("click", (event) => { event.stopPropagation(); activateTask(); });
+        li.appendChild(action);
       }
       elements.planList.appendChild(li);
+      if (pendingPlanFocus?.pane === pane && pendingPlanFocus.taskText === task.text) {
+        pendingPlanFocus = null;
+        const target = li.querySelector<HTMLElement>(".plan-task-action") ?? li;
+        if (target === li) li.tabIndex = -1;
+        target.scrollIntoView({ block: "nearest" });
+        target.focus();
+      }
     }
     elements.planPanel.classList.toggle("collapsed", pane.plan.length === 0);
     bindings.onPlanContent(pane.plan.length > 0, pane.plan.length, announce);
@@ -298,6 +320,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
   }
 
   function clear(): void {
+    pendingPlanFocus = null;
     elements.planList.replaceChildren();
     elements.planPanel.classList.add("collapsed");
     elements.modifiedList.replaceChildren();
@@ -406,6 +429,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
   ];
 
   function dispose(): void {
+    pendingPlanFocus = null;
     elements.btnClearModified.removeEventListener("click", onClearModified);
     elements.btnAcceptAll.removeEventListener("click", onAcceptAll);
     modifiedHeader?.removeEventListener("click", onModifiedHeader);
@@ -414,5 +438,5 @@ export function createActivityPane<TPane extends ActivityPaneState>(
     for (const unsub of unsubs) unsub();
   }
 
-  return { renderPlan, renderModified, pruneReviewMarks, dropStaleAcceptMarks, clear, dispose };
+  return { renderPlan, focusTask, renderModified, pruneReviewMarks, dropStaleAcceptMarks, clear, dispose };
 }

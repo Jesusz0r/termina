@@ -34,11 +34,13 @@ import htmlWorker from "monaco-editor/language/html/html.worker?worker";
 };
 
 import "./styles.css";
+import "./main/project-overview.css";
 import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
 import { createTerminalMenu } from "./main/terminal-menu";
 import { activateProjectContext } from "./main/project-activation";
 import { resolveFileNavigation } from "./main/file-navigation";
+import { canonicalizePath } from "../shared/canonical-path";
 import { createTimelinePane } from "./main/timeline-pane";
 import { createRunForkFeedback } from "./main/run-fork-feedback";
 import { createActivityPane } from "./main/activity-pane";
@@ -88,7 +90,7 @@ import {
 } from "./activity-cue";
 import { attachTabReorder } from "./main/tab-reorder";
 import { CHALLENGE_PROFILES, isTuiOwnedShortcut, pathBasename } from "../shared/types";
-import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, UnsavedConfirmResult, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary, WorkSummaryAction } from "../shared/types";
+import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, UnsavedConfirmResult, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary, WorkSummaryAction, TerminalCloseResult } from "../shared/types";
 
 type EditorManagerInstance = import("./editor").EditorManager;
 type ReviewViewInstance = import("./review").ReviewView;
@@ -164,6 +166,7 @@ const projectRail = createProjectRail({
   list: projectTabsEl,
   allProjects: document.getElementById("btn-all-projects") as HTMLButtonElement,
   onActivate: (projectId) => {
+    if (document.getElementById("attention-view")!.classList.contains("work-overview")) attentionView.close(false);
     void activateProject(projectId).catch((err) => {
       toast(`could not switch projects: ${(err as Error).message}`, "warning");
     });
@@ -174,7 +177,7 @@ const projectRail = createProjectRail({
       else if (!res.cancelled) toast(res.error ?? "could not close the project", "warning");
     }).catch((err) => toast(`could not close the project: ${(err as Error).message}`, "warning"));
   },
-  onAllProjects: (opener) => attentionView.open(opener),
+  onAllProjects: (opener) => attentionView.open(opener, "overview"),
   onReorder: (ids) => { void persistProjectOrder(ids); },
 });
 let projectOrderRequest = 0;
@@ -332,10 +335,10 @@ function activateProject(projectId: string): Promise<boolean> {
 function setActiveProject(projectId: string | null): void {
   const view = projectId ? projectViews.get(projectId) : undefined;
   const nextId = view ? projectId : null;
-  // Search results are project-relative. A switch under an open modal would
-  // open the old hit in the new tree.
+  // Only file and content results are project-relative. Global work navigation
+  // must remain current while its own project activation completes.
   if (nextId !== activeProjectId) {
-    quickOpen.close();
+    quickOpen.onProjectChange();
     sessionSearch.close();
   }
   activeProjectId = nextId;
@@ -626,22 +629,111 @@ async function navigateWorkAction(action: WorkSummaryAction, projectId: string):
   if (action.kind === "plan") {
     activityTabs.select("plan");
     planPanel.classList.remove("collapsed");
-    document.getElementById("activity-tab-plan")?.focus();
   } else if (action.kind === "changes") {
     layout.setModifiedVisible(true);
     activityTabs.select("modified");
     modifiedPanel.classList.remove("collapsed");
-    document.getElementById("activity-tab-modified")?.focus();
   } else if (action.kind === "evidence") return workSummaryView.showCheck();
-  else pane.view.focus();
+  focusWorkContext(projectId, action);
   return true;
+}
+
+// Focus after the overview releases the covered workspace's inert state.
+function focusWorkContext(projectId: string, action: WorkSummaryAction | null): void {
+  if (activeProjectId !== projectId) return;
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (action && (pane?.instanceId !== action.terminalId || pane.generation !== action.generation)) return;
+  if (action?.kind === "plan") {
+    if (action.taskText && pane) activityPane.focusTask(pane, action.taskText);
+    else document.getElementById("activity-tab-plan")?.focus();
+  } else if (action?.kind === "verify") {
+    // Revealing controls does not run or cancel a check.
+    (pane?.verify.state === "running" ? verifyBadge : btnVerify).focus();
+  }
+  else if (action?.kind === "changes") document.getElementById("activity-tab-modified")?.focus();
+  else if (action?.kind === "evidence") document.querySelector<HTMLElement>("#work-summary summary")?.focus();
+  else pane?.view.focus();
 }
 
 const attentionView = createAttentionView({
   element: document.getElementById("attention-view")!,
   toggle: document.getElementById("btn-attention") as HTMLButtonElement,
+  overviewToggle: document.getElementById("btn-all-projects") as HTMLButtonElement,
+  workspace: ["explorer", "explorer-divider", "main-split"].map((id) => document.getElementById(id)!),
   bridge: window.termina,
-  onOverview: (overview) => projectRail.setOverview(overview),
+  onOverview: (overview) => { projectRail.setOverview(overview); quickOpen.setWorkOverview(overview); },
+  onViewChange: (overviewOpen) => projectRail.setOverviewActive(overviewOpen),
+  onFocusTerminal: async (target, slot, isCurrent) => {
+    if (!isCurrent() || !await activateProject(target.projectId) || !isCurrent()) return null;
+    const matches = (pane: Pane | undefined): pane is Pane => !!pane && pane.projectId === target.projectId
+      && pane.instanceId === target.terminalId && pane.generation === target.generation
+      && pane.workspaceId === target.workspaceId && pane.cwd === target.root;
+    if (!matches(panes.get(target.terminalId))) return null;
+    if (!await navigateWorkAction({ kind: "terminal", terminalId: target.terminalId, generation: target.generation }, target.projectId)
+      || !isCurrent()) return null;
+    const pane = panes.get(target.terminalId);
+    if (!matches(pane) || !pane.container.parentNode) return null;
+    const parent = pane.container.parentNode;
+    const sibling = pane.container.nextSibling;
+    // Borrow the existing renderer view. Its PTY, event subscription and buffers
+    // stay with the canonical pane/runtime owners throughout this presentation.
+    slot.append(pane.container);
+    slot.scrollIntoView({ block: "nearest" });
+    pane.view.fit();
+    pane.view.focus();
+    return () => {
+      if (panes.get(pane.instanceId) !== pane || pane.container.parentNode !== slot) return;
+      parent.insertBefore(pane.container, sibling?.parentNode === parent ? sibling : null);
+      requestAnimationFrame(() => { if (panes.get(pane.instanceId) === pane) pane.view.fit(); });
+    };
+  },
+  onNavigate: async (projectId, action, isCurrent) => {
+    if (!isCurrent() || !await activateProject(projectId) || !isCurrent()) return false;
+    if (action) return navigateWorkAction(action, projectId);
+    layout.revealTerminal();
+    return true;
+  },
+  onReveal: focusWorkContext,
+  onCandidateRecovery: async (projectId, recovery, isCurrent) => {
+    try {
+      if (!isCurrent() || !await activateProject(projectId) || !isCurrent() || activeProjectId !== projectId) return false;
+      const generation = activeProjectGeneration;
+      const current = (): boolean => isCurrent() && activeProjectId === projectId && activeProjectGeneration === generation;
+      const work = await window.termina.getProjectWorkSummary(projectId);
+      if (!current() || !work?.candidateRecoveries.some((candidate) => candidate.comparisonId === recovery.comparisonId
+        && candidate.label === recovery.label && candidate.root === recovery.root && candidate.version === recovery.version
+        && candidate.recovery === recovery.recovery)) return false;
+      const summaries = await window.termina.getWorldlines(projectId);
+      if (!current()) return false;
+      const candidate = summaries.find((summary) => summary.comparisonId === recovery.comparisonId && summary.label === recovery.label
+        && summary.root === recovery.root && summary.version === recovery.version);
+      if (!candidate) return false;
+      worldlinesView.upsert(candidate);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  onRevealCandidate: (recovery) => {
+    activityTabs.select("worldlines");
+    document.getElementById("worldline-panel")?.classList.remove("collapsed");
+    if (!worldlinesView.revealRecovery(recovery.comparisonId, recovery.label, recovery.recovery)) {
+      toast("Candidate recovery changed. Refresh work before acting.", "warning");
+    }
+  },
+  onTerminalControl: (target, action) => {
+    const pane = panes.get(target.terminalId);
+    if (!pane || pane.projectId !== target.projectId || pane.workspaceId !== target.workspaceId
+      || pane.cwd !== target.root || pane.generation !== target.generation) {
+      return Promise.resolve({ ok: false, error: "The terminal context changed. Refresh work before acting." });
+    }
+    return action === "interrupt"
+      ? window.termina.interruptTerminal(target.terminalId, target.generation).catch((error: unknown) => ({
+        ok: false, error: `Could not interrupt the terminal: ${error instanceof Error ? error.message : String(error)}`,
+      }))
+      : closePane(target.terminalId);
+  },
+  onNewProject: () => { attentionView.close(false); btnNewProject.click(); },
   onInspect: async (result, isCurrent) => {
     if (!isCurrent()) return false;
     const activated = await activateProjectContext(result.folder.projectId, {
@@ -1252,22 +1344,22 @@ function disposePane(pane: Pane): void {
   pane.tabEl.remove();
 }
 
-async function closePane(instanceId: string): Promise<void> {
+async function closePane(instanceId: string): Promise<TerminalCloseResult> {
   const pane = panes.get(instanceId);
-  if (!pane || pendingTerminalCloses.has(pane)) return;
+  if (!pane || pendingTerminalCloses.has(pane)) return { ok: false, error: "The terminal is unavailable or already closing." };
   const terminalGeneration = pane.generation;
   pendingTerminalCloses.add(pane);
   try {
     const result = await window.termina.closeTerminal(instanceId, terminalGeneration);
     if (!result?.ok) {
       if (result?.error) toast(`could not close the terminal: ${result.error}`, "warning");
-      return;
+      return result;
     }
     // A roster push can prune this pane before the reply. Never remove a new life.
     const currentPane = panes.get(instanceId);
-    if ((currentPane && currentPane !== pane) || pane.generation !== terminalGeneration) return;
+    if ((currentPane && currentPane !== pane) || pane.generation !== terminalGeneration) return result;
     closingPanes.set(instanceId, { generation: terminalGeneration });
-    if (!currentPane) return;
+    if (!currentPane) return result;
     disposePane(pane);
     syncExplorerChanged();
     if (activeId === instanceId) {
@@ -1282,8 +1374,11 @@ async function closePane(instanceId: string): Promise<void> {
         renderChrome();
       }
     }
+    return result;
   } catch (err) {
-    toast(`could not close the terminal: ${(err as Error).message}`, "warning");
+    const error = `could not close the terminal: ${(err as Error).message}`;
+    toast(error, "warning");
+    return { ok: false, error };
   } finally {
     pendingTerminalCloses.delete(pane);
   }
@@ -1573,8 +1668,10 @@ async function openFileSmartInner(
   layout.revealEditor();
   try {
     await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });
+    // Navigation and editor keys use canonical paths; the project may retain a macOS alias.
     // A successful open is the recency signal, whatever path led here.
-    const rel = abs.startsWith(`${view.cwd}/`) ? abs.slice(view.cwd.length + 1) : null;
+    const root = canonicalizePath(view.cwd);
+    const rel = abs.startsWith(`${root}/`) ? abs.slice(root.length + 1) : null;
     if (rel) void window.termina.recordRecentFile(owner.projectId, rel).catch(() => undefined);
   } catch (err) {
     toast(`could not open ${pathBasename(abs)}: ${(err as Error).message}`, "error");
@@ -1954,6 +2051,7 @@ quickOpen.bind({
   onContentResults: (pattern, hits, truncated, error) => explorer.showContentResults(pattern, hits, truncated, error),
   contentGeneration: () => explorer.contentGeneration(),
   onExecuteCommand: (command) => commands.execute(command),
+  onOpenWork: (target, isCurrent) => attentionView.revealWork(target, isCurrent),
   getShortcut: (command) => prefs.current.shortcuts[command] ?? "",
 });
 commands.register("quick-open", () => quickOpen.open("files"));

@@ -33,7 +33,7 @@ function control(row: FakeEl, selector = ".project-select"): FakeEl {
 }
 
 function overview(projectId: string, working: number, attentionCount: number): WorkOverview {
-  return { projects: [{ projectId, name: projectId, root: `/projects/${projectId}`, working, attentionCount }], items: [] };
+  return { projects: [{ projectId, name: projectId, root: `/projects/${projectId}`, terminals: [], candidateRecoveries: [], working, attentionCount }], items: [] };
 }
 
 function terminal(id: string, overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummaryTerminalFacts {
@@ -63,6 +63,25 @@ describe("persistent project rail", () => {
       expect(control(row, ".tab-close").getAttribute("aria-describedby")).toBe(description.id);
     }
     expect(control(first, ".project-path").id).not.toBe(control(second, ".project-path").id);
+  });
+
+  it("marks All projects as the current view without losing the last project context or its factual counts", () => {
+    const h = harness();
+    const first = h.add("p1");
+    const second = h.add("p2");
+    rail.setActive("p1");
+    rail.setOverview(overview("p1", 2, 3));
+    rail.setOverviewActive(true);
+    expect(h.allProjects.getAttribute("aria-current")).toBe("page");
+    expect(first.classList.contains("active")).toBe(false);
+    expect(control(first).getAttribute("aria-current")).toBeNull();
+    expect(control(first, ".project-working").textContent).toBe("2 working");
+    rail.setActive("p2");
+    expect(second.classList.contains("active")).toBe(false);
+    rail.setOverviewActive(false);
+    expect(h.allProjects.getAttribute("aria-current")).toBeNull();
+    expect(second.classList.contains("active")).toBe(true);
+    expect(control(second).getAttribute("aria-current")).toBe("page");
   });
 
   it("uses separate native select and close buttons, forwarding only the exact clicked ID", () => {

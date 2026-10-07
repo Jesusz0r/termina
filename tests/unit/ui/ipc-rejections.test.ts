@@ -156,7 +156,7 @@ describe("renderer IPC rejection handling (refs #217 item 1)", () => {
     const activation = readFileSync(new URL("../../../src/main/project-activation.ts", import.meta.url), "utf8");
     expect(activation).toContain("const result = await bindings.request(projectId);");
     expect(renderer).toContain("return activateProjectContext(projectId, {");
-    expect(renderer).toMatch(/onActivate: \(projectId\) => \{\s*void activateProject\(projectId\)\.catch\(\(err\) => \{/);
+    expect(renderer).toMatch(/onActivate: \(projectId\) => \{\s*if \(document\.getElementById\("attention-view"\)!\.classList\.contains\("work-overview"\)\) attentionView\.close\(false\);\s*void activateProject\(projectId\)\.catch\(\(err\) => \{/);
     expect(renderer).toMatch(/void activateProject\(targetProject\)\.then\([\s\S]*?\)\.catch\(/);
     expect(renderer).toContain("await activateProject(owner.projectId)");
     expect(renderer).toContain("await openFileSmartInner(path, preview, requestedOwner, line, column);");

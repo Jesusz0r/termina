@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { createHash } from "node:crypto";
 import type {
-  AgentActivityView, PlanTask, ProjectWorkSummary, TerminalWorkSummary,
+  AgentActivityView, CandidateRecoverySummary, PlanTask, ProjectWorkSummary, TerminalWorkSummary,
   VerifyInfo, WorkAreaSummary, WorkAttentionItem, WorkAttentionReason, WorkOverview, WorkSummaryAction,
 } from "../../shared/types.js";
 
@@ -21,6 +21,7 @@ export interface WorkSummaryTerminalFacts {
 export function projectWorkSummary(
   project: { id: string; cwd: string },
   facts: readonly WorkSummaryTerminalFacts[],
+  candidateRecoveries: CandidateRecoverySummary[] = [],
 ): ProjectWorkSummary {
   const live = new Map(facts.map((terminal) => [terminal.id, terminal]));
   const terminals = facts.map((terminal): TerminalWorkSummary => {
@@ -71,7 +72,7 @@ export function projectWorkSummary(
       tasks, attention, nextAction,
     };
   });
-  return { projectId: project.id, name: basename(project.cwd) || project.cwd, root: project.cwd, terminals };
+  return { projectId: project.id, name: basename(project.cwd) || project.cwd, root: project.cwd, terminals, candidateRecoveries };
 }
 
 const ATTENTION_PRIORITY: Record<WorkAttentionReason, number> = {
@@ -123,7 +124,7 @@ export function workOverview(summaries: readonly ProjectWorkSummary[]): WorkOver
         }
       });
     }
-    return { projectId: project.projectId, name: project.name, root: project.root,
+    return { ...project,
       working: project.terminals.filter((terminal) => terminal.activity?.state === "working").length,
       attentionCount: items.length - start };
   });

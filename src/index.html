@@ -68,14 +68,14 @@
       <main id="main">
         <aside id="project-bar" aria-label="Project navigation">
           <div class="project-rail-heading">Projects</div>
-          <button type="button" id="btn-all-projects" aria-controls="attention-view">All projects</button>
+          <button type="button" id="btn-all-projects" aria-controls="attention-view" aria-expanded="false">All projects</button>
           <button type="button" id="btn-attention" aria-controls="attention-view" aria-expanded="false">Attention <span class="attention-count">…</span></button>
           <nav id="project-tabs" aria-label="Open projects"></nav>
           <button type="button" id="btn-new-project" title="Open a project folder" aria-label="New project">＋<span class="newtab-label">New project</span></button>
         </aside>
         <section id="attention-view" role="region" aria-label="Attention across all projects" hidden>
           <div class="attention-header">
-            <h2>Attention across all projects</h2>
+            <h2 id="work-view-title">Attention across all projects</h2>
             <button type="button" id="btn-close-attention" aria-label="Close attention">×</button>
           </div>
           <p class="attention-explainer">Blockers and unavailable workers first, then failed or interrupted attempts, then check issues. Inspecting does not resolve an item.</p>
@@ -84,8 +84,10 @@
             <button type="button" id="btn-refresh-attention">Refresh</button>
           </div>
           <p id="attention-message" role="status"></p>
+          <h3 id="overview-attention-heading" hidden>Needs your attention</h3>
           <ul id="attention-list"></ul>
           <button type="button" id="btn-more-attention" hidden>Show more</button>
+          <div id="project-overview" hidden></div>
         </section>
         <div id="explorer">
           <div class="explorer-header">

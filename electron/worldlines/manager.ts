@@ -45,6 +45,7 @@ import type {
   SessionForkCallOptions,
 } from "../session-fork.js";
 import type {
+  CandidateRecoverySummary,
   ChallengeProfile,
   DependencyChange,
   EvidenceRecord,
@@ -446,6 +447,29 @@ export class WorldlineManager {
     for (const cmp of this.comparisons.values()) {
       for (const cand of cmp.candidates.values()) {
         out.push(this.summaryOf(cmp, cand));
+      }
+    }
+    return out;
+  }
+
+  /** Terminal-less retained failures only; closed admission never permits reopening. */
+  recoverySummaries(): CandidateRecoverySummary[] {
+    if (this.readyError) return [];
+    const out: CandidateRecoverySummary[] = [];
+    for (const cmp of this.comparisons.values()) {
+      if (cmp.phase === "creating") continue;
+      const live = this.comparisonIsLive(cmp);
+      for (const cand of cmp.candidates.values()) {
+        if (cand.state !== "error" || cand.terminalId !== null || cand.pid !== null || cand.startupAttemptId) continue;
+        if (live && !cand.sessionFile) continue;
+        out.push({
+          comparisonId: cmp.id,
+          label: cand.label,
+          root: cand.dir,
+          version: cand.version,
+          error: cand.error,
+          recovery: live ? "open" : "discard",
+        });
       }
     }
     return out;

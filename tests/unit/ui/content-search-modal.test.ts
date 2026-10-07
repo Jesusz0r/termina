@@ -40,6 +40,7 @@ function mount(): { qo: InstanceType<QuickOpenMod["QuickOpen"]>; input: FakeEl; 
     onOpenContentHit: (relPath) => opened.push(relPath),
     onContentResults: (pattern) => delivered.push(pattern),
     onExecuteCommand: () => {},
+    onOpenWork: async () => false,
     getShortcut: () => "",
     contentGeneration: () => generation,
   });

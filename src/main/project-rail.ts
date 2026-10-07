@@ -14,6 +14,7 @@ export function createProjectRail(bindings: {
   upsert(project: { id: string; cwd: string }): HTMLElement;
   remove(projectId: string): void;
   setActive(projectId: string | null): void;
+  setOverviewActive(active: boolean): void;
   setOverview(overview: WorkOverview | null): void;
   orderedIds(): string[];
   setOrder(ids: string[]): void;
@@ -26,6 +27,7 @@ export function createProjectRail(bindings: {
   }>();
   let facts = new Map<string, WorkOverview["projects"][number]>();
   let activeId: string | null = null;
+  let overviewActive = false;
   let disposed = false;
 
   function orderedIds(): string[] {
@@ -43,8 +45,8 @@ export function createProjectRail(bindings: {
     entry.attention.textContent = project ? `${project.attentionCount} attention` : "Attention unknown";
     entry.attention.classList.toggle("has-attention", !!project?.attentionCount);
     entry.working.classList.toggle("has-work", !!project?.working);
-    entry.row.classList.toggle("active", id === activeId);
-    if (id === activeId) entry.select.setAttribute("aria-current", "page");
+    entry.row.classList.toggle("active", !overviewActive && id === activeId);
+    if (!overviewActive && id === activeId) entry.select.setAttribute("aria-current", "page");
     else entry.select.removeAttribute("aria-current");
   }
 
@@ -144,6 +146,12 @@ export function createProjectRail(bindings: {
       if (focused) (rows.get(orderedIds()[0] ?? "")?.select ?? allProjects).focus();
     },
     setActive: (id) => { activeId = id; for (const id of rows.keys()) paint(id); },
+    setOverviewActive: (active) => {
+      overviewActive = active;
+      if (active) allProjects.setAttribute("aria-current", "page");
+      else allProjects.removeAttribute("aria-current");
+      for (const id of rows.keys()) paint(id);
+    },
     setOverview: (overview) => {
       facts = new Map(overview?.projects.map((project) => [project.projectId, project]) ?? []);
       for (const id of rows.keys()) paint(id);
