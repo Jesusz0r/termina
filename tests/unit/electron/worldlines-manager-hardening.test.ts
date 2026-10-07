@@ -40,6 +40,7 @@ describe("manager hardening (issue #202)", () => {
     const primaryInfo = await lstat(primaryRoot, { bigint: true });
     const manager = new WorldlineManager({
       worldsRoot,
+      recoverStaleComparisons: (sweep) => sweep(),
       primaryRoot,
       primaryRootIdentity: { dev: String(primaryInfo.dev), ino: String(primaryInfo.ino) },
       realHome: root,
@@ -180,6 +181,7 @@ describe("manager hardening (issue #202)", () => {
       const primaryInfo = await lstat(primaryRoot, { bigint: true });
       const manager = new WorldlineManager({
         worldsRoot,
+        recoverStaleComparisons: (sweep) => sweep(),
         primaryRoot,
         primaryRootIdentity: { dev: String(primaryInfo.dev), ino: String(primaryInfo.ino) },
         realHome: root,

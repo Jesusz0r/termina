@@ -66,22 +66,30 @@ A fresh install starts empty:
 The empty editor tells you about `/login` and `/models` when the agent has
 no provider configured yet.
 
-Opening a folder creates one project tab and starts one agent terminal in
-it. Your open project tabs restore on the next launch — including each
-terminal's plan board and last verify verdict. Dispatched worker assignments
-never survive a restart; their tasks return to pending.
+Opening a folder adds it to the project rail and starts one agent terminal in
+it. Your open projects restore on the next launch — including each terminal's
+plan board and last verify verdict. Dispatched worker assignments never
+survive a restart; their tasks return to pending.
 
-### Project tabs
+### Project rail
 
-Each tab is one folder with its own explorer, editor, terminals, timeline,
-and worldlines. Switching tabs never interrupts a running agent — every
-project keeps working in the background. Reopening a folder that already has
-a tab reactivates that tab instead of duplicating it.
+The persistent left rail lists your folders, each with its own explorer,
+editor, terminals, timeline, and worldlines. Switching projects never interrupts
+a running agent. Reopening an existing folder reactivates it instead of
+creating a duplicate. Folder paths distinguish projects with the same name.
 
-A status dot on the tab matches the terminals: green while every agent is
-idle, a glowing pulse while one is working, amber glow when one is blocked.
-An unseen verify failure in a background project turns that project's dot
-red instead. Settling or blocking plays a short chime and a named toast
+Each project shows separate counts for recorded working agents and unresolved
+attention items. These counts come from current work facts, not unseen
+notifications; an idle agent is not proof of completion. A failure or outdated
+check still counts after inspection. If facts cannot be loaded, the counts say
+**unknown** rather than implying there is no work or attention.
+
+Use `Tab` to reach a project button, `↑`/`↓` or `Home`/`End` to browse, and
+`Enter` or `Space` to activate. Drag vertically or use `Alt+↑`/`↓` to reorder
+projects; the order uses the existing project preferences. **All projects**
+opens global attention without filtering out other projects.
+
+Settling or blocking still plays a short chime and a named toast
 (`pi-editor is idle`, or `pi-editor · dispatch needs you` when that project
 has more than one agent) unless that terminal already has keyboard focus
 in the project you are looking at. Click the toast to jump to that project
@@ -93,8 +101,8 @@ and terminal.
 
 | Area | What lives there |
 |---|---|
-| Project bar | Project tabs and `＋` to open another folder |
-| Explorer | File tree (far left, collapsible with `Cmd/Ctrl+B`) |
+| Project rail | Persistent project navigation, factual work/attention counts, All projects, Attention, and `＋` to open another folder |
+| Explorer | File tree beside the rail, collapsible with `Cmd/Ctrl+B` |
 | Terminal pane | Terminal tabs, the Session Timeline strip, the Plan Board, the Worldlines panel, and the Modified files panel |
 | Editor pane | Editor tabs, the Monaco editor, and Change Review |
 | Status bar | Current folder, the Verify button, and the Git handoff buttons |
@@ -105,7 +113,7 @@ button:
 - `Cmd/Ctrl+B` toggles the explorer.
 - `Cmd/Ctrl+Shift+E` toggles the terminal.
 - `Cmd/Ctrl+E` toggles the editor.
-- `Cmd/Ctrl+Shift+F` makes the terminal fullscreen (only the terminal shows).
+- `Cmd/Ctrl+Shift+F` makes the terminal fullscreen (the work area shows only the terminal; project navigation remains visible).
 
 Terminal and editor cannot both be minimized. The editor stays minimized
 while no file or review is open.
@@ -129,12 +137,14 @@ Click `＋` next to the terminal tabs to open the terminal chooser:
 - **Shells** — any shell detected on your system (`zsh`, `bash`, …).
 
 Shell tabs show the shell name as a badge. `Cmd/Ctrl+T` opens the chooser.
-Opening a folder starts one **Agent (core)** tab. Each terminal tab carries
-the same idle / working / blocked status dot as the project tab.
+Opening a folder starts one **Agent (core)** tab. Agent terminal tabs carry
+idle / working / blocked status dots; the project rail shows separate factual
+work and attention counts.
 
 Cycle without the mouse: `Ctrl+Tab` / `Ctrl+Shift+Tab` move between terminal
-tabs, `Cmd/Ctrl+Shift+[` / `]` move between project tabs, and scrolling over a
-tab strip cycles its tabs.
+tabs, `Cmd/Ctrl+Shift+[` / `]` move between projects, and scrolling over a
+terminal tab strip cycles its tabs. The project rail scrolls vertically without
+changing the selected project.
 
 ### Talking to the agent
 
@@ -167,8 +177,30 @@ Multi-line input:
 - `Shift+Enter`, `Ctrl+Enter`, or `Cmd+Enter` (macOS) inserts a newline.
 - `Option+Enter` (macOS) queues a follow-up message while the agent runs.
 
-`Cmd/Ctrl+.` sends an interrupt to the active terminal. `Cmd/Ctrl+Shift+W`
-closes it.
+`Cmd/Ctrl+.` sends Ctrl+C to the selected terminal. `Cmd/Ctrl+Shift+W`
+closes that terminal. When work may be affected, these commands ask for
+confirmation naming the terminal, project, and current task. Shell command
+activity is not inferred from output: closing or natively interrupting a live
+shell always asks. Direct Ctrl+C in the terminal and the emergency-stop chord remain immediate.
+
+**Interrupt is not close.** Ctrl+C targets the selected terminal's foreground
+work. It does not directly stop background child runs, separate dispatch workers,
+or a separate verification command. If the owner exits, its background child
+runs are terminated.
+
+**Close is not detach.** Closing ends that terminal session, stops its background
+child runs, cancels its verification command, and removes its terminal-local
+Change Review state. Other terminal tabs, including separate dispatch workers,
+remain open. Running commands are interrupted or terminated; separately detached
+processes are not guaranteed to stop. Files already written are not reverted.
+Cancel leaves the terminal pane and work intact. If the target or affected work
+changes during confirmation, the close is rejected; review it and close again.
+
+Closing a project applies this warning to that project's terminals and candidate
+work, while other projects keep running. Quitting or restarting for an update
+applies it to all projects. Unsaved editor buffers have their separate
+Save / Discard / Cancel gate; a later cancellation does not delete their recovery
+copies. On macOS, closing the window is not quitting the app.
 
 ### MCP servers (core)
 
@@ -257,9 +289,55 @@ States you will see:
 | `⏰ …` | Timed out. |
 | `⏸ …` | Cancelled. |
 
-A failure on a background tab dots that tab red (amber for timeout) until you
-look at it, so an idle terminal's verdict never sits unseen. Failures in a
-background project dot that project tab instead.
+A failure on a background terminal tab dots that tab red (amber for timeout)
+until you look at it, so an idle terminal's verdict never sits unseen. The
+project rail and global attention also show the recorded issue, including for
+background projects. Opening a terminal clears only its unseen notification;
+it does not clear the failure or its factual attention count.
+
+### Attention across all projects
+
+Click **Attention** or **All projects** in the rail, choose **View → Attention
+across all projects**, or press `Cmd/Ctrl+Alt+A`. The optional global view keeps
+items from every open project available while another project is selected.
+Starting work still opens the terminal/editor directly, not this view.
+
+Items identify their exact project path, task assignment when one is recorded,
+agent/model, work area, and reason. Blockers and unavailable workers appear
+before failed/incomplete/interrupted attempts, followed by check issues. A
+separate candidate tree is labelled separately from shared project files; it is
+not automatically a sandbox.
+
+**Inspect terminal**, **Inspect plan**, and **Inspect check** navigate to the
+current owner through main. Stale, closed, or superseded targets are rejected
+rather than opening a different project or terminal. Inspection never runs or
+cancels checks, retries a task, accepts changes, or resolves the item. Historical
+passing output remains **Outdated** when it no longer applies to current files.
+
+The view initially shows up to 50 items; **Show more** reveals the next page.
+**Refresh** loads current facts. A loading failure is explicit and retained rows
+are marked potentially outdated, not replaced with a false empty-success state.
+`Escape` or **Close** returns focus to the opener when it is still available.
+
+### Factual work context
+
+Expand **Project work** beside the terminal to inspect its project path,
+agent/model, Plan Board tasks, execution state, and assigned work area.
+Shared project files and a separate candidate tree are labelled differently;
+a separate tree alone is not a claim of filesystem sandboxing. The disclosure
+is optional and can be opened with the keyboard.
+
+An idle terminal is not proof of task completion. An incomplete, failed, or
+interrupted dispatch remains visible after its worker closes. **Inspect plan**
+returns to the existing task and retry action; the summary never retries work
+automatically.
+
+**Check details** shows the exact recorded command, tested source, timing,
+exit outcome, and retained bounded output. If source validity is lost, the
+summary says **Outdated** even when the historical execution passed. Inspecting
+this report does not run or cancel tests. Review paths are cumulative tracked
+paths, not proof of a clean tree or completed human review; **Inspect changes**
+opens the existing Change Review controls.
 
 TypeScript projects get background typechecks: after your run settles,
 `tsc --noEmit` refreshes silently into the agent's next-turn context when the
@@ -309,6 +387,16 @@ with live progress: `○` pending, `◐` active, `✓` done. Ordinary replies do
 not fill the board. A `/plan` turn publishes its reply; if that reply only
 asks what to plan, later replies keep publishing until one contains the
 list. The list stays until the next `/plan` or `/clear`.
+
+A `/plan` request can read files, search, fetch a URL, and discover available
+MCP tools. It cannot edit files, run shell commands, call MCP tools, or spawn
+or redirect a worker. Producing a task list
+does not unlock those tools during that request. Send an ordinary message
+such as “implement this plan” to allow implementation; this works even if a
+plan list is still owed. A new ordinary message can also steer an active
+planning run at its next safe boundary. `/clear` (or `/new`) resets both the
+planning restriction and pending plan publication. This restriction applies
+to the agent's tools, not manual editor changes or clicking Dispatch.
 
 ### Dispatching tasks
 
@@ -396,8 +484,10 @@ state. It refuses on conflicts before touching anything, journals every step
 so a crash recovers cleanly, and opens the merged result in Change Review plus
 a fresh terminal continuing the candidate's conversation.
 
-Candidates are temporary. Closing the project or quitting asks for
-confirmation when candidates hold changes; confirmed closes discard them.
+Candidates are temporary. The project-close or quit warning includes candidates
+with source changes or session activity. Confirmed closes discard their normal
+work areas; recovery files may be retained when cleanup cannot safely finish.
+Export anything you need before closing.
 
 ### Challenge Mode
 
@@ -436,6 +526,27 @@ as you type; click × or press `Escape` to clear.
   context menus offer close and pin actions.
 - Unsaved edits show a dot on the tab; **Save** is `Cmd/Ctrl+S`, **Save all** is `Cmd/Ctrl+Alt+S`.
 - Word wrap and minimap follow your Settings preferences.
+
+### Unsaved draft recovery
+
+Termina writes asynchronous recovery copies of editable text to its private
+application-data directory, not to your project files. Hover the unsaved dot
+to see whether the latest copy is saved, pending, or unavailable. A failed
+copy also shows a warning; do not rely on recovery while that warning persists.
+
+After a renderer reload or application restart, opening the owning project
+restores its available drafts as pinned, **unsaved** tabs. Candidate drafts
+can be recovered only while their original candidate workspace still exists;
+recovery does not recreate a discarded candidate. Recovered text is marked
+for review against the current file. If the file was deleted, saving requires
+the explicit restore confirmation. Recovery never applies text automatically.
+
+Recovery retains the last confirmed copy, not edits still pending when the
+process dies. It does not restore undo history, selections, or scroll position.
+There are at most 64 recovery copies, each limited to 2 MiB of UTF-8 text.
+Saving or explicitly discarding a buffer removes its copy; cancelling a close
+keeps it. Copies may contain sensitive text and remain in local application
+data until saved or discarded.
 
 ### File previews
 
@@ -503,7 +614,8 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 | `Cmd/Ctrl+T` | New terminal (chooser: agent or shell) |
 | `Cmd/Ctrl+Shift+W` | Close terminal |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous terminal tab |
-| `Cmd/Ctrl+Shift+[` / `]` | Previous / next project tab |
+| `Cmd/Ctrl+Shift+[` / `]` | Previous / next project |
+| `Cmd/Ctrl+Alt+A` | Attention across all projects |
 | `Cmd/Ctrl+.` | Interrupt the active terminal |
 | `Cmd/Ctrl+Alt+N` | New file |
 | `Cmd/Ctrl+Alt+Shift+N` | New folder |
@@ -585,8 +697,10 @@ Add a `test` script to `package.json`, or use pytest / cargo / go so the
 detector finds your suite.
 
 **The window is blank.**
-The paint watchdog reloads it automatically. State rebuilds from the recorded
-events; nothing is lost.
+The paint watchdog reloads it automatically. Terminal views rebuild from
+main-owned state and retained events. Unsaved editor text recovers from the
+last confirmed draft copy, with the [draft recovery limits](#unsaved-draft-recovery)
+above; edits that were still pending can be lost.
 
 **An update is stuck downloading.**
 Updates install on quit. If the download stalls, quit and relaunch, then

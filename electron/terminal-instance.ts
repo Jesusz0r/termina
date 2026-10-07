@@ -62,6 +62,8 @@ export class AgentTerminalInstance {
   baselineFills = new Map<string, Promise<void>>();
   /** Verify & Iterate: last test run attached to this terminal. */
   verify: VerifyInfo = { state: "untested", command: null, summary: null };
+  /** Bounded tail for rewriting agent context when a verdict becomes stale. */
+  verifyOutput: string | null = null;
   /** Plan Board: the tasks of the current run. */
   plan: PlanTask[] = [];
   /** Paths this run touched, relative to the project (for task progress). */
@@ -142,7 +144,9 @@ export class AgentTerminalInstance {
     env: Record<string, string | undefined>,
     cols: number,
     rows: number,
+    beforeSpawn?: (target: { id: string; generation: number }) => void,
   ) {
+    beforeSpawn?.({ id, generation: this.generation });
     this.id = id;
     this.cwd = cwd;
     this.workspaceId = workspaceId;

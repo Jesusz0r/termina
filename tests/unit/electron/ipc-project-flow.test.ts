@@ -261,8 +261,14 @@ check("close-to-opening replacement receives a ready folder push", replacementOp
 check("folder pushes carry an activation epoch and re-check after auth I/O", main.includes("activationGeneration")
   && main.includes("this.projectSelectionAction === selectionAction")
   && main.includes("const needsLogin = await this.agentNeedsLogin()")
-  && main.includes("if (!current()) return false")
-  && main.includes('this.send("folder:opened", { cwd, projectId, workspaceId, activationGeneration, needsLogin }, rendererTarget)'));
+  && main.includes("if (!current()) return null")
+  && main.includes("const folder: FolderOpenedPayload = { cwd, projectId, workspaceId, activationGeneration, needsLogin }")
+  && main.includes('this.send("folder:opened", folder, rendererTarget)')
+  && main.includes("return folder;"));
+check("activation replies carry the same authoritative context as pushes", main.includes("return folder ? { ok: true, folder } : { ok: false }")
+  && types.includes("Promise<ProjectActivateResult>")
+  && renderer.includes("applyFolder: applyFolderOpened")
+  && renderer.includes("appliedProjectFolder?.activationGeneration === e.activationGeneration"));
 check("close pushes advance the stale-event watermark", main.includes('this.send("project:closed", { projectId, activationGeneration: nextActivationGeneration }, rendererTarget)')
   && renderer.includes("latestProjectActivationGeneration")
   && renderer.includes("e.activationGeneration < latestProjectActivationGeneration"));
@@ -290,7 +296,7 @@ check("closing terminals cannot be rehydrated", main.includes("filter((t) => !t.
 
 check("project close and quit share the unsaved-buffer gate", main.includes("async confirmClose(projectId?: string)")
   && main.includes("await this.confirmUnsavedEditorBuffers(projectId)")
-  && main.includes("return this.confirmDiscardActiveCandidates(projectId)")
+  && main.includes("if (!unsaved.ok || !(await this.confirmCloseConsequences(projectId))) return false")
   && main.includes("if (!(await this.confirmClose(projectId)))")
   && main.includes(".confirmClose()")
   && main.includes('this.send("editor:unsaved-confirm"')
@@ -304,7 +310,7 @@ check("project close and quit share the unsaved-buffer gate", main.includes("asy
   && main.includes("flushDirtyModels(dispatchWriter, ownerWs.id")
   && main.includes("const flush = await this.flushDirtyModels(leaseRequester, ws.id"));
 
-assert.equal(checks.length, 28);
+assert.equal(checks.length, 29);
 
   });
 });

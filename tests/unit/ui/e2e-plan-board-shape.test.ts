@@ -10,9 +10,11 @@ const spec = readFileSync(new URL("../../../tests/e2e/plan-board.spec.ts", impor
  * ever replaces the production event seeding again.
  */
 describe("plan board spec shape (refs #147)", () => {
-  it("seeds plans through the sidecar boundary, never injected DOM", () => {
-    expect(spec).toContain("appendFileSync");
-    expect(spec).toContain('t: "plan"');
+  it("publishes plans through the real agent, never fabricated events or DOM", () => {
+    expect(spec).toContain("/plan plan-board-e2e-owner");
+    expect(spec).toContain("window.termina.writeTerminal");
+    expect(spec).toContain("response.output_item.done");
+    expect(spec).not.toContain("appendFileSync");
     expect(spec).toContain("plan:update");
     expect(spec).not.toContain("innerHTML");
     expect(spec).not.toContain("plan-checkbox");

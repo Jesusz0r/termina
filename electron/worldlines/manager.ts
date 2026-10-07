@@ -34,6 +34,7 @@ import { type ExportPatchFile } from "./export.js";
 import { changedFiles, isSafeRelativePath } from "./candidate-files.js";
 import { exportCandidateRun } from "./export-candidate.js";
 import { CandidateLaunch } from "./candidate-launch.js";
+import { admitWorldlineForkSource } from "./bootstrap.js";
 import { RunRegistry } from "./run-registry.js";
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps } from "../evidence.js";
 import type {
@@ -151,7 +152,6 @@ import {
   MAX_UNCERTAIN_SCAN_WORK_BYTES,
   MAX_WORLDLINE_FILE_BYTES,
   PROMOTION_JOURNAL_CHECKPOINT_PATHS,
-  READY_TIMEOUT_MS,
   RUNTIME_ALLOWLIST,
 } from "./limits.js";
 /** Core is the only engine. A missing engine fails closed as non-core. */
@@ -194,6 +194,8 @@ function errorDetail(error: unknown): string {
 
 export interface WorldlineDeps {
   worldsRoot: string;
+  /** Main coordinates one startup recovery for the shared worlds root. */
+  recoverStaleComparisons(sweep: () => Promise<void>): Promise<void>;
   primaryRoot: string;
   primaryRootIdentity: PromotionFsIdentity;
   realHome: string;
@@ -355,7 +357,7 @@ export class WorldlineManager {
         worldsRootBinding,
         { initialIdentity: this.deps.primaryRootIdentity },
       );
-      await this.sweepStale();
+      await this.deps.recoverStaleComparisons(() => this.sweepStale());
     })().catch((error: unknown) => {
       this.readyError = error instanceof Error ? error : new Error(String(error));
       this.releaseAdmissionOwnership();
@@ -758,7 +760,7 @@ export class WorldlineManager {
         throw new Error(`could not fork the reference session: ${uncertain}`);
       }
       this.ensureComparisonLive(ncmp);
-      const throughB = requireStorageSeq(run.promptParentEntryId, "the challenger session address is missing");
+      const throughB = requireStorageSeq(run.promptParentEntryId, "the challenger session address is missing", { allowRoot: true });
       const sourceB = run.sessionBranchFile ?? run.sessionFile ?? cand.sessionFile;
       const forkB = await this.forkCoreSession(ncmp, {
         sourceSessionFile: sourceB,
@@ -784,10 +786,6 @@ export class WorldlineManager {
       await this.launch.launchCandidate(ncmp, nA, wHead.commit);
       await this.launch.launchCandidate(ncmp, nB, ncmp.baseStateId);
       ncmp.phase = "running";
-      ncmp.readyTimer = setTimeout(() => {
-        if (ncmp.phase !== "running") return;
-        void this.teardown(ncmp.id, "error", "the candidates did not become ready in time");
-      }, READY_TIMEOUT_MS);
       // Drop the source from the live budget immediately. Teardown waits
       // on process group signals; do not hold the IPC handler for that.
       cmp.phase = "error";
@@ -1127,31 +1125,9 @@ export class WorldlineManager {
     }
     if (!run.startStateId || !run.settledStateId) return { ok: false, error: "the run has no complete source checkpoints" };
     if (!run.sessionBranchFile) return { ok: false, error: "the run has no session branch copy" };
-    // The fork preflight (WORLDLINES §4): repository, platform, disk.
-    const pre = await this.deps.preflight();
-    if (!pre.ok) return { ok: false, error: pre.reasons.join("; ") };
-    const store = await this.deps.getStore();
-    if (!store) return { ok: false, error: "recording is not available" };
-    if (resolve(store.sourceRoot) !== resolve(this.deps.primaryRoot)) {
-      return { ok: false, error: "the source repository identity changed since the run" };
-    }
-    // Trust-sensitive resources must still match the run's capture (§6.5).
-    // Either side incomplete refuses the fork: a missing baseline or a
-    // failed re-hash must never read as "unchanged".
-    if (!run.trustHashes) {
-      return { ok: false, error: "the run has no complete trust-sensitive baseline" };
-    }
-    let now: Record<string, string>;
-    try {
-      now = await this.deps.trustHashes();
-    } catch (error) {
-      return { ok: false, error: `trust-sensitive resources could not be verified: ${error instanceof Error ? error.message : String(error)}` };
-    }
-    const changed = [...new Set([...Object.keys(run.trustHashes), ...Object.keys(now)])]
-      .filter((k) => now[k] !== run.trustHashes![k]);
-    if (changed.length > 0) {
-      return { ok: false, error: `trust-sensitive resources changed since the run: ${changed.slice(0, 3).join(", ")}` };
-    }
+    const source = await admitWorldlineForkSource(this.deps, run.trustHashes);
+    if (!source.ok) return source;
+    const { store } = source;
     // Budgets (WORLDLINES §9): prompt payload caps. A present file that
     // cannot be parsed is not an empty prefill — Challenge would auto-run it.
     const payloadRead = await this.readPromptPayload(run);
@@ -1196,17 +1172,12 @@ export class WorldlineManager {
       if (aBytes > BigInt(MAX_CANDIDATE_BYTES)) {
         throw new Error(`candidate A exceeds the 1 GB budget (${(Number(aBytes) / 1e9).toFixed(1)} GB)`);
       }
-      await this.forkSessions(cmp, run);
       await this.createSupportDirs(cmp);
+      await this.forkSessions(cmp, run);
       await this.copyCoreResources(cmp);
       await this.writeStartupControls(cmp, startupPayload, opts.challengeProfile);
       await this.launchCandidates(cmp, run);
       cmp.phase = "running";
-      // Readiness arrives through the bridge session_ready events.
-      cmp.readyTimer = setTimeout(() => {
-        if (cmp.phase !== "running") return;
-        void this.teardown(cmp.id, "error", "the candidates did not become ready in time");
-      }, READY_TIMEOUT_MS);
       return { ok: true, comparisonId: cmp.id };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1263,7 +1234,6 @@ export class WorldlineManager {
       candidates: new Map(),
       phase: "creating",
       error: null,
-      readyTimer: null,
     };
     for (const { label, role } of spec.candidates) {
       const supportDir = join(dir, `${label}-support`);
@@ -1292,6 +1262,9 @@ export class WorldlineManager {
       });
     }
     this.comparisons.set(id, cmp);
+    // Expose preparation before template/session work or a pending startup
+    // handshake. Readiness is published only by the confirmed launch owner.
+    for (const cand of cmp.candidates.values()) this.pushUpdate(cmp, cand);
     return cmp;
   }
 
@@ -1403,7 +1376,7 @@ export class WorldlineManager {
     const destA = coreSessionFile(a.sessionDir, "session");
     const destB = coreSessionFile(b.sessionDir, "session");
     const throughA = requireStorageSeq(run.settledEntryId, "the settled session address is missing");
-    const throughB = requireStorageSeq(run.promptParentEntryId, "the alternative session address is missing");
+    const throughB = requireStorageSeq(run.promptParentEntryId, "the alternative session address is missing", { allowRoot: true });
     const forkA = await this.forkCoreSession(cmp, {
       sourceSessionFile: source,
       destinationSessionFile: destA,
@@ -1577,6 +1550,17 @@ export class WorldlineManager {
     if (!events) throw new Error(`candidate ${cand.label} events directory is not natively bound`);
     const fresh = await refreshBoundPromotionDirectory(events);
     cand.eventsBinding = fresh;
+    // A producer can consume the one-shot control and exit before confirming.
+    // Retire only a missing leaf; an existing replacement must still match
+    // the original native identity and content in the bound write below.
+    if (cand.controlLeaf) {
+      try {
+        await lstatPath(join(fresh.path, "startup-control.json"));
+      } catch (error) {
+        if (!isErrno(error, "ENOENT")) throw error;
+        cand.controlLeaf = undefined;
+      }
+    }
     cand.controlLeaf = await boundPromotionWriteFile({
       root: fresh.path,
       rootIdentity: promotionIdentityOf(fresh),
@@ -2648,8 +2632,9 @@ export class WorldlineManager {
       sourceRunId: rootRun.id,
       baseStateId: rootRun.startStateId,
     };
-    const store = await this.deps.getStore();
-    if (!store) return { ok: false, error: "recording is not available" };
+    const source = await admitWorldlineForkSource(this.deps, rootRun.trustHashes);
+    if (!source.ok) return source;
+    const { store } = source;
     const uncertaintyAdmission = await this.acquireUncertainComparisonAdmission();
     if (!uncertaintyAdmission.ok) return { ok: false, error: uncertaintyAdmission.error };
     const admissionLease = uncertaintyAdmission.lease;
@@ -2706,10 +2691,6 @@ export class WorldlineManager {
       await this.writeControl(cand, { opId: randomUUID(), action: "none" });
       await this.launch.launchCandidate(cmp, cand, opts.stateId);
       cmp.phase = "running";
-      cmp.readyTimer = setTimeout(() => {
-        if (cmp.phase !== "running") return;
-        void this.teardown(cmp.id, "error", "the candidate did not become ready in time");
-      }, READY_TIMEOUT_MS);
       return { ok: true, comparisonId: cmp.id };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2777,7 +2758,6 @@ export class WorldlineManager {
       await cmp.teardownPromise;
       return;
     }
-    if (cmp.readyTimer) clearTimeout(cmp.readyTimer);
     cmp.phase = "error";
     cmp.error = error;
     this.launch.cancelPending(comparisonId, error ?? `comparison ${state}`);
@@ -2951,7 +2931,6 @@ export class WorldlineManager {
       candidates,
       phase: "error",
       error: manifest.uncertainSessionArtifacts[0]?.error ?? "retained uncertain comparison",
-      readyTimer: null,
     };
     this.comparisons.set(cmp.id, cmp);
   }

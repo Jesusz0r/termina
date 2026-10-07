@@ -27,21 +27,27 @@ for (const kind of ["project", "terminal"] as const) {
     await expect(tabs.first()).toHaveCSS("cursor", "default");
     const first = (await tabs.first().boundingBox())!;
     const last = (await tabs.last().boundingBox())!;
-    const x = first.x + 15;
-    const y = first.y + first.height / 2;
-    await page.mouse.move(x, y);
+    const vertical = kind === "project";
+    const axis = vertical ? "y" : "x";
+    const size = vertical ? "height" : "width";
+    const cross = vertical ? first.x + 15 : first.y + first.height / 2;
+    const moveTo = (position: number) => page.mouse.move(vertical ? cross : position, vertical ? position : cross);
+    await moveTo(first[axis] + 15);
     await page.mouse.down();
-    await page.mouse.move(x + 10, y);
+    await moveTo(first[axis] + 25);
     await expect(page.locator(".tab-grabbed")).toHaveCount(1);
     await expect(strip).toHaveCSS("cursor", "grabbing");
-    const lifted = await page.locator(".tab-grabbed").evaluate((el) => parseFloat((el as HTMLElement).style.left));
-    expect(lifted).toBeCloseTo(first.x + 10, 0);
-    const target = last.x + last.width - 5;
-    await page.mouse.move(target, y);
+    const lifted = await page.locator(".tab-grabbed").evaluate((el, vertical) => {
+      const style = (el as HTMLElement).style;
+      return parseFloat(vertical ? style.top : style.left);
+    }, vertical);
+    expect(lifted).toBeCloseTo(first[axis] + 10, 0);
+    const target = last[axis] + last[size] - 5;
+    await moveTo(target);
     const slotIndex = () => strip.locator(".tab-drop-slot").evaluate((el) => [...el.parentElement!.children].indexOf(el));
     const settledIndex = await slotIndex();
     await page.waitForTimeout(180); // Let the neighbor slide animation finish.
-    await page.mouse.move(target - 1, y);
+    await moveTo(target - 1);
     expect(await slotIndex()).toBe(settledIndex);
     await page.mouse.up();
     await expect.poll(order).toEqual(["1", "2", "0"]);
@@ -50,9 +56,9 @@ for (const kind of ["project", "terminal"] as const) {
 
     // Escape restores the original order, and must not swallow the next click.
     const box = (await tabs.first().boundingBox())!;
-    await page.mouse.move(box.x + 15, box.y + box.height / 2);
+    await moveTo(box[axis] + 15);
     await page.mouse.down();
-    await page.mouse.move(target, y);
+    await moveTo(target);
     await expect(page.locator(".tab-grabbed")).toHaveCount(1);
     await page.keyboard.press("Escape");
     await page.mouse.up();
@@ -61,9 +67,9 @@ for (const kind of ["project", "terminal"] as const) {
     await expect(tabs.first()).toHaveClass(/active/);
 
     // Losing focus while dragging must restore the tab and cursor too.
-    await page.mouse.move(box.x + 15, box.y + box.height / 2);
+    await moveTo(box[axis] + 15);
     await page.mouse.down();
-    await page.mouse.move(target, y);
+    await moveTo(target);
     await expect(page.locator(".tab-grabbed")).toHaveCount(1);
     await page.evaluate(() => window.dispatchEvent(new Event("blur")));
     await page.mouse.up();
@@ -75,20 +81,24 @@ for (const kind of ["project", "terminal"] as const) {
     await strip.evaluate((el) => el.addEventListener("gotpointercapture", (event) => {
       el.releasePointerCapture((event as PointerEvent).pointerId);
     }, { once: true }));
-    await page.mouse.move(box.x + 15, box.y + box.height / 2);
+    await moveTo(box[axis] + 15);
     await page.mouse.down();
-    await page.mouse.move(target, y);
-    await page.mouse.move(target - 1, y);
-    await page.mouse.move(target - 2, y);
+    await moveTo(target);
+    await moveTo(target - 1);
+    await moveTo(target - 2);
     await page.mouse.up();
     await expect.poll(order).toEqual(["1", "2", "0"]);
     await expect(page.locator(".tab-grabbed, .tab-drop-slot")).toHaveCount(0);
 
-    // Reordering back to the beginning exercises leftward movement as well.
+    // The horizontal strip can scroll when the first tab is selected. Bring
+    // the last tab into view and measure this gesture's current coordinates.
+    await tabs.last().scrollIntoViewIfNeeded();
+    const startTab = (await tabs.first().boundingBox())!;
     const endTab = (await tabs.last().boundingBox())!;
-    await page.mouse.move(endTab.x + 15, endTab.y + endTab.height / 2);
+    await moveTo(endTab[axis] + 15);
     await page.mouse.down();
-    await page.mouse.move(first.x + 2, y);
+    await moveTo(startTab[axis] + 2);
+    await expect(page.locator(".tab-grabbed")).toHaveCount(1);
     await page.mouse.up();
     await expect.poll(order).toEqual(["0", "1", "2"]);
     await tabs.first().click();

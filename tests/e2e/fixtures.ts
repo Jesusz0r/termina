@@ -1,6 +1,8 @@
 import { test as base, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { mkdtempSync, rmSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { readFile, readdir } from "node:fs/promises";
+import { execFile, execFileSync } from "node:child_process";
+import { readSystemProcessIdentity } from "../../shared/process-identity.ts";
 import { join, resolve } from "node:path";
 import { patchBundleName } from "../../scripts/patch-bundle-name.ts";
 import { OwnedProcessTree } from "./owned-processes.ts";
@@ -25,7 +27,13 @@ const electronLifetimes = new WeakMap<ElectronApplication, {
    *  stdout and stderr are both kept: `[main]` startup logs go to stdout, while
    *  Chromium/GPU failures land on stderr, and either can be empty. */
   outputTail: string[];
+  processIdentity: string | null;
+  closed: Promise<void>;
+  nativeError: string | null;
+  startupSample: string | null;
+  runRoot: string;
 }>();
+const activeElectrons = new Map<string, Set<ElectronApplication>>();
 const preservedRunRoots = new Set<string>();
 
 /**
@@ -37,7 +45,13 @@ const WINDOW_DEADLINE_MS = 60_000;
 const WINDOW_POLL_MS = 5_000;
 const OUTPUT_TAIL_LINES = 40;
 
-function stopElectron(app: ElectronApplication): Promise<void> {
+export function sampleOwnedProcessMemory(app: ElectronApplication): ReturnType<OwnedProcessTree["sampleMemory"]> {
+  const lifetime = electronLifetimes.get(app);
+  if (!lifetime) throw new Error("missing test Electron ownership");
+  return lifetime.tree.sampleMemory();
+}
+
+export function closeOwnedElectron(app: ElectronApplication): Promise<void> {
   const lifetime = electronLifetimes.get(app);
   if (!lifetime) return Promise.reject(new Error("missing test Electron ownership"));
   if (lifetime.shutdown) return lifetime.shutdown;
@@ -62,7 +76,15 @@ function stopElectron(app: ElectronApplication): Promise<void> {
       app.close().catch(forceKill);
     });
     await tree.stop();
+    await lifetime.closed;
     if (captureError) throw captureError;
+    const active = activeElectrons.get(lifetime.runRoot);
+    active?.delete(app);
+    if (active?.size === 0) {
+      activeElectrons.delete(lifetime.runRoot);
+      preservedRunRoots.delete(lifetime.runRoot);
+    }
+    if (lifetime.nativeError) throw new Error(`Owned Electron failed during native teardown: ${lifetime.nativeError}`);
   })();
   return lifetime.shutdown;
 }
@@ -70,9 +92,32 @@ function stopElectron(app: ElectronApplication): Promise<void> {
 /** Append to a bounded output tail, dropping the oldest lines first. */
 function rememberOutput(tail: string[], chunk: string): void {
   for (const line of chunk.split("\n")) {
-    if (line.trim()) tail.push(line);
+    if (line.trim()) tail.push(`${new Date().toISOString()} ${line}`);
   }
   if (tail.length > OUTPUT_TAIL_LINES) tail.splice(0, tail.length - OUTPUT_TAIL_LINES);
+}
+
+/** Sample only this fixture's still-live process before startup cleanup. */
+async function captureStartupSample(app: ElectronApplication): Promise<void> {
+  const lifetime = electronLifetimes.get(app);
+  if (!lifetime || process.platform !== "darwin") return;
+  const { child, processIdentity, runRoot } = lifetime;
+  if (!processIdentity || child.exitCode !== null || child.signalCode !== null
+    || readSystemProcessIdentity(child.pid!) !== processIdentity) {
+    lifetime.startupSample = "Native sample unavailable: the launched process is no longer identity-validated.";
+    return;
+  }
+  const path = join(runRoot, `electron-startup-${child.pid}.sample.txt`);
+  try {
+    await new Promise<void>((resolveDone, reject) => {
+      execFile("/usr/bin/sample", [String(child.pid), "3", "10", "-file", path], {
+        timeout: 8_000, maxBuffer: 512 * 1024,
+      }, (error) => error ? reject(error) : resolveDone());
+    });
+    lifetime.startupSample = (await readFile(path, "utf8")).slice(0, 512 * 1024);
+  } catch (error) {
+    lifetime.startupSample = `Native sample unavailable: ${String(error)}`;
+  }
 }
 
 /**
@@ -104,11 +149,75 @@ async function acquireFirstWindow(app: ElectronApplication): Promise<Page> {
   const late = app.windows()[0];
   if (late) return late;
   const tail = (electronLifetimes.get(app)?.outputTail ?? []).slice(-20);
+  let startupState: unknown;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    startupState = await Promise.race([
+      app.evaluate(({ app, BrowserWindow }) => ({
+        ready: app.isReady(),
+        hasLock: app.hasSingleInstanceLock(),
+        appPath: app.getAppPath(),
+        userData: app.getPath("userData"),
+        pid: process.pid,
+        windows: BrowserWindow.getAllWindows().map((win) => ({ id: win.id, destroyed: win.isDestroyed() })),
+      })),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("startup probe timed out")), 5_000); }),
+    ]);
+  } catch (error) {
+    startupState = { probeError: String(error), exitCode: app.process().exitCode };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  await captureStartupSample(app);
   throw new Error(
     `Electron window was not created within ${WINDOW_DEADLINE_MS}ms`
+    + `\nstartup state: ${JSON.stringify(startupState)}`
     + (lastError ? `\nlast wait error: ${String(lastError)}` : "")
     + (tail.length ? `\n--- app output (last ${tail.length} lines) ---\n${tail.join("\n")}` : "\napp produced no output"),
   );
+}
+
+/** Launch or sequentially restart an Electron using the same isolated roots. */
+export async function launchOwnedElectron(env: Record<string, string>, runRoot: string): Promise<ElectronApplication> {
+  preservedRunRoots.add(runRoot);
+  const app = await electron.launch({
+    args: [resolve("."), `--user-data-dir=${env.TERMINA_USER_DATA_DIR}`, "--disable-gpu",
+      // AppKit persistence is bundle-scoped, not Electron-user-data-scoped.
+      // Ignore that external saved state without changing host preferences.
+      ...(process.platform === "darwin" ? ["-ApplePersistenceIgnoreState", "YES"] : []),
+    ], env,
+  });
+  const child = app.process();
+  const lifetime = {
+    child, tree: new OwnedProcessTree(child.pid!), shutdown: null, outputTail: [] as string[], runRoot,
+    processIdentity: readSystemProcessIdentity(child.pid!),
+    closed: new Promise<void>((resolveDone) => child.once("close", () => resolveDone())),
+    nativeError: null as string | null,
+    startupSample: null as string | null,
+  };
+  electronLifetimes.set(app, lifetime);
+  const active = activeElectrons.get(runRoot) ?? new Set<ElectronApplication>();
+  active.add(app);
+  activeElectrons.set(runRoot, active);
+  const recordOutput = (chunk: Buffer): void => {
+    rememberOutput(lifetime.outputTail, chunk.toString());
+    const nativeError = lifetime.outputTail.find((line) => /Napi::Error|terminating due to uncaught exception|terminate called after throwing/.test(line));
+    if (nativeError) lifetime.nativeError ??= nativeError;
+  };
+  child.stderr?.on("data", recordOutput);
+  child.stdout?.on("data", recordOutput);
+  const crashDumpDir = join(runRoot, "crash-dumps", String(child.pid));
+  mkdirSync(crashDumpDir, { recursive: true });
+  try {
+    await app.evaluate(({ app, crashReporter }, path) => {
+      app.setPath("crashDumps", path);
+      crashReporter.start({ uploadToServer: false, ignoreSystemCrashHandler: true });
+    }, crashDumpDir);
+  } catch (error) {
+    await closeOwnedElectron(app);
+    throw error;
+  }
+  return app;
 }
 
 export const test = base.extend<TerminaE2EFixtures>({
@@ -116,6 +225,14 @@ export const test = base.extend<TerminaE2EFixtures>({
   runRoot: async ({}, use) => {
     const runRoot = mkdtempSync(join(e2eTempDir(), "termina-playwright-"));
     await use(runRoot);
+    // A restarted app still belongs to this fixture if the test exits early.
+    for (const app of [...(activeElectrons.get(runRoot) ?? [])]) {
+      try {
+        await closeOwnedElectron(app);
+      } catch (error) {
+        console.warn(`[e2e] could not stop an owned Electron: ${String(error)}`);
+      }
+    }
     if (preservedRunRoots.has(runRoot)) {
       console.warn(`[e2e] retaining ${runRoot}: process cleanup was not confirmed`);
       return;
@@ -152,7 +269,7 @@ export const test = base.extend<TerminaE2EFixtures>({
     await use(root);
   },
 
-  electronApp: async ({ runRoot, projectRoot, terminalEngine }, use) => {
+  electronApp: async ({ runRoot, projectRoot, terminalEngine }, use, testInfo) => {
     const eventsDir = join(runRoot, "events");
     const worldsDir = join(runRoot, "worlds");
     const userData = join(runRoot, "user-data");
@@ -191,22 +308,9 @@ export const test = base.extend<TerminaE2EFixtures>({
     };
     delete env.ELECTRON_RUN_AS_NODE;
 
-    preservedRunRoots.add(runRoot);
-    const app = await electron.launch({
-      args: [
-        resolve("."),
-        `--user-data-dir=${userData}`,
-        // Deterministic software rendering: without this the GPU mode varies
-        // with the host. Production keeps the GPU; the suite never needs
-        // WebGL (guarded by gpu-mode.spec.ts).
-        "--disable-gpu",
-      ],
-      env,
-    });
-
+    // Software rendering keeps startup deterministic without a host GPU.
+    const app = await launchOwnedElectron(env, runRoot);
     const child = app.process();
-    const lifetime = { child, tree: new OwnedProcessTree(child.pid!), shutdown: null, outputTail: [] as string[] };
-    electronLifetimes.set(app, lifetime);
     // Suppressed-noise counters, split by class: the filter below keeps the
     // console readable, but a silent filter also hides frequency regressions,
     // so every suppressed line is counted and reported once per test below.
@@ -217,7 +321,6 @@ export const test = base.extend<TerminaE2EFixtures>({
     // the window never appears.
     child.stderr?.on("data", (chunk) => {
       const msg = chunk.toString();
-      rememberOutput(lifetime.outputTail, msg);
       // The GLES context failure spells it lowercase ("gpu/ipc/..."), so the
       // match must be case-insensitive to actually cover it.
       if (!/gpu|libpng|fontconfig/i.test(msg)) {
@@ -228,22 +331,40 @@ export const test = base.extend<TerminaE2EFixtures>({
         suppressedLib++;
       }
     });
-    child.stdout?.on("data", (chunk) => rememberOutput(lifetime.outputTail, chunk.toString()));
-
     try {
       await use(app);
     } finally {
-      await stopElectron(app);
-      const parts: string[] = [];
-      if (suppressedGpu > 0) parts.push(`${suppressedGpu} gpu`);
-      if (suppressedLib > 0) parts.push(`${suppressedLib} libpng/fontconfig`);
-      if (parts.length > 0) console.error(`[electron:err] suppressed ${parts.join(" + ")} stderr line(s)`);
-      preservedRunRoots.delete(runRoot);
+      try {
+        await closeOwnedElectron(app);
+      } finally {
+        const lifetime = electronLifetimes.get(app);
+        if (testInfo.status !== testInfo.expectedStatus || lifetime?.nativeError || lifetime?.startupSample) {
+          try {
+            await testInfo.attach("electron-output-tail", { body: (lifetime?.outputTail ?? []).join("\n"), contentType: "text/plain" });
+            if (lifetime?.startupSample) {
+              await testInfo.attach("electron-startup-native-sample", { body: lifetime.startupSample, contentType: "text/plain" });
+            }
+            if (lifetime?.nativeError) {
+              const crashDumpDir = join(lifetime.runRoot, "crash-dumps", String(lifetime.child.pid));
+              const dumps = (await readdir(crashDumpDir, { recursive: true })).filter((path) => path.endsWith(".dmp")).slice(0, 10);
+              for (const dump of dumps) {
+                await testInfo.attach(`owned-electron-${dump.replaceAll("/", "-")}`, { path: join(crashDumpDir, dump), contentType: "application/octet-stream" });
+              }
+            }
+          } catch (error) {
+            console.warn(`[e2e] could not attach owned Electron output: ${String(error)}`);
+          }
+        }
+        const parts: string[] = [];
+        if (suppressedGpu > 0) parts.push(`${suppressedGpu} gpu`);
+        if (suppressedLib > 0) parts.push(`${suppressedLib} libpng/fontconfig`);
+        if (parts.length > 0) console.error(`[electron:err] suppressed ${parts.join(" + ")} stderr line(s)`);
+      }
     }
   },
 
   closeElectron: async ({ electronApp }, use) => {
-    await use(() => stopElectron(electronApp));
+    await use(() => closeOwnedElectron(electronApp));
   },
 
   page: async ({ electronApp }, use) => {

@@ -10,7 +10,7 @@
 // First import: installs on evaluation, before any other module can stat into asar.
 import "./asar-stats-deprecation.ts";
 import { renameBoundEntry } from "./worldline-git.js";
-import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu, nativeTheme, protocol, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu, nativeTheme, protocol, shell, type MessageBoxOptions } from "electron";
 
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
@@ -71,7 +71,7 @@ import {
   parseScheduleMarker,
   pickDispatchTasks,
   reattachDispatchAssignments,
-  taskIsComplete,
+  settleDispatchTask,
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
 import { filterAgentEnvironment } from "./agent-env.js";
@@ -82,6 +82,10 @@ import { DiagnosticsRunner } from "./diagnostics.js";
 import { ScheduleRunner, type ScheduleTickTask } from "./schedule.js";
 import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { formatProjectSnapshot, MAX_PROJECT_SNAPSHOT_BYTES } from "./main/project-snapshot.js";
+import { projectWorkSummary, workOverview } from "./main/work-summary.js";
+import { formatVerifyContext, invalidateVerify, isVerifySourceCurrent, verifyOutputTail } from "./main/verify-source.js";
+import { closeConfirmation, closeTaskText, type CandidateCloseImpact, type TerminalCloseImpact } from "./main/close-confirm.js";
+import { SourceAdmissions, sourceTreesOverlap, type SourceClaim } from "./main/source-admission.js";
 import { searchProjectContent } from "./content-search.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
@@ -117,6 +121,7 @@ import {
   activityView,
   applyActivityEvent,
   emptyActivityInput,
+  hasLiveAgentWork,
   type ActivitySignal,
   type AgentActivityInput,
 } from "./agent-activity.js";
@@ -131,6 +136,7 @@ import {
   parsePtyAckPayload,
   parseRendererCapability,
   parseTerminalCreateOptions,
+  parseTerminalTarget,
 } from "./main/ipc-validate.js";
 import {
   newWorkspaceState,
@@ -142,6 +148,8 @@ import {
 } from "./main/project-workspace.js";
 import { isPdfPreviewUrl, previewContentType, previewKind } from "../shared/preview-media.js";
 import { decodeEditorText, readEditorFile } from "./main/editor-file.js";
+import { EditorDraftStore } from "./editor-drafts.js";
+import { EditorDraftSession } from "./main/editor-draft-session.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { evictOldest } from "../shared/evict-oldest.js";
@@ -157,7 +165,10 @@ import {
   type CommandId,
   type ContentHit,
   type ExplorerEntry,
+  type EditorFileResult,
+  type UnsavedConfirmResult,
   type InstanceSummary,
+  type TerminalCloseResult,
   type PlanTask,
   type RecorderState,
   type SessionHit,
@@ -168,8 +179,14 @@ import {
   type TimelinePrefix,
   type TimelineProgress,
   type ProjectWorkspaceRef,
+  type FolderOpenedPayload,
+  type ProjectActivateResult,
+  type WorkAttentionInspectResult,
+  type WorkOverview,
   type RendererIpcCapability,
-  type VerifyState,
+  type VerifyInfo,
+  type VerifyResultState,
+  type VerifySource,
 } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -213,6 +230,8 @@ const CHECKPOINT_CAPTURE_TIMEOUT_MS = 30_000;
 interface WorkspaceState {
   id: string;
   root: string;
+  /** Canonical physical source scope, distinct from the displayed root alias. */
+  canonicalRoot: string;
   /** True for the opened project; false for worldline candidates. */
   primary: boolean;
   /** The comparison that owns a candidate workspace. */
@@ -626,7 +645,7 @@ class TerminaApp {
   private subagents = new SubagentHost({
     eventsDirFor: (terminalId) => {
       const inst = this.runtime.get(terminalId);
-      return inst ? this.eventsDirOf(inst) : null;
+      return inst && !inst.closed && !inst.pty.hasExited && !this.disposed ? this.eventsDirOf(inst) : null;
     },
     baseEnv: () => cleanEnv(),
     coreBinary: () => coreEngineBinary(),
@@ -637,6 +656,7 @@ class TerminaApp {
     },
     admitSession: (sessionFile, signal) => this.sessionFork.admitCoreSession(sessionFile, { signal }),
     appendMailboxNote: (terminalId, note) => this.appendMailboxNote(terminalId, note),
+    ownerRunsChanged: (terminalId) => this.sourceAdmissions.releaseRetained(terminalId),
     watchStream: (terminalId) => this.runtime.watchSidecar(terminalId),
     releaseStream: (terminalId) => {
       this.runtime.stopSidecar(terminalId);
@@ -679,7 +699,7 @@ class TerminaApp {
   private appUpdater: AppUpdateController | null = null;
   private installingUpdate = false;
   /** In-flight background verify runs by owner terminal id. */
-  private verifyRuns = new Set<string>();
+  private verifyRuns = new Map<string, AgentTerminalInstance>();
   /** Background static diagnostics; main supplies live reads into app state. */
   private diagnostics = new DiagnosticsRunner({
     workspaceById: (workspaceId) => this.workspaceById(workspaceId),
@@ -705,7 +725,13 @@ class TerminaApp {
   private verifyJobs = new Map<string, VerifyJob>();
   /** Busy agent terminal ids: concurrent runs in one workspace overlap. */
   private busyAgents = new Set<string>();
+  /** Source reservations span startup, a run, and its background children. */
+  private sourceAdmissions = new SourceAdmissions(
+    (id) => this.subagents.activeRunIds(id).length > 0,
+    (claim) => this.expireSourceAdmission(claim),
+  );
   /** Dispatch workers: worker terminal id → its task text. */
+  private terminalCloseRequests = new WeakMap<AgentTerminalInstance, Promise<TerminalCloseResult>>();
   private dispatchWorkers = new Map<string, string>();
   /** Dispatch runs: worker terminal id → owner + the dispatched task text. */
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
@@ -725,6 +751,7 @@ class TerminaApp {
    *  Seeded by any failure, consumed by the loop below. Pass, cancel, or
    *  terminal close clears it. */
   private autoVerifyFailures = new Map<string, number>();
+  private verifyContextWrites = new Map<string, Promise<void>>();
   /** Consecutive failed verifies before the automatic loop stops. */
   private static readonly MAX_AUTO_VERIFY_ATTEMPTS = 3;
   /** True after the native owner has bound the events directory. */
@@ -746,11 +773,15 @@ class TerminaApp {
   private retainedSessionRoot = join(this.userDataDir, "retained-sessions");
   private sessionRetention = new SessionRetentionOwner(this.retainedSessionRoot);
   private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
+  private editorDrafts = new EditorDraftStore(join(this.userDataDir, "editor-drafts"));
+  private editorDraftSession = new EditorDraftSession(this.editorDrafts);
   private preferences: AppPreferences = defaultAppPreferences();
   private preferenceCommits: Promise<void> = Promise.resolve();
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   /** Renderer-reported scope: a live core TUI owns keyboard focus, so the menu blanks the Ctrl+P / Ctrl+R accelerators it would otherwise steal. */
   private coreTerminalFocused = false;
+  /** Native terminal actions use the exact pane selected by this renderer document. */
+  private terminalSelection: { id: string; generation: number; target: PtyRendererSendTarget } | null = null;
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /clear (/new alias) slash-command detection (terminals:write is per keystroke). */
   private newCommandBuffers = new Map<string, string>();
@@ -770,7 +801,8 @@ class TerminaApp {
   /** FIFO write-lease waiters per workspace id; empty queues are deleted. */
   private leaseWaiters = new Map<string, LeaseWaiter[]>();
   /** Renderer unsaved-buffer confirms awaiting their report. */
-  private unsavedWaiters = new Map<string, { resolve: (r: { ok: boolean; cancelled?: boolean; error?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
+  private unsavedWaiters = new Map<string, { resolve: (r: UnsavedConfirmResult) => void; timer: ReturnType<typeof setTimeout> }>();
+  private pendingDraftDiscards = new Map<string, string[]>();
   private unsavedSeq = 0;
   /** Per-caller file:search generations; older same-caller walks abort so fast
    *  typing never stacks full-tree walks. */
@@ -1123,6 +1155,7 @@ class TerminaApp {
     this.rendererReady = false;
     this.rendererGeneration = ++rendererGenerationSeq;
     this.rendererDocumentNonce = randomUUID();
+    this.editorDraftSession.reset();
     this.rendererLoadGeneration = ++rendererLoadGenerationSeq;
     this.rendererProcessId = processId;
     this.rendererFrameRoutingId = frameRoutingId;
@@ -1162,6 +1195,7 @@ class TerminaApp {
     this.rendererReady = false;
     this.rendererGeneration = ++rendererGenerationSeq;
     this.rendererDocumentNonce = randomUUID();
+    this.editorDraftSession.reset();
     this.rendererLoadGeneration = ++rendererLoadGenerationSeq;
     this.rendererProcessId = 0;
     this.rendererFrameRoutingId = 0;
@@ -1184,6 +1218,7 @@ class TerminaApp {
     this.rendererReady = false;
     this.rendererGeneration = ++rendererGenerationSeq;
     this.rendererDocumentNonce = randomUUID();
+    this.editorDraftSession.reset();
     this.rendererLoadGeneration = ++rendererLoadGenerationSeq;
     this.rendererProcessId = 0;
     this.rendererFrameRoutingId = 0;
@@ -1523,6 +1558,7 @@ class TerminaApp {
           { label: "Toggle Terminal", accelerator: shortcut("toggle-terminal"), click: send("toggle-terminal") },
           { label: "Toggle Editor", accelerator: shortcut("toggle-editor"), click: send("toggle-editor") },
           { label: "Toggle Modified Panel", accelerator: shortcut("toggle-modified"), click: send("toggle-modified") },
+          { label: "Attention across all projects", accelerator: shortcut("attention"), click: send("attention") },
           { label: "Next Project", accelerator: shortcut("next-project"), click: send("next-project") },
           { label: "Previous Project", accelerator: shortcut("previous-project"), click: send("previous-project") },
           { label: "Search Sessions…", accelerator: shortcut("session-search"), click: send("session-search") },
@@ -1770,7 +1806,10 @@ class TerminaApp {
   /** Create a workspace in a project and start its watcher. The primary
    *  workspace sets the project cwd used by the renderer-facing APIs. */
   private createWorkspace(project: ProjectState, root: string, primary: boolean): WorkspaceState {
-    const ws: WorkspaceState = newWorkspaceState(root, primary);
+    const ws: WorkspaceState = {
+      ...newWorkspaceState(root, primary),
+      canonicalRoot: primary ? project.canonicalRoot : root,
+    };
     project.workspaces.set(ws.id, ws);
     this.workspaceOwners.set(ws.id, project.id);
     if (primary) project.cwd = root;
@@ -1870,6 +1909,13 @@ class TerminaApp {
    * atomic; the canonical-path await in construction is not, so concurrent
    * agent_start events for one project must share a single construction. */
   private worldlineInits = new Map<string, Promise<void>>();
+  private worldlineRecovery: Promise<void> | null = null;
+
+  /** The shared worlds root is recovered before any project can create candidates. */
+  private recoverWorldlineComparisons(sweep: () => Promise<void>): Promise<void> {
+    this.worldlineRecovery ??= Promise.resolve().then(sweep);
+    return this.worldlineRecovery;
+  }
 
   private initWorldlines(project: ProjectState): Promise<void> {
     if (project.worldlines) return Promise.resolve();
@@ -1879,6 +1925,7 @@ class TerminaApp {
       if (project.worldlines) return;
       project.worldlines = new WorldlineManager({
         worldsRoot: this.worldsRoot,
+        recoverStaleComparisons: (sweep) => this.recoverWorldlineComparisons(sweep),
         // The canonical primary root: the sandbox compares canonical paths.
         primaryRoot: await this.canonicalPath(this.primaryWorkspace(project)?.root ?? project.cwd ?? homedir()),
       primaryRootIdentity: project.primaryRootIdentity,
@@ -2233,6 +2280,7 @@ class TerminaApp {
       if (ws.primary || ws.comparisonId !== comparisonId) continue;
       const stateId = ws.lastStateCommit;
       ws.watcher?.stop();
+      this.editorDraftSession.forgetWorkspace({ projectId: project.id, workspaceId: id });
       project.workspaces.delete(id);
       this.workspaceOwners.delete(id);
       project.terminalIds.forEach((tid) => {
@@ -2310,9 +2358,20 @@ class TerminaApp {
    * re-acquires without queueing and can never self-deadlock. Serializing
    * keeps concurrent captures and run starts from corrupting each other.
    */
+  private sourceWorkspaceWriter(root: string, except?: WorkspaceState): WorkspaceState | null {
+    for (const project of this.projects.values()) {
+      for (const other of project.workspaces.values()) {
+        if (other !== except && other.writerId !== null && sourceTreesOverlap(root, other.canonicalRoot)) return other;
+      }
+    }
+    return null;
+  }
+
   private async acquireWriteLease(wsId: string, requesterId: string, timeoutMs = 5000): Promise<{ ok: boolean; generation: number; error?: string }> {
     const ws = this.workspaceById(wsId);
     if (!ws) return { ok: false, generation: 0, error: "workspace not found" };
+    const overlap = this.sourceWorkspaceWriter(ws.canonicalRoot, ws);
+    if (overlap) return { ok: false, generation: ws.generation, error: `Source files overlap with another file operation in ${overlap.root}. Try again after it finishes.` };
     // Re-entrant fast path: the holder never queues behind itself.
     if (ws.writerId === requesterId) {
       ws.leaseDepth = (ws.leaseDepth ?? 0) + 1;
@@ -2841,13 +2900,16 @@ class TerminaApp {
                 text: t.text,
                 paths: t.paths,
                 state: t.state === "done" ? "done" : "pending",
+                ...(t.dispatchResult ? { dispatchResult: t.dispatchResult } : {}),
                 ...(model ? { model } : {}),
               };
             });
             this.sendPlan(inst);
           }
           if (rec.verify) {
-            inst.verify = { state: rec.verify.state, command: rec.verify.command, summary: rec.verify.summary };
+            inst.verify = invalidateVerify(rec.verify, "Previous session result has not been revalidated");
+            inst.verifyOutput = rec.verifyOutput ?? null;
+            this.writeVerifyContext(inst);
           }
         }
         spawned.push({ rec, id: inst.id });
@@ -3137,39 +3199,60 @@ class TerminaApp {
       throw new Error("this project already has the maximum number of saved terminals");
     }
     const sidecarTailer = opts?.sidecarTailer ?? this.tailer;
-    const inst = this.runtime.spawn({
-      id,
-      cwd: cwd ?? this.terminalCwd(),
-      workspaceId,
-      type,
-      shellName,
-      cmd,
-      args,
-      env,
-      tailer: sidecarTailer,
-      skipSidecarWatch: opts?.skipSidecarWatch,
-      rendererTarget,
-      setup: (created) => {
-        created.projectId = owner?.id ?? null;
-        created.persist = persist;
-        created.shellPath = shellPath;
-        created.sessionId = sessionId;
-        created.sessionFile = sessionFile;
-        if (type === "agent") created.engine = "core";
-        if (type === "agent" && !opts?.launch) {
-          const provider = env.TERMINA_CORE_PROVIDER?.trim() ?? "";
-          const modelName = env.TERMINA_CORE_MODEL?.trim() ?? "";
-          if (provider && modelName) {
-            const provisional = this.usableAgentModel(`${provider}/${modelName}`);
-            if (provisional) created.model = provisional;
+    const terminalRoot = cwd ?? this.terminalCwd();
+    const shellRoot = type === "shell" ? await fsRealpath(terminalRoot) : null;
+    let admittedGeneration: number | undefined;
+    let inst: AgentTerminalInstance;
+    try {
+      inst = this.runtime.spawn({
+        id,
+        cwd: shellRoot ?? terminalRoot,
+        workspaceId,
+        type,
+        shellName,
+        cmd,
+        args,
+        env,
+        tailer: sidecarTailer,
+        skipSidecarWatch: opts?.skipSidecarWatch,
+        rendererTarget,
+        beforeSpawn: (target) => {
+          if (this.disposed || (owner && this.projects.get(owner.id) !== owner)) throw new Error("project closed before terminal startup");
+          if (!shellRoot) return;
+          const writer = this.sourceWorkspaceWriter(shellRoot);
+          if (writer) throw new Error(`Source files overlap with a file operation in ${writer.root}. Try again after it finishes.`);
+          const admission = this.sourceAdmissions.admit({
+            ...target, root: shellRoot, groupId: `shell:${shellRoot}`, kind: "shell",
+          });
+          if (!admission.ok) throw new Error(this.sourceConflictText(admission.conflict));
+          admittedGeneration = target.generation;
+          this.sourceAdmissions.start(target.id, target.generation);
+        },
+        setup: (created) => {
+          created.projectId = owner?.id ?? null;
+          created.persist = persist;
+          created.shellPath = shellPath;
+          created.sessionId = sessionId;
+          created.sessionFile = sessionFile;
+          if (type === "agent") created.engine = "core";
+          if (type === "agent" && !opts?.launch) {
+            const provider = env.TERMINA_CORE_PROVIDER?.trim() ?? "";
+            const modelName = env.TERMINA_CORE_MODEL?.trim() ?? "";
+            if (provider && modelName) {
+              const provisional = this.usableAgentModel(`${provider}/${modelName}`);
+              if (provisional) created.model = provisional;
+            }
+            if (env.TERMINA_CORE_RESUME !== "1") {
+              const thinking = this.usableAgentThinking(env.TERMINA_CORE_EFFORT ?? null);
+              if (thinking) created.thinkingLevel = thinking;
+            }
           }
-          if (env.TERMINA_CORE_RESUME !== "1") {
-            const thinking = this.usableAgentThinking(env.TERMINA_CORE_EFFORT ?? null);
-            if (thinking) created.thinkingLevel = thinking;
-          }
-        }
-      },
-    });
+        },
+      });
+    } catch (error) {
+      if (admittedGeneration !== undefined) this.sourceAdmissions.remove(id, admittedGeneration);
+      throw error;
+    }
     if (owner) {
       owner.workspaces.get(workspaceId)?.terminalIds.add(id);
       owner.terminalIds.add(id);
@@ -3187,7 +3270,11 @@ class TerminaApp {
     }
     // Orient the first turn without discovery tool calls. Refreshes follow
     // watcher bursts through scheduleProjectSnapshot.
-    if (type === "agent") void this.writeProjectSnapshot(inst);
+    if (type === "agent") {
+      // A new terminal must not inherit a previous incarnation's green context.
+      this.writeVerifyContext(inst);
+      void this.writeProjectSnapshot(inst);
+    }
     this.sendInstances(rendererTarget);
     return inst;
   }
@@ -3260,21 +3347,23 @@ class TerminaApp {
     // A closed owner takes its background runs with it: no API burns for
     // a dead terminal, and no orphan results land nowhere.
     this.subagents.killOwner(inst.id, "terminal closed");
-    // A dispatch worker closed before settling: its task goes back to
-    // pending so the board stays honest.
+    this.sourceAdmissions.finish(inst.id, inst.generation);
+    // Exiting before settlement also releases the assignment and retains review.
     const dispatchExit = this.dispatchRuns.get(inst.id);
     if (dispatchExit) {
-      this.writeDispatchSettleNote(inst, "exited");
-      this.dispatchRuns.delete(inst.id);
-      this.dispatchWorkers.delete(inst.id);
       const ownerInst = this.runtime.get(dispatchExit.ownerId);
       const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchExit.taskText) : undefined;
-      if (ownerInst && task) {
-        task.state = "pending";
-        task.workerId = undefined;
-        task.claimed = undefined;
+      const end = inst.interruptedAt !== undefined || _details.origin === "forced" || _details.code === 0
+        ? "interrupted" : "failed";
+      const outcome = task ? settleDispatchTask(task, inst, end) : end;
+      this.writeDispatchSettleNote(inst, outcome);
+      if (ownerInst) {
+        this.collectWorker(inst, ownerInst, rendererTarget);
+        this.savePlanRoster(ownerInst);
         this.sendPlan(ownerInst, rendererTarget);
       }
+      this.dispatchRuns.delete(inst.id);
+      this.dispatchWorkers.delete(inst.id);
     }
     this.sendInstances(rendererTarget);
   }
@@ -3322,6 +3411,57 @@ class TerminaApp {
     });
   }
 
+  private invalidateWorkspaceVerify(ws: WorkspaceState, reason: string, currentTree?: string): void {
+    if (this.disposed || this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
+    const version = ws.watcher?.sourceVersion();
+    const currentSource = currentTree && version ? {
+      workspaceId: ws.id, root: ws.root, tree: currentTree, generation: ws.generation,
+      revision: version.revision, observationEpoch: version.observationEpoch,
+    } : undefined;
+    for (const inst of this.runtime.values()) {
+      if (inst.closed || inst.workspaceId !== ws.id) continue;
+      if (currentTree && isVerifySourceCurrent(inst.verify.source, currentSource)) continue;
+      const verify = invalidateVerify(inst.verify, reason);
+      if (verify === inst.verify) continue;
+      inst.verify = verify;
+      this.savePlanRoster(inst);
+      this.writeVerifyContext(inst);
+      this.send("verify:state", { terminalId: inst.id, verify });
+    }
+  }
+
+  /** Live Verify uses the same Rust capture and idle fence as run preflight. */
+  private async captureVerifySource(ownerId: string, cwd: string): Promise<VerifySource | undefined> {
+    const project = this.projectOfTerminal(ownerId);
+    const owner = this.runtime.get(ownerId);
+    const ws = owner ? this.workspaceOfTerminal(owner) : null;
+    const watcher = ws?.watcher;
+    if (!project || !ws || !watcher || (!sameUserPath(ws.root, cwd) && !pathInside(ws.root, cwd))) return undefined;
+    let state: SourceState | null = null;
+    try {
+      const store = await project.storePromise;
+      if (!store || ws.watcher !== watcher) return undefined;
+      state = await this.captureStable(store, ws, { root: ws.root, gitDir: ws.primary ? store.sourceGitDir : join(ws.root, ".git") });
+      const version = watcher.sourceVersion();
+      const generation = ws.generation;
+      if (!version) return undefined;
+      await watcher.observeCapturedSourcePaths(await store.treePaths(state.commit));
+      const after = watcher.sourceVersion();
+      return after && after.activityRevision === version.activityRevision && after.revision === version.revision
+        && after.observationEpoch === version.observationEpoch && ws.watcher === watcher && ws.generation === generation
+        ? { workspaceId: ws.id, root: ws.root, tree: state.tree, generation, revision: version.revision, observationEpoch: version.observationEpoch } : undefined;
+    } catch (err) {
+      console.warn(`[main] Verify source could not be validated: ${String(err)}`);
+      return undefined;
+    } finally {
+      if (state) await this.releaseStateIfUnused(state.commit, undefined, undefined, project);
+    }
+  }
+
+  private releaseVerifyAdmission(ownerId: string, owner: AgentTerminalInstance): void {
+    if (this.verifyRuns.get(ownerId) === owner) this.verifyRuns.delete(ownerId);
+  }
+
   private async runVerify(ownerId: string): Promise<{ ok: boolean; error?: string }> {
     const owner = this.runtime.get(ownerId);
     if (!owner) return { ok: false, error: "terminal not found" };
@@ -3331,38 +3471,43 @@ class TerminaApp {
     const rendererTarget = this.captureRendererSendTarget();
     const verifyOwnerId = this.projectOfTerminal(ownerId)?.id;
     if (this.disposed || this.projectIsSwitching(verifyOwnerId)) return { ok: false, error: "the project is changing" };
-    if (this.verifyRuns.has(ownerId)) return { ok: false, error: "a verify run is already in progress" };
-    this.verifyRuns.add(ownerId);
+    if (this.verifyRuns.has(ownerId) || this.verifyJobs.has(ownerId)) return { ok: false, error: "a verify run is already in progress" };
+    this.verifyRuns.set(ownerId, owner);
     // Run candidate tests inside the candidate sandbox. The tests cannot write
     // the primary project.
     const verifyOwner = this.projectOfTerminal(ownerId);
     const candidate = verifyOwner?.worldlines?.candidateSandboxOf(ownerId) ?? null;
-    const cwd = candidate?.root ?? this.terminalCwd();
+    const cwd = candidate?.root ?? owner.cwd;
     let tc: { command: string; args: string[]; label: string } | null;
     try {
       tc = await detectTestCommand(cwd);
     } catch (err) {
-      this.verifyRuns.delete(ownerId);
+      this.releaseVerifyAdmission(ownerId, owner);
       return { ok: false, error: `could not detect the test command: ${(err as Error).message}` };
     }
     if (!tc) {
-      this.verifyRuns.delete(ownerId);
+      this.releaseVerifyAdmission(ownerId, owner);
       return { ok: false, error: "no test command detected (looked for package.json scripts, pytest, cargo, go)" };
     }
-    if (
-      this.disposed ||
-      this.projectIsSwitching(verifyOwnerId) ||
-      this.runtime.get(ownerId) !== owner ||
-      (candidate && (!verifyOwner?.worldlines?.candidateSandboxOf(ownerId) || !existsSync(candidate.root)))
-    ) {
-      this.verifyRuns.delete(ownerId);
+    const ownerAdmitted = (): boolean => !this.disposed && !owner.closed && !this.projectIsSwitching(verifyOwnerId)
+      && this.runtime.get(ownerId) === owner
+      && (!candidate || (!!verifyOwner?.worldlines?.candidateSandboxOf(ownerId) && existsSync(candidate.root)));
+    if (!ownerAdmitted()) {
+      this.releaseVerifyAdmission(ownerId, owner);
       return { ok: false, error: "the project is changing" };
     }
 
+    const sourceWorkspace = this.workspaceOfTerminal(owner);
+    const sourceWatcher = sourceWorkspace?.watcher;
+    let testedSource: VerifySource | undefined;
+    let startedAt = 0;
     let child: ReturnType<typeof spawn>;
     let verifyProfilePath: string | null = null;
     let verifyProfileParent: PromotionFsIdentity | null = null;
     try {
+      const sourceTask = this.captureVerifySource(ownerId, cwd);
+      this.trackRecordingTask(sourceTask);
+      testedSource = await sourceTask;
       const shells = await detectShells();
       const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
@@ -3377,6 +3522,8 @@ class TerminaApp {
       const env = candidate
         ? { ...candidateEnv(null), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, TERMINA_EVENTS_DIR: candidate.eventsDir }
         : { ...verifyEnv() };
+      if (!ownerAdmitted()) throw new Error("the project is changing");
+      startedAt = Date.now();
       child = spawn(command, args, {
         cwd,
         detached: process.platform !== "win32",
@@ -3388,7 +3535,16 @@ class TerminaApp {
       if (verifyProfilePath && verifyProfileParent) {
         await this.removeBoundEvidenceProfile(verifyProfilePath, verifyProfileParent);
       }
-      this.verifyRuns.delete(ownerId);
+      this.releaseVerifyAdmission(ownerId, owner);
+      if (this.runtime.get(ownerId) === owner && !owner.closed && !this.projectIsSwitching(verifyOwnerId)) {
+        const verify = invalidateVerify(owner.verify, "Verification could not be started");
+        if (verify !== owner.verify) {
+          owner.verify = verify;
+          this.savePlanRoster(owner);
+          this.writeVerifyContext(owner);
+          this.send("verify:state", { terminalId: ownerId, verify }, rendererTarget);
+        }
+      }
       return { ok: false, error: `could not start the background test: ${(err as Error).message}` };
     }
 
@@ -3398,7 +3554,7 @@ class TerminaApp {
     let cleanupPromise: Promise<boolean> | null = null;
     let cleanupDone = false;
     let cleanupWaitAttached = false;
-    let pendingFinish: { code: number | null; how: VerifyState } | null = null;
+    let pendingFinish: { code: number | null; how: VerifyResultState } | null = null;
     const requestCleanup = (signal: NodeJS.Signals, graceMs = 1_500): Promise<boolean> => {
       cleanupPromise ??= terminateSandboxProcessGroup(child, signal, graceMs);
       if (!cleanupWaitAttached) {
@@ -3419,18 +3575,18 @@ class TerminaApp {
     const job: VerifyJob = { child, interrupted: false, cleanup: requestCleanup };
     this.verifyJobs.set(ownerId, job);
     const appendOutput = (data: Buffer | string): void => {
-      if (output.length >= MAX_VERIFY_OUTPUT) return;
-      output += data.toString().slice(0, MAX_VERIFY_OUTPUT - output.length);
+      output = (output + data.toString()).slice(-MAX_VERIFY_OUTPUT);
     };
-    const finishNow = (code: number | null, how: VerifyState): void => {
+    const finishNow = async (code: number | null, how: VerifyResultState): Promise<void> => {
       if (finished) return;
       finished = true;
       clearTimeout(verifyTimer);
-      this.verifyRuns.delete(ownerId);
-      this.verifyJobs.delete(ownerId);
-      const autoTask = this.autoVerifyTasks.get(ownerId) ?? null;
-      this.autoVerifyTasks.delete(ownerId);
-      const wasLooping = this.autoVerifyFailures.has(ownerId);
+      const finishedAt = Date.now();
+      const liveOwner = this.runtime.get(ownerId);
+      const ownsAutoTask = this.verifyJobs.get(ownerId) === job && (!liveOwner || liveOwner === owner);
+      const autoTask = ownsAutoTask ? this.autoVerifyTasks.get(ownerId) ?? null : null;
+      if (ownsAutoTask) this.autoVerifyTasks.delete(ownerId);
+      const wasLooping = ownsAutoTask && this.autoVerifyFailures.has(ownerId);
       if (verifyProfilePath) {
         const profilePath = verifyProfilePath;
         const profileParent = verifyProfileParent;
@@ -3438,61 +3594,96 @@ class TerminaApp {
         verifyProfileParent = null;
         if (profileParent) void this.removeBoundEvidenceProfile(profilePath, profileParent);
       }
-      if (this.runtime.get(ownerId) !== owner || this.projectIsSwitching(this.projectOfTerminal(ownerId)?.id) || this.disposed) return;
-      let summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : how === "cancelled" ? "cancelled" : "tests failing";
-      let failed: { count: number; names: string[] } | null = null;
-      if (how === "fail") {
-        try {
-          const parsed = parseFailingTests(output);
-          if (parsed.count > 0) {
-            failed = parsed;
-            summary = verifyFailSummary(parsed);
+      try {
+        if (!ownerAdmitted() || this.verifyJobs.get(ownerId) !== job) return;
+        const sourceTask = this.captureVerifySource(ownerId, cwd);
+        this.trackRecordingTask(sourceTask);
+        const currentSource = await sourceTask;
+        if (!ownerAdmitted() || this.verifyJobs.get(ownerId) !== job) return;
+        if (job.interrupted && how !== "timeout") how = "cancelled";
+        let summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : how === "cancelled" ? "cancelled" : "tests failing";
+        let failed: { count: number; names: string[] } | null = null;
+        if (how === "fail") {
+          try {
+            const parsed = parseFailingTests(output);
+            if (parsed.count > 0) {
+              failed = parsed;
+              summary = verifyFailSummary(parsed);
+            }
+          } catch {
+            /* Keep the generic failing summary. Parsing never fails the run. */
           }
-        } catch {
-          /* Keep the generic failing summary. Parsing never fails the run. */
         }
-      }
-      owner.verify = { state: how, command: tc.label, summary };
-      this.savePlanRoster(owner);
-      // Do not write a result for a cancelled run. The previous context stays.
-      if (how !== "cancelled") this.writeVerifyContext(ownerId, tc.label, how, code, output, failed);
-      if (autoTask && how !== "cancelled") {
-        const verdict = how === "pass" ? "✅ auto-verify passed" : how === "timeout" ? "⏰ auto-verify timed out" : "❌ auto-verify failed";
-        this.appendMailboxNote(ownerId, `## Auto-verify\n\nTask: ${autoTask}\nResult: ${verdict} — \`${summary}\``);
-      }
-      if (how === "pass" || how === "cancelled") {
-        this.autoVerifyFailures.delete(ownerId);
-        if (how === "pass" && wasLooping && !autoTask) {
-          this.appendMailboxNote(ownerId, `## Auto-verify\n\nResult: ✅ verify passed — \`${summary}\``);
-        }
-      } else if (how === "timeout") {
-        // A timed-out suite usually hangs again; retrying would burn up to
-        // three 10-minute runs. Report it and stop the loop.
-        this.autoVerifyFailures.delete(ownerId);
-        if (!autoTask) {
-          this.appendMailboxNote(ownerId, `## Verify timed out\n\n\`${summary}\` — automatic re-verify is disabled for timeouts; run Verify manually when the suite is responsive again.`);
-        }
-      } else {
-        const attempts = (this.autoVerifyFailures.get(ownerId) ?? 0) + 1;
-        if (attempts >= TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS) {
+        const verdict: VerifyInfo = {
+          state: how, command: tc.label, summary, source: testedSource,
+          result: { state: how, exitCode: code, startedAt, finishedAt },
+        };
+        // Capture cleanup also awaits Rust. Re-read observation after those
+        // awaits, immediately before certifying; running invalidation is deferred.
+        const liveWorkspace = this.workspaceOfTerminal(owner);
+        const liveVersion = sourceWatcher?.sourceVersion();
+        const liveSource = liveWorkspace && liveVersion && currentSource ? {
+          workspaceId: liveWorkspace.id, root: liveWorkspace.root, tree: currentSource.tree,
+          generation: liveWorkspace.generation, revision: liveVersion.revision, observationEpoch: liveVersion.observationEpoch,
+        } : undefined;
+        const current = liveWorkspace === sourceWorkspace && liveWorkspace?.watcher === sourceWatcher
+          && isVerifySourceCurrent(testedSource, currentSource) && isVerifySourceCurrent(currentSource, liveSource);
+        owner.verify = current ? verdict : invalidateVerify(verdict,
+          testedSource && currentSource ? "Source changed during verification" : "The tested source could not be validated");
+        owner.verifyOutput = verifyOutputTail(output);
+        this.savePlanRoster(owner);
+        this.writeVerifyContext(owner, failed);
+        if (owner.verify.state === "stale") {
           this.autoVerifyFailures.delete(ownerId);
-          this.appendMailboxNote(ownerId, `## Auto-verify stopped\n\n${attempts} consecutive failed verifies — needs attention before another automatic run.`);
-        } else {
-          this.autoVerifyFailures.set(ownerId, attempts);
+          if (autoTask || wasLooping) {
+            this.appendMailboxNote(ownerId, `## Auto-verify\n\n${autoTask ? `Task: ${autoTask}\n` : ""}Result: outdated — ${owner.verify.staleReason}. Run Verify again against stable source.`);
+          }
+          this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
+          return;
+        }
+        if (autoTask && how !== "cancelled") {
+          const verdict = how === "pass" ? "✅ auto-verify passed" : how === "timeout" ? "⏰ auto-verify timed out" : "❌ auto-verify failed";
+          this.appendMailboxNote(ownerId, `## Auto-verify\n\nTask: ${autoTask}\nResult: ${verdict} — \`${summary}\``);
+        }
+        if (how === "pass" || how === "cancelled") {
+          this.autoVerifyFailures.delete(ownerId);
+          if (how === "pass" && wasLooping && !autoTask) {
+            this.appendMailboxNote(ownerId, `## Auto-verify\n\nResult: ✅ verify passed — \`${summary}\``);
+          }
+        } else if (how === "timeout") {
+          // A timed-out suite usually hangs again; retrying would burn up to
+          // three 10-minute runs. Report it and stop the loop.
+          this.autoVerifyFailures.delete(ownerId);
           if (!autoTask) {
-            this.appendMailboxNote(ownerId, `## Verify failed\n\n\`${summary}\` — will automatically re-verify when your next run settles (attempt ${attempts} of ${TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS}).`);
+            this.appendMailboxNote(ownerId, `## Verify timed out\n\n\`${summary}\` — automatic re-verify is disabled for timeouts; run Verify manually when the suite is responsive again.`);
+          }
+        } else {
+          const attempts = (this.autoVerifyFailures.get(ownerId) ?? 0) + 1;
+          if (attempts >= TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS) {
+            this.autoVerifyFailures.delete(ownerId);
+            this.appendMailboxNote(ownerId, `## Auto-verify stopped\n\n${attempts} consecutive failed verifies — needs attention before another automatic run.`);
+          } else {
+            this.autoVerifyFailures.set(ownerId, attempts);
+            if (!autoTask) {
+              this.appendMailboxNote(ownerId, `## Verify failed\n\n\`${summary}\` — will automatically re-verify when your next run settles (attempt ${attempts} of ${TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS}).`);
+            }
           }
         }
+        this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
+      } finally {
+        if (this.verifyJobs.get(ownerId) === job) {
+          this.releaseVerifyAdmission(ownerId, owner);
+          this.verifyJobs.delete(ownerId);
+        }
       }
-      this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
     };
-    function finishAfterCleanup(): void {
+    const finishAfterCleanup = (): void => {
       if (!cleanupDone || !pendingFinish || finished) return;
       const pending = pendingFinish;
       pendingFinish = null;
-      finishNow(pending.code, pending.how);
-    }
-    const finish = (code: number | null, how: VerifyState): void => {
+      this.trackRecordingTask(finishNow(pending.code, pending.how));
+    };
+    const finish = (code: number | null, how: VerifyResultState): void => {
       if (finished) return;
       pendingFinish = { code, how };
       requestCleanup(how === "timeout" ? "SIGKILL" : "SIGTERM");
@@ -3504,6 +3695,8 @@ class TerminaApp {
       finish(null, "timeout");
     }, 10 * 60 * 1000);
 
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", appendOutput);
     child.stderr?.on("data", appendOutput);
     child.once("error", (err) => {
@@ -3514,13 +3707,14 @@ class TerminaApp {
       if (!finished) finish(code, timedOut ? "timeout" : job.interrupted ? "cancelled" : code === 0 ? "pass" : "fail");
     });
 
-    owner.verify = { state: "running", command: tc.label, summary: "running…" };
+    owner.verifyOutput = "";
+    owner.verify = { state: "running", command: tc.label, summary: "running…", source: testedSource };
     this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
     return { ok: true };
   }
 
   private cancelVerifyForComparison(comparisonId: string): void {
-    for (const ownerId of [...this.verifyRuns]) {
+    for (const ownerId of [...this.verifyRuns.keys()]) {
       const owner = this.runtime.get(ownerId);
       const workspace = owner ? this.projectOfTerminal(ownerId)?.workspaces.get(owner.workspaceId) : undefined;
       if (workspace?.comparisonId !== comparisonId) continue;
@@ -3555,40 +3749,40 @@ class TerminaApp {
   }
 
   /** Write the verify result to the context file the bridge extension reads. */
-  private writeVerifyContext(
-    ownerId: string,
-    label: string,
-    state: VerifyState,
-    code: number | null,
-    output: string,
-    failed: { count: number; names: string[] } | null = null,
-  ): void {
-    const owner = this.runtime.get(ownerId);
-    const eventsDir = owner ? this.eventsDirOf(owner) : this.eventsDir;
-    const root = owner ? this.eventsBindingOf(owner) : this.eventsDirBinding;
+  private writeVerifyContext(owner: AgentTerminalInstance, failed: { count: number; names: string[] } | null = null): void {
+    const root = this.eventsBindingOf(owner);
     if (!root) return;
-    const stamp = new Date().toISOString();
-    const status = state === "pass" ? "✅ PASSED" : state === "timeout" ? "⏰ TIMED OUT" : "❌ FAILED";
-    const failLine =
-      failed && failed.count > 0
-        ? `**Failed:** ${failed.count} — ${failed.names.map((n) => `\`${n}\``).join(", ")}\n\n`
-        : "";
-    const body = output.trim().slice(-6000);
-    const md =
-      `## Test run — \`${label}\` — ${stamp}\n\n` +
-      `**Status:** ${status}${code !== null ? ` (exit code ${code})` : ""}\n\n` +
-      failLine +
-      (body ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
-    void writeBoundOwnedFile({
-      root: eventsDir,
-      rootIdentity: root,
-      components: [`verify-${ownerId}.md`],
-      parentIdentity: root,
-      content: Buffer.from(md),
-      mode: 0o600,
-      maxBytes: 16 * 1024,
-    }).catch((err) => {
-      console.warn(`[main] could not write verify context: ${String(err)}`);
+    const eventsDir = this.eventsDirOf(owner);
+    const verify = owner.verify;
+    const md = formatVerifyContext(verify, owner.verifyOutput, failed);
+    const previous = this.verifyContextWrites.get(owner.id) ?? Promise.resolve();
+    const task = previous.then(async () => {
+      // Serialize immutable verdicts: a late pass must not overwrite stale context.
+      if (this.runtime.get(owner.id) !== owner || owner.closed || owner.verify !== verify) return;
+      try {
+        await writeBoundOwnedFile({
+          root: eventsDir,
+          rootIdentity: root,
+          components: [`verify-${owner.id}.md`],
+          parentIdentity: root,
+          content: Buffer.from(md),
+          mode: 0o600,
+          maxBytes: 16 * 1024,
+        });
+      } catch (err) {
+        console.warn(`[main] could not write verify context: ${String(err)}`);
+        // Derived context may be absent, but must not retain an obsolete green.
+        await this.removeEventLeaf(owner, `verify-${owner.id}.md`);
+      }
+    });
+    this.verifyContextWrites.set(owner.id, task);
+    this.trackRecordingTask(task);
+    const forget = (): void => {
+      if (this.verifyContextWrites.get(owner.id) === task) this.verifyContextWrites.delete(owner.id);
+    };
+    void task.then(forget, (err) => {
+      forget();
+      console.warn(`[main] Verify context update failed: ${String(err)}`);
     });
   }
 
@@ -3683,8 +3877,8 @@ class TerminaApp {
       (p) => this.canonicalPath(p),
     );
     if (tasks.length === 0) return;
+    const previousPlan = inst.plan;
     inst.plan = tasks;
-    this.savePlanRoster(inst);
     // Do not reset touched or tool outcomes. The plan can arrive after
     // the first tool events, and their progress must count.
     reattachDispatchAssignments(
@@ -3692,7 +3886,9 @@ class TerminaApp {
       [...this.dispatchRuns]
         .filter(([, entry]) => entry.ownerId === inst.id)
         .map(([workerId, entry]) => ({ workerId, taskText: entry.taskText })),
+      previousPlan,
     );
+    this.savePlanRoster(inst);
     this.sendPlan(inst, expected);
   }
 
@@ -3822,13 +4018,13 @@ class TerminaApp {
     return this.canonicalPath(join(root, p));
   }
 
-  /** True when an active verify or dispatch overlaps the given workspace. */
-  private overlapInWorkspace(workspaceId: string): boolean {
-    for (const id of this.verifyRuns) {
-      const inst = this.runtime.get(id);
-      if (inst && inst.workspaceId === workspaceId) return true;
+  /** Active Verify commands and other dispatch workers overlap this run's workspace. */
+  private overlapInWorkspace(workspaceId: string, terminalId: string): boolean {
+    for (const inst of this.verifyRuns.values()) {
+      if (inst.workspaceId === workspaceId) return true;
     }
-    for (const entry of this.dispatchRuns.values()) {
+    for (const [workerId, entry] of this.dispatchRuns) {
+      if (workerId === terminalId) continue;
       const owner = this.runtime.get(entry.ownerId);
       if (owner && owner.workspaceId === workspaceId) return true;
     }
@@ -4291,7 +4487,7 @@ class TerminaApp {
     }
   }
 
-  private writeDispatchSettleNote(worker: AgentTerminalInstance, status: "settled" | "exited"): void {
+  private writeDispatchSettleNote(worker: AgentTerminalInstance, status: NonNullable<PlanTask["dispatchResult"]>["outcome"], startError?: string): void {
     const dispatch = this.dispatchRuns.get(worker.id);
     if (!dispatch) return;
     const touched = [...worker.touched].map((p) => `\`${p}\``).join(", ");
@@ -4300,6 +4496,7 @@ class TerminaApp {
       "",
       `Task: ${dispatch.taskText}`,
       `Status: ${status}`,
+      ...(startError ? [`Start rejected: ${startError}`] : []),
       touched ? `Touched: ${touched}` : "Touched: none",
     ].join("\n");
     for (const id of this.dispatchGroupIds(dispatch.ownerId)) {
@@ -4620,6 +4817,7 @@ class TerminaApp {
     const inst = this.runtime.get(id);
     if (!inst || inst.closed) return;
     const owner = this.projectOfTerminal(id);
+    inst.interruptedAt = Date.now();
     this.closeTerminal(id);
     // Persist the user's close intent immediately. Waiting for the process
     // exit callback loses it when the app quits while PTY teardown is still
@@ -4638,20 +4836,124 @@ class TerminaApp {
     this.sendInstances();
   }
 
-  private closeActiveTerminal(): void {
-    const inst = this.activeProjectTerminals().at(-1);
-    if (inst) this.closeUserTerminal(inst.id);
+  private selectTerminal(id: unknown, generation: unknown): { ok: boolean } {
+    const ref = parseTerminalTarget(id, generation);
+    const inst = ref ? this.runtime.get(ref.id) : undefined;
+    const target = this.captureRendererSendTarget();
+    if (!ref || !inst || inst.closed || inst.generation !== ref.generation || !target
+      || this.disposed || this.projectIsSwitching(this.activeProjectId ?? undefined)
+      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId) return { ok: false };
+    this.terminalSelection = { ...ref, target };
+    return { ok: true };
+  }
+
+  private selectedTerminal(): AgentTerminalInstance | null {
+    const selected = this.terminalSelection;
+    if (!selected || !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), selected.target)) return null;
+    const inst = this.runtime.get(selected.id);
+    if (!inst || inst.closed || inst.generation !== selected.generation
+      || this.disposed || this.projectIsSwitching(this.activeProjectId ?? undefined)
+      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId) return null;
+    return inst;
+  }
+
+  private terminalCloseImpact(inst: AgentTerminalInstance): TerminalCloseImpact {
+    return {
+      id: inst.id,
+      generation: inst.generation,
+      projectRoot: this.projectOfTerminal(inst.id)?.cwd ?? null,
+      cwd: inst.cwd,
+      type: inst.type,
+      working: !inst.pty.hasExited && (inst.busy || hasLiveAgentWork(this.activityInputs.get(inst.id) ?? emptyActivityInput())),
+      exited: inst.pty.hasExited,
+      runId: inst.currentRun?.id ?? null,
+      dispatchTask: closeTaskText(this.dispatchRuns.get(inst.id)?.taskText),
+      taskText: closeTaskText(inst.pendingPrompt?.text ?? (inst.currentRun?.settledAt === null ? inst.currentRun.promptText : null)),
+      promptPayloadFile: inst.pendingPrompt?.file ?? inst.currentRun?.promptPayloadFile ?? null,
+      childRunIds: this.subagents.activeRunIds(inst.id),
+      verifying: this.verifyRuns.has(inst.id) || this.verifyJobs.has(inst.id),
+      verifyPid: this.verifyJobs.get(inst.id)?.child.pid ?? null,
+      changedFiles: inst.modified.size,
+    };
+  }
+
+  /** User requests share one gate. Internal teardown never asks again. */
+  private requestTerminalClose(id: string, generation: number): Promise<TerminalCloseResult> {
+    const inst = this.runtime.get(id);
+    if (!inst || inst.closed || inst.generation !== generation) {
+      return Promise.resolve({ ok: false, error: "the terminal is no longer available" });
+    }
+    const pending = this.terminalCloseRequests.get(inst);
+    if (pending) return pending;
+    const promise = this.performTerminalClose(inst).catch((error) => ({ ok: false, error: `could not close terminal: ${(error as Error).message}` }));
+    this.terminalCloseRequests.set(inst, promise);
+    void promise.finally(() => this.terminalCloseRequests.delete(inst));
+    return promise;
+  }
+
+  private async performTerminalClose(inst: AgentTerminalInstance): Promise<TerminalCloseResult> {
+    const rendererTarget = this.captureRendererSendTarget();
+    if (!rendererTarget) return { ok: false, error: "the terminal context is unavailable" };
+    const project = this.projectOfTerminal(inst.id);
+    const current = (): boolean => !this.disposed && this.runtime.get(inst.id) === inst && !inst.closed
+      && this.projectOfTerminal(inst.id) === project && !this.projectIsSwitching(project?.id)
+      && isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget);
+    if (!current()) return { ok: false, error: "the terminal context has changed" };
+    const impact = this.terminalCloseImpact(inst);
+    const options = closeConfirmation({ kind: "terminal", id: inst.id }, [impact]);
+    if (options) {
+      const win = this.win;
+      if (!win || win.isDestroyed()) return { ok: false, error: "confirmation is unavailable" };
+      try {
+        const result = await dialog.showMessageBox(win, options);
+        if (result.response !== 0) return { ok: false, cancelled: true };
+      } catch (error) {
+        return { ok: false, error: `could not confirm close: ${(error as Error).message}` };
+      }
+      if (!current()) return { ok: false, error: "the terminal context has changed" };
+      if (JSON.stringify(this.terminalCloseImpact(inst)) !== JSON.stringify(impact)) {
+        return { ok: false, error: "the terminal's work changed while confirming; close again to review it" };
+      }
+    }
+    this.closeUserTerminal(inst.id);
+    return { ok: true };
+  }
+
+  private async closeActiveTerminal(): Promise<void> {
+    const inst = this.selectedTerminal();
+    if (!inst) return;
+    const result = await this.requestTerminalClose(inst.id, inst.generation);
+    const win = this.win;
+    if (!result.ok && result.error && win && !win.isDestroyed()) {
+      await dialog.showMessageBox(win, { type: "warning", message: "Terminal not closed", detail: result.error }).catch((error) => {
+        console.warn(`[main] could not report terminal close failure: ${(error as Error).message}`);
+      });
+    }
   }
 
   private async abortActive(): Promise<void> {
-    const inst = this.activeProjectTerminals().at(-1);
-    if (inst) inst.pty.write("\x03");
-  }
-
-  /** The terminals of the active project, in creation order. */
-  private activeProjectTerminals(): AgentTerminalInstance[] {
-    const project = this.project();
-    return [...this.runtime.values()].filter((inst) => !inst.closed && (!project || project.terminalIds.has(inst.id)));
+    const inst = this.selectedTerminal();
+    if (!inst) return;
+    const rendererTarget = this.captureRendererSendTarget();
+    if (!rendererTarget) return;
+    const impact = this.terminalCloseImpact(inst);
+    const options = closeConfirmation({ kind: "interrupt", id: inst.id }, [impact]);
+    if (options) {
+      const win = this.win;
+      if (!win || win.isDestroyed()) return;
+      try {
+        const result = await dialog.showMessageBox(win, options);
+        if (result.response !== 0) return;
+      } catch (error) {
+        console.warn(`[main] could not confirm interrupt: ${(error as Error).message}`);
+        return;
+      }
+    }
+    if (this.selectedTerminal() !== inst || this.disposed
+      || !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget)
+      || JSON.stringify(this.terminalCloseImpact(inst)) !== JSON.stringify(impact)) return;
+    inst.interruptedAt = Date.now();
+    inst.pty.interrupt();
   }
 
   private instanceList(): InstanceSummary[] {
@@ -4684,6 +4986,65 @@ class TerminaApp {
 
   private sendInstances(expected?: PtyRendererSendTarget | null): void {
     this.send("instances:list", this.instanceList(), expected);
+  }
+
+  private workSummary(projectId: unknown) {
+    if (typeof projectId !== "string" || projectId.length > 64) return null;
+    const project = this.projects.get(projectId);
+    if (!project) return null;
+    const terminals = [...project.terminalIds].flatMap((id) => {
+      const inst = this.runtime.get(id);
+      if (!inst || inst.closed || inst.projectId !== project.id) return [];
+      return [{
+        id: inst.id, generation: inst.generation, type: inst.type, model: inst.model,
+        activity: activityView(activityFor(this.activityInputs.get(id) ?? emptyActivityInput())),
+        workspace: this.workspaceOfTerminal(inst), verify: inst.verify,
+        trackedChanges: inst.modified.size, plan: inst.plan,
+      }];
+    });
+    return projectWorkSummary(project, terminals);
+  }
+
+  private workOverview(): WorkOverview {
+    // workSummary walks each project's authoritative ids with direct Map lookups.
+    // Across all projects this collects each owned terminal once, not once per project.
+    return workOverview([...this.projects.keys()].flatMap((id) => {
+      const summary = this.workSummary(id);
+      return summary ? [summary] : [];
+    }));
+  }
+
+  private async inspectWorkAttention(id: unknown): Promise<WorkAttentionInspectResult> {
+    if (typeof id !== "string" || !/^work-[a-f0-9]{64}$/.test(id)) {
+      return { ok: false, error: "Invalid attention target." };
+    }
+    const item = this.workOverview().items.find((item) => item.id === id);
+    const project = item ? this.projects.get(item.projectId) : undefined;
+    if (!item || !project || this.disposed || this.projectIsSwitching(project.id)) {
+      return { ok: false, error: "This attention item is no longer available." };
+    }
+    const selectionAction = this.beginProjectSelectionAction();
+    const folder = await this.activateProject(project.id, undefined, selectionAction);
+    // Auth/activation awaits can overlap close, navigation, source movement or resolution.
+    // Both selection action and activation epoch must still own the active slot.
+    if (!folder || this.disposed || this.projects.get(project.id) !== project
+      || this.projectIsSwitching(project.id) || this.activeProjectId !== project.id
+      || this.projectSelectionAction !== selectionAction
+      || this.projectActivationGeneration !== folder.activationGeneration
+      || project.activationGeneration !== folder.activationGeneration) {
+      return { ok: false, error: "Attention navigation was superseded." };
+    }
+    const current = this.workOverview().items.find((item) => item.id === id);
+    if (!current) return { ok: false, error: "This attention item changed while opening." };
+    return { ok: true, folder, action: current.action };
+  }
+
+  private verifyReport(id: unknown, generation: unknown): string | null {
+    const target = parseTerminalTarget(id, generation);
+    const inst = target ? this.runtime.get(target.id) : undefined;
+    if (!target || !inst || inst.closed || inst.type !== "agent" || inst.generation !== target.generation
+      || !this.projectOfTerminal(inst.id)) return null;
+    return formatVerifyContext(inst.verify, inst.verifyOutput);
   }
 
   // -------------------------------------------------------------- sidecar ---
@@ -4745,6 +5106,10 @@ class TerminaApp {
           if (pending.terminalId !== inst.id || pending.requestId !== requestId) continue;
           this.expirePreflight(token, "cancel");
           break;
+        }
+        if (!inst.busy) {
+          this.sourceAdmissions.finish(inst.id, inst.generation);
+          this.rejectDispatchStart(inst, "run startup was cancelled");
         }
         break;
       }
@@ -4824,6 +5189,7 @@ class TerminaApp {
       case "agent_start":
         this.applyAgentSettings(inst, event.model, event.thinkingLevel, undefined, rendererTarget, event.permissions);
         inst.busy = true;
+        this.sourceAdmissions.start(inst.id, inst.generation);
         // Track busy agents: a second agent starting in the same workspace
         // overlaps this run (marked in coupleRunStart, WORLDLINES §5).
         if (inst.type === "agent") this.busyAgents.add(inst.id);
@@ -4894,26 +5260,35 @@ class TerminaApp {
         // evidence from the stale idle view between these two updates.
         if (candHit) this.markCandidateEvidenceStale(candHit.comparisonId);
         break;
+      case "agent_start_rejected":
+        if (!inst.busy) {
+          this.sourceAdmissions.finish(inst.id, inst.generation);
+          this.rejectDispatchStart(inst, event.error ?? "the prompt did not start");
+          this.sendInstances(rendererTarget);
+        }
+        break;
       case "agent_settled":
         inst.busy = false;
+        this.sourceAdmissions.finish(inst.id, inst.generation);
         this.busyAgents.delete(inst.id);
         if (event.error && inst.currentRun) {
           inst.currentRun.replayable = false;
-          inst.currentRun.reason = `session storage failed: ${event.error}`;
+          inst.currentRun.reason = event.error === "interrupted" ? "run interrupted" : `run failed: ${event.error}`;
           inst.currentRun.settledAt = Date.now();
           inst.currentRun = null;
           this.send("worldline:runs-changed", { terminalId: inst.id }, rendererTarget);
         }
         this.finalizePlan(inst, rendererTarget);
-        // A dispatch worker finished: mark the owner task done only when
-        // the worker's last file-tool outcomes cover that task's paths.
+        // Settlement releases execution ownership even when paths are incomplete.
         const dispatchEnd = this.dispatchRuns.get(inst.id);
         if (dispatchEnd) {
-          this.writeDispatchSettleNote(inst, "settled");
           const ownerInst = this.runtime.get(dispatchEnd.ownerId);
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchEnd.taskText) : undefined;
+          const end = event.error && event.error !== "interrupted" ? "failed"
+            : inst.interruptedAt !== undefined || event.error === "interrupted" ? "interrupted" : "settled";
+          const outcome = task ? settleDispatchTask(task, inst, end) : "incomplete";
+          this.writeDispatchSettleNote(inst, outcome);
           if (ownerInst) {
-            if (task && taskIsComplete(task.paths, inst.touched, inst.toolOutcomes)) task.state = "done";
             this.savePlanRoster(ownerInst);
             this.sendPlan(ownerInst, rendererTarget);
             this.collectWorker(inst, ownerInst, rendererTarget);
@@ -5023,8 +5398,13 @@ class TerminaApp {
           // Ignore ends with no matching file-tool start (read, bash, orphan).
           if (rel !== undefined) inst.toolOutcomes.set(rel, event.isError === true ? "error" : "ok");
         }
-        if (toolEv) await this.finishTimelineWriteSnapshot(inst, toolEv);
-        else await this.finishUnmatchedTimelineWriteSnapshots(inst);
+        if (toolEv) {
+          toolEv.entryId = event.entryId ?? null;
+          await this.finishTimelineWriteSnapshot(inst, toolEv);
+          // A watcher capture can finish before the durable result address.
+          // Publish through the same captured-moment owner once both exist.
+          if (toolEv.stateId) this.attachMomentState(inst, toolEv.stateId, [toolEv], rendererTarget);
+        } else await this.finishUnmatchedTimelineWriteSnapshots(inst);
         this.sendTimelinePrefix(inst, rendererTarget);
         // The tool finished: schedule the moment capture for its dots.
         if (inst.currentRun) this.scheduleMomentCapture(inst, rendererTarget);
@@ -5119,6 +5499,76 @@ class TerminaApp {
     });
   }
 
+  private expireSourceAdmission(claim: SourceClaim): void {
+    const inst = this.runtime.get(claim.id);
+    if (inst?.generation !== claim.generation) return;
+    if (inst.busy) {
+      this.sourceAdmissions.admit(claim);
+      this.sourceAdmissions.start(claim.id, claim.generation);
+      return;
+    }
+    // Missing startup evidence is not proof that the child cannot write. Keep
+    // its scope held while interrupting; settlement/PTY exit releases it.
+    if (!inst.pty.hasExited) {
+      this.sourceAdmissions.admit(claim);
+      this.sourceAdmissions.start(claim.id, claim.generation);
+    }
+    this.rejectDispatchStart(inst, "source admission expired before the run started");
+    for (const [token, pending] of this.pendingPreflights) {
+      if (pending.terminalId === inst.id) this.expirePreflight(token, "timeout");
+    }
+    if (!inst.pty.hasExited) {
+      inst.interruptedAt = Date.now();
+      inst.pty.interrupt();
+    }
+  }
+
+  private async admitSource(inst: AgentTerminalInstance): Promise<{ ok: boolean; error?: string }> {
+    const ws = this.workspaceOfTerminal(inst);
+    const project = this.projectOfTerminal(inst.id);
+    if (!ws || !project) return { ok: false, error: "source folder is no longer open" };
+    const root = await fsRealpath(ws.root);
+    if (root !== ws.canonicalRoot) return { ok: false, error: "source folder changed; reopen it before retrying" };
+    if (ws.primary) {
+      const identity = await lstat(root, { bigint: true });
+      if (String(identity.dev) !== project.primaryRootIdentity.dev || String(identity.ino) !== project.primaryRootIdentity.ino) {
+        return { ok: false, error: "source folder was replaced; reopen it before retrying" };
+      }
+    }
+    if (this.disposed || inst.closed || inst.pty.hasExited || this.runtime.get(inst.id) !== inst
+      || this.workspaceOfTerminal(inst) !== ws || this.projects.get(project.id) !== project) {
+      return { ok: false, error: "terminal closed before source admission" };
+    }
+    const writer = !ws.primary ? this.sourceWorkspaceWriter(root) : null;
+    if (writer) return { ok: false, error: `Source files overlap with a file operation in ${writer.root}. Try again after it finishes.` };
+    const groupId = this.dispatchRuns.get(inst.id)?.ownerId ?? inst.id;
+    const result = this.sourceAdmissions.admit({ id: inst.id, generation: inst.generation, root, groupId, kind: "agent" });
+    if (result.ok) return result;
+    return { ok: false, error: this.sourceConflictText(result.conflict) };
+  }
+
+  private sourceConflictText(conflict: { id: string; root: string; kind: "agent" | "shell" }): string {
+    const shell = conflict.kind === "shell" ? " Shell activity is unknown while its terminal is live." : "";
+    return `Source files overlap with ${conflict.id} in ${conflict.root}.${shell} Stop that work or use a separate candidate before retrying.`;
+  }
+
+  /** A rejected structured start has no agent_settled boundary to release its task. */
+  private rejectDispatchStart(inst: AgentTerminalInstance, error: string): void {
+    const dispatch = this.dispatchRuns.get(inst.id);
+    if (!dispatch || inst.busy) return;
+    const owner = this.runtime.get(dispatch.ownerId);
+    const task = owner ? findTaskByText(owner.plan, dispatch.taskText) : undefined;
+    const end = inst.interruptedAt !== undefined ? "interrupted" : "failed";
+    const outcome = task ? settleDispatchTask(task, inst, end) : end;
+    this.writeDispatchSettleNote(inst, outcome, error);
+    if (owner) {
+      this.collectWorker(inst, owner);
+      this.savePlanRoster(owner);
+      this.sendPlan(owner);
+    }
+    this.dispatchRuns.delete(inst.id);
+  }
+
   /**
    * The start preflight (WORLDLINES §6.3 steps 2-5): lease, flush, capture
    * the start state, then answer the bridge with a one-use token. The lease
@@ -5146,6 +5596,8 @@ class TerminaApp {
       }
     };
     const acknowledgeFailure = (error: string): void => {
+      if (!inst.busy) this.sourceAdmissions.finish(inst.id, inst.generation);
+      this.rejectDispatchStart(inst, error);
       this.writeAck(inst.id, requestId, { ok: false, error });
       report("failed");
     };
@@ -5159,13 +5611,26 @@ class TerminaApp {
     const remainingBudget = (): number => deadlineAt - Date.now() - 250;
     const ws = this.workspaceOfTerminal(inst);
     if (!ws) {
-      // No workspace: nothing to record. The run proceeds without a token.
-      this.writeAck(inst.id, requestId, { ok: true, token: null });
-      report("ok");
+      acknowledgeFailure("source folder is no longer open");
+      return;
+    }
+    try {
+      const admission = await this.admitSource(inst);
+      markStage("source");
+      if (!admission.ok) {
+        acknowledgeFailure(admission.error ?? "source admission failed");
+        return;
+      }
+    } catch (error) {
+      acknowledgeFailure(`source admission failed: ${(error as Error).message}`);
+      return;
+    }
+    if (remainingBudget() <= 0) {
+      acknowledgeFailure("preflight deadline expired during source admission");
       return;
     }
     if (!ws.primary) {
-      // A candidate run: Release 1 records primary runs only.
+      // Candidate scopes participate in admission, but primary runs alone record.
       this.writeAck(inst.id, requestId, { ok: true, token: null });
       report("ok");
       return;
@@ -5283,6 +5748,7 @@ class TerminaApp {
         return;
       }
       const state = captured.state;
+      this.invalidateWorkspaceVerify(ws, "Source capture differs from the recorded test run", state.tree);
       markStage("capture");
       this.setWorkspaceState(ws, state.commit);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
@@ -5358,6 +5824,8 @@ class TerminaApp {
    * A token-less agent_start is a retry or compaction of the open run.
    */
   private async coupleRunStart(inst: AgentTerminalInstance, event: AgentStartEvent): Promise<void> {
+    // Explicit null names the empty session root; an omitted parent is unknown.
+    const promptParentEntryId = event.parentEntryId === null ? "0" : event.parentEntryId ?? null;
     const token = String(event.preflightToken ?? "");
     const pending = token ? this.pendingPreflights.get(token) : undefined;
     const ws = this.workspaceOfTerminal(inst);
@@ -5378,7 +5846,7 @@ class TerminaApp {
         promptEventsDir: inst.pendingPrompt?.file ? this.eventsDirOf(inst) : null,
         promptText: inst.pendingPrompt?.text ?? null,
         promptEntryId: event.entryId ?? null,
-        promptParentEntryId: event.parentEntryId ?? null,
+        promptParentEntryId,
         settledEntryId: null,
         sessionFile: event.sessionFile ?? null,
         sessionBranchFile: null,
@@ -5390,7 +5858,7 @@ class TerminaApp {
         reason: null,
         interrupted: false,
         steering: false,
-        overlap: this.overlapInWorkspace(inst.workspaceId),
+        overlap: this.overlapInWorkspace(inst.workspaceId, inst.id),
         unownedEdits: 0,
         startedAt: Date.now(),
         settledAt: null,
@@ -5424,7 +5892,7 @@ class TerminaApp {
         promptEventsDir: inst.pendingPrompt?.file ? this.eventsDirOf(inst) : null,
         promptText: inst.pendingPrompt?.text ?? null,
         promptEntryId: event.entryId ?? null,
-        promptParentEntryId: event.parentEntryId ?? null,
+        promptParentEntryId,
         settledEntryId: null,
         sessionFile: event.sessionFile ?? null,
         sessionBranchFile: null,
@@ -5520,21 +5988,43 @@ class TerminaApp {
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
     if (!requestId) return;
+    const rejectCheckpoint = (error: string): void => {
+      const run = inst.currentRun;
+      if (kind === "settled" && run && !run.settledAt) {
+        run.replayable = false;
+        run.reason = `settled checkpoint failed: ${error}`;
+        run.settledAt = Date.now();
+        inst.currentRun = null;
+        this.pushTimeline(inst, {
+          t: "agent_settled", ts: run.settledAt, stateId: null,
+          entryId: entryId || null, model: run.model, runStartStateId: run.startStateId,
+        }, expected);
+        this.send("worldline:runs-changed", { terminalId: inst.id }, expected);
+      }
+      this.setRecorderState(inst, "degraded", expected, error.slice(0, 160));
+      this.writeAck(inst.id, requestId, { ok: false, error });
+    };
     const ws = this.workspaceOfTerminal(inst);
     if (!ws || (!ws.lastStateCommit && !ws.primary)) {
-      this.writeAck(inst.id, requestId, { ok: false, error: "recording is not available" });
+      rejectCheckpoint("recording is not available");
       return;
     }
     const checkpointOwner = this.projectOfTerminal(inst.id);
-    const store = await checkpointOwner?.storePromise;
+    let store: SnapshotStore | null | undefined;
+    try {
+      store = await checkpointOwner?.storePromise;
+    } catch (err) {
+      rejectCheckpoint(err instanceof Error ? err.message : String(err));
+      return;
+    }
     if (!store) {
-      this.writeAck(inst.id, requestId, { ok: false, error: "recording is not available" });
+      rejectCheckpoint("recording is not available");
       return;
     }
     const leaseRequester = `checkpoint:${inst.id}:${requestId}`;
     const lease = await this.acquireWriteLease(ws.id, leaseRequester, 8000);
     if (!lease.ok) {
-      this.writeAck(inst.id, requestId, { ok: false, error: lease.error ?? "the workspace is busy" });
+      rejectCheckpoint(lease.error ?? "the workspace is busy");
       return;
     }
     // The preflight's race shape: the capture has an overall deadline so a
@@ -5544,7 +6034,7 @@ class TerminaApp {
     // finally below must not release it early.
     let releaseOnExit = true;
     try {
-      const capturePromise = this.captureStable(store, ws);
+      const capturePromise = this.captureStable(store, ws, { root: ws.root, gitDir: ws.primary ? store.sourceGitDir : join(ws.root, ".git") });
       const captured = await Promise.race([
         capturePromise.then((state) => ({ ok: true as const, state })),
         new Promise<{ ok: false }>((resolve) => {
@@ -5553,7 +6043,7 @@ class TerminaApp {
       ]);
       if (!captured.ok) {
         releaseOnExit = false;
-        this.writeAck(inst.id, requestId, { ok: false, error: "checkpoint capture timed out" });
+        rejectCheckpoint("checkpoint capture timed out");
         this.trackRecordingTask(capturePromise.then(
           () => undefined,
           () => undefined,
@@ -5567,14 +6057,17 @@ class TerminaApp {
       if (!ws.primary) await checkpointOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.writeAck(inst.id, requestId, { ok: true, stateId: state.commit });
       if (kind === "settled" && inst.currentRun && !inst.currentRun.settledAt) {
-        const runStartStateId = inst.currentRun.startStateId;
-        const model = inst.currentRun.model;
+        const settledRun = inst.currentRun;
+        const runStartStateId = settledRun.startStateId;
+        const model = settledRun.model;
         // Session-branch copy can outlive the sidecar ack. Do not hold the
         // tailer's in-flight slot (and producer backpressure) on it.
         this.trackRecordingTask((async () => {
           await this.finalizeRun(inst, state, entryId, expected);
           this.pushTimeline(inst, {
             t: "agent_settled",
+            // Session copying delays publication, not the run's actual end.
+            ts: settledRun.settledAt!,
             stateId: state.commit,
             entryId: entryId || null,
             model,
@@ -5583,7 +6076,7 @@ class TerminaApp {
         })());
       }
     } catch (err) {
-      this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      rejectCheckpoint(err instanceof Error ? err.message : String(err));
     } finally {
       if (releaseOnExit) this.releaseWriteLease(ws.id, leaseRequester);
     }
@@ -5594,7 +6087,7 @@ class TerminaApp {
    * reject any raw activity or generation change across capture. Two bounded
    * attempts prevent a continuously changing source from waiting forever.
    */
-  private async captureStable(store: SnapshotStore, ws: WorkspaceState): Promise<SourceState> {
+  private async captureStable(store: SnapshotStore, ws: WorkspaceState, source: { root: string; gitDir: string }): Promise<SourceState> {
     for (let attempt = 0; attempt < 2; attempt++) {
       const watcher = ws.watcher;
       if (!watcher) throw new Error("source watcher is not available");
@@ -5604,9 +6097,13 @@ class TerminaApp {
       if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
         throw new Error("the retained-blob budget is exhausted");
       }
-      const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null);
+      const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null, {}, {}, source);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
-      if (ws.generation === gen && watcher.isIdleAt(idleRevision)) return state;
+      if (ws.generation === gen && ws.watcher === watcher && watcher.isIdleAt(idleRevision)) {
+        this.invalidateWorkspaceVerify(ws, "Source capture differs from the recorded test run", state.tree);
+        return state;
+      }
+      await this.releaseStateIfUnused(state.commit, undefined, undefined, this.projectOfWorkspace(ws.id));
     }
     throw new Error("the source changed during capture");
   }
@@ -5881,6 +6378,8 @@ class TerminaApp {
 
   /** Push the recorder state label (WORLDLINES §6). */
   private setRecorderState(inst: AgentTerminalInstance, state: RecorderState, expected?: PtyRendererSendTarget | null, detail?: string | null): void {
+    // A successful capture does not restore earlier evicted moments.
+    if (state === "ready" && inst.timeline.some((event) => event.evicted)) state = "budget";
     if (state === "degraded" && detail !== undefined) inst.recorderDetail = detail;
     if (state !== "degraded") inst.recorderDetail = null;
     // Degraded resends: each failed batch carries the latest error for the
@@ -5908,7 +6407,7 @@ class TerminaApp {
     run.settledEntryId = entryId || null;
     run.settledAt = Date.now();
     run.interrupted = inst.interruptedAt !== undefined && inst.interruptedAt > run.startedAt;
-    if (run.overlap || this.overlapInWorkspace(run.workspaceId)) {
+    if (run.overlap || this.overlapInWorkspace(run.workspaceId, inst.id)) {
       run.overlap = true;
       run.replayable = false;
       run.reason = "another writer overlapped the same workspace";
@@ -6166,6 +6665,9 @@ class TerminaApp {
       case "agent_start":
         this.foldActivity(inst, { t: "agent_start", seq, at }, expected);
         break;
+      case "agent_start_rejected":
+        this.foldActivity(inst, { t: "agent_start_rejected", seq, at }, expected);
+        break;
       case "agent_settled":
         this.foldActivity(inst, { t: "agent_settled", seq, at, error: event.error ?? null }, expected);
         break;
@@ -6297,6 +6799,8 @@ class TerminaApp {
     // becomes the next run's prompt. The old verify verdict is stale too.
     inst.pendingPrompt = null;
     inst.verify = { state: "untested", command: null, summary: null };
+    inst.verifyOutput = null;
+    this.writeVerifyContext(inst);
     this.send("verify:state", { terminalId, verify: inst.verify }, expected);
     // Modified files and their original baselines intentionally survive /clear:
     // they describe real workspace changes still present on disk. The next
@@ -6379,12 +6883,12 @@ class TerminaApp {
    *  reference in the timeline array. */
   private pushTimeline(
     inst: AgentTerminalInstance,
-    ev: Omit<TimelineEvent, "seq" | "ts">,
+    ev: Omit<TimelineEvent, "seq" | "ts"> & { ts?: number },
     expected?: PtyRendererSendTarget | null,
   ): TimelineEvent {
     const event = ev as TimelineEvent;
     event.seq = ++inst.timelineSeq;
-    event.ts = Date.now();
+    event.ts = ev.ts ?? Date.now();
     inst.timeline.push(event);
     if (inst.timeline.length > MAX_TIMELINE_EVENTS) {
       const removed = inst.timeline.splice(0, inst.timeline.length - MAX_TIMELINE_EVENTS);
@@ -6660,7 +7164,7 @@ class TerminaApp {
    * Ask the renderer to Save / Discard / Cancel dirty editor buffers.
    * Save reuses flushAll → file:save. Cancel aborts the close or quit.
    */
-  async confirmUnsavedEditorBuffers(projectId?: string): Promise<{ ok: boolean; cancelled?: boolean; error?: string }> {
+  async confirmUnsavedEditorBuffers(projectId?: string): Promise<UnsavedConfirmResult> {
     const rendererTarget = this.captureRendererSendTarget();
     return new Promise((resolve) => {
       const requestId = `unsaved-${++this.unsavedSeq}`;
@@ -6679,41 +7183,91 @@ class TerminaApp {
     });
   }
 
-  /**
-   * Shared close/quit gate: unsaved editor buffers, then live worldline
-   * candidates. Cancel at either step aborts.
-   */
+  /** Shared close/quit gate: unsaved buffers, then affected work and candidates. */
   async confirmClose(projectId?: string): Promise<boolean> {
+    if (projectId) this.pendingDraftDiscards.delete(projectId);
     const unsaved = await this.confirmUnsavedEditorBuffers(projectId);
-    if (!unsaved.ok) return false;
-    return this.confirmDiscardActiveCandidates(projectId);
+    if (!unsaved.ok || !(await this.confirmCloseConsequences(projectId))) return false;
+    const tokens = unsaved.discardDraftTokens ?? [];
+    if (projectId) {
+      // A later lease failure must not destroy copies from an aborted close.
+      this.pendingDraftDiscards.set(projectId, tokens);
+    } else {
+      try {
+        await this.discardEditorDrafts(tokens);
+      } catch (error) {
+        console.warn(`[main] recovery copies could not be discarded: ${(error as Error).message}`);
+        return false;
+      }
+    }
+    return true;
   }
 
-  /**
-   * Confirmation for live candidates with activity (§6.11): a folder
-   * switch or app quit discards them; ask first.
-   */
-  async confirmDiscardActiveCandidates(projectId?: string): Promise<boolean> {
-    // Count only the given project when one tab closes. App quit passes no
-    // id and counts every project.
-    const wanted = projectId ? [this.projects.get(projectId)] : [...this.projects.values()];
-    let active = 0;
-    for (const project of wanted) {
-      if (!project) continue;
-      active += (await project.worldlines?.activeCandidates().catch(() => 0)) ?? 0;
+  private async discardEditorDrafts(tokens: string[], projectId?: string): Promise<void> {
+    try {
+      await this.editorDraftSession.discard(tokens, projectId);
+    } catch (error) {
+      this.send("editor:recovery-refresh", { projectId: projectId ?? null, error: (error as Error).message });
+      throw error;
     }
-    if (active === 0) return true;
+  }
+
+  /** Main owns consequence scope. Navigation never uses this teardown gate. */
+  private async confirmCloseConsequences(projectId?: string): Promise<boolean> {
+    const project = projectId ? this.projects.get(projectId) : null;
+    if (projectId && !project) return false;
+    const wanted = project ? [project] : [...this.projects.values()];
     const win = this.win;
-    if (!win) return true;
-    const res = await dialog.showMessageBox(win, {
-      type: "warning",
-      message: `${active} worldline candidate(s) have source changes or session activity`,
-      detail: "Closing the project or quitting discards them. Discard and continue?",
-      buttons: ["Discard and continue", "Cancel"],
-      defaultId: 1,
-      cancelId: 1,
-    });
-    return res.response === 0;
+    const rendererTarget = this.captureRendererSendTarget();
+    // macOS can keep work alive without a window. Quit still has an unparented
+    // native confirmation; an unavailable document in an existing window fails closed.
+    if (!rendererTarget && win) return false;
+    const windowGeneration = this.rendererWindowGeneration;
+    const documentGeneration = this.rendererGeneration;
+    const current = (): boolean => !this.disposed
+      && wanted.every((owner) => this.projects.get(owner.id) === owner)
+      && (projectId !== undefined || wanted.length === this.projects.size)
+      && (rendererTarget
+        ? isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget)
+        : this.win === null && this.rendererWindowGeneration === windowGeneration && this.rendererGeneration === documentGeneration);
+    const collect = async (): Promise<{ terminals: TerminalCloseImpact[]; candidates: CandidateCloseImpact[] }> => {
+      const counts = await Promise.all(wanted.map((owner) => owner.worldlines?.activeCandidates() ?? 0));
+      return {
+        terminals: [...this.runtime.values()]
+          .filter((inst) => !inst.closed && (!projectId || inst.projectId === projectId))
+          .map((inst) => this.terminalCloseImpact(inst)),
+        candidates: wanted.map((owner, index) => ({
+          projectRoot: owner.cwd,
+          count: counts[index],
+          comparisonIds: owner.worldlines?.list().map((comparison) => comparison.id) ?? [],
+        })),
+      };
+    };
+    try {
+      const impact = await collect();
+      if (!current()) return false;
+      const scope = project ? { kind: "project" as const, root: project.cwd } : { kind: "app" as const };
+      const options = closeConfirmation(scope, impact.terminals, impact.candidates);
+      if (!options) return true;
+      if (win?.isDestroyed()) return false;
+      const result = await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options));
+      if (result.response !== 0 || !current()) return false;
+      const latest = await collect();
+      if (!current()) return false;
+      if (JSON.stringify(latest) !== JSON.stringify(impact)) {
+        const changed: MessageBoxOptions = {
+          type: "warning",
+          message: "Work changed while confirming",
+          detail: "Nothing was closed. Close again to review the affected work.",
+        };
+        await (win ? dialog.showMessageBox(win, changed) : dialog.showMessageBox(changed));
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.warn(`[main] could not confirm affected work: ${(error as Error).message}`);
+      return false;
+    }
   }
 
   private openFolder(): Promise<{ cwd: string } | { cancelled: true }> {
@@ -6858,12 +7412,12 @@ class TerminaApp {
     projectId: string,
     expected?: PtyRendererSendTarget | null,
     expectedSelectionAction?: number,
-  ): Promise<boolean> {
+  ): Promise<FolderOpenedPayload | null> {
     const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
     const project = this.projects.get(projectId);
-    if (!project || this.projectIsSwitching(projectId)) return false;
+    if (!project || this.projectIsSwitching(projectId)) return null;
     const selectionAction = expectedSelectionAction ?? this.beginProjectSelectionAction();
-    if (expectedSelectionAction !== undefined && this.projectSelectionAction !== expectedSelectionAction) return false;
+    if (expectedSelectionAction !== undefined && this.projectSelectionAction !== expectedSelectionAction) return null;
     const activationGeneration = this.nextProjectActivationGeneration();
     this.activeProjectId = projectId;
     project.activationGeneration = activationGeneration;
@@ -6887,7 +7441,7 @@ class TerminaApp {
     activationGeneration: number,
     selectionAction = this.projectSelectionAction,
     expected?: PtyRendererSendTarget | null,
-  ): Promise<boolean> {
+  ): Promise<FolderOpenedPayload | null> {
     const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
     const project = this.projects.get(projectId);
     const current = () => !this.disposed
@@ -6897,13 +7451,14 @@ class TerminaApp {
       && project?.activationGeneration === activationGeneration
       && this.projectActivationGeneration === activationGeneration
       && this.projectSelectionAction === selectionAction;
-    if (!current()) return false;
+    if (!current()) return null;
     const needsLogin = await this.agentNeedsLogin();
     // Auth I/O is asynchronous. Re-check every active-project fence before
     // publishing; an earlier request must never resurrect a closed/hidden tab.
-    if (!current()) return false;
-    this.send("folder:opened", { cwd, projectId, workspaceId, activationGeneration, needsLogin }, rendererTarget);
-    return true;
+    if (!current()) return null;
+    const folder: FolderOpenedPayload = { cwd, projectId, workspaceId, activationGeneration, needsLogin };
+    this.send("folder:opened", folder, rendererTarget);
+    return folder;
   }
 
   /**
@@ -7045,6 +7600,9 @@ class TerminaApp {
         closeLeaseWorkspaceId = primary.id;
       }
       await project.worldlines?.drainEvidence();
+      await this.discardEditorDrafts(this.pendingDraftDiscards.get(projectId) ?? [], projectId);
+      this.editorDraftSession.forgetProject(projectId);
+      this.pendingDraftDiscards.delete(projectId);
       await project.worldlines?.dispose().catch(() => undefined);
       project.worldlines = null;
       await this.clearMineFiles(project);
@@ -7216,17 +7774,26 @@ class TerminaApp {
       for (const inst of this.runtime.values()) {
         if (matches(inst)) return true;
       }
+      for (const inst of this.runtime.nativeValues()) {
+        if (matches(inst)) return true;
+      }
       return false;
     };
     const deadline = Date.now() + timeoutMs;
     while (anyAlive() && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    for (const inst of [...this.runtime.values()]) {
+    const remaining = new Set([...this.runtime.values(), ...this.runtime.nativeValues()]);
+    for (const inst of remaining) {
       if (matches(inst)) {
         inst.pty.killGroup("SIGKILL");
         inst.pty.kill("SIGKILL");
       }
+    }
+    // Logical forced cleanup is not node-pty completion. Keep the JS
+    // environment and core alive until native callbacks and exit hooks finish.
+    while (anyAlive()) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
   }
 
@@ -7241,6 +7808,8 @@ class TerminaApp {
     const canonicalRootPromise = this.canonicalPath(ws.root);
     const workspaceTerminals = (): AgentTerminalInstance[] =>
       [...ws.terminalIds].map((id) => this.runtime.get(id)).filter((t): t is AgentTerminalInstance => t !== undefined);
+    watcher.onSourceChanged = () => this.invalidateWorkspaceVerify(ws, "Workspace activity after the recorded test run");
+    watcher.onObservationLost = () => this.invalidateWorkspaceVerify(ws, "Source observation is unavailable");
     watcher.onChange = async (change) => {
       const rendererTarget = this.captureRendererSendTarget();
       const owner = this.projectOfWorkspace(ws.id);
@@ -7283,7 +7852,7 @@ class TerminaApp {
       // receives user edits on its next turn (see the edits-<id>.md context
       // file).
       const busy = workspaceTerminals().filter((t) => t.busy);
-      const verifyInWorkspace = [...this.verifyRuns].some((id) => this.runtime.get(id)?.workspaceId === ws.id);
+      const verifyInWorkspace = [...this.verifyRuns.values()].some((inst) => inst.workspaceId === ws.id);
       if (busy.length === 0 && !verifyInWorkspace && !this.promotionPaths?.has(relPath)) {
         this.recordUserEdit(ws, { path, relPath, status: change.status, prev: change.prev, content: change.content, at: now });
       }
@@ -7831,6 +8400,18 @@ class TerminaApp {
         activationGeneration: p.activationGeneration,
       }));
     });
+    ipcMain.handle("work:overview", async () => {
+      if (this.initialRestorePromise) await this.initialRestorePromise;
+      return this.workOverview();
+    });
+    ipcMain.handle("work:inspect", async (_e, id: unknown) => {
+      if (this.initialRestorePromise) await this.initialRestorePromise;
+      return this.inspectWorkAttention(id);
+    });
+    ipcMain.handle("project:work-summary", async (_e, projectId: unknown) => {
+      if (this.initialRestorePromise) await this.initialRestorePromise;
+      return this.workSummary(projectId);
+    });
     ipcMain.handle("project:open", async () => {
       if (this.initialRestorePromise) await this.initialRestorePromise;
       return this.openFolder();
@@ -7846,9 +8427,10 @@ class TerminaApp {
       }
       return this.openProjectAt(cwd);
     });
-    ipcMain.handle("project:activate", async (_e, projectId: unknown) => {
+    ipcMain.handle("project:activate", async (_e, projectId: unknown): Promise<ProjectActivateResult> => {
       if (typeof projectId !== "string" || !this.projects.has(projectId)) return { ok: false };
-      return { ok: await this.activateProject(projectId) };
+      const folder = await this.activateProject(projectId);
+      return folder ? { ok: true, folder } : { ok: false };
     });
     ipcMain.handle("project:close", async (_e, projectId: unknown) => {
       if (typeof projectId !== "string") return { ok: false, error: "invalid project" };
@@ -7991,12 +8573,11 @@ class TerminaApp {
         p.sequence,
       );
     });
-    ipcMain.handle("terminals:close", (event, id: unknown, generation: unknown) => {
-      if (event.sender !== this.win?.webContents) return;
-      if (typeof id !== "string" || typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) return;
-      const inst = this.runtime.get(id);
-      if (!inst || inst.generation !== generation) return;
-      this.closeUserTerminal(id);
+    ipcMain.handle("terminals:select", (_event, id: unknown, generation: unknown) => this.selectTerminal(id, generation));
+    ipcMain.handle("terminals:close", (_event, id: unknown, generation: unknown) => {
+      const ref = parseTerminalTarget(id, generation);
+      if (!ref) return { ok: false, error: "invalid terminal target" };
+      return this.requestTerminalClose(ref.id, ref.generation);
     });
     ipcMain.handle("terminals:write", (_e, id: unknown, data: unknown) => {
       if (typeof id !== "string" || typeof data !== "string") return;
@@ -8167,6 +8748,7 @@ class TerminaApp {
     });
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
     ipcMain.handle("verify:cancel", (_e, terminalId: string) => this.cancelVerify(terminalId));
+    ipcMain.handle("verify:report", (_e, id: unknown, generation: unknown) => this.verifyReport(id, generation));
 
     // ---- Mine ----
     ipcMain.handle("mine:set", (_e, path: string, mine: boolean, owner: unknown) => this.setMineFile(path, mine, owner));
@@ -8255,13 +8837,25 @@ class TerminaApp {
     });
     ipcMain.handle("review:revert", (_e, terminalId: string, path: string) => this.revertReviewFile(terminalId, path));
 
-    ipcMain.handle("file:open", (_e, absPath: unknown, owner: unknown) => {
+    ipcMain.handle("file:open", (_e, absPath: unknown, owner: unknown, purpose: unknown) => {
       if (typeof absPath !== "string") return { ok: false, path: "", error: "invalid path" };
-      return this.openFileInEditor(absPath, owner);
+      if (purpose !== undefined && purpose !== "editor") return { ok: false, path: absPath, error: "invalid file purpose" };
+      return this.openFileInEditor(absPath, owner, purpose);
     });
+    ipcMain.handle("file:draft-claim", (_e, absPath: unknown, owner: unknown, modelId: unknown) => this.claimEditorDraft(absPath, owner, modelId));
     ipcMain.handle("file:save", (_e, absPath: unknown, content: unknown, owner: unknown, restore: unknown) =>
       this.saveEditorFile(absPath, content, owner, restore),
     );
+    ipcMain.handle("file:drafts", (_e, projectId: unknown) => this.listEditorDrafts(projectId));
+    ipcMain.handle("file:draft-checkpoint", (_e, token: unknown, revision: unknown, content: unknown, owner: unknown) => {
+      const target = this.projectWorkspace(owner);
+      if (!target) return { ok: false, error: "invalid project workspace" };
+      return this.editorDraftSession.checkpoint(token, revision, content, { projectId: target.project.id, workspaceId: target.workspace.id });
+    });
+    ipcMain.handle("file:draft-release", (_e, token: unknown, owner: unknown) => {
+      const target = this.projectWorkspace(owner);
+      if (target) this.editorDraftSession.forget(token, { projectId: target.project.id, workspaceId: target.workspace.id });
+    });
 
     ipcMain.handle("explorer:list-dir", (_e, projectId: unknown, absPath: unknown) => {
       if (typeof projectId !== "string" || typeof absPath !== "string") return { entries: [], error: "invalid path" };
@@ -8359,22 +8953,97 @@ class TerminaApp {
     });
   }
 
-  private async openFileInEditor(absPath: string, owner: unknown): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: true; path: string; preview: "image" | "pdf"; version: number } | { ok: false; path: string; error: string }> {
+  private async listEditorDrafts(projectId: unknown): Promise<{ ok: boolean; files: { path: string; owner: ProjectWorkspaceRef }[]; error?: string }> {
+    const project = typeof projectId === "string" ? this.projects.get(projectId) : undefined;
+    if (!project) return { ok: false, files: [], error: "project is not open" };
+    const files: { path: string; owner: ProjectWorkspaceRef }[] = [];
+    const errors = new Set<string>();
+    try {
+      for (const workspace of project.workspaces.values()) {
+        const root = await this.canonicalPath(workspace.root);
+        const drafts = await this.editorDrafts.list(root);
+        if (drafts.unreadable) errors.add("Some recovery copies could not be read. They have been preserved.");
+        for (const path of drafts.paths) {
+          try {
+            const managed = await this.managedPath(path, workspace.id);
+            if (!managed || managed.workspace !== workspace) throw new Error("the file is no longer in this workspace");
+            files.push({ path: managed.path, owner: { projectId: project.id, workspaceId: workspace.id } });
+          } catch (error) {
+            errors.add(`${basename(path)}: ${(error as Error).message}. The recovery copy has been preserved.`);
+          }
+        }
+      }
+      if (this.projects.get(project.id) !== project) return { ok: false, files: [], error: "project is not open" };
+      return { ok: true, files, error: errors.size ? [...errors].join("; ") : undefined };
+    } catch (error) {
+      return { ok: false, files: [], error: (error as Error).message };
+    }
+  }
+
+  private async claimEditorDraft(absPath: unknown, owner: unknown, modelId: unknown): Promise<{ ok: true; token: string; revision: number } | { ok: false; error: string }> {
+    if (typeof absPath !== "string" || typeof modelId !== "string" || !/^[0-9a-f-]{36}$/.test(modelId)) {
+      return { ok: false, error: "invalid editor model identity" };
+    }
+    const target = this.projectWorkspace(owner);
+    if (!target) return { ok: false, error: "invalid project workspace" };
+    const generation = this.rendererGeneration;
+    try {
+      const managed = await this.managedPath(absPath, target.workspace.id);
+      if (!managed || managed.workspace !== target.workspace || managed.path !== absPath) {
+        return { ok: false, error: "editor path identity changed" };
+      }
+      const root = await this.canonicalPath(target.workspace.root);
+      if (generation !== this.rendererGeneration || this.projectWorkspace(owner)?.workspace !== target.workspace
+        || this.projectIsSwitching(target.project.id)) {
+        return { ok: false, error: "editor owner is no longer current" };
+      }
+      return { ok: true, ...this.editorDraftSession.issue(root, managed.path,
+        { projectId: target.project.id, workspaceId: target.workspace.id }, modelId) };
+    } catch (error) {
+      return { ok: false, error: (error as Error).message };
+    }
+  }
+
+  private async openFileInEditor(absPath: string, owner: unknown, purpose?: "editor"): Promise<EditorFileResult> {
     const target = this.projectWorkspace(owner);
     if (!target) return { ok: false, path: absPath, error: "invalid project workspace" };
     const managed = await this.managedPath(absPath, target.workspace.id);
     if (!managed) return { ok: false, path: absPath, error: "path is outside a managed workspace" };
     const kind = previewKind(managed.path);
+    const rendererGeneration = this.rendererGeneration;
     try {
-      const st = await stat(managed.path);
-      if (!st.isFile()) return { ok: false, path: managed.path, error: "not a file" };
-      if (kind) {
+      const draft = kind || purpose !== "editor" ? null
+        : await this.editorDrafts.get(await this.canonicalPath(managed.workspace.root), managed.path);
+      let recoveryDiskError: string | undefined;
+      let deleted = false;
+      const st = await stat(managed.path).catch((error: unknown) => {
+        if (!draft) throw error;
+        deleted = isErrno(error, "ENOENT");
+        if (!deleted) recoveryDiskError = (error as Error).message;
+        return null;
+      });
+      const recoverySaveBlocked = !!st && !st.isFile();
+      if (recoverySaveBlocked && !draft) return { ok: false, path: managed.path, error: "not a file" };
+      if (kind && st) {
         if (st.size > MAX_PREVIEW_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to preview (${st.size} bytes)` };
         return { ok: true, path: managed.path, preview: kind, version: st.mtimeMs };
       }
-      if (st.size > MAX_OPEN_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to open (${st.size} bytes)` };
-      const content = decodeEditorText(await readEditorFile(managed.path, MAX_OPEN_FILE_SIZE));
-      return { ok: true, path: managed.path, content, changedLines: managed.workspace.changeLines.get(managed.path) };
+      let content = "";
+      try {
+        if (recoverySaveBlocked) throw new Error("the path is no longer a regular file; copy the recovered text to another file");
+        if (st && st.size > MAX_OPEN_FILE_SIZE) throw new Error(`file is too large to open (${st.size} bytes)`);
+        if (st) content = decodeEditorText(await readEditorFile(managed.path, MAX_OPEN_FILE_SIZE));
+      } catch (error) {
+        if (!draft) throw error;
+        recoveryDiskError = (error as Error).message;
+      }
+      if (this.rendererGeneration !== rendererGeneration || this.projectWorkspace(owner)?.workspace !== managed.workspace) {
+        return { ok: false, path: managed.path, error: "file owner is no longer current" };
+      }
+      const changedLines = managed.workspace.changeLines.get(managed.path);
+      if (purpose !== "editor") return { ok: true, path: managed.path, content, changedLines };
+      return { ok: true, path: managed.path, content,
+        recoveredDraft: draft?.content, deleted, recoveryDiskError, recoverySaveBlocked, changedLines };
     } catch (err) {
       return { ok: false, path: managed.path, error: (err as Error).message };
     }
@@ -8623,6 +9292,8 @@ class TerminaApp {
     // create its own root. Establish the app-owned root before any restored
     // core terminal or session fork can inspect it.
     await mkdir(this.coreSessionRoot(), { recursive: true, mode: 0o700 });
+    // Candidate workspace scopes inherit this canonical app-owned ancestor.
+    this.worldsRoot = await this.canonicalPath(this.worldsRoot);
     this.preferences = await this.preferencesStore.load();
     this.shortcutMap = { ...this.preferences.shortcuts };
     this.appUpdater = createAppUpdater({
@@ -8866,6 +9537,8 @@ class TerminaApp {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.sourceAdmissions.dispose();
+    this.editorDraftSession.reset();
     if (this.loginHintTimer) {
       clearTimeout(this.loginHintTimer);
       this.loginHintTimer = null;
@@ -8887,6 +9560,12 @@ class TerminaApp {
     this.schedules.stop();
     await this.persistOpenProjects();
     await this.preferenceCommits;
+    try {
+      await this.editorDrafts.flush();
+    } catch (error) {
+      // A failed recovery copy must not strand PTYs, children or core workers.
+      console.warn(`[main] recovery copies did not finish during shutdown: ${(error as Error).message}`);
+    }
     await this.preferencesStore.flush();
     await this.drainVerifyJobs(null);
     this.tailer.stop();
@@ -9116,10 +9795,11 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", (event) => {
-  if (cleanupComplete || process.env.NODE_ENV === "test") return;
+  if (cleanupComplete) return;
   event.preventDefault();
   if (cleanupStarted) return;
-  if (quitConfirmed) {
+  // Fixture shutdown skips interaction, not native-resource disposal.
+  if (quitConfirmed || process.env.NODE_ENV === "test") {
     cleanupStarted = true;
     void appState
       .dispose()

@@ -76,6 +76,28 @@ export class OwnedProcessTree {
     }
   }
 
+  /** RSS census of this fixture's live processes. Shared pages are counted
+   * per process; the sum is not a unique physical-memory footprint. */
+  sampleMemory(): { totalRssKiB: number; processes: Array<{ pid: number; identity: string; rssKiB: number }> } {
+    this.capture();
+    const owned = [...this.identities.keys()].filter((pid) => this.stillOwned(pid));
+    const processes: Array<{ pid: number; identity: string; rssKiB: number }> = [];
+    if (owned.length === 0) return { totalRssKiB: 0, processes };
+    const requested = new Set(owned);
+    const output = execFileSync("ps", ["-p", owned.join(","), "-o", "pid=,rss="], {
+      encoding: "utf8", timeout: 2_000, maxBuffer: 1024 * 1024,
+      env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
+    });
+    for (const line of output.trim().split("\n")) {
+      if (!line.trim()) continue;
+      const [pid, rssKiB] = line.trim().split(/\s+/).map(Number);
+      if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(rssKiB) || rssKiB! < 0) throw new Error(`invalid owned-process RSS sample: ${line}`);
+      if (!requested.has(pid!) || !this.stillOwned(pid!)) continue;
+      processes.push({ pid: pid!, identity: this.identities.get(pid!)!, rssKiB: rssKiB! });
+    }
+    return { totalRssKiB: processes.reduce((total, entry) => total + entry.rssKiB, 0), processes };
+  }
+
   private stillOwned(pid: number): boolean {
     const expected = this.identities.get(pid);
     if (!expected) return false;

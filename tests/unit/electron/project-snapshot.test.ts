@@ -22,7 +22,7 @@ describe("Project Snapshot Invariants", () => {
 
     // Written at agent creation; refreshes follow watcher bursts only.
     check("agent creation writes a snapshot",
-      main.includes("if (type === \"agent\") void this.writeProjectSnapshot(inst);"));
+      /if \(type === "agent"\) \{[\s\S]*?this\.writeVerifyContext\(inst\);\s*void this\.writeProjectSnapshot\(inst\);/.test(main));
     check("watcher bursts schedule one debounced refresh",
       main.includes("this.scheduleProjectSnapshot(ws.id);")
       && main.includes("PROJECT_SNAPSHOT_DEBOUNCE_MS"));

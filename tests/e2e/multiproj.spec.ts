@@ -44,6 +44,11 @@ test.describe("Multi-Project Tabs & Workspace Switching", () => {
   test("editor collapse on an empty project does not stick to a project with open tabs", async ({ page, runRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
 
+    // Empty signed-in projects collapse; the unauthenticated login hint is
+    // deliberately occupied and must remain visible (covered below).
+    const agentDir = join(runRoot, "home", ".termina", "agent");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "synthetic-layout-token" } }), { mode: 0o600 });
     const projA = join(runRoot, "collapse-a");
     const projB = join(runRoot, "collapse-b");
     mkdirSync(projA, { recursive: true });
@@ -68,5 +73,20 @@ test.describe("Multi-Project Tabs & Workspace Switching", () => {
     await expect(tabA).toHaveClass(/active/, { timeout: 10_000 });
     await expect(page.locator("#right-pane.minimized")).toHaveCount(0);
     await expect(page.locator(".editor-tab").getByText("file-in-a.txt")).toBeVisible({ timeout: 10_000 });
+  });
+
+  test("an empty first-run project keeps its login hint until credentials are stored", async ({ page, runRoot }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const project = join(runRoot, "login-empty");
+    mkdirSync(project);
+    await page.evaluate((dir) => window.termina.projectOpenPath(dir), project);
+    await expect(page.locator(".project-tab.active")).toContainText("login-empty");
+    await expect(page.locator(".empty-login:visible")).toHaveCount(1);
+    await expect(page.locator("#right-pane.minimized")).toHaveCount(0);
+    const agentDir = join(runRoot, "home", ".termina", "agent");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "synthetic-layout-token" } }), { mode: 0o600 });
+    await expect(page.locator(".empty-login:visible")).toHaveCount(0);
+    await expect(page.locator("#right-pane.minimized")).toHaveCount(1);
   });
 });

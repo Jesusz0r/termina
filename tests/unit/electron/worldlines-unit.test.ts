@@ -1,12 +1,13 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorldlineManager, disposeWorldlineGitCore, ensurePromotionRoots } from "../../../electron/worldlines/index.ts";
 import { MARKER } from "../../../electron/worldlines/limits.ts";
+import { consumeStartupControl } from "../../../agent-core/host/context.ts";
 import type { CandidateState, ComparisonState, RunRecord } from "../../../electron/worldlines/types.ts";
-import type { ChallengeProfile, TimelineEvent } from "../../../shared/types.ts";
+import type { ChallengeProfile, TimelineEvent, WorldlineSummary } from "../../../shared/types.ts";
 
 describe("Worldline Manager, Core Client & Retention Performance Unit Suite", () => {
 
@@ -19,6 +20,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
 
     const deps = {
       worldsRoot,
+      recoverStaleComparisons: (sweep: () => Promise<void>) => sweep(),
       primaryRoot,
       realHome: root,
       userData: root,
@@ -94,6 +96,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
 
     const deps = {
       worldsRoot: join(root, "worlds"),
+      recoverStaleComparisons: (sweep: () => Promise<void>) => sweep(),
       primaryRoot: join(root, "worlds"),
       realHome: root,
       userData: root,
@@ -219,7 +222,6 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       candidates: new Map([["A", candidate]]),
       phase: "running",
       error: null,
-      readyTimer: null,
     };
 
     try {
@@ -344,8 +346,8 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
     expect(challenge).toContain('role: "challenge"');
   });
 
-  it("fills marker, manifest, and support paths for pair and moment constructions", async () => {
-    const { manager, root } = await makeReadyManager();
+  it("publishes preparation with marker, manifest, and support paths for pair and moment constructions", async () => {
+    const { manager, root, updates } = await makeReadyManager();
     try {
       const pair = await (manager as unknown as {
         createComparison: (run: RunRecord, profile?: ChallengeProfile) => Promise<ComparisonState>;
@@ -359,6 +361,12 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
         status: string;
       };
       expect(pairManifest).toMatchObject({ expectedCandidates: 2, sourceRunId: "run-unit", status: "creating" });
+      expect(updates).toHaveLength(2);
+      expect(updates.map(({ label, state, sessionFile, terminalId }) => ({ label, state, sessionFile, terminalId }))).toEqual([
+        { label: "A", state: "creating", sessionFile: null, terminalId: null },
+        { label: "B", state: "creating", sessionFile: null, terminalId: null },
+      ]);
+      expect(updates.every((update) => update.comparisonId === pair.id && update.sourceRunId === "run-unit")).toBe(true);
       expect(supportPaths(pair.candidates.get("A")!)).toEqual(expectedSupport(pair.dir, "A"));
       expect(supportPaths(pair.candidates.get("B")!)).toEqual(expectedSupport(pair.dir, "B"));
       expect(pair.candidates.get("A")?.role).toBe("reference");
@@ -398,10 +406,45 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       expect(moment.candidates.get("A")?.headStateId).toBeNull();
       expect(supportPaths(moment.candidates.get("A")!)).toEqual(expectedSupport(moment.dir, "A"));
       expect(moment.candidates.get("B")).toBeUndefined();
+      expect(updates.filter((update) => update.comparisonId === moment.id)).toMatchObject([
+        { label: "A", role: "moment", state: "creating", sessionFile: null, terminalId: null },
+      ]);
       const momentManifest = JSON.parse(await readFile(join(moment.dir, "manifest.json"), "utf8")) as {
         expectedCandidates: number;
       };
       expect(momentManifest.expectedCandidates).toBe(1);
+    } finally {
+      await manager.dispose().catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recreates an unacknowledged consumed control without adopting an unexpected replacement", async () => {
+    const { manager, root } = await makeReadyManager();
+    const surface = manager as unknown as {
+      createComparison(run: RunRecord): Promise<ComparisonState>;
+      createSupportDirs(comparison: ComparisonState): Promise<void>;
+      writeControl(cand: CandidateState, control: Record<string, unknown>): Promise<void>;
+    };
+    try {
+      const comparison = await surface.createComparison(makeUnitRun());
+      await surface.createSupportDirs(comparison);
+      const candidate = comparison.candidates.get("A")!;
+      const path = join(candidate.eventsDir, "startup-control.json");
+      await surface.writeControl(candidate, { opId: "first-start", action: "none" });
+      expect(candidate.controlLeaf).toBeDefined();
+      // Use the actual producer consume path, but lose its confirmation.
+      expect(consumeStartupControl(candidate.eventsDir, "term-unit", "bridge-unit")?.opId).toBe("first-start");
+      expect(existsSync(path)).toBe(false);
+      await surface.writeControl(candidate, { opId: "retry-start", action: "none" });
+      expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ opId: "retry-start" });
+      // A missing consumed control is different from a candidate-planted file.
+      await rm(path);
+      await writeFile(path, "unexpected replacement", { mode: 0o600 });
+      await expect(surface.writeControl(candidate, { opId: "must-not-replace", action: "none" })).rejects.toThrow(
+        "promotion write expected destination was not present",
+      );
+      expect(await readFile(path, "utf8")).toBe("unexpected replacement");
     } finally {
       await manager.dispose().catch(() => {});
       await rm(root, { recursive: true, force: true });
@@ -568,7 +611,8 @@ function supportPaths(cand: CandidateState) {
   };
 }
 
-async function makeReadyManager(): Promise<{ manager: WorldlineManager; root: string }> {
+async function makeReadyManager(): Promise<{ manager: WorldlineManager; root: string; updates: WorldlineSummary[] }> {
+  const updates: WorldlineSummary[] = [];
   const root = await realpath(await mkdtemp(join(tmpdir(), "termina-worldline-construct-")));
   const worldsRoot = join(root, "worlds");
   const primaryRoot = join(root, "primary");
@@ -576,6 +620,7 @@ async function makeReadyManager(): Promise<{ manager: WorldlineManager; root: st
   const primaryInfo = await lstat(primaryRoot, { bigint: true });
   const manager = new WorldlineManager({
     worldsRoot,
+    recoverStaleComparisons: (sweep) => sweep(),
     primaryRoot,
     primaryRootIdentity: { dev: String(primaryInfo.dev), ino: String(primaryInfo.ino) },
     realHome: root,
@@ -593,7 +638,7 @@ async function makeReadyManager(): Promise<{ manager: WorldlineManager; root: st
     discardCoreSession: async () => ({ ok: false, error: "unused" }),
     createCandidate: async () => ({ terminalId: "unused", pid: 0 }),
     createCandidateWorkspace: () => root,
-    onUpdate: () => {},
+    onUpdate: (summary) => updates.push(summary),
     onCandidateState: () => {},
     onRemoved: () => {},
     preflight: async () => ({ ok: true, reasons: [] }),
@@ -623,5 +668,5 @@ async function makeReadyManager(): Promise<{ manager: WorldlineManager; root: st
     installPromoted: async () => ({ terminalId: "unused" }),
   });
   await (manager as unknown as { ready: Promise<void> }).ready;
-  return { manager, root };
+  return { manager, root, updates };
 }

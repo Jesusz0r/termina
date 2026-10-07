@@ -44,10 +44,10 @@ html[data-theme="light"] {
   --border: #c8d0d8;
   --text: #1f2328;
   --text-dim: #57606a;
-  --accent: #0969da;
+  --accent: #0960c4;
   --on-accent: #ffffff;
   --green: #1a7f37;
-  --yellow: #9a6700;
+  --yellow: #8b5e00;
   --red: #cf222e;
   --orange: #bc4c00;
   --purple: #8250df;
@@ -79,8 +79,8 @@ html[data-theme="atom"] {
   --bg-hover: #3a3f4b;
   --border: #181a1f;
   --text: #abb2bf;
-  --text-dim: #5c6370;
-  --accent: #61afef;
+  --text-dim: #a3aab6;
+  --accent: #68b4f3;
   --green: #98c379;
   --yellow: #e5c07b;
   --red: #e06c75;
@@ -128,9 +128,65 @@ body {
   flex: 1;
 }
 
+/* Global attention stays optional and does not cover the project navigator. */
+#btn-attention,
+#attention-view button {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 9px;
+  cursor: pointer;
+}
+#btn-attention[aria-expanded="true"] { border-color: var(--accent); }
+.attention-count { color: var(--yellow); font-variant-numeric: tabular-nums; }
+#attention-view {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: min(620px, calc(100% - var(--project-rail-width) - 16px));
+  max-height: calc(100% - 16px);
+  padding: 14px;
+  overflow: auto;
+  z-index: 40;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--yellow);
+  border-radius: 6px;
+  box-shadow: 0 8px 30px color-mix(in srgb, var(--bg) 70%, transparent);
+  user-select: text;
+}
+#attention-view[hidden] { display: none; }
+.attention-header, .attention-toolbar { display: flex; align-items: start; gap: 12px; }
+.attention-header h2 { flex: 1; margin: 0; font-size: 14px; line-height: 1.6; }
+.attention-explainer, #attention-status, #attention-message {
+  margin: 10px 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.6;
+}
+#attention-status { flex: 1; }
+#attention-message:empty { display: none; }
+#attention-message { color: var(--yellow); }
+#attention-list { list-style: none; padding: 0; margin: 0; }
+.attention-item { padding: 14px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.attention-item h3 { margin: 0 0 8px; font-size: 13px; color: var(--yellow); }
+.attention-item p { margin: 6px 0; font-size: 11px; line-height: 1.65; }
+.attention-context { white-space: pre-line; }
+.attention-area, .attention-detail { color: var(--text-dim); }
+#attention-view button:hover, #btn-attention:hover { background: var(--bg-hover); }
+#attention-view button:focus-visible, #btn-attention:focus-visible, .work-summary-report:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ----------------------------------------------------------------- layout */
 
 #main {
+  --project-rail-width: clamp(112px, 18%, 200px);
+  position: relative;
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
@@ -201,6 +257,7 @@ body {
 }
 
 #left-pane {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1 1 50%;
@@ -724,6 +781,76 @@ body {
   background: var(--accent);
 }
 
+/* Optional factual context stays beside the terminal, not behind an overview. */
+#work-summary {
+  flex: 0 0 auto;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: 11px;
+}
+
+#work-summary > summary {
+  padding: 6px 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+#work-summary > summary:focus-visible,
+#work-summary button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.work-summary-content {
+  max-height: min(38vh, 320px);
+  overflow: auto;
+  padding: 0 12px 8px;
+}
+
+.work-summary-content dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 4px 0 8px;
+}
+
+.work-summary-content dt {
+  color: var(--text-dim);
+}
+
+.work-summary-content dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.work-summary-tasks {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.work-summary-tasks li {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.work-summary-content button {
+  margin: 4px 8px 4px 0;
+}
+
+.work-summary-report {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-chrome);
+}
+
+#left-pane.minimized #work-summary {
+  display: none;
+}
+
 #left-pane.minimized,
 #right-pane.minimized {
   flex: 0 0 34px;
@@ -759,7 +886,15 @@ body {
   min-height: 0;
 }
 
-#left-pane.minimized #terminal-container,
+#left-pane.minimized #terminal-container {
+  position: absolute;
+  inset: 34px 0 0;
+}
+
+#left-pane.minimized .term-pane {
+  visibility: hidden;
+}
+
 #left-pane.minimized #activity-tabbar,
 #left-pane.minimized #timeline-strip,
 #left-pane.minimized #plan-panel,
@@ -916,7 +1051,7 @@ body.tab-reordering * {
 }
 
 #project-tabs > .tab-drop-slot {
-  border-radius: 6px 6px 0 0;
+  border-radius: 4px;
 }
 
 .terminal-tab .tab-name {
@@ -924,8 +1059,7 @@ body.tab-reordering * {
   text-overflow: ellipsis;
 }
 
-.terminal-tab .tab-status,
-.project-tab .tab-status {
+.terminal-tab .tab-status {
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -1036,28 +1170,24 @@ body.tab-reordering * {
   white-space: nowrap;
 }
 
-.terminal-tab .tab-status.idle,
-.project-tab .tab-status.idle {
+.terminal-tab .tab-status.idle {
   background: var(--green);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 55%, var(--bg-panel));
 }
 
-.terminal-tab .tab-status.busy,
-.project-tab .tab-status.busy {
+.terminal-tab .tab-status.busy {
   background: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, var(--bg-panel));
   animation: activity-pulse 1.1s ease-in-out infinite;
 }
 
-.terminal-tab .tab-status.blocked,
-.project-tab .tab-status.blocked {
+.terminal-tab .tab-status.blocked {
   background: var(--yellow);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--yellow) 55%, var(--bg-panel));
   animation: activity-pulse 1.1s ease-in-out infinite;
 }
 
-.terminal-tab .tab-status.verify-fail,
-.project-tab .tab-status.verify-fail {
+.terminal-tab .tab-status.verify-fail {
   background: var(--red);
   animation: none;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 55%, var(--bg-panel));
@@ -1173,12 +1303,15 @@ body.tab-reordering * {
   outline: none;
 }
 
+/* Keep background terminals measurable. xterm's DOM width cache cannot cache
+ * zero-width glyphs under display:none and repeatedly forces layout on output. */
 .term-pane {
   width: 100%;
   height: 100%;
-  display: none;
+  visibility: hidden;
   overflow: hidden;
-  position: relative;
+  position: absolute;
+  inset: 0;
   margin: 0;
   padding: 0;
 }
@@ -1212,7 +1345,7 @@ body.tab-reordering * {
 }
 
 .term-pane.active {
-  display: block;
+  visibility: visible;
 }
 
 /* Above the xterm canvas: the terminal paints over any pane background. */
@@ -2415,147 +2548,89 @@ body.tab-reordering * {
 
 #project-bar {
   display: flex;
-  align-items: stretch;
-  gap: 4px;
-  /* Locked like the other strips. A flex child with only `height` still
-   * shrinks when the project below it changes min-content on a tab switch. */
-  flex: 0 0 36px;
-  height: 36px;
-  min-height: 36px;
-  max-height: 36px;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 0 var(--project-rail-width);
   min-width: 0;
-  padding: 0 8px;
-  overflow: hidden;
+  min-height: 0;
+  padding: 10px 6px;
   background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
-  -webkit-app-region: drag;
+  border-right: 1px solid var(--border);
 }
-
+.project-rail-heading { padding: 2px 8px 8px; color: var(--text-dim); font-size: 11px; }
 #project-tabs {
   display: flex;
-  align-items: stretch;
+  flex-direction: column;
   gap: 4px;
-  height: 100%;
-  min-height: 0;
-  /* overflow-x: auto alone computes overflow-y to auto, so a status ring or
-   * a thin scrollbar steals height and the tabs (height: 100%) follow it. */
-  overflow-x: auto;
-  overflow-y: hidden;
   flex: 1;
-  min-width: 0;
-  scrollbar-width: none;
-  /* The tabs paint above the new-project stub where they overlap. */
-  position: relative;
-  z-index: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
 }
-
-#project-tabs::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
-}
-
 .project-tab {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  /* The tab fills the locked bar. A percentage of an unlocked strip
-   * changes when the active project’s status or label overflows. */
-  height: 100%;
-  min-height: 0;
+  align-items: start;
   flex: 0 0 auto;
-  padding: 0 12px;
-  font-size: 12px;
-  color: var(--text-dim);
-  background: transparent;
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 6px 6px 0 0;
-  max-width: 220px;
-  white-space: nowrap;
-  overflow: visible;
-  -webkit-app-region: no-drag;
-}
-
-.project-tab:hover {
-  background: var(--bg-hover);
-}
-
-.project-tab.active {
-  color: var(--text);
-  background: var(--bg);
-  border-color: var(--border);
-}
-
-.project-tab .tab-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
   min-width: 0;
-}
-
-.project-tab .tab-close {
   color: var(--text-dim);
-  font-size: 14px;
-  line-height: 1;
-  border-radius: 3px;
-  padding: 0 3px;
+  border: 1px solid transparent;
+  border-radius: 4px;
 }
-
-.project-tab .tab-close:hover {
+.project-tab:hover { background: var(--bg-hover); }
+.project-tab.active { background: var(--bg-raised); border-color: var(--accent); }
+.project-select {
+  min-width: 0;
+  flex: 1;
+  padding: 9px 6px;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  background: none;
   color: var(--text);
-  background: var(--bg-hover);
-}
-
-/* The new-project stub reads as half a tab tucked behind the open tabs.
- * It grows from the bar floor like a real project tab, but shorter. */
-#btn-new-project {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  align-self: flex-end;
-  height: 26px;
-  margin-left: -8px;
-  padding: 0 10px 0 13px;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 6px 6px 0 0;
-  background: var(--bg-raised);
-  color: var(--text-dim);
-  font-size: 15px;
-  line-height: 1;
+  border: none;
   cursor: pointer;
+}
+.project-select .tab-name { display: block; overflow-wrap: anywhere; }
+.project-path {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.project-counts { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 9px; font-size: 10px; color: var(--text-dim); }
+.project-attention.has-attention { color: var(--yellow); }
+.project-working.has-work { color: var(--accent); }
+.project-tab .tab-close {
   flex: 0 0 auto;
-  position: relative;
-  z-index: 0;
-  -webkit-app-region: no-drag;
-  transition: background 0.12s ease, color 0.12s ease;
+  margin: 5px 1px 0 0;
+  padding: 4px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  border-radius: 3px;
 }
-
-#btn-new-project:hover,
-#btn-new-project:focus-visible {
+#btn-new-project, #btn-all-projects {
+  font: inherit;
+  font-size: 11px;
+  padding: 8px;
+  text-align: left;
   color: var(--text);
-  background: var(--bg-hover);
-  outline: none;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
 }
-
-/* No projects yet: the stub becomes a complete labeled tab. The idle
- * list stops growing so the tab sits where the first tab would. */
-#project-bar:has(#project-tabs:empty) #project-tabs {
-  flex: 0 0 auto;
-}
-
-#project-bar:has(#project-tabs:empty) #btn-new-project {
-  align-self: stretch;
-  height: auto;
-  margin-left: 0;
-  padding: 0 14px;
-  background: var(--bg);
-  font-size: 13px;
-}
-
-#project-bar:has(#project-tabs:empty) #btn-new-project:hover,
-#project-bar:has(#project-tabs:empty) #btn-new-project:focus-visible {
-  color: var(--text);
+#project-bar #btn-attention { text-align: left; font-size: 11px; }
+#project-bar .newtab-label { display: inline; }
+#project-bar button:hover { background: var(--bg-hover); }
+#project-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) {
+  .project-tab, .terminal-tab, .tab-grabbed { transition: none; }
 }
 
 #editor-tabs {
@@ -3042,6 +3117,11 @@ html[data-theme="light"] #statusbar .muted {
 
 #verify-badge.state-running {
   background: rgba(0, 0, 0, 0.22);
+}
+
+#verify-badge.state-stale {
+  background: color-mix(in srgb, var(--yellow) 18%, var(--bg));
+  color: var(--yellow);
 }
 
 #verify-badge.state-unknown {
@@ -3808,9 +3888,8 @@ button.toast:focus-visible {
   *,
   *::before,
   *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    animation: none !important;
+    transition: none !important;
   }
 }
 /* ---- explorer filter ---- */

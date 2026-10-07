@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import type { EvidenceSummary, WorldlineSummary } from "../../../shared/types";
 import { TimelineView } from "../../../src/timeline.ts";
 import { installFakeDom, type FakeDocument, type FakeEl } from "./fake-dom.ts";
+import { resolveFileNavigation } from "../../../src/main/file-navigation.ts";
 
 type Worldlines = typeof import("../../../src/worldlines.ts");
 
@@ -72,8 +73,17 @@ describe("renderer core hardening batch, items 2-10 (refs #217)", () => {
   });
 
   it("routes nested projects by longest prefix (item 9)", () => {
-    expect(renderer).toContain("let best: { projId: string; view: ProjectView } | null = null;");
-    expect(renderer).toContain("if (!best || projView.cwd.length > best.view.cwd.length) best = { projId, view: projView };");
+    const projects = new Map([
+      ["parent", { id: "parent", cwd: "/project", workspaceId: "ws-parent" }],
+      ["nested", { id: "nested", cwd: "/project/sub", workspaceId: "ws-nested" }],
+    ]);
+    expect(renderer).toContain("const target = resolveFileNavigation(path, projectViews, requestedOwner ??");
+    expect(resolveFileNavigation("/project/sub/file.ts", projects, { projectId: "parent", workspaceId: "ws-parent" })).toEqual({
+      path: "/project/sub/file.ts", owner: { projectId: "nested", workspaceId: "ws-nested" },
+    });
+    expect(resolveFileNavigation("/project/submarine/file.ts", projects, { projectId: "parent", workspaceId: "ws-parent" })?.owner).toEqual({
+      projectId: "parent", workspaceId: "ws-parent",
+    });
   });
 
   it("defers or queues boot pushes until the editor chunk resolves (item 10)", () => {

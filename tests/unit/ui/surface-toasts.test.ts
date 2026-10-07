@@ -6,6 +6,7 @@ const worldlines = readFileSync(new URL("../../../src/worldlines.ts", import.met
 const main = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
 const activityPane = readFileSync(new URL("../../../src/main/activity-pane.ts", import.meta.url), "utf8");
 const timelinePane = readFileSync(new URL("../../../src/main/timeline-pane.ts", import.meta.url), "utf8");
+const runForkFeedback = readFileSync(new URL("../../../src/main/run-fork-feedback.ts", import.meta.url), "utf8");
 
 /** Body of a class method, including nested blocks. */
 function methodBody(source: string, signature: string): string {
@@ -190,8 +191,11 @@ describe("fork success toasts", () => {
     const forkPoint = methodBody(timelinePane, "onFork: (ev) => {");
     // The durable surface: worldline pushes render cards and badge the tab.
     expect(main).toContain("worldlinesView.upsert(summary)");
-    expect(forkRun).toContain("forkRun(run.id)");
-    expect(challengeRun).toContain("challengeRun(run.id, profile)");
+    expect(forkRun).toContain("runForkFeedback.request(pane, run.id)");
+    expect(runForkFeedback).toContain("window.termina.forkRun(runId)");
+    expect(hasInfoToast(runForkFeedback)).toBe(false);
+    expect(challengeRun).toContain("runForkFeedback.request(pane, run.id, profile)");
+    expect(runForkFeedback).toContain("window.termina.challengeRun(runId, profile)");
     expect(forkPoint).toContain("forkPoint(pane.instanceId, ev.seq)");
     expect(hasInfoToast(forkRun)).toBe(false);
     expect(hasInfoToast(challengeRun)).toBe(false);
@@ -203,11 +207,9 @@ describe("fork success toasts", () => {
   });
 
   it("still toasts fork failures", () => {
-    expect(methodBody(main, 'btnForkRun.addEventListener("click", () => {')).toContain(
-      "toast(`Fork Run failed: ${res.error ?? \"unknown error\"}`, \"warning\")",
-    );
-    expect(methodBody(main, 'button.addEventListener("click", () => {')).toContain(
-      "toast(`Challenge failed: ${res.error ?? \"unknown error\"}`, \"warning\")",
+    expect(runForkFeedback).toContain('const failure = profile ? "Challenge failed" : "Fork Run failed"');
+    expect(runForkFeedback).toContain(
+      "toast(`${failure}: ${res.error ?? \"unknown error\"}`, \"warning\")",
     );
     expect(methodBody(timelinePane, "onFork: (ev) => {")).toContain(
       "toast(`fork at this moment failed: ${res.error ?? \"unknown error\"}`, \"warning\")",

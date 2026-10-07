@@ -42,13 +42,27 @@ describe("tab order", () => {
 
   it("lands before the tab whose midpoint the pointer has not passed", () => {
     const slots = [
-      { left: 0, width: 100 },
-      { left: 104, width: 100 },
-      { left: 208, width: 100 },
+      { start: 0, size: 100 },
+      { start: 104, size: 100 },
+      { start: 208, size: 100 },
     ];
     expect(insertionIndex(40, slots)).toBe(0);
     expect(insertionIndex(60, slots)).toBe(1);
     expect(insertionIndex(160, slots)).toBe(2);
     expect(insertionIndex(400, slots)).toBe(3);
+  });
+
+  it("uses axis-neutral positions, unequal sizes and exact midpoint boundaries", () => {
+    const slots = [
+      { start: 200, size: 40 },
+      { start: 244, size: 80 },
+      { start: 328, size: 24 },
+    ];
+    expect(insertionIndex(219, slots)).toBe(0);
+    expect(insertionIndex(220, slots)).toBe(1);
+    expect(insertionIndex(283, slots)).toBe(1);
+    expect(insertionIndex(284, slots)).toBe(2);
+    expect(insertionIndex(340, slots)).toBe(3);
+    expect(insertionIndex(200, [])).toBe(0);
   });
 });

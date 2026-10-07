@@ -39,6 +39,8 @@ export class TimelineView {
    *  still owns the marker — so an evict/refresh/reset that retired the marker
    *  can never be overwritten by the stale result. */
   private progressInFlight = new Map<number, object>();
+  /** Pending forks projected by the pane owner for the displayed source. */
+  private pendingForks = new Set<number>();
   private hoverSeq: number | null = null;
   private hoverTimer: ReturnType<typeof setTimeout> | null = null;
   private activeSeq: number | null = null;
@@ -98,8 +100,26 @@ export class TimelineView {
     this.onContent(this.events.length > 0, this.events.length);
   }
 
+  /** Render transient preparation without changing the captured event. */
+  setPendingForks(seqs: Iterable<number>): void {
+    this.pendingForks = new Set(seqs);
+    for (const [seq, dot] of this.dots) {
+      const ev = this.eventsBySeq.get(seq);
+      if (ev) this.setDotLabel(dot, ev, this.progressCache.get(seq));
+    }
+    this.renderCount();
+  }
+
+  private renderCount(): void {
+    let pending = 0;
+    for (const seq of this.pendingForks) if (this.eventsBySeq.has(seq)) pending++;
+    const count = this.events.length ? `(${this.events.length})` : "";
+    this.countEl.textContent = count + (pending ? ` · Preparing ${pending > 1 ? "candidates" : "candidate"}…` : "");
+  }
+
   /** Clear timeline state when the project changes. */
   resetForProject(): void {
+    this.pendingForks.clear();
     this.setEvents([]);
     this.setRecorder("paused");
     this.activity = null;
@@ -138,7 +158,7 @@ export class TimelineView {
   /** The recorder state label (indexing / ready / paused / degraded / budget). */
   setRecorder(state: RecorderState, detail?: string | null): void {
     const safe = asKnownState(state, KNOWN_RECORDER_STATES);
-    this.recorderEl.textContent = safe === "ready" ? "" : safe;
+    this.recorderEl.textContent = safe === "ready" ? "" : safe === "budget" ? "Recent moments only" : safe;
     this.recorderEl.className = `timeline-recorder rec-${safe}`;
     this.recorderEl.hidden = safe === "ready";
     const base =
@@ -149,7 +169,7 @@ export class TimelineView {
           : safe === "degraded"
             ? "some moments could not be captured"
             : safe === "budget"
-              ? "the fork-point budget is evicting old moments"
+              ? "Earlier moments are no longer retained; this timeline is not the full session history."
               : "recorder state is unknown";
     this.recorderEl.title = safe === "degraded" && detail ? `${base}: ${detail}` : base;
   }
@@ -175,7 +195,7 @@ export class TimelineView {
     if (this.activeSeq !== null && gone.has(this.activeSeq)) this.activeSeq = null;
     if (this.tabStopSeq !== null && gone.has(this.tabStopSeq)) this.setTabStop(this.activeSeq ?? this.newestSeq());
     this.restoreTimelineFocus(hadDotFocus);
-    this.countEl.textContent = this.events.length ? `(${this.events.length})` : "";
+    this.renderCount();
     this.btnPlay.hidden = this.events.length === 0;
     this.reportContent();
   }
@@ -235,7 +255,7 @@ export class TimelineView {
       this.setTabStop(event.seq);
     }
     this.restoreTimelineFocus(hadDotFocus);
-    this.countEl.textContent = `(${this.events.length})`;
+    this.renderCount();
     this.btnPlay.hidden = this.events.length === 0;
     this.reportContent();
     // Keep the newest dot in view — but only when the user is already near
@@ -334,6 +354,8 @@ export class TimelineView {
     const label = this.tooltip(ev, progress);
     dot.title = label;
     dot.setAttribute("aria-label", label);
+    if (this.pendingForks.has(ev.seq)) dot.setAttribute("aria-busy", "true");
+    else dot.removeAttribute("aria-busy");
   }
 
   /** True when a still-mounted timeline dot owns keyboard focus. */
@@ -414,7 +436,7 @@ export class TimelineView {
 
   private render(): void {
     const n = this.events.length;
-    this.countEl.textContent = n ? `(${n})` : "";
+    this.renderCount();
     this.btnPlay.hidden = n === 0;
     this.dotsEl.replaceChildren();
     this.dots.clear();
@@ -435,7 +457,8 @@ export class TimelineView {
 
   private tooltip(ev: TimelineEvent, progress?: TimelineProgress): string {
     const time = new Date(ev.ts).toLocaleTimeString();
-    const fork = ev.stateId ? " — Cmd/Ctrl+Click or Cmd/Ctrl+Enter to fork at this moment" : ev.evicted ? " (source evicted)" : "";
+    const pending = this.pendingForks.has(ev.seq);
+    const fork = pending ? "" : ev.stateId ? " — Cmd/Ctrl+Click or Cmd/Ctrl+Enter to fork at this moment" : ev.evicted ? " (source evicted)" : "";
     let base: string;
     switch (ev.t) {
       case "agent_start":
@@ -445,7 +468,8 @@ export class TimelineView {
         base = `${time} — run settled`;
         break;
       case "tool":
-        base = `${time} — ${ev.toolName} ${ev.relPath ?? ""}${ev.content === undefined ? " (no snapshot)" : ""}${fork}`;
+        // Content is fetched lazily; its absence in IPC is not a missing snapshot.
+        base = `${time} — ${ev.toolName} ${ev.relPath ?? ""}${fork}`;
         break;
       case "change":
         base = `${time} — changed on disk: ${ev.relPath ?? ""}${fork}`;
@@ -457,7 +481,7 @@ export class TimelineView {
       newest === ev.seq && activityState === "blocked"
         ? ` — ${presentBlockedLabel(this.activity?.reason)}`
         : "";
-    return base + blocked + this.progressLine(progress);
+    return base + blocked + this.progressLine(progress) + (pending ? " — Preparing candidate…" : "");
   }
 
   private eventBySeq(seq: number): TimelineEvent | undefined {

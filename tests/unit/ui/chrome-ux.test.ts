@@ -241,7 +241,7 @@ describe("status activity copy (issue #348)", () => {
 });
 
 describe("tab activity dots", () => {
-  it("paints idle/working/blocked on terminal and project tabs from one helper", () => {
+  it("preserves terminal idle/working/blocked dots and activity cues", () => {
     expect(mainSrc).toContain("function applyTabActivity(");
     expect(mainSrc).toContain('el.classList.toggle("idle", !working && !presented.blocked)');
     expect(mainSrc).toContain('el.classList.toggle("busy", working)');
@@ -249,7 +249,7 @@ describe("tab activity dots", () => {
     expect(mainSrc).toContain('el.title = "agent working"');
     expect(mainSrc).toContain('el.title = "idle"');
     expect(mainSrc).toContain("applyTabActivity(pane.statusEl, presented, { fail: failDot, timeout: timeoutDot })");
-    expect(mainSrc).toContain("updateProjectAttention(pane.projectId)");
+    expect(mainSrc).not.toContain("updateProjectAttention");
     expect(mainSrc).toContain("noteActivityCue(");
     expect(mainSrc).toContain("activityCueIsWatching(");
     expect(mainSrc).toContain("paneProjectId: pane.projectId");
@@ -257,6 +257,19 @@ describe("tab activity dots", () => {
     expect(mainSrc).toContain("windowFocused: document.hasFocus()");
     expect(mainSrc).toContain("if (sounded && pane.type === \"agent\") announceActivityCue(pane, sounded)");
     expect(mainSrc).toContain("() => revealActivityPane(targetId)");
-    expect(mainSrc).toContain("if (activeProjectId !== targetProject) return");
+    expect(mainSrc).toContain("void activateProject(targetProject).then((activated) => {");
+    expect(mainSrc).toContain("if (!activated || activeProjectId !== targetProject) return");
+  });
+
+  it("projects canonical overview counts instead of mirroring terminal notification dots", () => {
+    const railSrc = readFileSync(new URL("../../../src/main/project-rail.ts", import.meta.url), "utf8");
+    expect(mainSrc).toContain("const projectRail = createProjectRail({");
+    expect(mainSrc).toContain("onOverview: (overview) => projectRail.setOverview(overview)");
+    expect(mainSrc).toContain("projectRail.setActive(activeProjectId)");
+    expect(railSrc).toContain("project.working");
+    expect(railSrc).toContain("project.attentionCount");
+    expect(railSrc).not.toContain("verifyAttention");
+    expect(railSrc).not.toContain("applyTabActivity");
+    expect(mainSrc).not.toContain("updateProjectAttention");
   });
 });

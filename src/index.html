@@ -65,11 +65,28 @@
       <div class="hint">starting…</div>
     </div>
     <div id="app">
-      <header id="project-bar">
-        <div id="project-tabs"></div>
-        <button type="button" id="btn-new-project" title="Open a project in a new tab" aria-label="New project">＋<span class="newtab-label">New project</span></button>
-      </header>
       <main id="main">
+        <aside id="project-bar" aria-label="Project navigation">
+          <div class="project-rail-heading">Projects</div>
+          <button type="button" id="btn-all-projects" aria-controls="attention-view">All projects</button>
+          <button type="button" id="btn-attention" aria-controls="attention-view" aria-expanded="false">Attention <span class="attention-count">…</span></button>
+          <nav id="project-tabs" aria-label="Open projects"></nav>
+          <button type="button" id="btn-new-project" title="Open a project folder" aria-label="New project">＋<span class="newtab-label">New project</span></button>
+        </aside>
+        <section id="attention-view" role="region" aria-label="Attention across all projects" hidden>
+          <div class="attention-header">
+            <h2>Attention across all projects</h2>
+            <button type="button" id="btn-close-attention" aria-label="Close attention">×</button>
+          </div>
+          <p class="attention-explainer">Blockers and unavailable workers first, then failed or interrupted attempts, then check issues. Inspecting does not resolve an item.</p>
+          <div class="attention-toolbar">
+            <p id="attention-status">Loading attention…</p>
+            <button type="button" id="btn-refresh-attention">Refresh</button>
+          </div>
+          <p id="attention-message" role="status"></p>
+          <ul id="attention-list"></ul>
+          <button type="button" id="btn-more-attention" hidden>Show more</button>
+        </section>
         <div id="explorer">
           <div class="explorer-header">
             <svg class="header-logo brand-mark" viewBox="0 0 1024 1024" aria-hidden="true" focusable="false"><line x1="180" y1="636" x2="650" y2="636" stroke="currentColor" stroke-opacity="0.35" stroke-width="56" stroke-linecap="round"/><circle cx="250" cy="636" r="54" fill="currentColor"/><circle cx="410" cy="636" r="54" fill="currentColor"/><circle cx="568" cy="636" r="70" fill="currentColor"/><path d="M568 636Q612 566 692 506" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round"/><circle cx="800" cy="420" r="62" fill="none" stroke="currentColor" stroke-width="50"/></svg>
@@ -101,6 +118,10 @@
               <button type="button" id="btn-new-terminal" title="New terminal (Cmd+T / Ctrl+T)" aria-label="New terminal">＋<span class="newtab-label">New terminal</span></button>
               <button type="button" id="btn-min-terminal" class="pane-toggle" title="Minimize terminal" aria-label="Minimize terminal">–</button>
             </div>
+            <details id="work-summary" hidden>
+              <summary><span class="work-summary-heading">Project work</span></summary>
+              <div class="work-summary-content" hidden></div>
+            </details>
             <div id="terminal-container"></div>
             <div id="activity-tabbar" role="tablist" aria-label="Activity panels">
               <button type="button" class="activity-tab" id="activity-tab-timeline" data-tab="timeline" role="tab" aria-controls="timeline-strip">Timeline <span class="activity-count" data-count="timeline"></span></button>

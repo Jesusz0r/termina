@@ -101,6 +101,63 @@ afterAll(() => {
   delete (globalThis as Record<string, unknown>).window;
 });
 
+describe("candidate preparation and retry", () => {
+  it("explains result-based pairs as result and retry while rendering both real candidates", () => {
+    const panel = makePanel();
+    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
+    view.upsert(summary("A"));
+    view.upsert(summary("B"));
+    expect(panel.querySelector(".cmp-caption")!.textContent).toBe("A is the result · B is a retry");
+    expect(panel.querySelectorAll(".candidate-card").map((card) => card.dataset.label)).toEqual(["A", "B"]);
+  });
+
+  it("shows only the real moment candidate while preparing and keeps Open disabled until ready", () => {
+    const panel = makePanel();
+    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
+    const preparing: WorldlineSummary = { ...summary("A"), role: "moment", state: "creating" };
+    view.upsert(preparing);
+    expect(panel.querySelectorAll(".candidate-card")).toHaveLength(1);
+    expect(panel.querySelector(".cmp-caption")!.textContent).toBe("Continue from this moment in a separate tree");
+    const card = panel.querySelector(".candidate-card")!;
+    expect(card.querySelector(".cand-state")!.textContent).toBe("creating");
+    expect(card.querySelector(".cand-open")!.disabled).toBe(true);
+    view.upsert({ ...preparing, state: "ready", version: 2 });
+    expect(card.querySelector(".cand-state")!.textContent).toBe("ready");
+    expect(card.querySelector(".cand-open")!.disabled).toBe(false);
+  });
+
+  it("reports a failed reopen and leaves the retained session available for an explicit retry", async () => {
+    vi.useFakeTimers();
+    const previous = window.termina.openWorldlineTerminal;
+    const open = vi.fn().mockResolvedValueOnce({ ok: false, error: "the candidate session failed to start: session rejected" })
+      .mockResolvedValueOnce({ ok: true, terminalId: "term-retry" });
+    window.termina.openWorldlineTerminal = open;
+    try {
+      const panel = makePanel();
+      const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
+      const navigate = vi.fn();
+      view.bind({ onOpenTerminal: navigate });
+      const failed: WorldlineSummary = { ...summary("A"), role: "moment", state: "error", error: "session rejected" };
+      view.upsert(failed);
+      const card = panel.querySelector(".candidate-card")!;
+      const button = card.querySelector(".cand-open")!;
+      expect(card.title).toBe("error: session rejected");
+      expect(button.disabled).toBe(false);
+      button.click();
+      await vi.waitFor(() => expect(fake.document.body.querySelector(".toast-warning")?.textContent).toContain("session rejected"));
+      expect(navigate).not.toHaveBeenCalled();
+      expect(button.disabled).toBe(false);
+      button.click();
+      await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith("term-retry"));
+      expect(open.mock.calls).toEqual([["cmp-1", "A"], ["cmp-1", "A"]]);
+    } finally {
+      window.termina.openWorldlineTerminal = previous;
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("worldline changed-file caps (refs #213)", () => {
   it("caps the inline details list with an overflow note and honest totals", async () => {
     const panel = makePanel();

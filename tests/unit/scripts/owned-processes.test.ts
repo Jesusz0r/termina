@@ -46,6 +46,37 @@ describe("E2E descendant ownership", () => {
     vi.restoreAllMocks();
   });
 
+  it("samples RSS only for still-owned birth identities, including reparented descendants", async () => {
+    const tree = new OwnedProcessTree(100);
+    listing = "100 1\n101 1\n102 101\n900 1\n";
+    const original = vi.mocked(execFileSync).getMockImplementation()!;
+    vi.mocked(execFileSync).mockImplementation((file, args) => {
+      if (args?.at(-1) === "pid=,rss=") return "100 2048\n101 1024\n102 512\n900 999999\n";
+      return original(file, args);
+    });
+    expect(tree.sampleMemory()).toMatchObject({ totalRssKiB: 3584, processes: [
+      { pid: 100, identity: "root", rssKiB: 2048 }, { pid: 101, identity: "child", rssKiB: 1024 }, { pid: 102, identity: "grandchild", rssKiB: 512 },
+    ] });
+    await tree.stop();
+    expect(signals.map(([pid]) => pid)).toEqual([101, 102]);
+  });
+
+  it("does not attribute memory to a PID replaced during the RSS census", async () => {
+    const tree = new OwnedProcessTree(100);
+    const original = vi.mocked(execFileSync).getMockImplementation()!;
+    vi.mocked(execFileSync).mockImplementation((file, args) => {
+      if (args?.at(-1) === "pid=,rss=") {
+        identities.set(101, "foreign-new-birth");
+        listing = listing.replace("101 100", "101 900");
+        return "100 2048\n101 999999\n102 512\n";
+      }
+      return original(file, args);
+    });
+    expect(tree.sampleMemory()).toMatchObject({ totalRssKiB: 2560, processes: [{ pid: 100 }, { pid: 102 }] });
+    await tree.stop();
+    expect(signals).toEqual([[102, "SIGTERM"]]);
+  });
+
   it("remembers descendants after parent death; leaves foreign processes alone", async () => {
     const tree = new OwnedProcessTree(100);
     alive.delete(100);

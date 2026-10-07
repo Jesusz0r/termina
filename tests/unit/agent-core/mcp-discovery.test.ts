@@ -73,7 +73,7 @@ describe("deferred MCP definitions", () => {
       expect(toolInputError({ name: "call_mcp_tool", input }, definitions)).toContain("invalid tool arguments");
     }
     const call = vi.fn();
-    await expect(callDiscoveredMcpTool({ tools: [], notes: [], servers: [], call, shutdown() {} }, { name: "x", arguments: [] })).rejects.toThrow("arguments object");
+    await expect(callDiscoveredMcpTool({ tools: [], notes: [], servers: [], async connect() {}, call, shutdown() {} }, { name: "x", arguments: [] })).rejects.toThrow("arguments object");
     expect(call).not.toHaveBeenCalled();
   });
 
@@ -81,7 +81,7 @@ describe("deferred MCP definitions", () => {
     const outcome = { content: "result", isError: false };
     const call = vi.fn().mockResolvedValue(outcome);
     const options = { shouldStop: () => true, timeoutMs: 10 };
-    const result = await callDiscoveredMcpTool({ tools: catalog(), notes: [], servers: [], call, shutdown() {} }, {
+    const result = await callDiscoveredMcpTool({ tools: catalog(), notes: [], servers: [], async connect() {}, call, shutdown() {} }, {
       name: "mcp_assets_tool_4", arguments: { value: "texture" },
     }, options);
     expect(call).toHaveBeenCalledExactlyOnceWith("mcp_assets_tool_4", { value: "texture" }, options);

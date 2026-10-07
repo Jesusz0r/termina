@@ -17,8 +17,16 @@ Current reference describes the product and architecture as they exist today. It
 
 Images used by the repository README are kept in [`assets/`](assets/).
 
+## Audits and design studies
+
+Dated findings and exploratory designs, not guarantees of current behavior.
+
+- [`reference/WORKSPACE-EXPERIENCE-AUDIT.md`](reference/WORKSPACE-EXPERIENCE-AUDIT.md) — product, UI/UX, and developer-experience audit with evidence and validation limits
+- [`mockups/workspace/README.md`](mockups/workspace/README.md) — interactive, simulated attention-first workspace study
+
 ## Plans
 
 Not current behavior.
 
+- [`plans/attention-first-workspace.md`](plans/attention-first-workspace.md) — proposed multi-project and multi-agent experience, workflows, safety boundaries, and rollout priorities
 - [`plans/computer-use.md`](plans/computer-use.md) — proposed Termina-owned browser tool. Not implemented.

@@ -126,6 +126,8 @@ export interface TerminalRuntimeSpawnOptions {
   /** Candidate watchReady already armed this id; do not reset its cursor. */
   skipSidecarWatch?: boolean;
   rendererTarget: PtyRendererSendTarget | null;
+  /** Main's synchronous admission boundary, before a child process exists. */
+  beforeSpawn?: (target: { id: string; generation: number }) => void;
   /** Mutate the instance before it enters the live map. */
   setup?: (inst: AgentTerminalInstance) => void;
 }
@@ -138,6 +140,9 @@ export interface TerminalRuntimeSpawnOptions {
 export class TerminalRuntime {
   private terminalSeq = 0;
   private readonly terminals = new Map<string, AgentTerminalInstance>();
+  /** A forced logical release does not complete node-pty's native callback. */
+  private readonly nativeExits = new Set<AgentTerminalInstance>();
+  private egressDisposed = false;
   private readonly pendingSourceDrains = new Map<AgentTerminalInstance, () => void>();
   private readonly sidecarQueues = new Map<string, SidecarEventQueue>();
   private readonly sidecarSources = new Map<string, SidecarWatch>();
@@ -186,6 +191,17 @@ export class TerminalRuntime {
     return this.terminals.keys();
   }
 
+  /** Includes logically released instances until their native exit arrives. */
+  nativeValues(): IterableIterator<AgentTerminalInstance> {
+    return this.nativeExits.values();
+  }
+
+  private trackNativeExit(inst: AgentTerminalInstance): void {
+    if (this.nativeExits.has(inst)) return;
+    this.nativeExits.add(inst);
+    inst.pty.onNativeExit = () => { this.nativeExits.delete(inst); };
+  }
+
   clear(): void {
     for (const id of [...this.sidecarSources.keys()]) this.stopSidecar(id);
     this.sidecarSources.clear();
@@ -226,7 +242,9 @@ export class TerminalRuntime {
       opts.env,
       opts.cols ?? 80,
       opts.rows ?? 24,
+      opts.beforeSpawn,
     );
+    this.trackNativeExit(inst);
     try {
       opts.setup?.(inst);
       this.adopt(inst, opts);
@@ -245,6 +263,8 @@ export class TerminalRuntime {
    */
   adopt(inst: AgentTerminalInstance, opts: Pick<TerminalRuntimeSpawnOptions, "tailer" | "skipSidecarWatch" | "rendererTarget">): void {
     if (this.terminals.has(inst.id)) throw new Error(`terminal ${inst.id} already exists`);
+    this.trackNativeExit(inst);
+    const completeNativeExit = inst.pty.onNativeExit;
     this.terminals.set(inst.id, inst);
     const terminalGeneration = inst.generation;
     inst.pty.onData = (data) => this.acceptOutput(inst.id, terminalGeneration, data);
@@ -257,6 +277,7 @@ export class TerminalRuntime {
     let sourceTailCancelled = false;
     let sourceDrainTimer: ReturnType<typeof setTimeout> | null = null;
     inst.pty.onNativeExit = () => {
+      completeNativeExit();
       if (inst.exitHandled || exitDeadline !== null || this.terminals.get(inst.id) !== inst) return;
       exitDeadline = Date.now() + PTY_EXIT_DRAIN_TIMEOUT_MS;
       this.host.onPtyStopping?.(inst);
@@ -266,8 +287,11 @@ export class TerminalRuntime {
         sourceTailCancelled = true;
         inst.pty.cancelOutput();
       };
-      this.pendingSourceDrains.set(inst, cancelTail);
-      sourceDrainTimer = setTimeout(cancelTail, PTY_EXIT_DRAIN_TIMEOUT_MS);
+      if (this.egressDisposed) cancelTail();
+      else {
+        this.pendingSourceDrains.set(inst, cancelTail);
+        sourceDrainTimer = setTimeout(cancelTail, PTY_EXIT_DRAIN_TIMEOUT_MS);
+      }
     };
     inst.pty.onExit = async (code: number, origin: "native" | "forced" = "native") => {
       if (inst.exitHandled) return;
@@ -408,6 +432,7 @@ export class TerminalRuntime {
   }
 
   disposeEgress(): void {
+    this.egressDisposed = true;
     this.egress.dispose();
     for (const cancelTail of this.pendingSourceDrains.values()) cancelTail();
   }

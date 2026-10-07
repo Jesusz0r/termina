@@ -109,6 +109,7 @@ function setup(opts: {
   const watched: string[] = [];
   const unwatched: string[] = [];
   const sessions: Array<{ op: "attach" | "detach"; terminalId: string; viewerId: string }> = [];
+  const ownerChanges: Array<{ terminalId: string; active: number }> = [];
   const procs: FakeProc[] = [];
   const launches: Array<{ cmd: string; args: string[]; env: Record<string, string | undefined> }> = [];
   let launchAttempts = 0;
@@ -119,7 +120,7 @@ function setup(opts: {
     launches.push({ cmd, args, env: launchOpts.cwd ? { ...launchOpts.env, PWD: launchOpts.cwd } : launchOpts.env });
     return fake.api;
   };
-  const host = new SubagentHost(
+  const host: SubagentHost = new SubagentHost(
     {
       eventsDirFor: eventsDirFor ?? (() => dir),
       baseEnv: () => ({}),
@@ -134,6 +135,7 @@ function setup(opts: {
       releaseStream: (id) => { unwatched.push(id); },
       attachSession: (terminalId, viewerId) => { sessions.push({ op: "attach", terminalId, viewerId }); },
       detachSession: (terminalId, viewerId) => { sessions.push({ op: "detach", terminalId, viewerId }); },
+      ownerRunsChanged: (terminalId) => { ownerChanges.push({ terminalId, active: host.activeRunIds(terminalId).length }); },
       dispatchKeysFor: async () => dispatch ?? { keys: new Set<string>(), root: "" },
       canonicalPath: canonicalPath ?? (async (p) => {
         try {
@@ -154,7 +156,7 @@ function setup(opts: {
   };
   const resultFile = join(dir, "subagent-term-7-bg-1.result.json");
   const readResult = () => JSON.parse(readFileSync(resultFile, "utf8"));
-  return { dir, host, notes, watched, unwatched, sessions, procs, launches, writeTask, resultFile, readResult, get launchAttempts() { return launchAttempts; } };
+  return { dir, host, notes, watched, unwatched, sessions, ownerChanges, procs, launches, writeTask, resultFile, readResult, get launchAttempts() { return launchAttempts; } };
 }
 
 describe("SubagentHost", () => {
@@ -339,6 +341,8 @@ describe("SubagentHost", () => {
     expect(s.notes.length).toBe(1);
     expect(s.notes[0]!.terminalId).toBe("term-7");
     expect(s.notes[0]!.note).toMatch(/## Subagent bg-1 settled/);
+    await until(() => s.ownerChanges.length === 1);
+    expect(s.ownerChanges).toEqual([{ terminalId: "term-7", active: 0 }]);
     // Task file consumed; no relaunch on redelivery.
     expect(existsSync(join(s.dir, "subagent-term-7-bg-1.task.json"))).toBe(false);
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
@@ -436,6 +440,7 @@ describe("SubagentHost", () => {
         releaseStream: () => {},
         attachSession: () => {},
         detachSession: () => {},
+        ownerRunsChanged: () => {},
         dispatchKeysFor: async () => ({ keys: new Set<string>(), root: dir }),
         canonicalPath: async (p) => p,
         isWorldlineTerminal: () => false,
@@ -648,6 +653,9 @@ describe("SubagentHost", () => {
       await s.host.handleSpawn(term, run, name);
     }
     expect(s.host.activeCount()).toBe(3);
+    expect(s.host.activeRunIds("term-7").length).toBe(2);
+    expect(s.host.activeRunIds("term-9").length).toBe(1);
+    expect(s.host.activeRunIds("term-unknown").length).toBe(0);
     expect(s.host.killOwner("term-7", "terminal cleared")).toBe(2);
     // Runs stay active until their children exit; the survivor is untouched.
     expect(s.host.activeCount()).toBe(3);
@@ -657,6 +665,8 @@ describe("SubagentHost", () => {
     await until(() => existsSync(join(s.dir, "subagent-term-7-bg-1.result.json")));
     await until(() => existsSync(join(s.dir, "subagent-term-7-bg-2.result.json")));
     await until(() => s.host.activeCount() === 1);
+    expect(s.host.activeRunIds("term-7").length).toBe(0);
+    expect(s.host.activeRunIds("term-9").length).toBe(1);
     expect(existsSync(join(s.dir, "subagent-term-9-bg-1.result.json"))).toBe(false);
     expect(s.host.killOwner("term-unknown", "x")).toBe(0);
   });

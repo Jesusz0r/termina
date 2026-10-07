@@ -28,14 +28,18 @@ function makeFakeLine(
   };
 }
 
-function provideForLine(line: ReturnType<typeof makeFakeLine>): ILink[] | undefined {
-  const term = { buffer: { active: { getLine: (y: number) => (y === 0 ? line : undefined) } }, element: undefined };
+function provideForLines(lines: ReturnType<typeof makeFakeLine>[], requestedLine = 1): ILink[] | undefined {
+  const term = { buffer: { active: { getLine: (y: number) => lines[y] } }, element: undefined };
   const provider = createTerminalLinkProvider(term as unknown as Terminal, () => {}, () => {});
   let result: ILink[] | undefined;
-  provider.provideLinks(1, (links) => {
+  provider.provideLinks(requestedLine, (links) => {
     result = links;
   });
   return result;
+}
+
+function provideForLine(line: ReturnType<typeof makeFakeLine>): ILink[] | undefined {
+  return provideForLines([line]);
 }
 
 describe("Terminal file link detection", () => {
@@ -217,6 +221,43 @@ describe("Terminal file link detection", () => {
 });
 
 describe("Terminal link provider ranges (refs #144)", () => {
+  it("resolves the complete path and cell range from either soft-wrapped row", () => {
+    const lines = [makeFakeLine("See /other/proje"), { ...makeFakeLine("ct/source.ts:2:3"), isWrapped: true }];
+    for (const requested of [1, 2]) {
+      const links = provideForLines(lines, requested);
+      expect(links).toHaveLength(1);
+      expect(links![0].text).toBe("/other/project/source.ts:2:3");
+      expect(links![0].range).toEqual({ start: { x: 5, y: 1 }, end: { x: "ct/source.ts:2:3".length, y: 2 } });
+    }
+  });
+
+  it("does not reinterpret a wrapped web URL tail as a local file", () => {
+    const links = provideForLines([makeFakeLine("https://example.com/"), { ...makeFakeLine("readme.ts:2"), isWrapped: true }], 2);
+    expect(links).toHaveLength(1);
+    expect(links![0].text).toBe("https://example.com/readme.ts:2");
+    expect(links![0].range).toEqual({ start: { x: 1, y: 1 }, end: { x: 11, y: 2 } });
+  });
+
+  it("preserves spaces on intermediate wrapped rows and never joins hard newlines", () => {
+    const quoted = provideForLines([makeFakeLine('"path with '), { ...makeFakeLine('spaces/file.ts:2"'), isWrapped: true }], 2);
+    expect(quoted![0].text).toBe('"path with spaces/file.ts:2"');
+    const separate = provideForLines([makeFakeLine("first.ts"), makeFakeLine("second.ts")], 2);
+    expect(separate!.map((link) => link.text)).toEqual(["second.ts"]);
+  });
+
+  it("declines truncated or exceptionally long wrapped output instead of opening a partial target", () => {
+    expect(provideForLines([{ ...makeFakeLine("partial/file.ts"), isWrapped: true }])).toBeUndefined();
+    const huge = Array.from({ length: 65 }, (_, index) => ({ ...makeFakeLine("x".repeat(256)), isWrapped: index > 0 }));
+    huge.push({ ...makeFakeLine("/source.ts"), isWrapped: true });
+    expect(provideForLines(huge, huge.length)).toBeUndefined();
+  });
+
+  it("only returns links covering the requested physical row", () => {
+    const lines = [makeFakeLine("first.ts   "), { ...makeFakeLine("second.ts"), isWrapped: true }];
+    expect(provideForLines(lines, 1)!.map((link) => link.text)).toEqual(["first.ts"]);
+    expect(provideForLines(lines, 2)!.map((link) => link.text)).toEqual(["second.ts"]);
+  });
+
   it("maps string offsets to cells after a wide CJK character", () => {
     // "界" occupies cells 0-1, the space is cell 2, so `s` sits at cell 3 (x=4).
     const line = makeFakeLine("界 src/main.ts", { wide: (cp) => cp === "界" });

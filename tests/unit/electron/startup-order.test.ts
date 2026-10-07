@@ -37,6 +37,8 @@ describe("initial project restoration", () => {
     const app = {
       initialRestorePromise: null as Promise<void> | null,
       coreSessionRoot: () => "/fixture/core",
+      worldsRoot: "/fixture/worlds",
+      canonicalPath: async (path: string) => path,
       preferencesStore: { load: async () => ({ shortcuts: {} }) },
       registerIpc: () => {},
       registerMediaProtocol: () => {},

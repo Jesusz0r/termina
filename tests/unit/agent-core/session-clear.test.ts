@@ -101,6 +101,21 @@ describe("/clear writer-open failure (#222)", () => {
     expect(main.testOnlyResumeState()).toEqual({ historyLength: 0, storageSeq: 0, streamPrepared: true });
   });
 
+  it("keeps the provider cache routing pin across /clear", async () => {
+    const main = await import("../../../agent-core/main.ts");
+    const liveFile = seedBundle("clear-keep-cache-pin", [{ role: "user", content: "hello" }]);
+    const resumed = await testOnlyResume(main, liveFile);
+    expect(resumed.ok).toBe(true);
+    const before = main.testOnlyCacheRoutingKey("openai-codex", "gpt-6.1-sol");
+    expect(before).toMatch(/^tc1_/);
+    withTempHome(() => {
+      main.testOnlyDispatchLine("/clear");
+    });
+    // /new uses this same reset. A second command here races the post-clear
+    // MCP reconnect and is rejected as busy, so it would not prove the pin.
+    expect(main.testOnlyCacheRoutingKey("openai-codex", "gpt-6.1-sol")).toBe(before);
+  });
+
   it("keeps bash permission policy across /clear", async () => {
     const main = await import("../../../agent-core/main.ts");
     const liveFile = seedBundle("clear-keep-permissions", [{ role: "user", content: "hello" }]);

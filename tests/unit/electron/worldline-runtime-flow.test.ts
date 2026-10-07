@@ -31,6 +31,7 @@ interface FlowCandidate {
   version: number;
   error: null;
   startupAttemptId?: string;
+  startupControlOpId?: string;
 }
 
 /** Comparison fixture shape shared by the flow probes. */
@@ -55,7 +56,6 @@ interface FlowComparison {
   candidates: Map<string, FlowCandidate>;
   phase: string;
   error: null;
-  readyTimer: null;
 }
 
 /** Spawn options the probes observe on createCandidate. */
@@ -158,7 +158,6 @@ describe("Worldline Runtime Flow Suite", () => {
       candidates: new Map([[candidate.label, candidate]]),
       phase: "creating",
       error: null,
-      readyTimer: null,
     });
     
     const fakeBin = join(root, "fake-bin");
@@ -177,6 +176,7 @@ describe("Worldline Runtime Flow Suite", () => {
     let removed = false;
     const deps = {
       worldsRoot,
+      recoverStaleComparisons: (sweep: () => Promise<void>) => sweep(),
       primaryRoot,
       realHome: root,
       userData: root,
@@ -236,7 +236,7 @@ describe("Worldline Runtime Flow Suite", () => {
       spawnedResolve({ terminalId, pid: childPid });
       // Fresh startup readiness is immediate, before the launch continuation's
       // delayed process identity lookup.
-      manager?.onSessionReady(terminalId, true, null, { bridgeId: "fresh-bridge", generation: "fresh-generation", seq: 1 });
+      manager?.onSessionReady(terminalId, true, null, { opId: "fresh-control", bridgeId: "fresh-bridge", generation: "fresh-generation", seq: 1 });
       return { terminalId, pid: childPid };
     };
     
@@ -250,7 +250,8 @@ describe("Worldline Runtime Flow Suite", () => {
       const candidate = makeCandidate(root);
       const comparison = makeComparison(root, "fresh-teardown", candidate);
       manager.comparisons.set(comparison.id, comparison);
-      const launch = manager.launch.launchCandidate(comparison, candidate, [], null).catch((error) => error);
+      candidate.startupControlOpId = "fresh-control";
+      const launch = manager.launch.launchCandidate(comparison, candidate, null).catch((error) => error);
       const created = await spawned;
       await nextTurn();
       const oldAttempt = [...manager.launch.candidateLaunchAttempts.values()][0];
@@ -276,7 +277,7 @@ describe("Worldline Runtime Flow Suite", () => {
       // captured attempt identity/start time, never a later CandidateState pid.
       const worldlinesSource = await (await import("node:fs/promises")).readFile("electron/worldlines/candidate-launch.ts", "utf8");
       assert.match(worldlinesSource, /candidateLaunchAttempts/);
-      assert.match(worldlinesSource, /awaitAbortable\(identity, attempt\.controller\.signal\)/);
+      assert.match(worldlinesSource, /awaitAbortable\(Promise\.all\(\[identity, pending\.promise\]\), attempt\.controller\.signal\)/);
       assert.match(worldlinesSource, /terminateCandidateGroup\(attempt\.pid, lstart\)/);
     
       // Evidence cancellation is owned by the comparison, not the global queue.

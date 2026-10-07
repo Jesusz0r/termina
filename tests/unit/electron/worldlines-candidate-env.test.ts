@@ -31,6 +31,7 @@ async function setup(model: string | null, thinkingLevel: string | null): Promis
 
   const manager = new WorldlineManager({
     worldsRoot,
+    recoverStaleComparisons: (sweep) => sweep(),
     primaryRoot,
     primaryRootIdentity: { dev: String(primaryInfo.dev), ino: String(primaryInfo.ino) },
     realHome: root,

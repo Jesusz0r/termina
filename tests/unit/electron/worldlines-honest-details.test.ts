@@ -51,6 +51,7 @@ async function makeManager(opts?: {
   const identity = await lstat(primaryRoot, { bigint: true });
   const manager = new WorldlineManager({
     worldsRoot,
+    recoverStaleComparisons: (sweep: () => Promise<void>) => sweep(),
     primaryRoot,
     primaryRootIdentity: { dev: String(identity.dev), ino: String(identity.ino) },
     realHome: root,
@@ -236,7 +237,7 @@ describe("worldline honest details / silent degradation (issues #246 #257 #269)"
     }
   });
 
-  it("fails closed when the alternative session address is missing or zero", async () => {
+  it("fails closed for missing or invalid addresses but accepts a declared empty-session parent", async () => {
     const { manager, root } = await makeManager();
     try {
       const cmp = {
@@ -255,10 +256,20 @@ describe("worldline honest details / silent degradation (issues #246 #257 #269)"
         (manager as unknown as { forkCoreSessions: (c: unknown, r: RunRecord) => Promise<void> })
           .forkCoreSessions(cmp, run),
       ).rejects.toThrow(/alternative session address is missing/);
-      await expect(
-        (manager as unknown as { forkCoreSessions: (c: unknown, r: RunRecord) => Promise<void> })
-          .forkCoreSessions(cmp, { ...run, promptParentEntryId: "0" }),
-      ).rejects.toThrow(/alternative session address is missing/);
+      const surface = manager as unknown as {
+        forkCoreSessions: (c: unknown, r: RunRecord) => Promise<void>;
+        forkCoreSession: (c: unknown, opts: { throughSeq: number; destinationSessionFile: string }) => Promise<{ ok: boolean }>;
+        ensureComparisonLive: (c: unknown) => void;
+      };
+      await expect(surface.forkCoreSessions(cmp, { ...run, promptParentEntryId: "invalid" }))
+        .rejects.toThrow(/alternative session address is missing/);
+      await expect(surface.forkCoreSessions(cmp, { ...run, promptParentEntryId: "0", settledEntryId: "0" }))
+        .rejects.toThrow(/settled session address is missing/);
+      const forked: number[] = [];
+      surface.forkCoreSession = async (_cmp, opts) => { forked.push(opts.throughSeq); return { ok: true }; };
+      surface.ensureComparisonLive = () => {};
+      await surface.forkCoreSessions(cmp, { ...run, promptParentEntryId: "0" });
+      expect(forked).toEqual([12, 0]);
     } finally {
       await disposeFixture(manager, root);
     }

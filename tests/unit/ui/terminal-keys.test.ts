@@ -38,6 +38,31 @@ describe("shell line-edit chords", () => {
     expect(shellLineEdit(key({ ctrlKey: true, key: "F5", code: "F5" }), legacy)).toBe("\x1b[15~");
   });
 
+  it("keeps the native emergency-stop chord out of the terminal in every reporting mode", () => {
+    const emergencyStop = key({ key: "Escape", code: "Escape", metaKey: true, ctrlKey: true, altKey: true });
+    for (const mode of [legacy, reporting, appCursor]) {
+      expect(shellLineEdit(emergencyStop, mode)).toBe("");
+    }
+  });
+
+  it("does not swallow ordinary Escape or different modifier combinations", () => {
+    for (const modifiers of [
+      {},
+      { ctrlKey: true },
+      { altKey: true },
+      { metaKey: true },
+      { ctrlKey: true, altKey: true },
+      { ctrlKey: true, metaKey: true },
+      { altKey: true, metaKey: true },
+      { ctrlKey: true, altKey: true, metaKey: true, shiftKey: true },
+    ]) {
+      expect(shellLineEdit(key({ key: "Escape", code: "Escape", ...modifiers }), legacy)).toBeNull();
+    }
+    const emergencyStop = key({ key: "Escape", code: "Escape", metaKey: true, ctrlKey: true, altKey: true });
+    expect(shellLineEdit({ ...emergencyStop, type: "keyup" }, legacy)).toBeNull();
+    expect(shellLineEdit({ ...emergencyStop, isComposing: true }, legacy)).toBeNull();
+  });
+
   it("forwards modifier keys once the child enabled reporting", () => {
     expect(shellLineEdit(key({ ctrlKey: true }), reporting)).toBeNull();
     expect(shellLineEdit(key({ altKey: true }), reporting)).toBeNull();

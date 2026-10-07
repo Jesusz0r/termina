@@ -4,6 +4,9 @@
  */
 // Use .ts so the source harness can load this module with strip-types.
 import { isCoreSessionId } from "../agent-core/session.ts";
+import { isRecord } from "../shared/guards.ts";
+import { DISPATCH_OUTCOMES, type PlanTask, type VerifyInfo } from "../shared/types.ts";
+import { parseStoredVerify, parseStoredVerifyOutput } from "./main/verify-source.ts";
 
 export const MAX_TERMINAL_ROSTER = 16;
 export const MAX_ROSTER_BYTES = 64 * 1024;
@@ -12,7 +15,6 @@ export const MAX_ROSTER_PLAN_TASKS = 50;
 const MAX_PLAN_TEXT = 500;
 const MAX_PLAN_PATHS = 100;
 const MAX_PLAN_PATH = 256;
-const MAX_VERIFY_TEXT = 256;
 const MAX_ID = 64;
 const MAX_PATH = 1024;
 const TERM_ID = /^term-[1-9][0-9]{0,5}$/;
@@ -30,9 +32,11 @@ export type TerminalRosterEntry = {
   model?: string;
   /** Handoff plan: task text, paths, and state. Worker assignments never
    *  persist — the restoring side resets active tasks to pending. */
-  plan?: Array<{ text: string; paths: string[]; state: "pending" | "active" | "done" }>;
+  plan?: Array<Pick<PlanTask, "text" | "paths" | "state" | "dispatchResult">>;
   /** Last verify verdict for the badge. */
-  verify?: { state: "untested" | "pass" | "fail" | "timeout" | "cancelled"; command: string | null; summary: string | null };
+  verify?: VerifyInfo;
+  /** Bounded execution output, private to persistence and agent context. */
+  verifyOutput?: string;
 };
 
 /** Absolute directory string safe to store and spawn from. */
@@ -69,19 +73,13 @@ function parseRosterPlan(value: unknown): TerminalRosterEntry["plan"] {
         if (typeof p === "string" && p && p.length <= MAX_PLAN_PATH && !/[\x00-\x1f]/.test(p)) paths.push(p);
       }
     }
-    out.push({ text: rec.text, paths, state: rec.state });
+    const result = isRecord(rec.dispatchResult) ? rec.dispatchResult : null;
+    const outcome = DISPATCH_OUTCOMES.find((value) => value === result?.outcome);
+    const dispatchResult = result && typeof result.workerId === "string" && TERM_ID.test(result.workerId) && outcome
+      ? { workerId: result.workerId, outcome } : undefined;
+    out.push({ text: rec.text, paths, state: rec.state, ...(dispatchResult ? { dispatchResult } : {}) });
   }
   return out.length > 0 ? out : undefined;
-}
-
-function parseRosterVerify(value: unknown): TerminalRosterEntry["verify"] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const rec = value as Record<string, unknown>;
-  if (rec.state !== "untested" && rec.state !== "pass" && rec.state !== "fail" && rec.state !== "timeout" && rec.state !== "cancelled") return undefined;
-  if (rec.state === "untested") return undefined;
-  const text = (v: unknown): string | null =>
-    typeof v === "string" && v.length <= MAX_VERIFY_TEXT && !/[\x00-\x1f]/.test(v) ? v : null;
-  return { state: rec.state, command: text(rec.command), summary: text(rec.summary) };
 }
 
 export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
@@ -117,8 +115,12 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
     if (entry.type === "agent") {
       const plan = parseRosterPlan(rec.plan);
       if (plan) entry.plan = plan;
-      const verify = parseRosterVerify(rec.verify);
-      if (verify) entry.verify = verify;
+      const verify = parseStoredVerify(rec.verify);
+      if (verify) {
+        entry.verify = verify;
+        const output = parseStoredVerifyOutput(rec.verifyOutput);
+        if (output !== undefined) entry.verifyOutput = output;
+      }
     }
     seen.add(entry.id);
     out.push(entry);
@@ -129,14 +131,16 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
 
 /**
  * Fit entries into the roster byte budget, degrading handoff state before
- * identity: other entries' plans go first, then all verdicts. The first
+ * identity: output tails go first, then other entries' plans and verdicts. The first
  * entry keeps its plan longest. Core resume fields always fit, so tabs are
  * never lost to a full board.
  */
 export function fitTerminalRoster(entries: TerminalRosterEntry[]): TerminalRosterEntry[] {
   const size = (list: TerminalRosterEntry[]): number => Buffer.byteLength(JSON.stringify({ terminals: list }), "utf8");
   if (size(entries) <= MAX_ROSTER_BYTES) return entries;
-  const stripped = entries.map((entry, i) =>
+  const withoutOutput = entries.map(({ verifyOutput: _output, ...rest }) => rest);
+  if (size(withoutOutput) <= MAX_ROSTER_BYTES) return withoutOutput;
+  const stripped = withoutOutput.map((entry, i) =>
     i === 0 ? entry : { ...entry, plan: undefined },
   );
   if (size(stripped) <= MAX_ROSTER_BYTES) return stripped;

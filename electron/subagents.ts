@@ -75,6 +75,8 @@ export interface SubagentHostSinks {
   admitSession(sessionFile: string, signal: AbortSignal): Promise<SessionResult>;
   /** Existing owner-mailbox path. The host never writes mailbox files itself. */
   appendMailboxNote(terminalId: string, note: string): void;
+  /** Child processes have stopped and the owner's active registry changed. */
+  ownerRunsChanged(terminalId: string): void;
   /** Tail a child sidecar stream on the shared tailer. */
   watchStream(terminalId: string): void;
   /** Release a child sidecar stream (stop tailing, drop its queue). */
@@ -241,6 +243,14 @@ export class SubagentHost {
 
   activeCount(): number {
     return this.runs.size;
+  }
+
+  activeRunIds(parentTerminalId: string): string[] {
+    const ids: string[] = [];
+    for (const run of this.runs.values()) {
+      if (run.parentTerminalId === parentTerminalId) ids.push(run.runId);
+    }
+    return ids;
   }
 
   /** True while a live child still addresses this core session bundle. */
@@ -892,6 +902,7 @@ export class SubagentHost {
       run.retryTimer = null;
     }
     this.runs.delete(run.key);
+    this.sinks.ownerRunsChanged(run.parentTerminalId);
     this.streams.delete(run.childTid);
     this.detachParentSession(run);
     try {

@@ -40,25 +40,25 @@ describe("Verify Attention Invariants", () => {
       && renderer.includes("if (activeId === terminalId) renderStatus(pane);"));
     // Dots are solid (no busy blink) with theme colors.
     check("dot styles use theme colors without blink",
-      css.includes(".terminal-tab .tab-status.verify-fail,")
-      && css.includes(".project-tab .tab-status.verify-fail {")
-      && css.includes("background: var(--red);")
-      && css.includes(".terminal-tab .tab-status.verify-timeout {")
-      && css.includes("background: var(--yellow);"));
-    check("idle and working share the same tab-status language",
-      css.includes(".terminal-tab .tab-status.idle,")
-      && css.includes(".project-tab .tab-status.idle {")
+      /\.terminal-tab \.tab-status\.verify-fail \{[^}]*background: var\(--red\);[^}]*animation: none;/s.test(css)
+      && /\.terminal-tab \.tab-status\.verify-timeout \{[^}]*background: var\(--yellow\);[^}]*animation: none;/s.test(css));
+    check("terminal idle and working keep the tab-status language",
+      css.includes(".terminal-tab .tab-status.idle {")
       && css.includes("background: var(--green);")
-      && css.includes(".terminal-tab .tab-status.busy,")
-      && css.includes(".project-tab .tab-status.busy {")
+      && css.includes(".terminal-tab .tab-status.busy {")
       && css.includes("background: var(--accent);")
       && css.includes("animation: activity-pulse")
       && css.includes("@keyframes activity-pulse")
       && css.includes("transform: scale(1.55)"));
-    // Background projects mirror attention onto their own tab.
-    check("project tabs mirror unseen failures",
-      renderer.includes("function updateProjectAttention(projectId: string | null): void {")
-      && renderer.includes("fail: fail && projectId !== activeProjectId,"));
+    // Project attention is factual, not a mirror of transient terminal nudges.
+    const rail = readFileSync(new URL("../../../src/main/project-rail.ts", import.meta.url), "utf8");
+    check("overview is wired directly to the canonical project rail",
+      renderer.includes("onOverview: (overview) => projectRail.setOverview(overview)")
+      && rail.includes("project.working")
+      && rail.includes("project.attentionCount")
+      && !rail.includes("verifyAttention")
+      && !renderer.includes("updateProjectAttention")
+      && !css.includes(".project-tab .tab-status"));
     assert.ok(checks.length >= 7);
   });
 });

@@ -49,7 +49,6 @@ interface LayoutElements {
   btnMinExplorer: HTMLButtonElement;
   btnMinTerminal: HTMLButtonElement;
   btnMinEditor: HTMLButtonElement;
-  mainEl: HTMLElement;
 }
 
 interface LayoutBindings {
@@ -93,7 +92,6 @@ export function createLayout(bindings: LayoutBindings): {
     btnMinExplorer,
     btnMinTerminal,
     btnMinEditor,
-    mainEl,
   } = bindings.elements;
 
   let explorerMinimized = false;
@@ -164,9 +162,9 @@ export function createLayout(bindings: LayoutBindings): {
     // frame at the old cell grid, then snaps — that is the occupancy flicker.
     void splitEl.getBoundingClientRect();
     bindings.layoutEditors();
-    // Only the visible pane: hidden panes measure 0 and skip anyway, but
-    // fitting each of them on every layout change spams pty resizes when
-    // they become visible with stale grids. They fit on activation instead.
+    // Only the visible pane: background terminals retain measurable geometry,
+    // but fitting them here would send unnecessary PTY resizes. They fit on
+    // activation instead.
     bindings.layoutActiveTerminal();
   }
 
@@ -388,7 +386,7 @@ export function createLayout(bindings: LayoutBindings): {
       finishExplorerDrag();
       return;
     }
-    const rect = mainEl.getBoundingClientRect();
+    const rect = explorerEl.getBoundingClientRect();
     const w = Math.min(420, Math.max(140, e.clientX - rect.left));
     explorerEl.style.width = `${w}px`;
   };

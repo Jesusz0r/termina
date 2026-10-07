@@ -47,7 +47,7 @@ describe("worldlines guards (issue #193)", () => {
     expect(parseStorageSeq("9".repeat(30))).toBe(null);
   });
 
-  it("requireStorageSeq rejects missing and zero B anchors", () => {
+  it("requireStorageSeq rejects missing and zero entry addresses", () => {
     expect(requireStorageSeq("42", "b")).toBe(42);
     expect(() => requireStorageSeq(undefined, "the alternative session address is missing"))
       .toThrow(/the alternative session address is missing/);
@@ -55,6 +55,14 @@ describe("worldlines guards (issue #193)", () => {
       .toThrow(/the alternative session address is missing/);
     expect(() => requireStorageSeq("abc", "this moment has no session address"))
       .toThrow(/this moment has no session address/);
+  });
+
+  it("accepts an explicit empty-session parent without treating missing addresses as root", () => {
+    expect(requireStorageSeq("0", "parent", { allowRoot: true })).toBe(0);
+    expect(requireStorageSeq("42", "parent", { allowRoot: true })).toBe(42);
+    for (const missing of [null, undefined, "", "abc", "-1", "0x0", "0\n"]) {
+      expect(() => requireStorageSeq(missing, "parent", { allowRoot: true })).toThrow("parent");
+    }
   });
 
   it("isComparisonDirectoryCollision uses errno, not a message regex", () => {

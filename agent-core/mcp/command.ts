@@ -19,7 +19,8 @@ export const MCP_SLASH_USAGE = [
 
 
 export type McpSlash =
-  | { action: "list" | "reconnect" }
+  | { action: "list" }
+  | { action: "reconnect" }
   | { action: "edit"; edit: McpConfigEdit };
 
 
@@ -78,11 +79,49 @@ export function parseMcpSlash(line: string): McpSlash | { error: string } {
 }
 
 
+const MCP_MENTION_SEPARATOR = /[\s,;]/u;
+const MCP_MENTION_OPENING = "\"'`([{<";
+const MCP_MENTION_CLOSING = "\"'`])}>.!?:";
+
+/** Names a prompt actually says. Short names are ignored so ordinary words do not connect a server. */
+export function mcpServersNamedIn(text: string, names: readonly string[]): string[] {
+  const eligible = names.filter(name => name.length >= 3).map(name => name.toLowerCase());
+  if (eligible.length === 0) return [];
+  // Prefer complete names over their shorter pieces, including a literal final period.
+  eligible.sort((a, b) => b.length - a.length);
+  const input = text.toLowerCase();
+  // Skip closing prose punctuation in constant time, even for long quote runs.
+  const nextNonClosing = new Uint32Array(input.length + 1);
+  nextNonClosing[input.length] = input.length;
+  for (let index = input.length - 1; index >= 0; index--) {
+    nextNonClosing[index] = MCP_MENTION_CLOSING.includes(input[index]!) ? nextNonClosing[index + 1]! : index;
+  }
+  const found = new Set<string>();
+  mentions: for (let index = 0; index < input.length; index++) {
+    if (index > 0 && !MCP_MENTION_SEPARATOR.test(input[index - 1]!)) continue;
+    let start = index;
+    while (start < input.length) {
+      for (const name of eligible) {
+        if (!input.startsWith(name, start)) continue;
+        const end = nextNonClosing[start + name.length]!;
+        if (end < input.length && !MCP_MENTION_SEPARATOR.test(input[end]!)) continue;
+        found.add(name);
+        index = end;
+        continue mentions;
+      }
+      if (!MCP_MENTION_OPENING.includes(input[start]!)) break;
+      start += 1;
+    }
+  }
+  return names.filter(name => name.length >= 3 && found.has(name.toLowerCase()));
+}
+
+
 export function formatMcpStatus(
   entries: readonly McpInventoryEntry[],
   servers: readonly McpServerReport[] | null,
 ): string {
-  const header = "MCP (~/.termina/agent/mcp.json)\nNo OAuth login. Put an Authorization header or env credential in that file.";
+  const header = "MCP (~/.termina/agent/mcp.json)\nA prompt that names a server connects it. /mcp reconnect connects all.\nNo OAuth login. Put an Authorization header or env credential in that file.";
   if (entries.length === 0) return `${header}\n(no MCP servers)`;
   const live = new Map((servers ?? []).map((server) => [server.name, server]));
   const lines = entries.map((entry) => {

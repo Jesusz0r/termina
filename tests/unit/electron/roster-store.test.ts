@@ -71,6 +71,7 @@ function agent(id: string, model = "anthropic/claude-opus-4-6"): RosterTerminal 
     model,
     plan: [],
     verify: { state: "untested", command: null, summary: null },
+    verifyOutput: null,
   };
 }
 

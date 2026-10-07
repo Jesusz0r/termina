@@ -34,6 +34,7 @@ export interface RosterTerminal {
   readonly model: string | null;
   readonly plan: PlanTask[];
   readonly verify: VerifyInfo;
+  readonly verifyOutput: string | null;
 }
 
 /** Live reads into main-owned state, evaluated at call time. */
@@ -96,10 +97,12 @@ export class TerminalRosterStore {
           text: t.text.slice(0, 500),
           paths: t.paths.slice(0, 100),
           state: t.state,
+          dispatchResult: t.dispatchResult,
         }));
       }
       if (inst.verify.state !== "untested" && inst.verify.state !== "running") {
-        entry.verify = { state: inst.verify.state, command: inst.verify.command, summary: inst.verify.summary };
+        entry.verify = { ...inst.verify };
+        if (inst.verifyOutput !== null) entry.verifyOutput = inst.verifyOutput;
       }
     }
     return entry;

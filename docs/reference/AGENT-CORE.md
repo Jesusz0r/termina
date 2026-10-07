@@ -213,6 +213,16 @@ Stubs recover through the reproducing command and the append-only session
 JSONL, which keeps originals. The kernel does not call the snapshot store
 and does not put a timeline sequence in the stub.
 
+Captured mutation moments use the paired tool-result message's persisted
+storage sequence. `agent-core/main.ts` emits ordinary `tool_end` records only
+after that message is stored, carrying its exact `entryId`; a tool start is
+not a session-fork address. Main joins that address to the existing captured
+source state before publishing the moment. Forking through an unanswered
+assistant tool call would break structural pairing and is not allowed.
+Timeline IPC deliberately omits file content, so absent content in a push
+is not proof of an absent snapshot. Retention limits and unavailable content
+must be disclosed without substituting current source as historical evidence.
+
 ## P5 — Measure waste as money, attribute it to causes
 
 **Invariant**: cache hit rate alone is vanity. The number that matters is
@@ -447,6 +457,16 @@ command behavior and wait until the current task finishes; later
 queued text does not jump ahead of them. Other slash commands retain their
 usual immediate or busy-state behavior. Input received during final
 checkpointing starts the next run rather than changing the settled run.
+
+An actual `/plan` rewrite refuses effectful client tools in the existing
+`agent-core/main.ts` execution gate. It admits only the established read tools
+and local `search_mcp_tools` discovery; bash, MCP execution, and subagent
+spawn/redirection are refused before executor entry.
+Plan publication and this refusal are separate submit facts: a parsed task
+list only clears publication debt, never tool refusal. A later non-plan user
+request, including durable in-run steering, clears the refusal even if its
+reply is still being published to the board. `/clear` and `/new` reset both.
+The gate does not prevent user-initiated editor changes or Dispatch actions.
 
 Clipboard and Finder image drops never enter the pty. The host writes
 validated PNG, JPEG, WebP, and GIF files next to the sidecar as

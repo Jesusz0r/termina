@@ -307,6 +307,8 @@ export class SettingsView {
     const fontValue = document.createElement("output");
     fontValue.textContent = `${this.preferences[key]}px`;
     const font = document.createElement("input");
+    font.id = `settings-${key}`;
+    fontLabel.htmlFor = font.id;
     font.type = "range";
     font.min = "10";
     font.max = "20";
@@ -327,6 +329,8 @@ export class SettingsView {
     const label = document.createElement("label");
     label.textContent = "Font family";
     const select = document.createElement("select");
+    select.id = "settings-font-family";
+    label.htmlFor = select.id;
     for (const family of CODE_FONT_FAMILIES) {
       const option = document.createElement("option");
       option.value = family;

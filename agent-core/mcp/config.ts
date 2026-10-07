@@ -201,7 +201,9 @@ export type McpInventoryEntry = {
 export type McpConfigEdit =
   | { op: "add-http"; name: string; url: string }
   | { op: "add-stdio"; name: string; command: string; args: string[] }
-  | { op: "remove" | "disable" | "enable"; name: string };
+  | { op: "remove"; name: string }
+  | { op: "disable"; name: string }
+  | { op: "enable"; name: string };
 
 
 function isRecord(value: unknown): value is Record<string, unknown> {

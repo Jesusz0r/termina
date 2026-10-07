@@ -491,7 +491,8 @@ export class PtyView {
   }
 
   fit(): void {
-    if (this.disposed) return;
+    if (this.disposed || !this.visible) return;
+    if (getComputedStyle(this.container).visibility === "hidden") return;
     const container = this.term.element?.parentElement;
     if (!container || container.clientWidth === 0 || container.clientHeight === 0) return;
     const dims = this.fitAddon.proposeDimensions();

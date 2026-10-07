@@ -10,11 +10,12 @@ import * as monaco from "monaco-editor";
 import { canonicalizePath } from "../shared/canonical-path";
 import { previewMediaUrl, type PreviewKind } from "../shared/preview-media";
 import { ImagePreview, type ImagePreviewState } from "./image-preview";
-import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
+import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId, type EditorFileResult } from "../shared/types";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { languageForPath } from "./editor-language";
+import { EditorDraftCheckpoint } from "./editor-draft";
 import { changedLinesInAfter } from "../shared/line-diff";
-import { copyText, showUnsavedConfirm, toast } from "./components/modals";
+import { copyText, showConfirm, showUnsavedConfirm, toast } from "./components/modals";
 import { applyEmptyStateShortcutHints } from "./settings-shortcuts";
 import { showContextMenu, closeContextMenu } from "./components/context-menu";
 import { THEME_TOKENS } from "./theme-tokens.gen";
@@ -157,6 +158,9 @@ interface TextTab {
   dom: HTMLElement;
   dirtyDot: HTMLElement;
   savedVersionId: number;
+  draftRecovery: EditorDraftCheckpoint | null;
+  recoveryDiskError: string | null;
+  recoverySaveBlocked: boolean;
   changeDecorations: string[];
   agentRevealLine: number | null;
 }
@@ -185,6 +189,7 @@ const AGENT_CHANGE_DECO: monaco.editor.IModelDecorationOptions = {
 
 export class EditorManager {
   private editor: monaco.editor.IStandaloneCodeEditor;
+  private disposed = false;
   private tabs = new Map<string, OpenTab>();
   private order: string[] = [];
   private activeKey: string | null = null;
@@ -200,6 +205,7 @@ export class EditorManager {
   private previewKey: string | null = null;
   /** Opens in flight, keyed by the requested path, so a second click waits. */
   private opening = new Map<string, Promise<string>>();
+  private creating = new Map<string, Promise<string>>();
   private editorContainer: HTMLElement;
   private previewEl: HTMLElement;
   private imagePreview: ImagePreview | null = null;
@@ -361,18 +367,41 @@ export class EditorManager {
     column: number | undefined,
   ): Promise<string> {
     const replacing = preview && this.previewKey && this.previewKey !== key ? this.previewKey : null;
-    const res = await window.termina.openFile(path, owner);
+    const res = await window.termina.openFile(path, owner, "editor");
     if (!res.ok) throw new Error(res.error);
+    if (this.disposed) throw new Error("editor is closed");
     const resolvedPath = canonicalizePath(res.path);
-    if (resolvedPath !== key) {
-      if (this.tabs.has(resolvedPath)) {
-        if (!preview && this.previewKey === resolvedPath) this.pinPreview();
-        this.activate(resolvedPath);
-        this.onFileOpened();
-        return resolvedPath;
-      }
-      key = resolvedPath;
+    key = resolvedPath;
+    if (this.tabs.has(key)) {
+      if (!preview && this.previewKey === key) this.pinPreview();
+      this.activate(key);
+      this.onFileOpened();
+      if (typeof line === "number" && line > 0) this.revealPosition(line, column);
+      return key;
     }
+    const pending = this.creating.get(key);
+    if (pending) {
+      await pending;
+      if (!preview && this.previewKey === key) this.pinPreview();
+      this.activate(key);
+      if (typeof line === "number" && line > 0) this.revealPosition(line, column);
+      return key;
+    }
+    const run = this.createFileTab(key, preview, owner, res, replacing, line, column);
+    this.creating.set(key, run);
+    try {
+      return await run;
+    } finally {
+      if (this.creating.get(key) === run) this.creating.delete(key);
+    }
+  }
+
+  /** Only a new canonical model acquires recovery access; aliases reuse it. */
+  private async createFileTab(
+    key: string, preview: boolean, owner: ProjectWorkspaceRef,
+    res: Extract<EditorFileResult, { ok: true }>, replacing: string | null,
+    line?: number, column?: number,
+  ): Promise<string> {
     if ("preview" in res) {
       const tab = this.makeTab(key, owner, { media: { kind: res.preview, version: res.version } });
       if (preview) {
@@ -387,6 +416,12 @@ export class EditorManager {
       this.onFileOpened();
       return key;
     }
+    const access = await window.termina.claimEditorDraft(key, owner, crypto.randomUUID());
+    if (!access.ok) throw new Error(access.error);
+    if (this.disposed) {
+      void window.termina.releaseEditorDraft(access.token, owner).catch(() => undefined);
+      throw new Error("editor is closed");
+    }
     const lease = acquireSharedFileModel(key, owner);
     const model = lease.model;
     const tab = this.makeTab(key, owner, { model, releaseModel: lease.release });
@@ -394,6 +429,21 @@ export class EditorManager {
       lease.release();
       throw new Error("text file did not create a text tab");
     }
+    let recoveryWarned = false;
+    tab.draftRecovery = new EditorDraftCheckpoint(access.token, access.revision, owner, {
+      checkpoint: (token, revision, content, ref) => window.termina.checkpointEditorDraft(token, revision, content, ref),
+      status: (state, error) => {
+        if (this.disposed || this.tabs.get(tab.key) !== tab) return;
+        tab.dirtyDot.title = state === "saved" ? "Recovery copy saved; project file is still unsaved"
+          : state === "pending" ? "Recovery copy pending; the latest edits are not yet protected"
+            : `Recovery copy unavailable: ${error}`;
+        tab.dirtyDot.dataset.recovery = state;
+        if (state === "failed" && !recoveryWarned) {
+          recoveryWarned = true;
+          toast(`could not protect unsaved edits in ${pathBasename(tab.key)}: ${error}`, "error");
+        } else if (state === "saved") recoveryWarned = false;
+      },
+    });
     if (preview) {
       this.previewKey = key;
       tab.dom.classList.add("preview");
@@ -421,6 +471,24 @@ export class EditorManager {
         tab.agentRevealLine = null;
       }
     }
+    tab.recoveryDiskError = res.recoveryDiskError ?? null;
+    tab.recoverySaveBlocked = res.recoverySaveBlocked ?? false;
+    if (res.recoveredDraft !== undefined) {
+      if (res.deleted || res.recoveryDiskError || res.recoveredDraft !== res.content) {
+        model.setValue(res.recoveredDraft);
+        this.syncDirty(tab);
+        if (this.previewKey === key) this.pinPreview();
+        tab.dom.classList.add("conflict");
+        tab.dom.title = `${key} — recovered unsaved draft; ${res.recoveryDiskError ?? "review the current file before saving"}`;
+        if (res.deleted) {
+          this.deletedOnDisk.add(key);
+          tab.dom.classList.add("deleted");
+        }
+        toast(`Recovered unsaved edits in ${pathBasename(key)}${res.deleted ? " (file deleted on disk)" : " — review before saving"}`, "warning");
+      } else {
+        tab.draftRecovery.update(null);
+      }
+    }
     this.activate(key);
     this.onFileOpened();
     if (typeof line === "number" && line > 0) {
@@ -431,6 +499,46 @@ export class EditorManager {
 
   hasFile(path: string): boolean {
     return this.resolveKey(path) !== null;
+  }
+
+  /** Recover only paths that main still attributes to this project's live workspaces. */
+  async restoreDrafts(projectId: string): Promise<void> {
+    const result = await window.termina.getEditorDrafts(projectId);
+    if (!result.ok) throw new Error(result.error ?? "recovery copies could not be read");
+    const failures: string[] = result.error ? [result.error] : [];
+    for (const file of result.files) {
+      if (this.disposed) return;
+      try {
+        await this.openFile(file.path, { preview: false, owner: file.owner });
+      } catch (error) {
+        failures.push(`${file.path}: ${(error as Error).message}`);
+      }
+    }
+    if (!this.disposed && failures.length) throw new Error(failures.join("; "));
+  }
+
+  /** Wait for the current recovery copies, without saving project files. */
+  async flushDrafts(): Promise<boolean> {
+    const results = await Promise.all([...this.tabs.values()].filter(isTextTab).map((tab) => tab.draftRecovery?.flush() ?? true));
+    return results.every(Boolean);
+  }
+
+  /** Explicit Discard removes copies; teardown alone must preserve them. */
+  async discardDrafts(keys: string[] = [...this.userDirty]): Promise<boolean> {
+    const recoveries = keys.map((key) => this.tabs.get(key)).filter((tab): tab is TextTab => !!tab && isTextTab(tab));
+    for (const tab of recoveries) tab.draftRecovery?.update(null);
+    const cleared = (await Promise.all(recoveries.map((tab) => tab.draftRecovery?.flush() ?? true))).every(Boolean);
+    if (!cleared) await this.reprotectDrafts();
+    return cleared;
+  }
+
+  /** An aborted multi-buffer discard must not leave a stale saved indicator. */
+  async reprotectDrafts(): Promise<boolean> {
+    for (const key of this.userDirty) {
+      const tab = this.tabs.get(key);
+      if (tab && isTextTab(tab)) this.syncDirty(tab);
+    }
+    return this.flushDrafts();
   }
 
   /** True when at least one file or snapshot tab is open. */
@@ -532,6 +640,7 @@ export class EditorManager {
     tab.dirtyDot.style.display = dirty ? "inline-block" : "none";
     if (dirty) this.userDirty.add(tab.key);
     else this.userDirty.delete(tab.key);
+    tab.draftRecovery?.update(dirty ? tab.model.getValue() : null);
   }
 
   /** Paths marked as the user's own (agent off-limits). */
@@ -616,6 +725,9 @@ export class EditorManager {
           dom,
           dirtyDot: dirty,
           savedVersionId: source.model.getAlternativeVersionId(),
+          draftRecovery: null,
+          recoveryDiskError: null,
+          recoverySaveBlocked: false,
           changeDecorations: [],
           agentRevealLine: null,
         }
@@ -782,6 +894,11 @@ export class EditorManager {
     const tab = this.tabs.get(key);
     if (!tab) return;
     if (isTextTab(tab)) {
+      if (tab.draftRecovery && tab.owner) {
+        const token = tab.draftRecovery.token;
+        const owner = tab.owner;
+        void tab.draftRecovery.flush().then(() => window.termina.releaseEditorDraft(token, owner)).catch(() => undefined);
+      }
       tab.contentListener?.dispose();
       tab.contentListener = null;
       tab.releaseModel();
@@ -806,6 +923,21 @@ export class EditorManager {
     if (this.order.length === 0) this.onBecameEmpty();
   }
 
+  private async confirmRecoveredSave(tab: TextTab, writerId?: string): Promise<boolean> {
+    if (tab.recoverySaveBlocked) {
+      toast(tab.recoveryDiskError ?? "copy the recovered text to another file before saving", "error");
+      return false;
+    }
+    const deleted = this.deletedOnDisk.has(tab.key);
+    if (!deleted && !tab.recoveryDiskError) return true;
+    // Run-start flushes must not implicitly restore or replace a changed file.
+    if (writerId) return false;
+    const result = await showConfirm(deleted ? "Restore deleted file" : "Replace current file", deleted
+      ? `Saving recreates ${pathBasename(tab.key)} with this buffer's text. The recovery copy stays intact if you cancel.`
+      : `The current file cannot be opened as editable text (${tab.recoveryDiskError}). Saving replaces it with this recovered buffer. Cancel to keep both unchanged.`);
+    return result.confirmed === true;
+  }
+
   async saveActive(): Promise<void> {
     if (!this.activeKey || this.activeKey.startsWith("timeline:")) return;
     const tab = this.tabs.get(this.activeKey);
@@ -819,6 +951,8 @@ export class EditorManager {
       // The tab closed (or was replaced) while queued: a stale op must not
       // touch the disposed model, let alone a new tab under the same key.
       if (!live || live !== tab || !live.owner || !isTextTab(live)) return;
+      if (!(await this.confirmRecoveredSave(live))) return;
+      if (this.tabs.get(tab.key) !== live) return;
       const submittedText = live.model.getValue();
       const submittedVersion = live.model.getAlternativeVersionId();
       const savedAtSubmit = live.savedVersionId;
@@ -866,6 +1000,8 @@ export class EditorManager {
   private acknowledgeSave(key: string, model: monaco.editor.ITextModel, submittedVersion: number, savedAtSubmit: number): void {
     const tab = this.tabs.get(key);
     if (!tab || !isTextTab(tab) || tab.model !== model) return;
+    tab.recoveryDiskError = null;
+    tab.recoverySaveBlocked = false;
     if (tab.savedVersionId === savedAtSubmit) tab.savedVersionId = submittedVersion;
     this.syncDirty(tab);
     if (this.deletedOnDisk.delete(key)) {
@@ -900,6 +1036,8 @@ export class EditorManager {
       const ok = await this.chainSave(key, async () => {
         const live = this.tabs.get(key);
         if (!live || live !== tab || !live.owner || !isTextTab(live)) return false;
+        if (!(await this.confirmRecoveredSave(live, writerId))) return false;
+        if (this.tabs.get(key) !== live) return false;
         const submittedText = live.model.getValue();
         const submittedVersion = live.model.getAlternativeVersionId();
         const savedAtSubmit = live.savedVersionId;
@@ -923,6 +1061,14 @@ export class EditorManager {
   /** True when any model has unsaved user edits. */
   hasDirtyModels(): boolean {
     return this.userDirty.size > 0;
+  }
+
+  /** Main defers these explicit discards until every close gate succeeds. */
+  dirtyDraftTokens(): string[] {
+    return [...this.userDirty].flatMap((key) => {
+      const tab = this.tabs.get(key);
+      return tab && isTextTab(tab) && tab.draftRecovery ? [tab.draftRecovery.token] : [];
+    });
   }
 
   /** How many models have unsaved user edits. */
@@ -973,8 +1119,8 @@ export class EditorManager {
     void this.requestCloseKeys(this.order.slice(at + 1));
   }
 
-  closeAllTabs(): void {
-    void this.requestCloseKeys([...this.order]);
+  closeAllTabs(): Promise<boolean> {
+    return this.requestCloseKeys([...this.order]);
   }
 
   private closeConfirm: Promise<boolean> | null = null;
@@ -1010,6 +1156,15 @@ export class EditorManager {
         toast(`could not save: ${result.failed.map((p) => pathBasename(p)).join(", ")}`, "error");
         return false;
       }
+    }
+    const copiesUpdated = decision === "save" ? await this.flushDrafts() : await this.discardDrafts(unique);
+    if (!copiesUpdated) {
+      toast("could not update recovery copies; the tabs remain open", "error");
+      return false;
+    }
+    if (decision === "save" && unique.some((key) => this.userDirty.has(key))) {
+      toast("files changed while saving; review the latest edits before closing", "warning");
+      return false;
     }
     this.closeKeys(unique);
     return true;
@@ -1240,6 +1395,7 @@ export class EditorManager {
   }
 
   dispose(): void {
+    this.disposed = true;
     closeContextMenu();
     this.clearMedia();
     this.previewEl.remove();

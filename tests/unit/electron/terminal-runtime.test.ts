@@ -94,6 +94,53 @@ function hostWithSends(sends: ChunkSend[]): TerminalRuntimeHost {
 }
 
 describe("TerminalRuntime", () => {
+  it("rejects admission before spawning or watching a child", () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { eventsDir: "/tmp/termina-admission-test" });
+    const tailer = fakeTailer();
+    const targets: Array<{ id: string; generation: number }> = [];
+    assert.throws(() => runtime.spawn({
+      id: "term-1", cwd: process.cwd(), workspaceId: "ws-1", type: "shell",
+      cmd: "/does-not-exist", args: [], env: {}, tailer, rendererTarget: null,
+      beforeSpawn: (target) => { targets.push(target); throw new Error("source files are busy"); },
+    }), /source files are busy/);
+    assert.equal(targets.length, 1);
+    assert.equal(targets[0]!.id, "term-1");
+    assert.ok(targets[0]!.generation > 0);
+    assert.equal(runtime.get("term-1"), undefined);
+    assert.deepEqual(tailer.watched, []);
+  });
+
+  it("keeps native ownership after forced logical release and fences a recycled id", async () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const old = fakeTerminal("term-1", 1).inst;
+    runtime.adopt(old, { tailer: fakeTailer(), rendererTarget: null });
+    await (old.pty.onExit as (code: number, origin: "forced") => void)(137, "forced");
+    assert.equal(runtime.has(old.id), false);
+    assert.deepEqual([...runtime.nativeValues()], [old]);
+    const current = fakeTerminal("term-1", 2).inst;
+    runtime.adopt(current, { tailer: fakeTailer(), rendererTarget: null });
+    old.pty.onNativeExit();
+    assert.deepEqual([...runtime.nativeValues()], [current]);
+    assert.equal(runtime.get(current.id), current);
+    current.pty.onNativeExit();
+    await current.pty.onExit(0);
+    assert.deepEqual([...runtime.nativeValues()], []);
+    runtime.disposeEgress();
+  });
+
+  it("cancels the source tail when native exit arrives after egress disposal", async () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    let cancelled = 0;
+    inst.pty.cancelOutput = () => { cancelled++; inst.pty.onExit(0); };
+    runtime.adopt(inst, { tailer: fakeTailer(), rendererTarget: null });
+    runtime.disposeEgress();
+    inst.pty.onNativeExit();
+    assert.equal(cancelled, 1, "shutdown cancellation must not wait for the source-drain deadline");
+    assert.deepEqual([...runtime.nativeValues()], []);
+    await waitFor(() => !runtime.has(inst.id), "native exit did not release the logical instance");
+  });
+
   it("owns the configured events dir", () => {
     const runtime = new TerminalRuntime(hostWithSends([]), { eventsDir: "/tmp/termina-phase-b-events" });
     assert.equal(runtime.eventsDir, "/tmp/termina-phase-b-events");

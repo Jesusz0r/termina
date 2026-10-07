@@ -16,8 +16,8 @@ function jsonLines(path: string): Row[] {
 /** Real kernel + real local tools, mocked provider only. Every file and process
  * belongs to this fixture, including HOME, authentication, events and traces. */
 async function scenario(toolProgram: string, check: (result: {
-  root: string; output: string; messages: Row[]; requests: Row[]; traces: Row[]; events: Row[];
-}) => void, timeoutMs = 40_000, extraFiles: Record<string, string> = {}, textProgram = 'return "finished";', setup?: (ctx: { project: string; home: string }) => void): Promise<void> {
+  root: string; output: string; messages: Row[]; requests: Row[]; traces: Row[]; events: Row[]; sessionRecords: Row[];
+}) => void, timeoutMs = 40_000, extraFiles: Record<string, string> = {}, textProgram = 'return "finished";', setup?: (ctx: { project: string; home: string }) => void, prompt = "tool lifecycle regression"): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "termina-tool-loop-"));
   const project = join(root, "project");
   const home = join(root, "home");
@@ -50,7 +50,7 @@ async function scenario(toolProgram: string, check: (result: {
       return new Response(events.map((event) => "data: " + JSON.stringify(event) + "\\n\\n").join(""),
         { status: 200, headers: { "content-type": "text/event-stream" } });
     };
-    process.argv = [process.execPath, new URL(${JSON.stringify(mainUrl)}).pathname, "-p", "tool lifecycle regression"];
+    process.argv = [process.execPath, new URL(${JSON.stringify(mainUrl)}).pathname, "-p", ${JSON.stringify(prompt)}];
     await import(${JSON.stringify(mainUrl)});
   `;
   const env: NodeJS.ProcessEnv = { ...process.env };
@@ -109,7 +109,7 @@ async function scenario(toolProgram: string, check: (result: {
     const traceDir = join(events, `${terminalId}.traces`);
     const traces = existsSync(traceDir) ? readdirSync(traceDir).filter((name) => /^turn-\d+\.json$/.test(name))
       .map((name) => JSON.parse(readFileSync(join(traceDir, name), "utf8"))) : [];
-    check({ root: project, output, messages, requests: jsonLines(requestsFile), traces, events: jsonLines(join(events, `${terminalId}.jsonl`)) });
+    check({ root: project, output, messages, requests: jsonLines(requestsFile), traces, events: jsonLines(join(events, `${terminalId}.jsonl`)), sessionRecords: jsonLines(sessionFile) });
   } finally {
     clearTimeout(timeout);
     clearInterval(ackTimer);
@@ -133,6 +133,23 @@ function expectPaired(messages: Row[]): void {
 }
 
 describe("real tool loop regressions", () => {
+  it("addresses tool moments through persisted, paired results rather than unanswered assistant calls", async () => {
+    await scenario(`
+      if (turn === 1) return [{ name: "edit", id: "edit-moment", input: { path: "file.txt", old_text: "original", new_text: "updated" } }];
+      if (turn === 2) return [{ name: "bash", id: "check-moment", input: { command: "test $(cat file.txt) = updated" } }];
+      return [];
+    `, ({ events, sessionRecords, messages }) => {
+      const ends = events.filter((event) => event.t === "tool_end");
+      expect(ends).toHaveLength(2);
+      for (const end of ends) {
+        expect(Number(end.entryId)).toBeGreaterThan(0);
+        const record = sessionRecords.find((row) => row.storageSeq === Number(end.entryId));
+        expect(record?.message?.role).toBe("user");
+        expect(record?.message?.content.some((block: Row) => block.type === "tool_result" && block.tool_use_id === end.toolCallId)).toBe(true);
+      }
+      expectPaired(messages);
+    });
+  });
   it("exposes and executes separate read modes while rejecting mixed and unsupported arguments", async () => {
     await scenario(`
       if (turn === 1) return [
@@ -202,7 +219,7 @@ describe("real tool loop regressions", () => {
       const dir = join(home, ".termina", "agent");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: [join(project, "mcp-server.mjs")] } } }));
-    });
+    }, "Use fixture MCP for the tool lifecycle regression");
   });
 
   it("does not attribute ordinary tool-history growth as a prefix flip", async () => {

@@ -10,7 +10,7 @@ import { closeSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, re
 import { readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createCurrentDir, createSessionBundleWithAdmission, createSessionBundleWithAdmissionAsync, currentHasContent, listCurrentSegments, recoverActiveSegment, renameCurrentUnique, retainUnboundCleanup } from "./bundles.ts";
-import { anchoredChildPath, fsyncDirectory, openDirectoryAnchor, validateDirectoryAnchor } from "./descriptors.ts";
+import { anchoredChildPath, fsyncDirectory, openDirectoryAnchor, statIdentity, validateDirectoryAnchor, validateSegment } from "./descriptors.ts";
 import type { DirectoryAnchor } from "./descriptors.ts";
 import { ACTIVE_NAME, ARCHIVE_PREFIX, BAD_PREFIX, CURRENT_DIR, MAX_SESSION_BUNDLE_BYTES, MAX_SESSION_RECORD_BYTES, MAX_SESSION_SEGMENT_BYTES, READ_CHUNK, errMsg, inspectEntry, isCoreSessionId, parseSessionBundlePath, partFileName, sessionBudgetExceeded, sessionBundleLimit, yieldToEventLoop } from "./primitives.ts";
 import type { EmptySessionBundleInspection, LogicalSessionEntry, SessionBundlePaths, SessionOperationOptions, SessionResult, SessionTestHooks } from "./primitives.ts";
@@ -432,6 +432,19 @@ export class SessionWriter {
     }
   }
 
+  private validateActiveSegment(): SessionResult {
+    if (this.fd === null) return { ok: false, error: "session writer is not open" };
+    try {
+      const info = fstatSync(this.fd, { bigint: true });
+      return validateSegment({
+        path: this.sessionFile, name: ACTIVE_NAME, fd: this.fd,
+        size: Number(info.size), identity: statIdentity(info), allowTruncatedTail: true,
+      });
+    } catch (err) {
+      return { ok: false, error: errMsg(err) };
+    }
+  }
+
   private roll(): SessionResult {
     this.close();
     const partPath = join(this.currentDir, partFileName(this.nextPart));
@@ -486,6 +499,16 @@ export class SessionWriter {
         `session bundle exceeds MAX_SESSION_BUNDLE_BYTES (${retained + encoded.line.length} bytes); append rejected before mutation`,
       );
     }
+    // Durability on an old descriptor is not durability at the session address
+    // emitted to the host. Reject a rebound leaf before append or rollover.
+    if (this.fd !== null) {
+      const valid = this.validateActiveSegment();
+      if (!valid.ok) {
+        this.poisoned = true;
+        this.close();
+        return valid;
+      }
+    }
     if (this.activeBytes + encoded.line.length > MAX_SESSION_SEGMENT_BYTES) {
       const rolled = this.roll();
       if (!rolled.ok) return rolled;
@@ -504,6 +527,8 @@ export class SessionWriter {
         offset += written;
       }
       fsyncSync(this.fd!);
+      const valid = this.validateActiveSegment();
+      if (!valid.ok) throw new Error(valid.error);
       this.activeBytes = preWriteOffset + encoded.line.length;
       this.lastStorageSeq = record.storageSeq;
       return { ok: true, storageSeq: record.storageSeq };

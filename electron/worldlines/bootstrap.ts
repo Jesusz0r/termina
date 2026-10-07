@@ -4,7 +4,7 @@
  * live project state at call time and keeps the manager wiring.
  */
 import { lstat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { isErrno } from "../../shared/guards.js";
 import { PathLookup } from "../path-lookup.js";
 import { sandboxResourceLimitPreflight } from "../sandbox.js";
@@ -62,7 +62,7 @@ export async function gitDirLooksPresent(start: string): Promise<boolean> {
   }
 }
 
-/** Read-only load paths for the sandboxed core (agent-core copy + electron + node). */
+/** Read-only load paths for the sandboxed core and Verify (agent-core, Electron, Node, npm). */
 export function worldlineAppReadPaths(corePath: string, paths: PathLookup): string[] {
   const out: string[] = [];
   out.push(process.execPath);
@@ -74,6 +74,21 @@ export function worldlineAppReadPaths(corePath: string, paths: PathLookup): stri
     out.push(paths.cachedRealpath(node));
   } catch {
     /* The configured node path can disappear between checks. */
+  }
+  const npm = paths.findOnPath("npm");
+  if (npm) {
+    try {
+      const cli = paths.cachedRealpath(npm);
+      const npmRoot = dirname(dirname(cli));
+      // npm's symlinked CLI loads its own JS dependencies. Grant only the
+      // standard package directory, never the installation prefix or HOME.
+      if (basename(cli) === "npm-cli.js" && basename(dirname(cli)) === "bin"
+          && basename(npmRoot) === "npm" && basename(dirname(npmRoot)) === "node_modules") {
+        out.push(cli, npmRoot);
+      }
+    } catch {
+      /* The configured npm path can disappear between checks. */
+    }
   }
   return [...new Set(out)];
 }
@@ -104,6 +119,37 @@ export async function worldlinePreflight(opts: {
     reasons.push(`free disk space is below the 512 MB minimum (${Math.floor(free / (1024 * 1024))} MB)`);
   }
   return { ok: reasons.length === 0, reasons };
+}
+
+/** Historical run and moment forks must establish the same source trust. */
+export async function admitWorldlineForkSource(
+  deps: {
+    primaryRoot: string;
+    preflight(): Promise<{ ok: boolean; reasons: string[] }>;
+    getStore(): Promise<SnapshotStore | null>;
+    trustHashes(): Promise<Record<string, string>>;
+  },
+  baseline: Record<string, string> | null,
+): Promise<{ ok: true; store: SnapshotStore } | { ok: false; error: string }> {
+  const pre = await deps.preflight();
+  if (!pre.ok) return { ok: false, error: pre.reasons.join("; ") };
+  const store = await deps.getStore();
+  if (!store) return { ok: false, error: "recording is not available" };
+  if (resolve(store.sourceRoot) !== resolve(deps.primaryRoot)) {
+    return { ok: false, error: "the source repository identity changed since the run" };
+  }
+  if (!baseline) return { ok: false, error: "the run has no complete trust-sensitive baseline" };
+  let now: Record<string, string>;
+  try {
+    now = await deps.trustHashes();
+  } catch (error) {
+    return { ok: false, error: `trust-sensitive resources could not be verified: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const changed = [...new Set([...Object.keys(baseline), ...Object.keys(now)])].filter((key) => now[key] !== baseline[key]);
+  if (changed.length > 0) {
+    return { ok: false, error: `trust-sensitive resources changed since the run: ${changed.slice(0, 3).join(", ")}` };
+  }
+  return { ok: true, store };
 }
 
 /** Capture a candidate head off the main thread. */

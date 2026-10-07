@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
+import { quoteShellArg } from "../../../shared/terminal-control.ts";
 import {
   benchmarkConfigFrom,
   detectTestFromFiles,
@@ -9,7 +10,7 @@ import {
 
 const pkg = (scripts: Record<string, string>): string => JSON.stringify({ scripts });
 
-describe("verify-detect package scripts (refs #152)", () => {
+describe("verify-detect captured package scripts (refs #152)", () => {
   it("preserves quoted arguments verbatim through sh", () => {
     expect(detectTestFromPkg(pkg({ test: 'runner --grep "two words"' }))).toEqual({
       command: "sh",
@@ -57,11 +58,10 @@ describe("verify-detect package scripts (refs #152)", () => {
     expect(run.stdout).toBe("one|two words|three|");
   });
 
-  it.runIf(process.platform !== "win32")("survives the verify shell-command construction", () => {
+  it.runIf(process.platform !== "win32")("survives the evidence shell-command construction", () => {
     const tc = detectTestFromPkg(pkg({ test: 'printf "%s|" one "two words" three' }))!;
-    // runVerify builds `command + quoted args` and runs it under `shell -c`.
-    const quoteShellArg = (arg: string): string => `'${arg.replace(/'/g, `'\\''`)}'`;
-    const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
+    // Evidence wraps the captured argv in the chosen shell.
+    const cmdline = [tc.command, ...tc.args].map(quoteShellArg).join(" ");
     const run = spawnSync("sh", ["-c", cmdline], { encoding: "utf8" });
     expect(run.status).toBe(0);
     expect(run.stdout).toBe("one|two words|three|");
@@ -70,8 +70,7 @@ describe("verify-detect package scripts (refs #152)", () => {
   it.runIf(process.platform !== "win32")("executes custom test command string with shell arguments", () => {
     const custom = 'printf "%s|" "custom command" works';
     const tc = { command: "sh", args: ["-c", custom], label: custom };
-    const quoteShellArg = (arg: string): string => `'${arg.replace(/'/g, `'\\''`)}'`;
-    const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
+    const cmdline = [tc.command, ...tc.args].map(quoteShellArg).join(" ");
     const run = spawnSync("sh", ["-c", cmdline], { encoding: "utf8" });
     expect(run.status).toBe(0);
     expect(run.stdout).toBe("custom command|works|");

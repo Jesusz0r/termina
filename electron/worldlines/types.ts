@@ -95,7 +95,6 @@ export interface ComparisonState {
   candidates: Map<"A" | "B", CandidateState>;
   phase: "creating" | "running" | "error";
   error: string | null;
-  readyTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export type ComparisonManifestStatus = "creating" | "complete" | "uncertain";
@@ -194,10 +193,8 @@ export type CandidateReadyEvent = {
 export type CandidateLaunchAttempt = {
   comparisonId: string;
   label: "A" | "B";
-  /** Fresh local operation identity; never persisted in the manifest. */
+  /** Exact durably written startup-control identity, not manifest state. */
   opId: string;
-  /** Exact startup-control opId, when the control was durably written. */
-  controlOpId: string | null;
   /** Manager generation, distinct from the sidecar writer generation. */
   generation: number;
   controller: AbortController;
@@ -209,8 +206,6 @@ export type CandidateLaunchAttempt = {
   cleanupPromise: Promise<void> | null;
   fallbackRequested: boolean;
   directCleanupRequested: boolean;
-  sessionReady: boolean;
-  sidecarGeneration: string | null;
   operation: Promise<void> | null;
 };
 

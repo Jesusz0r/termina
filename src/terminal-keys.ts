@@ -1,5 +1,6 @@
 /**
  * Bytes for a navigation chord, or null if xterm should encode the key.
+ * The reserved native emergency-stop chord is swallowed before encoding.
  *
  * xterm.js emits CSI `1;<mod>X` for every modified navigation key. That
  * encoding is only valid after the child enables modifyOtherKeys or the
@@ -71,6 +72,9 @@ function legacy(which: Nav, fn: number, applicationCursor: boolean): string {
  */
 export function shellLineEdit(event: LineEditKey, mode: LineEditMode): string | null {
   if (event.type !== "keydown" || event.isComposing) return null;
+  // xterm drops Control/Command on Escape and encodes Option as Escape+Escape.
+  // Those bytes interrupt the agent and kill its shell group, not just the helper.
+  if (event.key === "Escape" && event.ctrlKey && event.altKey && event.metaKey && !event.shiftKey) return "";
   const nav = navKey(event);
   if (!nav) return null;
   const modified = event.shiftKey || event.ctrlKey || event.altKey || event.metaKey;

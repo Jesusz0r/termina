@@ -27,6 +27,12 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("preserves the durable result address on a tool end without guessing malformed addresses", () => {
+    const record = { bridgeId: "term-1", seq: 1, t: "tool_end", toolCallId: "write-1", isError: false, entryId: "12" };
+    expect(sidecarEventFromRecord(record)).toMatchObject({ t: "tool_end", entryId: "12" });
+    expect(sidecarEventFromRecord({ ...record, entryId: 12 })).toMatchObject({ t: "tool_end", entryId: undefined });
+  });
+
   describe("Sidecar Producer Envelope Bounding", () => {
     it("skips poll tails for idle terminals and attributes watch vs poll wakes", async () => {
       const id = "term-wake-counts";

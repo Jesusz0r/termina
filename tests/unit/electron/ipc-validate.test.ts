@@ -8,6 +8,7 @@ import {
   parsePtyAckPayload,
   parseRendererCapability,
   parseTerminalCreateOptions,
+  parseTerminalTarget,
 } from "../../../electron/main/ipc-validate.ts";
 
 describe("IPC request-shape checks", () => {
@@ -28,6 +29,12 @@ describe("IPC request-shape checks", () => {
     expect(isUnsavedConfirmResult({ ok: false, cancelled: true })).toBe(true);
     expect(isUnsavedConfirmResult({ ok: false, error: "x" })).toBe(true);
     expect(isUnsavedConfirmResult({ ok: true, cancelled: "no" })).toBe(false);
+    const token = "11111111-1111-1111-1111-111111111111";
+    expect(isUnsavedConfirmResult({ ok: true, discardDraftTokens: [] })).toBe(true);
+    expect(isUnsavedConfirmResult({ ok: true, discardDraftTokens: Array(2000).fill(token) })).toBe(true);
+    for (const discardDraftTokens of [null, token, [1], ["short"], Array(2001).fill(token)]) {
+      expect(isUnsavedConfirmResult({ ok: true, discardDraftTokens })).toBe(false);
+    }
   });
 
   it("parses renderer capabilities and PTY acks", () => {
@@ -55,6 +62,16 @@ describe("IPC request-shape checks", () => {
       sequence: 4,
     });
     expect(parsePtyAckPayload({ id: "term-1", generation: 0, windowGeneration: 1, rendererGeneration: 1, sequence: 1 })).toBeNull();
+  });
+
+  it("requires an explicit terminal identity and positive generation", () => {
+    expect(parseTerminalTarget("term-1", 2)).toEqual({ id: "term-1", generation: 2 });
+    for (const id of [undefined, null, "", " ", "x".repeat(65), 1]) {
+      expect(parseTerminalTarget(id, 1)).toBeNull();
+    }
+    for (const generation of [undefined, null, 0, -1, 1.5, Infinity, "1", Number.MAX_SAFE_INTEGER + 1]) {
+      expect(parseTerminalTarget("term-1", generation)).toBeNull();
+    }
   });
 
   it("shape-checks terminals:create options", () => {

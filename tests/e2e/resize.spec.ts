@@ -48,10 +48,10 @@ test.describe("pane resize dividers", () => {
       await expect(page.locator(".project-tab.active")).toContainText(project);
       for (const width of [360, 180, 300]) {
         const box = (await page.locator("#explorer-divider").boundingBox())!;
-        const main = (await page.locator("#main").boundingBox())!;
+        const explorer = (await page.locator("#explorer").boundingBox())!;
         await page.mouse.move(box.x + 2, box.y + 100);
         await page.mouse.down();
-        await page.mouse.move(main.x + width, box.y + 100, { steps: 10 });
+        await page.mouse.move(explorer.x + width, box.y + 100, { steps: 10 });
         await page.mouse.up();
         await expect.poll(() => page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width)).toBeCloseTo(width, 0);
       }
@@ -59,9 +59,10 @@ test.describe("pane resize dividers", () => {
     await page.locator("#explorer-tree").getByText("other.txt").click();
     await expect(page.locator(".editor-tab").getByText("other.txt")).toBeVisible();
     const box = (await page.locator("#explorer-divider").boundingBox())!;
+    const explorer = (await page.locator("#explorer").boundingBox())!;
     await page.mouse.move(box.x + 2, box.y + 100);
     await page.mouse.down();
-    await page.mouse.move(400, box.y + 100, { steps: 10 });
+    await page.mouse.move(explorer.x + 400, box.y + 100, { steps: 10 });
     await page.mouse.up();
     await expect.poll(() => page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width)).toBeCloseTo(400, 0);
   });
@@ -78,10 +79,10 @@ test.describe("pane resize dividers", () => {
     const width = () => page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width);
     const dragTo = async (target: number): Promise<void> => {
       const box = (await page.locator("#explorer-divider").boundingBox())!;
-      const main = (await page.locator("#main").boundingBox())!;
+      const explorer = (await page.locator("#explorer").boundingBox())!;
       await page.mouse.move(box.x + 2, box.y + 100);
       await page.mouse.down();
-      await page.mouse.move(main.x + target, box.y + 100, { steps: 10 });
+      await page.mouse.move(explorer.x + target, box.y + 100, { steps: 10 });
       await page.mouse.up();
     };
     await dragTo(420);
@@ -113,6 +114,7 @@ test.describe("pane resize dividers", () => {
     await page.locator("#explorer-tree").getByText("greeting.ts").click();
     await expect(page.locator(".editor-tab").getByText("greeting.ts").first()).toBeVisible();
     const leftWidth = () => page.locator("#left-pane").evaluate((el) => el.getBoundingClientRect().width);
+    const before = await leftWidth();
     const box = (await page.locator("#divider").boundingBox())!;
     const y = box.y + box.height / 2;
     await page.mouse.move(box.x + 2, y);
@@ -120,7 +122,9 @@ test.describe("pane resize dividers", () => {
     await page.mouse.move(box.x + 122, y, { steps: 10 });
     await page.mouse.up();
     const custom = await leftWidth();
-    expect(custom).toBeGreaterThan(620);
+    // Require more than 10% growth from the initial 50/50 split. A fixed
+    // 620px threshold assumes the old available width without the rail.
+    expect(custom).toBeGreaterThan(before * 1.1);
     // Minimize the editor with tabs open, then open a modified file: the
     // review reveal restores the editor, and must restore the ratio too —
     // not reset to 50/50. The minimize takeover itself still clears the
@@ -181,25 +185,37 @@ test.describe("pane resize dividers", () => {
     }
   });
 
-  test("project tab clicks above the divider do not start an explorer resize", async ({ page, runRoot }) => {
+  test("project rail selection does not start an explorer resize", async ({ page, runRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const other = join(runRoot, "resize-other");
     mkdirSync(other);
     await page.evaluate((dir) => window.termina.projectOpenPath(dir), other);
     const firstTab = page.locator(".project-tab").filter({ hasText: "test-project" });
-    const tabBox = (await firstTab.boundingBox())!;
-    // Put the explorer divider under the first tab, away from its close button.
-    const x = tabBox.x + tabBox.width - 40;
-    await page.locator("#explorer").evaluate((el, width) => { el.style.width = `${width}px`; }, x - 2);
-    const dividerBox = (await page.locator("#explorer-divider").boundingBox())!;
-    expect(dividerBox.x + 2).toBeCloseTo(x, 0);
-    const before = await page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width);
-    await page.mouse.move(x, tabBox.y + tabBox.height / 2);
+    const otherTab = page.locator(".project-tab").filter({ hasText: "resize-other" });
+    const select = firstTab.locator(".project-select");
+    const tabBox = (await select.boundingBox())!;
+    const width = () => page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width);
+    const before = await width();
+    const x = tabBox.x + tabBox.width / 2;
+    const y = tabBox.y + tabBox.height / 2;
+    await page.mouse.move(x, y);
     await page.mouse.down();
-    await page.mouse.move(x + 10, tabBox.y + tabBox.height / 2, { steps: 3 });
+    // Stay below the 5px reorder threshold: this is selection, not a rail drag.
+    await page.mouse.move(x + 2, y + 2, { steps: 3 });
+    expect(await page.locator("body").evaluate((el) => el.style.cursor)).not.toBe("col-resize");
+    expect(await width()).toBe(before);
+    await expect(page.locator(".tab-grabbed, .tab-drop-slot")).toHaveCount(0);
     await page.mouse.up();
     await expect(firstTab).toHaveClass(/active/);
-    expect(await page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width)).toBe(before);
+    expect(await width()).toBe(before);
+
+    for (const [tab, key] of [[otherTab, "Enter"], [firstTab, "Space"]] as const) {
+      await tab.locator(".project-select").focus();
+      await page.keyboard.press(key);
+      await expect(tab).toHaveClass(/active/);
+      expect(await width()).toBe(before);
+      expect(await page.locator("body").evaluate((el) => el.style.cursor)).not.toBe("col-resize");
+    }
   });
 
   test("split divider drag changes the terminal share", async ({ page }) => {

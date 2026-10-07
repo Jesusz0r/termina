@@ -122,7 +122,7 @@ import {
   emptyToolLoopTracker,
   trackToolLoopTurn,
 } from "./stall.ts";
-import { providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
+import { READ_TOOLS, providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
 import { READ_TOOL_DEFS } from "./main/read-tools.ts";
 import {
   HIGH_WATER,
@@ -331,6 +331,7 @@ import {
   editMcpConfig,
   formatMcpStatus,
   inspectMcpConfig,
+  mcpServersNamedIn,
   parseMcpSlash,
   readMcpConfigFile,
   writeMcpConfigFile,
@@ -503,7 +504,8 @@ const eventsDir = sessionEnvironment.TERMINA_EVENTS_DIR ?? "";
 const rawTerminalId = sessionEnvironment.TERMINA_TERMINAL_ID ?? "";
 const terminalId = isValidTerminalId(rawTerminalId) ? rawTerminalId : "";
 const sessionId = sessionEnvironment.TERMINA_CORE_SESSION_ID?.trim() || terminalId;
-/** Stable for one logical session boundary; rotated by /clear/quarantine. */
+/** Derived from the session id. `/clear` keeps that id, so it keeps this pin.
+ *  Quarantine still rotates it. */
 let cacheSeed = cacheSessionSeed(sessionId);
 const cacheGate = createCacheCapabilityGate({
   protocolFor: providerProtocol,
@@ -1703,6 +1705,11 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   const notExecuted = (text: string): ToolOutcome => ({ ...done(use, text, true), executed: false });
   if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
   if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
+  // MCP annotations, bash commands, and child briefs cannot establish read-only
+  // behavior. Admit only the existing observational tools and local MCP discovery.
+  if (planToolsRestricted && !READ_TOOLS.has(use.name) && use.name !== "search_mcp_tools") {
+    return notExecuted(`error: ${use.name} is not executed on a /plan turn. Only reads and search are allowed; submit a non-/plan request to implement.`);
+  }
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
     return done(use, got);
@@ -1989,31 +1996,91 @@ let mcpSession: McpSession | null = null;
 let mcpBusy = false;
 let mcpGeneration = 0;
 
-async function connectMcp(): Promise<void> {
+/** A turn started before a late server finished. Apply its tools when the turn ends. */
+let mcpToolsStale = false;
+
+function applyMcpTools(session: McpSession): void {
+  mcpSession = session;
+  if (running) {
+    mcpToolsStale = true;
+    return;
+  }
+  clientTools = mcpClientTools(TOOLS, session.tools);
+  mcpToolsStale = false;
+  syncIndicators();
+}
+
+function flushMcpTools(beforeFirstRequest = false): void {
+  if (!mcpToolsStale || (running && !beforeFirstRequest) || !mcpSession) return;
+  clientTools = mcpClientTools(TOOLS, mcpSession.tools);
+  mcpToolsStale = false;
+  syncIndicators();
+}
+
+function mcpLaunchOptions(generation: number, announced: Set<string>, announcedNotes: Set<string>) {
+  return {
+    projectRoot: canonicalCwd,
+    confineCwd: (cwd: string | undefined) => jailMcpCwd(canonicalCwd, cwd),
+    onUpdate(partial: McpSession) {
+      if (generation !== mcpGeneration) return;
+      for (const server of partial.servers) {
+        if (announced.has(server.name)) continue;
+        announced.add(server.name);
+        if (server.state === "connected") out(`(mcp ${server.name} connected, ${server.tools} tools)\n`);
+      }
+      for (const note of partial.notes) {
+        if (announcedNotes.has(note)) continue;
+        announcedNotes.add(note);
+        out(`(${note})\n`);
+      }
+      applyMcpTools(partial);
+    },
+  };
+}
+
+/** Replace the session. No argument connects every enabled server. */
+async function connectMcp(configs = loadMcpConfigs(userMcpPath(homedir()))): Promise<void> {
   const generation = ++mcpGeneration;
   mcpSession?.shutdown();
   mcpSession = null;
+  mcpToolsStale = false;
   clientTools = TOOLS.slice();
   syncIndicators();
   try {
-    const session = await startMcp(loadMcpConfigs(userMcpPath(homedir())), {
-      projectRoot: canonicalCwd,
-      confineCwd: (cwd) => jailMcpCwd(canonicalCwd, cwd),
-    });
+    const session = await startMcp(configs, mcpLaunchOptions(generation, new Set(), new Set()));
     if (generation !== mcpGeneration) {
       session.shutdown();
       return;
     }
-    mcpSession = session;
-    clientTools = mcpClientTools(TOOLS, session.tools);
-    syncIndicators();
-    for (const note of session.notes) out(`(${note})\n`);
+    applyMcpTools(session);
   } catch (error) {
     if (generation !== mcpGeneration) return;
     mcpSession = null;
     clientTools = TOOLS.slice();
+    mcpToolsStale = false;
     syncIndicators();
     out(`(MCP unavailable; built-in tools remain: ${error instanceof Error ? error.message : String(error)})\n`);
+  }
+}
+
+/** Connect servers a prompt names. Leaves other servers down, and leaves an already-connected server up. */
+async function ensureNamedMcp(text: string): Promise<void> {
+  const all = loadMcpConfigs(userMcpPath(homedir()));
+  const named = new Set(mcpServersNamedIn(text, all.map((cfg) => cfg.name)));
+  if (named.size === 0) return;
+  const missing = all.filter((cfg) => named.has(cfg.name) && !mcpSession?.servers.some((row) => row.name === cfg.name && row.state === "connected"));
+  if (missing.length === 0) return;
+  mcpBusy = true;
+  showPrompt();
+  try {
+    if (!mcpSession) {
+      await connectMcp(missing);
+      return;
+    }
+    await mcpSession.connect(missing);
+    applyMcpTools(mcpSession);
+  } finally {
+    mcpBusy = false;
   }
 }
 
@@ -4282,21 +4349,29 @@ async function runSubagentTask(taskPath: string): Promise<never> {
  *  frames the real error instead of "no settlement". */
 function abortPromptStart(message: string, draft?: string): void {
   lastRunOutcome = { status: "failure", failure: message };
+  sidecar.logEvent({ t: "agent_start_rejected", error: message });
   out(`(the run did not start: ${message})\n`);
   if (draft !== undefined) surface?.setDraft(draft);
   running = false;
+  flushMcpTools();
   currentAbort = null;
   showPrompt();
 }
 
+type PlanSubmission = { publish: boolean; rewrite: boolean };
+
 async function runPrompt(
   prompt: string,
   extraImages: Array<{ name: string; mediaType: string }> = [],
-  planTurn = false,
+  plan: PlanSubmission = { publish: false, rewrite: false },
   admission?: { queued: boolean; onCommitted: () => void },
 ): Promise<void> {
+  // Publication may carry over to a later user request, but tool refusal only
+  // belongs to an actual `/plan` rewrite. A parsed list never grants write access.
+  const planTurn = plan.publish;
+  planToolsRestricted = plan.rewrite;
   // Arm before early aborts so a failed `/plan` start still publishes the
-  // user's next reply. A list in this turn clears the flag.
+  // user's next reply. A list in this turn clears the publication flag only.
   if (planTurn) planPublishPending = true;
   const abortStart = (message: string): void => abortPromptStart(message, admission?.queued ? undefined : prompt);
   if (shutdownRequested) return;
@@ -4371,6 +4446,14 @@ async function runPrompt(
       return;
     }
     preflight = { requestId, token: typeof ack.token === "string" ? ack.token : null };
+  }
+  // A server's startup can write project files; source admission comes first.
+  await ensureNamedMcp(prompt);
+  flushMcpTools(true);
+  if (interrupted || shutdownRequested) {
+    cancelPreflight();
+    abortStart("startup interrupted");
+    return;
   }
   const preparedImages = await preparePromptImages(extraImages);
   void refreshPendingImageCount();
@@ -4721,19 +4804,12 @@ async function runPrompt(
               if (follow) process.stdout.write(follow);
             }
             outcomes.push(outcome);
-            sidecar.logEvent({
-              t: "tool_end",
-              toolCallId: chunk[ci]!.id,
-              isError: outcome.isError,
-              ...toolOutcomeTraceFields(outcome),
-            });
           } else {
             const err = item.reason;
             const message = err instanceof Error ? err.message : String(err);
             if (handles[ci]) surface?.finishTool(handles[ci]!, "error", capDisplay(message, TOOL_DISPLAY_BYTES));
             const outcome = done(chunk[ci]!, message, true);
             outcomes.push(outcome);
-            sidecar.logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
           }
         }
       }
@@ -4748,7 +4824,6 @@ async function runPrompt(
           ? "(interrupted by user)"
           : "(not executed: user steering arrived; follow the next user message before choosing further tools)", true);
         outcomes.push(outcome);
-        if (interrupted) sidecar.logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
       }
       let resultBlocks = outcomes.map((o, i): ContentBlock => {
         const b = o.result as ContentBlock;
@@ -4777,6 +4852,14 @@ async function runPrompt(
         }
       }
       pushMessage("user", resultBlocks);
+      // A tool moment may fork only through the persisted, paired results,
+      // never through an assistant message with still-unanswered calls.
+      for (let i = 0; i < outcomes.length; i++) {
+        sidecar.logEvent({
+          t: "tool_end", toolCallId: uses[i]!.id, isError: outcomes[i]!.isError,
+          entryId: String(storageSeq), ...toolOutcomeTraceFields(outcomes[i]!),
+        });
+      }
       await writeMainTrace({
         status: stalled ? "stalled" : "ok",
         seqBefore,
@@ -4857,6 +4940,7 @@ async function runPrompt(
   // task-settled record is still being written.
   activeRequestOverlay = null;
   running = false;
+  flushMcpTools();
   syncSubagentChrome();
   stopSubagentApprovalTimer();
   syncIndicators();
@@ -5007,6 +5091,11 @@ export function testOnlyPermissionMode(): PermissionMode {
   return permissionMode;
 }
 
+/** Test seam: provider routing pin. `/clear` must not change it. */
+export function testOnlyCacheRoutingKey(provider: ProviderId, model: string): string | null {
+  return cacheIdentityForRole("main", provider, model)?.key ?? null;
+}
+
 /** Test seam: persist one record against the live writer (covers /clear sequence reset). */
 export function testOnlyPersist(entry: Record<string, unknown> = { type: "checkpoint" }): SessionResult<{ storageSeq: number }> {
   try {
@@ -5018,14 +5107,16 @@ export function testOnlyPersist(entry: Record<string, unknown> = { type: "checkp
 
 /** Live-view reset shared by /clear success and its writer-open failure path.
  *  Conversation history, usage, and pending child-approval pickers go;
- *  permissionMode stays on the terminal. */
+ *  permissionMode stays. The cache pin stays too: it is the session id, and
+ *  `/clear` does not change that id. */
 function resetLiveSessionState(): void {
   storageSeq = 0;
   planPublishPending = false;
+  planToolsRestricted = false;
   history.length = 0;
   lastHandoff = null;
   clearSubagentApprovals();
-  rotateCacheSession();
+  resetCacheContinuity();
   sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
   lastUsd = null;
   postRevision = false;
@@ -5316,6 +5407,7 @@ async function runBangCommand(command: string): Promise<void> {
     pushMessage("user", bangCommandContext(command, got.content));
   } finally {
     running = false;
+    flushMcpTools();
     stopSubagentApprovalTimer();
     interrupted = false;
     showPrompt();
@@ -5344,6 +5436,8 @@ function printSkillPicker(): void {
 let running = false;
 /** After `/plan`, plain submits publish until a reply contains a task list. */
 let planPublishPending = false;
+/** An actual `/plan` rewrite refuses effectful tools until the next user request. */
+let planToolsRestricted = false;
 const queuedLines: string[] = [];
 const MAX_QUEUED_LINES = 16;
 let queueDrainBlocked = false;
@@ -5394,6 +5488,9 @@ async function drainSteeringLines(): Promise<boolean> {
     if (!prepared.ok) throw new SessionStoreError(prepared.error);
     if (interrupted) break;
     pushUserPrompt(expandFileTags(canonicalCwd, line), prepared.images);
+    // Steering is a new non-command user request, not an assistant-granted
+    // mode switch. Only clear the refusal after the message is durable.
+    planToolsRestricted = false;
     // Enqueue may have happened before agent_start or in a preceding run.
     // Invalidate replay for the run that actually receives this message too.
     sidecar.logEvent({ t: "steer_input", behavior: "steer" });
@@ -5424,7 +5521,7 @@ function queueTypedLine(line: string): void {
     : "(queued — steers at the next safe boundary)\n");
 }
 
-function submit(line: string, planTurn = false, commitQueuedLine?: () => void): void {
+function submit(line: string, plan: PlanSubmission = { publish: false, rewrite: false }, commitQueuedLine?: () => void): void {
   if (resumeBusy || mcpBusy) {
     out("(engine busy)\n");
     return;
@@ -5443,7 +5540,7 @@ function submit(line: string, planTurn = false, commitQueuedLine?: () => void): 
   queueDrainBlocked = false;
   // A rejected prompt promise must never kill the engine: the pty would
   // close and the terminal looks like it quit on the user.
-  void runPrompt(line, [], planTurn, {
+  void runPrompt(line, [], plan, {
     queued: commitQueuedLine !== undefined,
     onCommitted: () => { committed = true; commitQueuedLine?.(); },
   })
@@ -5928,12 +6025,12 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
     streamPrepared = true;
     syncIndicators();
     out("(session cleared)\n");
-    mcpBusy = true;
+    mcpSession?.shutdown();
+    mcpSession = null;
+    mcpToolsStale = false;
+    clientTools = TOOLS.slice();
+    syncIndicators();
     showPrompt();
-    void connectMcp().finally(() => {
-      mcpBusy = false;
-      showPrompt();
-    });
     return;
   }
   if (line === "/compact") {
@@ -6009,7 +6106,7 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
       showPrompt();
       return;
     }
-    submit(planPrompt, true, commitQueuedLine);
+    submit(planPrompt, { publish: true, rewrite: true }, commitQueuedLine);
     showPrompt();
     return;
   }
@@ -6034,7 +6131,7 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
       showPrompt();
       return;
     }
-    submit(skillSlashSubmit(skillCmd.skill, skillCmd.request), false, commitQueuedLine);
+    submit(skillSlashSubmit(skillCmd.skill, skillCmd.request), { publish: false, rewrite: false }, commitQueuedLine);
     showPrompt();
     return;
   }
@@ -6061,7 +6158,7 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
     });
     return;
   }
-  submit(line, planPublishPending, commitQueuedLine);
+  submit(line, { publish: planPublishPending, rewrite: false }, commitQueuedLine);
   showPrompt();
 }
 
@@ -6099,9 +6196,8 @@ async function main(): Promise<void> {
       sidecar.logEvent({ t: "trace_startup", runId: traceRunId, ok: false, error: message });
     }
   }
-  // The TUI is constructed before the first MCP bind so it can render the
-  // startup banner, but no prompt may be accepted until the tool schema is
-  // fixed for this session.
+  // Hold the prompt through catalog and auth boot. MCP stays down until a
+  // prompt names a server.
   mcpBusy = true;
   frontMatter.systemPrompt();
   await bootCatalog();
@@ -6160,11 +6256,7 @@ async function main(): Promise<void> {
   if (!surface) out(banner);
   const bootList = currentCatalog();
   if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
-  try {
-    await connectMcp();
-  } finally {
-    mcpBusy = false;
-  }
+  mcpBusy = false;
   const resumeResult = sessionEnvironment.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
   let structured = "";
   let structuredImages: Array<{ name: string; mediaType: string }> = [];

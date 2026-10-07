@@ -72,6 +72,7 @@ const bridge: TerminaBridge = {
   onLoginHint: (cb) => bindPushEvent("auth:login-hint", cb),
   onFlushRequest: (cb) => bindPushEvent("editor:flush-request", cb),
   onUnsavedConfirm: (cb) => bindPushEvent("editor:unsaved-confirm", cb),
+  onEditorRecoveryRefresh: (cb) => bindPushEvent("editor:recovery-refresh", cb),
   onUpdateState: (cb) => bindPushEvent("update:state", cb),
   onInstances: (cb) => bindPushEvent("instances:list", cb),
 
@@ -80,6 +81,7 @@ const bridge: TerminaBridge = {
   getShells: () => ipcRenderer.invoke("terminals:shells"),
   readyTerminal: (id, generation) => ipcRenderer.send("pty:ready", id, generation),
   acknowledgePtyData: (payload) => ipcRenderer.send("pty:ack", payload),
+  selectTerminal: (id, generation) => ipcRenderer.invoke("terminals:select", id, generation),
   closeTerminal: (id, generation) => ipcRenderer.invoke("terminals:close", id, generation),
   writeTerminal: (id, data) => ipcRenderer.invoke("terminals:write", id, data),
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke("terminals:resize", id, cols, rows),
@@ -113,6 +115,10 @@ const bridge: TerminaBridge = {
   getTimelinePrefix: (terminalId) => ipcRenderer.invoke("timeline:prefix", terminalId),
   getTimelineProgress: (terminalId, seq) => ipcRenderer.invoke("timeline:progress", terminalId, seq),
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
+  getProjectWorkSummary: (projectId) => ipcRenderer.invoke("project:work-summary", projectId),
+  getWorkOverview: () => ipcRenderer.invoke("work:overview"),
+  inspectWorkAttention: (id) => ipcRenderer.invoke("work:inspect", id),
+  getVerifyReport: (terminalId, generation) => ipcRenderer.invoke("verify:report", terminalId, generation),
   searchSessions: (query) => ipcRenderer.invoke("session:search", query),
   searchFiles: (query, source) => ipcRenderer.invoke("file:search", query, source),
   recordRecentFile: (projectId, relPath) => ipcRenderer.invoke("file:record-recent", projectId, relPath),
@@ -159,7 +165,12 @@ const bridge: TerminaBridge = {
   reorderProjects: (ids) => ipcRenderer.invoke("project:reorder", ids),
   reorderTerminals: (projectId, ids) => ipcRenderer.invoke("terminals:reorder", projectId, ids),
   openExternal: (url) => ipcRenderer.invoke("shell:open-external", url),
-  openFile: (path, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:open", path, owner),
+  openFile: (path, owner: ProjectWorkspaceRef, purpose) => ipcRenderer.invoke("file:open", path, owner, purpose),
+  claimEditorDraft: (path, owner: ProjectWorkspaceRef, modelId) => ipcRenderer.invoke("file:draft-claim", path, owner, modelId),
+  getEditorDrafts: (projectId) => ipcRenderer.invoke("file:drafts", projectId),
+  checkpointEditorDraft: (token, revision, content, owner: ProjectWorkspaceRef) =>
+    ipcRenderer.invoke("file:draft-checkpoint", token, revision, content, owner),
+  releaseEditorDraft: (token, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:draft-release", token, owner),
   saveFile: (path, content, owner: ProjectWorkspaceRef, restore) =>
     ipcRenderer.invoke("file:save", path, content, owner, restore === true),
 

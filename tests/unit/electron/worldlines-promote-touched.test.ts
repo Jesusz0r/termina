@@ -83,6 +83,7 @@ async function makeFixture(opts: {
   const primaryInfo = await lstat(primaryRoot, { bigint: true });
   const manager = new WorldlineManager({
     worldsRoot,
+    recoverStaleComparisons: (sweep) => sweep(),
     primaryRoot,
     primaryRootIdentity: { dev: String(primaryInfo.dev), ino: String(primaryInfo.ino) },
     realHome: root,
@@ -216,7 +217,6 @@ async function makeFixture(opts: {
     candidates: new Map([["A", cand]]),
     phase: "running",
     error: null,
-    readyTimer: null,
   };
   (manager as unknown as { comparisons: Map<string, ComparisonState> }).comparisons.set(comparisonId, cmp);
   return { root, worldsRoot, primaryRoot, candRoot, manager, comparisonId };

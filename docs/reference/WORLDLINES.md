@@ -782,10 +782,17 @@ Run candidate agent, shell, dispatch, Verify, and child processes under one poli
 - keep network access for live candidates (a per-provider allowlist is not
   expressible in the profile language); deny all evidence and
   candidate-Verify network by default;
-- apply bounded memory, CPU time, file-size, process-count, open-file, and
-  output limits; and
+- apply bounded memory, CPU time, file-size, open-file, and output limits; and
 - keep every descendant in a tracked process group whose supervisor terminates
   the group when the main-process control channel closes.
+
+Use the existing native process model: bounded app-managed work, lifecycle
+controls, timeouts, and tracked-group cleanup. Termina imposes no hard numerical
+descendant budget and does not set `RLIMIT_NPROC`, which limits processes for the
+user rather than one candidate. Rapid process creation and resource exhaustion
+are not prevented by a per-candidate kernel process-count limit. Seatbelt
+filesystem, source, and sibling isolation, environment sanitization, write
+leases, and the other resource controls remain required.
 
 The file-tool path guard is defense in depth. The operating-system policy is the
 actual write boundary. Verify and evidence workers use the same filesystem and
@@ -1410,8 +1417,11 @@ Phase 0 must record real baselines. Initial targets:
 - At most 2 GB of logical runtime data per comparison template.
 - At most 1 GB of new candidate-local data per candidate before automatic
   cancellation.
-- Bounded memory, CPU time, process count, file size, open files, captured
-  output, and terminal scrollback per candidate.
+- Bounded memory, CPU time, file size, open files, captured output, and terminal
+  scrollback per candidate.
+- Bound app-managed work using the existing concurrency, lifecycle, timeout,
+  and tracked-group cleanup controls, not a hard numerical descendant budget
+  (see section 6.6).
 - Require at least 512 MB of free space before pair creation.
 - Checkpoint acknowledgement timeout of 5 seconds.
 - One concurrent comparison creation, promotion, or benchmark per project.
@@ -1473,8 +1483,12 @@ evidence, runs; preflight and capture live in `bootstrap.ts`) and
   deny all evidence and candidate-Verify network.
 - Give A and B independent Git indexes, refs, runtime files, homes, caches,
   sessions, and temporary directories.
-- Enforce memory, CPU time, file-size, process-count, output, and free-space
-  limits.
+- Enforce memory, CPU time, file-size, output, and free-space limits.
+- Verify existing bounded app-managed work, lifecycle controls, timeouts, and
+  tracked-group cleanup without a Termina-imposed hard numerical descendant
+  budget or `RLIMIT_NPROC` setting. Do not claim these controls prevent rapid
+  process creation or resource exhaustion through a per-candidate kernel
+  process-count limit.
 - Kill grandchildren during discard.
 
 ### Fork Run
