@@ -1,0 +1,13 @@
+# Concurrent sessions
+
+New agent terminals automatically get an isolated work area when another live terminal uses overlapping source files. Opening a second session does not require a timeline moment, a completed run, Plan Board, or a manual Worldline fork. Concurrent creation is serialized before choosing the source area.
+
+The area uses the existing native snapshot/template, candidate sandbox, session store, and startup handshake. Its conversation starts fresh; restored legacy tabs keep their conversation through the existing session fork worker. The initial captured source is the merge base. Independent sessions have no invented source run or B candidate.
+
+Independent session files and conversations survive project close, app shutdown, and crash recovery. Their captured template and source snapshot store remain retained, with a primary checkpoint for merge ancestry. Reopening the project restores each area through the normal candidate reopen handshake. Missing or unproven resources stay retained and cannot launch. `/clear` does not discard independent work areas. Review and merge results through the existing Worldlines actions; discard removes an area explicitly.
+
+The existing candidate requirements still apply: Git, the supported macOS sandbox, sufficient disk space, and a maximum of three candidate areas per project. Retained independent areas count toward that budget, including failed startups; explicit discard releases their slot. Failed preparation reports an error and never falls back to another unrestricted writer on the primary source.
+
+An actual `/plan` run admits only the built-in observational tools. Named MCP startup, MCP discovery/calls, bash, edits, and subagent mutations are refused. Steering cannot expand that run's admitted scope; a later implementation submit starts a new run. Read scopes can share source files; independent writers retain exclusion, and coordinated workers retain their existing claims. Overlapping source activity invalidates replay provenance even when workspace IDs differ.
+
+Change Review records accepted tool outcomes and file changes observed during the session's admitted write scope. Readers and idle observers cannot advance that result. Revert requires the accepted result to remain current, rejects active source writers, and uses the native conditional file operation. An unattributed change with no accepted result cannot be reverted. Later edits, recreated deleted files, changed file types, and namespace races cannot be silently overwritten. Binary baselines continue to use their captured source blob.

@@ -1,3 +1,4 @@
+import { ensureBoundDirectory } from "../../../electron/worldlines/promotion-recovery/bound-dirs.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { readFileSync } from "node:fs";
@@ -95,7 +96,7 @@ async function makeManager(opts?: {
     benchmarkConfigFrom: async () => null,
     onEvidenceUpdate: () => {},
     onPromotionApply: () => {},
-    primarySessionDir: async (cwd: string) => join(cwd, "sessions"),
+    primarySessionDir: async (cwd: string) => ensureBoundDirectory(join(cwd, "sessions"), "test session directory"),
     installPromoted: async () => ({ terminalId: "unused" }),
   } as never);
   // Replacing this promise orphaned real native bootstrap work: dispose then

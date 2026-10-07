@@ -41,6 +41,29 @@ describe("SourceAdmissions", () => {
     expect(admissions.admit(claim("c", 1, "/repo-other"))).toEqual({ ok: true });
   });
 
+  it("shares observational runs with writers but never upgrades a live reader", () => {
+    const writer = claim("writer");
+    const reader = { ...claim("reader"), access: "read" as const };
+    expect(admissions.admit(writer)).toEqual({ ok: true });
+    expect(admissions.admit(reader)).toEqual({ ok: true });
+    admissions.start(reader.id, reader.generation);
+    expect(admissions.admit(claim("reader"))).toEqual({ ok: false, conflict: reader });
+    expect(admissions.admit(claim("rival"))).toEqual({ ok: false, conflict: writer });
+  });
+
+  it("attributes watcher results only to the admitted writer generation", () => {
+    admissions.admit(claim("writer"));
+    admissions.admit({ ...claim("reader"), access: "read" });
+    expect(admissions.ownsWrite("writer", 1, "/repo/file.txt")).toBe(false);
+    admissions.start("writer", 1);
+    expect(admissions.ownsWrite("writer", 1, "/repo/file.txt")).toBe(true);
+    expect(admissions.ownsWrite("reader", 1, "/repo/file.txt")).toBe(false);
+    expect(admissions.ownsWrite("writer", 2, "/repo/file.txt")).toBe(false);
+    expect(admissions.ownsWrite("writer", 1, "/other/file.txt")).toBe(false);
+    admissions.finish("writer", 1);
+    expect(admissions.ownsWrite("writer", 1, "/repo/file.txt")).toBe(false);
+  });
+
   it("allows equal and nested roots only for an explicit coordinated group", () => {
     expect(admissions.admit(claim("a", 1, "/repo", "team"))).toEqual({ ok: true });
     expect(admissions.admit({ ...claim("b", 1, "/repo/src", "team"), kind: "shell" })).toEqual({ ok: true });

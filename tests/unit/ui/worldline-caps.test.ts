@@ -126,6 +126,15 @@ describe("candidate preparation and retry", () => {
     expect(card.querySelector(".cand-open")!.disabled).toBe(false);
   });
 
+  it("renders one independent session with no invented source run or retry", () => {
+    const panel = makePanel();
+    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
+    view.upsert({ ...summary("A"), role: "session", sourceRunId: null });
+    expect(panel.querySelectorAll(".candidate-card")).toHaveLength(1);
+    expect(panel.querySelector(".cmp-run")!.textContent).toBe("Independent session");
+    expect(panel.querySelector(".cmp-caption")!.textContent).toBe("Work independently; review and merge when ready");
+  });
+
   it("reports a failed reopen and leaves the retained session available for an explicit retry", async () => {
     vi.useFakeTimers();
     const previous = window.termina.openWorldlineTerminal;

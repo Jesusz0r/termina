@@ -33,7 +33,19 @@ function parseArtifact(value: unknown): { path: string; error: string } | null {
 export function parseComparisonManifest(value: unknown): ComparisonManifest | null {
   if (!isRecord(value)) return null;
   const { id, sourceRunId, createdAt, status, expectedCandidates, candidates: rawCandidates, uncertainSessionArtifacts: rawArtifacts } = value;
-  if (typeof id !== "string" || !id || typeof sourceRunId !== "string" || !sourceRunId) return null;
+  if (typeof id !== "string" || !id || (sourceRunId !== null && (typeof sourceRunId !== "string" || !sourceRunId))) return null;
+  let session: ComparisonManifest["session"];
+  if (sourceRunId === null) {
+    const s = value.session;
+    if (!isRecord(s) || typeof s.primaryRoot !== "string" || !isAbsolute(s.primaryRoot) || typeof s.baseStateId !== "string" || !s.baseStateId
+      || typeof s.sourceGitDir !== "string" || !isAbsolute(s.sourceGitDir)
+      || (s.model !== null && typeof s.model !== "string")
+      || (s.thinkingLevel !== null && typeof s.thinkingLevel !== "string")) return null;
+    if (s.primaryStateId !== undefined && (typeof s.primaryStateId !== "string" || !s.primaryStateId)) return null;
+    if (s.sourceSessionFile !== undefined && (typeof s.sourceSessionFile !== "string" || !isAbsolute(s.sourceSessionFile))) return null;
+    session = { ...(typeof s.primaryStateId === "string" ? { primaryStateId: s.primaryStateId } : {}),
+      ...(typeof s.sourceSessionFile === "string" ? { sourceSessionFile: s.sourceSessionFile } : {}), primaryRoot: s.primaryRoot, baseStateId: s.baseStateId, sourceGitDir: s.sourceGitDir, model: s.model, thinkingLevel: s.thinkingLevel };
+  } else if (value.session !== undefined) return null;
   if (typeof createdAt !== "number" || !Number.isFinite(createdAt) || createdAt <= 0) return null;
   if (status !== "creating" && status !== "complete" && status !== "uncertain") return null;
   if (expectedCandidates !== 1 && expectedCandidates !== 2) return null;
@@ -55,7 +67,8 @@ export function parseComparisonManifest(value: unknown): ComparisonManifest | nu
   }
   if (status === "complete" && (count !== expectedCandidates || uncertainSessionArtifacts.length > 0)) return null;
   if (status === "uncertain" && uncertainSessionArtifacts.length === 0) return null;
-  return { id, sourceRunId, createdAt, status, expectedCandidates, candidates, uncertainSessionArtifacts };
+  if (session && expectedCandidates !== 1) return null;
+  return { id, sourceRunId, ...(session ? { session } : {}), createdAt, status, expectedCandidates, candidates, uncertainSessionArtifacts };
 }
 
 export function comparisonManifestFor(cmp: ComparisonState, status: ComparisonManifestStatus = "creating"): ComparisonManifest {
@@ -66,6 +79,10 @@ export function comparisonManifestFor(cmp: ComparisonState, status: ComparisonMa
   return {
     id: cmp.id,
     sourceRunId: cmp.sourceRunId,
+    ...(cmp.sourceRunId === null && cmp.baseStateId ? { session: {
+      ...(cmp.primaryStateId ? { primaryStateId: cmp.primaryStateId } : {}),
+      ...(cmp.sourceSessionFile ? { sourceSessionFile: cmp.sourceSessionFile } : {}), primaryRoot: cmp.primaryRoot, baseStateId: cmp.baseStateId, sourceGitDir: cmp.sourceGitDir, model: cmp.model, thinkingLevel: cmp.thinkingLevel,
+    } } : {}),
     createdAt: cmp.createdAt,
     status,
     expectedCandidates: cmp.expectedCandidates,

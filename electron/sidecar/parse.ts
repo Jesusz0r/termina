@@ -80,6 +80,7 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
         t: "preflight_request",
         requestId: optionalString(rec.requestId),
         hasImages: optionalBoolean(rec.hasImages),
+        readOnly: optionalBoolean(rec.readOnly),
         deadlineAt: optionalSafeInteger(rec.deadlineAt),
       };
     case "preflight_cancel":

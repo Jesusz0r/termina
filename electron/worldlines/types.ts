@@ -8,7 +8,7 @@ import type { WorldlineState } from "../../shared/types.js";
 
 export interface CandidateState {
   label: "A" | "B";
-  role: "reference" | "alternative" | "challenge" | "moment";
+  role: "reference" | "alternative" | "challenge" | "moment" | "session";
   dir: string;
   supportDir: string;
   /** Native identity of the allocated candidate root. */
@@ -67,7 +67,9 @@ export interface ComparisonState {
   sessionWorkspaceBinding?: BoundPromotionDirectory;
   markerLeaf?: BoundPromotionExpectedLeaf;
   manifestLeaf?: BoundPromotionExpectedLeaf;
-  sourceRunId: string;
+  sourceRunId: string | null;
+  sourceSessionFile?: string;
+  primaryStateId?: string;
   /** The source Git common dir, resolved at fork time. */
   sourceGitDir: string;
   /** The primary project root, resolved at fork time. */
@@ -101,7 +103,9 @@ export type ComparisonManifestStatus = "creating" | "complete" | "uncertain";
 export type ComparisonManifestCandidate = { pid: number | null; lstart: string | null; paths: string[] };
 export type ComparisonManifest = {
   id: string;
-  sourceRunId: string;
+  sourceRunId: string | null;
+  /** Present only for durable independent user sessions. */
+  session?: { primaryStateId?: string; sourceSessionFile?: string; primaryRoot: string; baseStateId: string; sourceGitDir: string; model: string | null; thinkingLevel: string | null };
   createdAt: number;
   status: ComparisonManifestStatus;
   expectedCandidates: 1 | 2;

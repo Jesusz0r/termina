@@ -169,11 +169,12 @@ export async function worldlineCaptureHead(
 export async function worldlineCapturePrimary(
   storePromise: Promise<SnapshotStore | null> | null,
   primary: { root: string; lastStateCommit: string | null } | null,
+  parentStateId?: string,
 ): Promise<string | null> {
   const store = await storePromise;
   if (!primary || !store) return null;
   try {
-    const state = await store.capture(await gitHead(primary.root), primary.lastStateCommit);
+    const state = await store.capture(await gitHead(primary.root), parentStateId ?? primary.lastStateCommit);
     return state.commit;
   } catch {
     return null;

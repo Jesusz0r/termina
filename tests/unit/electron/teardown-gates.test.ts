@@ -113,7 +113,7 @@ function makeHarness(opts: { switching: Set<string>; activeId: string | null }) 
     },
     projectIsSwitching: (id: string | undefined) => id !== undefined && opts.switching.has(id),
     captureRendererSendTarget: () => null,
-    createTerminal: async (_cwd: unknown, createOpts: unknown) => {
+    createUserTerminal: async (createOpts: unknown) => {
       created.push(createOpts as Record<string, unknown>);
       return { id: "term-99" };
     },

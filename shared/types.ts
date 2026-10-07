@@ -550,11 +550,11 @@ export interface WorldlineSummary {
   id: string;
   comparisonId: string;
   label: "A" | "B";
-  role: "reference" | "alternative" | "challenge" | "moment";
+  role: "reference" | "alternative" | "challenge" | "moment" | "session";
   comparisonBaseStateId: string | null;
   promotionBaseStateId: string | null;
   headStateId: string | null;
-  sourceRunId: string;
+  sourceRunId: string | null;
   terminalId: string | null;
   version: number;
   state: WorldlineState;
@@ -635,7 +635,7 @@ export interface WorldlineDetails {
   state: WorldlineSummary["state"];
   error: string | null;
   /** Provenance: the source run and the states it compares. */
-  sourceRunId: string;
+  sourceRunId: string | null;
   comparisonBaseStateId: string | null;
   promotionBaseStateId: string | null;
   headStateId: string | null;

@@ -1,3 +1,4 @@
+import { ensureBoundDirectory } from "../../../electron/worldlines/promotion-recovery/bound-dirs.ts";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readdir, readFile, realpath, lstat, rm, stat, writeFile } from "node:fs/promises";
@@ -112,6 +113,7 @@ async function makeFixture(opts: {
     trustHashes: async () => ({}),
     captureHead: async () => ({ commit: "", tree: "" }),
     capturePrimary: async () => null,
+      restorePrimaryLineage: async () => {},
     releaseState: async () => {},
     terminalBusy: () => false,
     terminalLive: () => true,
@@ -135,7 +137,7 @@ async function makeFixture(opts: {
     benchmarkConfigFrom: async () => null,
     onEvidenceUpdate: () => {},
     onPromotionApply: () => {},
-    primarySessionDir: async (cwd: string) => join(cwd, "sessions"),
+    primarySessionDir: async (cwd: string) => ensureBoundDirectory(join(cwd, "sessions"), "test session directory"),
     installPromoted: opts.installPromoted ?? (async () => ({ terminalId: "term-promoted" })),
   });
 

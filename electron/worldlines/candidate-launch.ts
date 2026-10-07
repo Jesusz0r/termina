@@ -396,6 +396,8 @@ export class CandidateLaunch {
     if ([...cmp.candidates.values()].every((c) => c.state === "ready")) {
       void (async () => {
         try {
+          // Durable user areas need their captured template when reopened.
+          if (cmp.sourceRunId === null) return;
           if (!cmp.rootBinding || !cmp.templateBinding) return;
           const root = await refreshBoundPromotionDirectory(cmp.rootBinding);
           const template = await refreshBoundPromotionDirectory(cmp.templateBinding);

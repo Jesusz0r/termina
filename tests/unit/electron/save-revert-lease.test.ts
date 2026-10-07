@@ -3,12 +3,15 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { lstat, mkdir, rm, writeFile, realpath as fsRealpath } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { revertReviewedFile } from "../../../electron/review-revert.ts";
+import { readPromotionEntry } from "../../../electron/worldlines/promotion-recovery/entry-state.ts";
+import type { PromotionEntryState } from "../../../electron/worldlines/types.ts";
+import { createHash, randomUUID } from "node:crypto";
 import { isErrno } from "../../../shared/guards.ts";
 import { syncParentDir } from "../../../shared/fsync.ts";
 import { evictOldest } from "../../../shared/evict-oldest.ts";
 import ts from "typescript";
-import { sourceTreesOverlap } from "../../../electron/main/source-admission.ts";
+import { SourceAdmissions, sourceTreesOverlap } from "../../../electron/main/source-admission.ts";
 
 /**
  * Save/revert write-lease, binary-exact revert, and lstat-guard tests.
@@ -79,7 +82,7 @@ type ReleaseWriteLease = (wsId: string, requesterId: string) => void;
 type DeleteBaseline = (inst: FakeInst, path: string) => void;
 type SetBaseline = (inst: FakeInst, path: string, value: string | null, stateId?: string | null) => void;
 type SetBounded = <K, V>(map: Map<K, V>, key: K, value: V, limit: number) => void;
-type RecordModified = (inst: FakeInst, absPath: string, status: "created" | "modified") => Promise<void>;
+type RecordModified = (inst: FakeInst, absPath: string, status: "created" | "modified", fromWatcher?: boolean) => Promise<void>;
 type PrepareRunBaselines = (inst: FakeInst) => void;
 
 interface FakeWorkspace {
@@ -93,9 +96,11 @@ interface FakeWorkspace {
 
 interface FakeInst {
   id: string;
+  generation: number;
   workspaceId: string;
   baselines: Map<string, string | null>;
   baselineStates: Map<string, string>;
+  reviewStates: Map<string, PromotionEntryState>;
   baselineBytes: number;
   modified: Map<string, { path: string; relPath: string; status: string }>;
   currentRun: { startStateId: string | null } | null;
@@ -129,8 +134,8 @@ const writeLeasedEditorFile = loadMethod(
 const revertReviewFile = loadMethod(
   "revertReviewFile",
   "private async revertReviewFile(",
-  ["lstat", "mkdir", "rm", "writeFile", "randomUUID", "isErrno", "relative", "isAbsolute", "dirname", "syncParentDir"],
-  [lstat, mkdir, rm, writeFile, randomUUID, isErrno, relative, isAbsolute, dirname, syncParentDir],
+  ["lstat", "mkdir", "rm", "writeFile", "randomUUID", "isErrno", "relative", "isAbsolute", "dirname", "syncParentDir", "revertReviewedFile"],
+  [lstat, mkdir, rm, writeFile, randomUUID, isErrno, relative, isAbsolute, dirname, syncParentDir, revertReviewedFile],
 ) as RevertReviewFile;
 
 const realSourceWriter = loadMethod("sourceWorkspaceWriter", "private sourceWorkspaceWriter(", ["sourceTreesOverlap"], [sourceTreesOverlap]) as (
@@ -151,9 +156,12 @@ const realSetBounded = loadMethod("setBounded", "private setBounded<", ["evictOl
 const realRecordModified = loadMethod(
   "recordModified",
   "private async recordModified(",
-  ["TerminaApp"],
-  [TerminaAppConsts],
+  ["TerminaApp", "readPromotionEntry"],
+  [TerminaAppConsts, readPromotionEntry],
 ) as RecordModified;
+const realRecordDeleted = loadMethod("recordDeleted", "private async recordDeleted(",
+  ["TerminaApp", "readPromotionEntry"], [TerminaAppConsts, readPromotionEntry]) as
+  (inst: FakeInst, path: string) => Promise<void>;
 const realPrepareRunBaselines = loadMethod("prepareRunBaselines", "private prepareRunBaselines(", [], []) as PrepareRunBaselines;
 
 /** Missing-tail-tolerant realpath, mirroring the production canonicalPath. */
@@ -180,9 +188,11 @@ function makeWorkspace(wsRoot: string): FakeWorkspace {
 function makeInst(ws: FakeWorkspace): FakeInst {
   return {
     id: "term-1",
+    generation: 1,
     workspaceId: ws.id,
     baselines: new Map(),
     baselineStates: new Map(),
+    reviewStates: new Map(),
     baselineBytes: 0,
     modified: new Map(),
     currentRun: null,
@@ -243,7 +253,18 @@ function makeSaveApp(ws: FakeWorkspace, opts: { swapLeaf?: boolean } = {}) {
 }
 
 function makeRevertApp(ws: FakeWorkspace, inst: FakeInst, store: FakeStore | null, opts: { swapLeaf?: boolean } = {}) {
+  for (const path of inst.baselines.keys()) {
+    if (inst.reviewStates.has(path)) continue;
+    let state: PromotionEntryState = { type: "missing" };
+    if (existsSync(path)) {
+      const info = lstatSync(path);
+      state = info.isFile() ? { type: "file", mode: info.mode & 0o777, hash: createHash("sha256").update(readFileSync(path)).digest("hex") }
+        : { type: "other", mode: info.mode & 0o777 };
+    }
+    inst.reviewStates.set(path, state);
+  }
   return {
+    sourceAdmissions: { writerAt: () => null },
     ...makeLeaseBroker(ws),
     terminals: new Map([[inst.id, inst]]),
     runtime: { get: (id: string) => (id === inst.id ? inst : undefined) },
@@ -259,6 +280,7 @@ function makeRevertApp(ws: FakeWorkspace, inst: FakeInst, store: FakeStore | nul
 
 function makeRecordApp(ws: FakeWorkspace) {
   return {
+    sourceAdmissions: { ownsWrite: () => false },
     canonicalPath: (p: string) => tolerantCanonical(p),
     setBounded: <K, V>(map: Map<K, V>, key: K, value: V, limit: number) => realSetBounded.call(null, map, key, value, limit),
     rel: async (absPath: string, wsRoot: string) => relative(await tolerantCanonical(wsRoot), await tolerantCanonical(absPath)),
@@ -463,6 +485,73 @@ describe("change review revert", () => {
     expect(ws.writerId).toBeNull();
   });
 
+  it("preserves changes made after the session's last review observation", async () => {
+    const ws = makeWorkspace(dir);
+    const inst = makeInst(ws);
+    const file = join(dir, "later.txt");
+    writeFileSync(file, "agent result");
+    inst.baselines.set(file, "original");
+    const app = makeRevertApp(ws, inst, null);
+    writeFileSync(file, "later work from another session");
+    const result = await revertReviewFile.call(app, inst.id, file);
+    expect(result.ok).toBe(false);
+    expect(readFileSync(file, "utf8")).toBe("later work from another session");
+    expect(inst.baselines.get(file)).toBe("original");
+  });
+
+  it("does not recreate a reviewed file deleted by a later idle observer", async () => {
+    const ws = makeWorkspace(dir);
+    const inst = makeInst(ws);
+    const file = join(dir, "later-delete.txt");
+    writeFileSync(file, "agent result");
+    inst.baselines.set(file, "original");
+    const app = makeRevertApp(ws, inst, null);
+    await rm(file);
+    await realRecordDeleted.call({ ...makeRecordApp(ws), send() {} }, inst, file);
+    expect((await revertReviewFile.call(app, inst.id, file)).ok).toBe(false);
+    expect(existsSync(file)).toBe(false);
+    expect(inst.baselines.get(file)).toBe("original");
+  });
+
+  it("keeps a reader's accepted result when a writer changes the shared source", async () => {
+    const ws = makeWorkspace(dir);
+    const reader = makeInst(ws);
+    const file = join(dir, "reader.txt");
+    writeFileSync(file, "reader's prior result");
+    reader.baselines.set(file, "original");
+    const app = makeRevertApp(ws, reader, null);
+    const admissions = new SourceAdmissions(() => false, () => {});
+    admissions.admit({ id: reader.id, generation: 1, root: dir, groupId: reader.id, kind: "agent", access: "read" });
+    admissions.start(reader.id, 1);
+    admissions.admit({ id: "writer", generation: 1, root: dir, groupId: "writer", kind: "agent" });
+    admissions.start("writer", 1);
+    try {
+      writeFileSync(file, "writer's later result");
+      await realRecordModified.call({ ...makeRecordApp(ws), sourceAdmissions: admissions }, reader, file, "modified", true);
+      expect((await revertReviewFile.call(app, reader.id, file)).ok).toBe(false);
+      expect(readFileSync(file, "utf8")).toBe("writer's later result");
+    } finally { admissions.dispose(); }
+  });
+
+  it("reverts a deletion observed during the session's admitted write scope", async () => {
+    const ws = makeWorkspace(dir);
+    const writer = makeInst(ws);
+    const file = join(dir, "writer-delete.txt");
+    writeFileSync(file, "agent result");
+    writer.baselines.set(file, "original");
+    const app = makeRevertApp(ws, writer, null);
+    const admissions = new SourceAdmissions(() => false, () => {});
+    admissions.admit({ id: writer.id, generation: 1, root: dir, groupId: writer.id, kind: "agent" });
+    admissions.start(writer.id, 1);
+    try {
+      await rm(file);
+      await realRecordDeleted.call({ ...makeRecordApp(ws), sourceAdmissions: admissions, send() {} }, writer, file);
+      admissions.finish(writer.id, 1);
+      expect(await revertReviewFile.call(app, writer.id, file)).toEqual({ ok: true });
+      expect(readFileSync(file, "utf8")).toBe("original");
+    } finally { admissions.dispose(); }
+  });
+
   it("falls back to the stored string when the blob is gone", async () => {
     const ws = makeWorkspace(dir);
     const inst = makeInst(ws);
@@ -664,7 +753,7 @@ describe("save/revert wiring", () => {
     expect(method).toContain("acquireWriteLease");
     expect(method).toContain("releaseWriteLease");
     expect(method).toContain("readBlob");
-    expect(method).toContain("lstat(");
+    expect(method).toContain("revertReviewedFile(");
     expect(method).toContain("baselineStates");
   });
 
@@ -698,8 +787,8 @@ describe("save/revert wiring", () => {
 
   it("routes review reverts through the durable replace helper", () => {
     const method = extractMethod(main, "private async revertReviewFile(");
-    expect(method).toContain("this.durableReplaceFile(");
-    expect(method).toContain("syncParentDir(p)");
+    expect(method).toContain("revertReviewedFile(");
+    expect(method).toContain("inst.reviewStates.get(p)");
     expect(method).not.toContain("writeFile(");
   });
 

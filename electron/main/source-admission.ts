@@ -6,6 +6,8 @@ export interface SourceClaim {
   readonly root: string;
   readonly groupId: string;
   readonly kind: "agent" | "shell";
+  /** Only the core's enforced observational run scope may request this. */
+  readonly access?: "read";
 }
 
 export function sourceTreesOverlap(a: string, b: string): boolean {
@@ -34,12 +36,14 @@ export class SourceAdmissions {
   admit(claim: SourceClaim): { ok: true } | { ok: false; conflict: SourceClaim } {
     const key = this.key(claim.id, claim.generation);
     const previous = this.reservations.get(key);
-    if (previous && (previous.claim.root !== claim.root || previous.claim.groupId !== claim.groupId)) {
+    if (previous && (previous.claim.root !== claim.root || previous.claim.groupId !== claim.groupId
+      || previous.claim.access !== claim.access)) {
       return { ok: false, conflict: previous.claim };
     }
     for (const record of this.reservations.values()) {
       if (record === previous) continue;
       if (sourceTreesOverlap(record.claim.root, claim.root)
+        && record.claim.access !== "read" && claim.access !== "read"
         && !(claim.groupId !== "" && record.claim.groupId === claim.groupId)) {
         return { ok: false, conflict: record.claim };
       }
@@ -96,6 +100,19 @@ export class SourceAdmissions {
     const key = this.key(id, generation);
     clearTimeout(this.reservations.get(key)?.timer);
     this.reservations.delete(key);
+  }
+
+  writerAt(root: string): SourceClaim | null {
+    for (const { claim } of this.reservations.values()) {
+      if (claim.access !== "read" && sourceTreesOverlap(root, claim.root)) return claim;
+    }
+    return null;
+  }
+
+  ownsWrite(id: string, generation: number, path: string): boolean {
+    const record = this.reservations.get(this.key(id, generation));
+    if (!record || (record.phase === "pending" && !record.priorLive)) return false;
+    return record.claim.access !== "read" && sourceTreesOverlap(record.claim.root, path);
   }
 
   dispose(): void {

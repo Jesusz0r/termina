@@ -33,6 +33,7 @@ import {
 import { type ExportPatchFile } from "./export.js";
 import { changedFiles, isSafeRelativePath } from "./candidate-files.js";
 import { exportCandidateRun } from "./export-candidate.js";
+import { createIndependentSession, type IndependentSessionOptions, loadIndependentSessions, restoreIndependentSession } from "./independent-session.js";
 import { CandidateLaunch } from "./candidate-launch.js";
 import { admitWorldlineForkSource } from "./bootstrap.js";
 import { RunRegistry } from "./run-registry.js";
@@ -178,7 +179,8 @@ type PromptPayloadLookup =
   | { kind: "unreadable"; error: string };
 
 type ComparisonConstruction = {
-  sourceRunId: string;
+  sourceRunId: string | null;
+  sourceSessionFile?: string;
   sourceGitDir: string;
   baseStateId: string | null;
   model: string | null;
@@ -240,6 +242,7 @@ export interface WorldlineDeps {
   captureHead(root: string, gitDir: string, parent: string | null): Promise<{ commit: string; tree: string }>;
   /** Capture the current primary state (details conflict status). */
   capturePrimary(): Promise<string | null>;
+  restorePrimaryLineage(parentStateId: string): Promise<void>;
   /** Release a temporary state reference after a comparison operation. */
   releaseState(stateId: string): Promise<void>;
   terminalBusy(terminalId: string): boolean;
@@ -275,7 +278,7 @@ export interface WorldlineDeps {
   } | null>;
   onEvidenceUpdate(summary: EvidenceSummary): void;
   onPromotionApply(relPaths: string[] | null): void;
-  primarySessionDir(cwd: string): Promise<string>;
+  primarySessionDir(cwd: string): Promise<BoundPromotionDirectory>;
   installPromoted(seed: PromoteSeed): Promise<{ terminalId: string }>;
 }
 
@@ -358,7 +361,26 @@ export class WorldlineManager {
         { initialIdentity: this.deps.primaryRootIdentity },
       );
       await this.deps.recoverStaleComparisons(() => this.sweepStale());
+      const recovery = await loadIndependentSessions(worldsRootBinding, this.deps.primaryRoot);
+      this.recoveryUnproven = recovery.unproven;
+      const latest = recovery.sessions.filter((s) => s.manifest.status === "complete")
+        .sort((a, b) => b.manifest.createdAt - a.manifest.createdAt)[0]?.manifest.session;
+      if (latest) await this.deps.restorePrimaryLineage(latest.primaryStateId ?? latest.baseStateId);
+      for (const saved of recovery.sessions) {
+        this.rehydrateUncertainComparison(saved.manifest, saved.binding.path);
+        const cmp = this.comparisons.get(saved.manifest.id)!;
+        cmp.rootBinding = saved.binding;
+        cmp.rootIdentity = promotionIdentityOf(saved.binding);
+        if (this.liveWorldlineCount() > 3) {
+          cmp.error = "the work area budget is exhausted; saved work was retained";
+          const candidate = cmp.candidates.get("A");
+          if (candidate) candidate.error = cmp.error;
+          continue;
+        }
+        await restoreIndependentSession(cmp, saved.manifest, saved.binding, this.deps);
+      }
     })().catch((error: unknown) => {
+      this.recoveryUnproven = true;
       this.readyError = error instanceof Error ? error : new Error(String(error));
       this.releaseAdmissionOwnership();
       throw this.readyError;
@@ -469,8 +491,8 @@ export class WorldlineManager {
     this.runs.record(run, this.pinnedRunIds());
   }
 
-  runOf(runId: string): RunRecord | null {
-    return this.runs.of(runId);
+  runOf(runId: string | null): RunRecord | null {
+    return runId === null ? null : this.runs.of(runId);
   }
 
   runSummaries(terminalId?: string): RunSummary[] {
@@ -834,6 +856,8 @@ export class WorldlineManager {
   async activeCandidates(): Promise<number> {
     let active = 0;
     for (const cmp of this.comparisons.values()) {
+      // User sessions retain their files when a project closes.
+      if (cmp.sourceRunId === null) continue;
       for (const cand of cmp.candidates.values()) {
         if (cand.state === "discarded" || cand.state === "error" || cand.state === "promoted") continue;
         try {
@@ -857,13 +881,13 @@ export class WorldlineManager {
   }
 
   /** The comparison and candidate behind one terminal, or null. */
-  candidateContextOf(terminalId: string): { sourceRunId: string; sessionFile: string | null } | null {
+  candidateContextOf(terminalId: string): { sourceRunId: string | null; sessionFile: string | null; baseStateId: string | null } | null {
     const hit = this.launch.terminalToComparison.get(terminalId);
     if (!hit) return null;
     const cmp = this.comparisons.get(hit.comparisonId);
     const cand = cmp?.candidates.get(hit.label);
     if (!cmp || !cand) return null;
-    return { sourceRunId: cmp.sourceRunId, sessionFile: cand.sessionFile };
+    return { sourceRunId: cmp.sourceRunId, sessionFile: cand.sessionFile, baseStateId: cmp.baseStateId };
   }
 
   /** The sandbox launch facts of a candidate terminal, or null. */
@@ -1203,6 +1227,10 @@ export class WorldlineManager {
     const manifestLeaf = await writeComparisonManifestBound(rootBinding, {
       id,
       sourceRunId: spec.sourceRunId,
+      ...(spec.sourceRunId === null && spec.baseStateId ? { session: {
+        ...(spec.sourceSessionFile ? { sourceSessionFile: spec.sourceSessionFile } : {}),
+        primaryStateId: spec.baseStateId, primaryRoot: this.deps.primaryRoot, baseStateId: spec.baseStateId, sourceGitDir: spec.sourceGitDir, model: spec.model, thinkingLevel: spec.thinkingLevel,
+      } } : {}),
       createdAt,
       status: "creating",
       expectedCandidates: spec.expectedCandidates,
@@ -1218,6 +1246,8 @@ export class WorldlineManager {
       markerLeaf,
       manifestLeaf,
       sourceRunId: spec.sourceRunId,
+      sourceSessionFile: spec.sourceSessionFile,
+      primaryStateId: spec.sourceRunId === null ? spec.baseStateId ?? undefined : undefined,
       sourceGitDir: spec.sourceGitDir,
       primaryRoot: this.deps.primaryRoot,
       baseCommit: null,
@@ -1707,6 +1737,7 @@ export class WorldlineManager {
       const manifest = loaded.manifest;
       if (manifest.id !== cmp.id || manifest.sourceRunId !== cmp.sourceRunId) throw new Error("comparison manifest is not complete");
       manifest.candidates[cand.label] = { pid: cand.pid, lstart: cand.lstart, paths: [cand.dir, cand.supportDir] };
+      if (manifest.session && cmp.primaryStateId) manifest.session.primaryStateId = cmp.primaryStateId;
       manifest.uncertainSessionArtifacts = [...cmp.uncertainSessionArtifacts];
       manifest.status = manifest.uncertainSessionArtifacts.length > 0
         ? "uncertain"
@@ -1728,7 +1759,7 @@ export class WorldlineManager {
     sessionFile: string | null;
     terminalId: string | null;
     eventsDir: string;
-    sourceRunId: string;
+    sourceRunId: string | null;
     state: WorldlineState;
   } | null {
     const cmp = this.comparisons.get(comparisonId);
@@ -1872,7 +1903,7 @@ export class WorldlineManager {
     if (!this.comparisons.has(comparisonId)) return { ok: false, error: "comparison not found" };
     const store = await this.deps.getStore();
     const cmp = this.comparisons.get(comparisonId);
-    const baseStateId = this.runOf(cmp?.sourceRunId ?? "")?.startStateId ?? null;
+    const baseStateId = cmp?.baseStateId ?? null;
     if (!cmp || !store || !baseStateId) return { ok: false, error: !cmp ? "comparison not found" : "recording is not available" };
     if (!this.evidenceAttemptLive(cmp, attempt)) return { ok: false, error: "evidence was cancelled" };
     const targets = new Map<"A" | "B", NonNullable<ReturnType<WorldlineManager["evidenceTarget"]>>>();
@@ -2068,7 +2099,7 @@ export class WorldlineManager {
     if (!store) return { ok: false, error: "recording is not available" };
     const primary = await this.deps.workspaceAt(this.deps.primaryRoot);
     if (!primary) return { ok: false, error: "no primary workspace" };
-    const baseState = this.runOf(target.sourceRunId)?.startStateId ?? null;
+    const baseState = this.comparisons.get(comparisonId)?.baseStateId ?? null;
     if (!baseState) return { ok: false, error: "the source run base is missing" };
     const candWs = await this.deps.workspaceAt(target.root);
     const candGen = candWs?.generation ?? 0;
@@ -2092,7 +2123,6 @@ export class WorldlineManager {
     let primaryRootBinding: BoundPromotionDirectory;
     let journalRoot: BoundPromotionDirectory;
     let worldsRootPath: string;
-    let installDir: string;
     let installBinding: BoundPromotionDirectory;
     try {
       worldsRootPath = this.boundWorldsRootPath();
@@ -2111,8 +2141,7 @@ export class WorldlineManager {
         ino: journalIdentity.identity.ino,
         capability: journalIdentity.identity.capability,
       };
-      installDir = await this.deps.primarySessionDir(this.deps.primaryRoot);
-      installBinding = await ensureBoundDirectory(installDir, "primary session directory", worldsIdentity);
+      installBinding = await this.deps.primarySessionDir(this.deps.primaryRoot);
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -2603,6 +2632,41 @@ export class WorldlineManager {
 
   // ------------------------------------------------------- fork any moment ----
 
+  async createIndependentSession(opts: IndependentSessionOptions): Promise<{ ok: boolean; terminalId?: string; error?: string }> {
+    await this.ready;
+    return createIndependentSession({
+      deps: this.deps,
+      acquireAdmission: () => this.acquireUncertainComparisonAdmission(),
+      liveCount: () => this.liveWorldlineCount(),
+      construct: (spec) => this.constructComparison(spec),
+      buildTemplate: (cmp, store, state) => this.buildTemplateFromState(cmp, store, state),
+      clone: (cmp) => this.cloneCandidates(cmp),
+      support: (cmp) => this.createSupportDirs(cmp),
+      resources: (cmp) => this.copyCoreResources(cmp),
+      ensureLive: (cmp) => this.ensureComparisonLive(cmp),
+      forkSession: async (cmp, sourceSessionFile, destinationSessionFile) => {
+        const result = await this.forkCoreSession(cmp, { sourceSessionFile, destinationSessionFile });
+        if (!result.ok) throw new Error(await this.recordUncertainSession(cmp, result.sessionFile, result.error));
+      },
+      start: async (cmp, state) => {
+        const cand = cmp.candidates.get("A")!;
+        await this.writeControl(cand, { opId: randomUUID(), action: "none" });
+        await this.launch.launchCandidate(cmp, cand, state);
+      },
+      teardown: (id, error) => this.teardown(id, "error", error),
+    }, opts);
+  }
+
+  /** Restore user sessions through the same candidate reopen handshake. */
+  async restoreIndependentSessions(): Promise<void> {
+    await this.ready;
+    for (const cmp of this.comparisons.values()) {
+      if (cmp.sourceRunId !== null || cmp.phase === "error") continue;
+      const result = await this.openTerminal(cmp.id, "A");
+      if (!result.ok) console.warn(`[worldlines] session retained: ${result.error}`);
+    }
+  }
+
   /**
    * Fork one candidate from a timeline moment (WORLDLINES §6): the exact
    * captured source state and the session branched at the dot's entry.
@@ -2617,7 +2681,7 @@ export class WorldlineManager {
     }
     const nested = this.candidateContextOf(terminalId);
     const covering = this.runCovering(terminalId, moment.ts);
-    const rootRun = nested ? this.runOf(nested.sourceRunId) : covering;
+    const rootRun = nested?.sourceRunId ? this.runOf(nested.sourceRunId) : covering;
     const sessionFile = nested?.sessionFile ?? covering?.sessionFile;
     if (!rootRun) return { ok: false, error: "the source run is unavailable" };
     if (!sessionFile) return { ok: false, error: "the run session is unavailable" };
@@ -2630,7 +2694,7 @@ export class WorldlineManager {
       thinkingLevel: rootRun.thinkingLevel,
       sessionFile,
       sourceRunId: rootRun.id,
-      baseStateId: rootRun.startStateId,
+      baseStateId: nested?.baseStateId ?? rootRun.startStateId,
     };
     const source = await admitWorldlineForkSource(this.deps, rootRun.trustHashes);
     if (!source.ok) return source;
@@ -2790,7 +2854,8 @@ export class WorldlineManager {
       // 3. Recompute after the drain: a worker may have reported an
       // uncertain commit while cancellation was in flight. A manifest write
       // failure is itself evidence that deletion cannot be proven safe.
-      const retainUncertainArtifacts = (cmp.uncertainSessionArtifacts.length > 0 || cmp.manifestWriteFailed) && !cmp.removeUncertainRequested;
+      const retainIndependent = cmp.sourceRunId === null && state !== "discarded" && state !== "promoted";
+      const retainUncertainArtifacts = retainIndependent || (cmp.uncertainSessionArtifacts.length > 0 || cmp.manifestWriteFailed) && !cmp.removeUncertainRequested;
       let removed = false;
       if (!retainUncertainArtifacts) {
         removed = await this.removeOwnedDir(cmp.dir).catch((cleanupError) => {
@@ -2875,6 +2940,7 @@ export class WorldlineManager {
   /** Rehydrate retained uncertain evidence so an operator can explicitly discard it after restart. */
   private rehydrateUncertainComparison(manifest: ComparisonManifest, dir: string): void {
     if (this.comparisons.has(manifest.id)) return;
+    const origin = manifest.session;
     const candidates = new Map<"A" | "B", CandidateState>();
     for (const label of ["A", "B"] as const) {
       const recorded = manifest.candidates[label];
@@ -2887,7 +2953,7 @@ export class WorldlineManager {
       const supportDir = isInside(dir, recordedSupport) ? recordedSupport : fallbackSupport;
       candidates.set(label, {
         label,
-        role: manifest.expectedCandidates === 1 ? "moment" : label === "A" ? "reference" : "alternative",
+        role: origin ? "session" : manifest.expectedCandidates === 1 ? "moment" : label === "A" ? "reference" : "alternative",
         dir: candidateDir,
         supportDir,
         homeDir: join(supportDir, "home"),
@@ -2898,8 +2964,8 @@ export class WorldlineManager {
         profilePath: join(dir, "profiles", `${label}.sb`),
         // An uncertain destination is deliberately not a valid session path.
         sessionFile: null,
-        comparisonBaseStateId: null,
-        promotionBaseStateId: null,
+        comparisonBaseStateId: origin?.baseStateId ?? null,
+        promotionBaseStateId: origin?.baseStateId ?? null,
         headStateId: null,
         headCommit: Promise.resolve(),
         terminalId: null,
@@ -2915,12 +2981,14 @@ export class WorldlineManager {
       dir,
       templateDir: join(dir, "template"),
       sourceRunId: manifest.sourceRunId,
-      sourceGitDir: this.deps.primaryRoot,
+      sourceSessionFile: origin?.sourceSessionFile,
+      primaryStateId: origin?.primaryStateId,
+      sourceGitDir: origin?.sourceGitDir ?? this.deps.primaryRoot,
       primaryRoot: this.deps.primaryRoot,
       baseCommit: null,
-      baseStateId: null,
-      model: null,
-      thinkingLevel: null,
+      baseStateId: origin?.baseStateId ?? null,
+      model: origin?.model ?? null,
+      thinkingLevel: origin?.thinkingLevel ?? null,
       engine: "core",
       expectedCandidates: manifest.expectedCandidates,
       uncertainSessionArtifacts: [...manifest.uncertainSessionArtifacts],
@@ -2944,7 +3012,7 @@ export class WorldlineManager {
     for (const cmp of this.comparisons.values()) {
       // A draining comparison still holds trees and processes until its
       // teardown releases them; only a finished drain frees budget.
-      if (cmp.phase === "running" || cmp.phase === "creating" || cmp.teardownPromise !== null) n += cmp.candidates.size;
+      if (cmp.sourceRunId === null || cmp.phase === "running" || cmp.phase === "creating" || cmp.teardownPromise !== null) n += cmp.candidates.size;
     }
     return n;
   }
@@ -3012,6 +3080,7 @@ export class WorldlineManager {
         // clean shutdown can still write its settled markers.
         await this.launch.terminateCandidateProcess(null, candidate.pid, candidate.lstart);
       }
+      if (manifest.session) continue;
       if (manifest.status === "uncertain") {
         // Keep the comparison addressable after restart. It is intentionally
         // rehydrated as phase:error with no valid session paths; only explicit
@@ -3024,13 +3093,44 @@ export class WorldlineManager {
     }
   }
 
+  private recoveryUnproven = true;
+
+  retainsSnapshotStore(): boolean {
+    return this.recoveryUnproven || [...this.comparisons.values()].some((cmp) => cmp.sourceRunId === null);
+  }
+
+  async openMigratedSession(sourceSessionFile: string): Promise<{ ok: boolean; terminalId?: string; error?: string } | null> {
+    await this.ready;
+    const cmp = [...this.comparisons.values()].find((c) => c.sourceRunId === null && c.sourceSessionFile === sourceSessionFile);
+    return cmp ? this.openTerminal(cmp.id, "A") : null;
+  }
+
   /** Discard every live comparison. */
   async dispose(): Promise<void> {
     this.sessionForkClosing = true;
     for (const fork of this.sessionForks) fork.controller.abort();
     await this.ready;
     await this.drainSessionForks();
-    await Promise.all([...this.comparisons.values()].map((cmp) => this.teardown(cmp.id, "discarded", null)));
+    const primaryState = [...this.comparisons.values()].some((cmp) => cmp.sourceRunId === null)
+      ? await this.deps.capturePrimary().catch(() => null) : null;
+    await Promise.all([...this.comparisons.values()].map(async (cmp) => {
+      const cand = cmp.candidates.get("A");
+      if (cmp.sourceRunId !== null || !cand) {
+        await this.teardown(cmp.id, "discarded", null);
+        return;
+      }
+      if (primaryState) cmp.primaryStateId = primaryState;
+      this.closingComparisons.add(cmp.id);
+      this.launch.cancelPending(cmp.id, "session suspended");
+      await this.launch.cancelLaunches(cmp.id);
+      await this.cancelEvidence(cmp.id);
+      await cand.headCommit.catch(() => undefined);
+      await this.launch.terminateCandidateProcess(cand.terminalId, cand.pid, cand.lstart);
+      cand.pid = null;
+      cand.lstart = null;
+      await this.updateManifest(cmp, cand);
+      this.launch.clearRoutes(cmp.id);
+    }));
     // A creator can be between its source validation and comparison
     // materialization. Wait for the root-scoped owner lease to release so
     // shutdown cannot finish while that continuation still owns worldsRoot.

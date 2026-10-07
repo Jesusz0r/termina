@@ -1,3 +1,4 @@
+import { ensureBoundDirectory } from "../../../electron/worldlines/promotion-recovery/bound-dirs.ts";
 import { describe, it } from "vitest";
 /**
  * Focused runtime regressions for comparison teardown and uncertain-session
@@ -185,7 +186,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
         benchmarkConfigFrom: async () => null,
         onEvidenceUpdate: () => undefined,
         onPromotionApply: () => undefined,
-        primarySessionDir: async () => worldsRoot,
+        primarySessionDir: async () => ensureBoundDirectory(worldsRoot, "test session directory"),
         installPromoted: async () => ({ terminalId: "term-test" }),
         ...overrides,
       };

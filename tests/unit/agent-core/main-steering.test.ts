@@ -567,15 +567,15 @@ describe("/plan tool admission", () => {
     ["fixture-mcp", "mcp_fixture-mcp_write"],
     ["fixture_tools", "mcp_fixture_tools_write"],
     ["fixture.api", "mcp_fixture_api_write"],
-  ])("allows reads and discovery but refuses every effectful entry even after publishing a list (%s)", async (mcpName, toolName) => {
+  ])("allows reads and refuses MCP startup and every effectful entry even after publishing a list (%s)", async (mcpName, toolName) => {
     const allowed = [
       { name: "read_file", input: { path: "file.txt" } },
       { name: "read_files", input: { paths: ["file.txt"] } },
       { name: "grep", input: { pattern: "original", path: "file.txt" } },
       { name: "glob", input: { pattern: "*.txt" } },
-      { name: "search_mcp_tools", input: { query: mcpName } },
     ];
     const denied = [
+      { name: "search_mcp_tools", input: { query: mcpName } },
       { name: "write_file", input: { path: "created.txt", content: "wrong" } },
       { name: "edit", input: { path: "file.txt", old_text: "original", new_text: "wrong" } },
       { name: "bash", input: { command: "printf wrong > bash-called" } },
@@ -586,19 +586,19 @@ describe("/plan tool admission", () => {
     const actions = denied;
     await steeringScenario("final", [], ({ project, requests, messages, events }) => {
       expect(requests).toHaveLength(3);
-      for (const action of actions) expect(requests[0].tools.some((tool: Row) => tool.name === action.name)).toBe(true);
+      for (const action of actions.filter((a) => !["search_mcp_tools", "call_mcp_tool"].includes(a.name))) expect(requests[0].tools.some((tool: Row) => tool.name === action.name)).toBe(true);
+      expect(existsSync(join(project, "mcp-started"))).toBe(false);
       const results = toolResults(messages);
       expect(results).toHaveLength(allowed.length + actions.length + 1);
       for (const result of results.slice(0, allowed.length)) expect(result.is_error, result.content).not.toBe(true);
       expect(results[0].content).toContain("original");
       expect(results[2].content).toContain("original");
-      expect(results[4].content).toContain(toolName);
       for (const result of results.slice(allowed.length)) {
         expect(result.is_error).toBe(true);
-        expect(result.content).toContain("not executed on a /plan turn");
+        expect(result.content).toMatch(/not executed on a \/plan turn|unknown tool/);
       }
       expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("original\n");
-      expect(existsSync(join(project, "mcp-started"))).toBe(true);
+      expect(existsSync(join(project, "mcp-started"))).toBe(false);
       for (const file of ["created.txt", "second.txt", "bash-called", "mcp-called"]) {
         expect(existsSync(join(project, file)), file).toBe(false);
       }
@@ -648,8 +648,9 @@ describe("/plan tool admission", () => {
       expect(requests).toHaveLength(4);
       const results = toolResults(messages);
       expect(results).toHaveLength(3);
-      expect(results.every(result => result.is_error !== true)).toBe(true);
-      expect(results[0].content).toContain("mcp_fixture_write");
+      expect(results[0].is_error).toBe(true);
+      expect(results.slice(1).every(result => result.is_error !== true)).toBe(true);
+      expect(results[0].content).toContain("unknown tool search_mcp_tools");
       expect(results[1].content).toBe("executed");
       expect(results[2].content).toContain("[exit 0]");
       expect(readFileSync(join(project, "mcp-called"), "utf8")).toBe("executed");
@@ -688,15 +689,15 @@ describe("/plan tool admission", () => {
     });
   });
 
-  it("clears the refusal when a new non-plan steering message becomes durable", async () => {
+  it("keeps the admitted read-only scope when a steering message becomes durable", async () => {
     await steeringScenario("final", ["implement now"], ({ project, requests, messages, events }) => {
       expectOneRun(events);
       expect(requests).toHaveLength(3);
-      expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("implemented");
+      expect(readFileSync(join(project, "file.txt"), "utf8")).toBe("original\n");
       const results = toolResults(messages);
       expect(results[0]).toMatchObject({ is_error: true });
       expect(results[0].content).toContain("steering");
-      expect(results[1].is_error).not.toBe(true);
+      expect(results[1].is_error).toBe(true);
     }, {
       initialLine: "/plan", toolsByTurn: [
         [{ name: "write_file", input: { path: "file.txt", content: "stale" } }],

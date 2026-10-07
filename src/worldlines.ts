@@ -252,13 +252,13 @@ export class WorldlinesView {
   /** One candidate summary changed (push or initial list). */
   upsert(summary: WorldlineSummary): void {
     let pair = this.pairs.get(summary.comparisonId);
-    if (!pair) pair = this.makePair(summary.comparisonId, summary.role === "moment");
+    if (!pair) pair = this.makePair(summary.comparisonId, summary.role === "moment" || summary.role === "session", summary.role === "session");
     const card = pair.cards.get(summary.label)!;
     const prev = card.summary;
     if (summary.version < prev.version) return;
     this.lastTouched = summary.comparisonId;
-    pair.runEl.textContent = summary.sourceRunId;
-    pair.runEl.title = `source run ${summary.sourceRunId}`;
+    pair.runEl.textContent = summary.sourceRunId ?? "Independent session";
+    pair.runEl.title = summary.sourceRunId ? `source run ${summary.sourceRunId}` : "Work on this task in its own files";
     card.summary = summary;
     if (summary.terminalId) this.byTerminal.set(summary.terminalId, summary.label);
     // Drop the previous terminal on every transition — including to null when
@@ -297,7 +297,7 @@ export class WorldlinesView {
     this.refreshCount();
   }
 
-  private makePair(comparisonId: string, moment: boolean): PairView {
+  private makePair(comparisonId: string, moment: boolean, session = false): PairView {
     const block = document.createElement("div");
     block.className = "comparison";
     block.dataset.cmp = comparisonId;
@@ -325,6 +325,7 @@ export class WorldlinesView {
     const challengeButtons = CHALLENGE_PROFILES.map((profile) => {
       const label = challengeLabels[profile];
       const btn = actionButton("cmp-challenge", label, `Challenge with ${profile}`, () => void this.challenge(comparisonId, profile));
+      if (session) btn.disabled = true;
       btn.dataset.profile = profile;
       return btn;
     });
@@ -333,7 +334,7 @@ export class WorldlinesView {
     moreBody.append(...challengeButtons, evidenceBtn, discardBtn);
     const rolesEl = document.createElement("div");
     rolesEl.className = "cmp-caption";
-    rolesEl.textContent = moment ? "Continue from this moment in a separate tree" : WORLDLINE_PAIR_ROLES_LINE;
+    rolesEl.textContent = session ? "Work independently; review and merge when ready" : moment ? "Continue from this moment in a separate tree" : WORLDLINE_PAIR_ROLES_LINE;
     head.append(idEl, runEl, spacer, abBtn, moreBtn, rolesEl);
 
     const verdictsEl = document.createElement("div");
@@ -519,7 +520,7 @@ export class WorldlinesView {
     const s = card.summary;
     void showConfirm(
       "Promote candidate",
-      `Merge candidate ${label} (${s.role}) into the primary project? The three-way merge uses the run start as the base.`,
+      `Merge candidate ${label} (${s.role}) into the primary project? The three-way merge uses the captured source as the base.`,
     ).then(async (r) => {
       if (!r.confirmed) return;
       await this.runPromote(comparisonId, label, false);
