@@ -169,7 +169,6 @@ const projectRail = createProjectRail({
   list: projectTabsEl,
   allProjects: document.getElementById("btn-all-projects") as HTMLButtonElement,
   onActivate: (projectId) => {
-    if (document.getElementById("attention-view")!.classList.contains("work-overview")) attentionView.close(false);
     void activateProject(projectId).catch((err) => {
       toast(`could not switch projects: ${(err as Error).message}`, "warning");
     });
@@ -181,6 +180,7 @@ const projectRail = createProjectRail({
     }).catch((err) => toast(`could not close the project: ${(err as Error).message}`, "warning"));
   },
   onAllProjects: (opener) => attentionView.open(opener, "overview"),
+  onFilterProject: (projectId) => attentionView.filterProject(projectId),
   onReorder: (ids) => { void persistProjectOrder(ids); },
 });
 let projectOrderRequest = 0;
@@ -671,6 +671,7 @@ const attentionView = createAttentionView({
   bridge: window.termina,
   onOverview: (overview) => { projectRail.setOverview(overview); quickOpen.setWorkOverview(overview); },
   onViewChange: (overviewOpen) => projectRail.setOverviewActive(overviewOpen),
+  onProjectFilterChange: (projectId) => projectRail.setProjectFilter(projectId),
   onFocusTerminal: async (target, slot, isCurrent) => {
     if (!isCurrent() || !await activateProject(target.projectId) || !isCurrent()) return null;
     const matches = (pane: Pane | undefined): pane is Pane => !!pane && pane.projectId === target.projectId

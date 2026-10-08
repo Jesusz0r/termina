@@ -7,6 +7,7 @@ export function createProjectRail(bindings: {
   list: HTMLElement;
   allProjects: HTMLButtonElement;
   onActivate(projectId: string): void;
+  onFilterProject(projectId: string): void;
   onClose(projectId: string): void;
   onAllProjects(opener: HTMLElement): void;
   onReorder(ids: string[]): void;
@@ -15,6 +16,7 @@ export function createProjectRail(bindings: {
   remove(projectId: string): void;
   setActive(projectId: string | null): void;
   setOverviewActive(active: boolean): void;
+  setProjectFilter(projectId: string | null): void;
   setOverview(overview: WorkOverview | null): void;
   orderedIds(): string[];
   setOrder(ids: string[]): void;
@@ -28,6 +30,7 @@ export function createProjectRail(bindings: {
   let facts = new Map<string, WorkOverview["projects"][number]>();
   let activeId: string | null = null;
   let overviewActive = false;
+  let filteredProjectId: string | null = null;
   let disposed = false;
 
   function orderedIds(): string[] {
@@ -46,6 +49,11 @@ export function createProjectRail(bindings: {
     entry.attention.classList.toggle("has-attention", !!project?.attentionCount);
     entry.working.classList.toggle("has-work", !!project?.working);
     entry.row.classList.toggle("active", !overviewActive && id === activeId);
+    entry.row.classList.toggle("is-filtered", overviewActive && id === filteredProjectId);
+    if (overviewActive) entry.select.setAttribute("aria-pressed", String(id === filteredProjectId));
+    else entry.select.removeAttribute("aria-pressed");
+    entry.select.setAttribute("aria-label", `${overviewActive ? "Filter Overview to project" : "Open project"} ${entry.name.textContent}`);
+    entry.select.title = `${overviewActive ? "Filter Overview · attention stays global" : "Open project"} · Arrow keys to browse · Alt+Up/Down to reorder`;
     if (!overviewActive && id === activeId) entry.select.setAttribute("aria-current", "page");
     else entry.select.removeAttribute("aria-current");
   }
@@ -57,7 +65,10 @@ export function createProjectRail(bindings: {
     const id = row?.dataset.projectId;
     if (!id || !rows.has(id)) return;
     if (target?.closest(".tab-close")) bindings.onClose(id);
-    else if (target?.closest(".project-select")) bindings.onActivate(id);
+    else if (target?.closest(".project-select")) {
+      if (overviewActive) bindings.onFilterProject(id);
+      else bindings.onActivate(id);
+    }
   };
   const onKey = (event: KeyboardEvent): void => {
     if (disposed) return;
@@ -115,7 +126,6 @@ export function createProjectRail(bindings: {
         counts.append(working, attention);
         select.setAttribute("aria-describedby", `${path.id} ${counts.id}`);
         select.append(name, path, counts);
-        select.title = "Open project · Arrow keys to browse · Alt+Up/Down to reorder";
         const close = document.createElement("button");
         close.type = "button";
         close.className = "tab-close";
@@ -130,7 +140,6 @@ export function createProjectRail(bindings: {
       entry.name.textContent = name;
       entry.name.title = project.cwd;
       entry.path.textContent = project.cwd;
-      entry.select.setAttribute("aria-label", `Open project ${name}`);
       entry.close.setAttribute("aria-label", `Close project ${name}`);
       entry.close.title = `Close project ${project.cwd}`;
       paint(project.id);
@@ -152,6 +161,7 @@ export function createProjectRail(bindings: {
       else allProjects.removeAttribute("aria-current");
       for (const id of rows.keys()) paint(id);
     },
+    setProjectFilter: (projectId) => { filteredProjectId = projectId; for (const id of rows.keys()) paint(id); },
     setOverview: (overview) => {
       facts = new Map(overview?.projects.map((project) => [project.projectId, project]) ?? []);
       for (const id of rows.keys()) paint(id);

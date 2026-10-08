@@ -17,6 +17,7 @@ export function createAttentionView(bindings: {
   bridge: TerminaBridge;
   onOverview(overview: WorkOverview | null): void;
   onViewChange(overviewOpen: boolean): void;
+  onProjectFilterChange(projectId: string | null): void;
   onInspect(result: Extract<WorkAttentionInspectResult, { ok: true }>, isCurrent: () => boolean): Promise<boolean>;
   onNavigate(projectId: string, action: WorkSummaryAction | null, isCurrent: () => boolean): Promise<boolean>;
   onReveal(projectId: string, action: WorkSummaryAction | null): void;
@@ -27,6 +28,7 @@ export function createAttentionView(bindings: {
   onRevealCandidate(target: CandidateNavigationTarget): void;
 }): {
   open(opener?: HTMLElement, mode?: "attention" | "overview"): void;
+  filterProject(projectId: string): void;
   revealWork(target: WorkSearchTarget, isCurrent: () => boolean): Promise<boolean>;
   close(restoreFocus?: boolean): void;
   dispose(): void;
@@ -49,6 +51,7 @@ export function createAttentionView(bindings: {
     },
     onTaskCreated: (request, task) => { void revealCreatedTask(request, task); },
     onSelectionChange: () => { inspectSequence++; renderSelection(); },
+    onProjectFilterChange: bindings.onProjectFilterChange,
     onFocusTerminal: bindings.onFocusTerminal,
     onTerminalControl: bindings.onTerminalControl,
     onCandidateRecovery: (projectId, recovery) => { void navigateCandidate({ projectId, candidate: recovery, mode: recovery.recovery }); },
@@ -364,6 +367,13 @@ export function createAttentionView(bindings: {
   function open(source: HTMLElement = toggle, nextMode: "attention" | "overview" = "attention"): void {
     if (disposed) return;
     inspectSequence++;
+    if (!element.hidden && mode === "overview" && nextMode === "overview") {
+      opener = source;
+      projectOverview.setProjectFilter(null);
+      message.textContent = "";
+      refresh();
+      return;
+    }
     if (mode !== nextMode) projectOverview.clearSelection();
     else projectOverview.leaveFocus();
     restoreWorkspace();
@@ -379,6 +389,7 @@ export function createAttentionView(bindings: {
     toggle.setAttribute("aria-expanded", String(mode === "attention"));
     overviewToggle.setAttribute("aria-expanded", String(mode === "overview"));
     if (mode === "overview") {
+      projectOverview.setProjectFilter(null);
       for (const node of bindings.workspace) { workspaceInert.set(node, node.inert); node.inert = true; }
     }
     bindings.onViewChange(mode === "overview");
@@ -444,6 +455,13 @@ export function createAttentionView(bindings: {
   void load();
   return {
     open,
+    filterProject: (projectId) => {
+      if (disposed || element.hidden || mode !== "overview") return;
+      if (!projectOverview.setProjectFilter(projectId)) {
+        message.textContent = "This project is unavailable or changed. Refresh Overview and choose its current project.";
+        refresh();
+      } else message.textContent = "";
+    },
     revealWork,
     close,
     dispose: () => {

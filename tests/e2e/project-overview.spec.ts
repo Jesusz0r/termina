@@ -146,6 +146,11 @@ test("ordinary shells stay unknown and closing a project removes only its work c
   await expect(page.locator(".overview-inspector-check")).toBeHidden();
   await expect(page.locator(".overview-inspector-plan")).toBeHidden();
   await page.locator(`#project-tabs .project-tab[data-project-id="${original.id}"] .project-select`).click();
+  await expect(page.locator("#attention-view")).toBeVisible();
+  await expect(lane(page, original.id)).toBeVisible();
+  expect(await page.locator("#main-split").evaluate((node) => (node as HTMLElement).inert)).toBe(true);
+  await page.locator("#attention-view").getByRole("button", { name: "Return to workspace", exact: true }).click();
+  await page.locator(`#project-tabs .project-tab[data-project-id="${original.id}"] .project-select`).click();
   await expect(page.locator("#attention-view")).toBeHidden();
   expect(await page.locator("#main-split").evaluate((node) => (node as HTMLElement).inert)).toBe(false);
 });

@@ -41,6 +41,9 @@
 .overview-status { margin: 12px 0 22px; color: var(--text-dim); font-size: 11px; line-height: 1.8; }
 .overview-projects { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; align-items: start; }
 .overview-project { margin-bottom: 8px; min-width: 0; }
+.overview-project-filter { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.overview-project-filter p { min-width: 0; overflow-wrap: anywhere; font: 11px/1.8 var(--font-chrome); color: var(--text-dim); }
+.overview-project-filter button { flex-shrink: 0; }
 .work-overview .attention-item.is-selected { outline: 1px solid var(--accent); background: var(--bg-raised); }
 .overview-project-heading { margin-bottom: 12px; }
 .overview-project-heading > div { min-width: 0; }

@@ -85,7 +85,12 @@ check still counts after inspection. If facts cannot be loaded, the counts say
 **unknown** rather than implying there is no work or attention.
 
 Use `Tab` to reach a project button, `↑`/`↓` or `Home`/`End` to browse, and
-`Enter` or `Space` to activate.
+`Enter` or `Space` to activate. While **All projects** is open, selecting a rail
+project instead filters its work lanes without activating its workspace or
+hiding other projects' attention. The selected filter and exact path remain
+visible; **All projects** removes that project filter. The local search remains
+separate. A changed or closed filtered project is shown as unavailable until
+you make an explicit choice, never replaced by another project.
 
 Drag vertically or use `Alt+↑`/`↓` to reorder projects; the order uses the existing
 project preferences. **Open project**, **Open terminal**, and **Open plan**

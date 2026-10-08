@@ -14,16 +14,17 @@ function harness() {
   const allProjects = dom.document.createElement("button");
   dom.document.body.append(list, allProjects);
   const onActivate = vi.fn();
+  const onFilterProject = vi.fn();
   const onClose = vi.fn();
   const onAllProjects = vi.fn();
   const onReorder = vi.fn();
   rail = createProjectRail({
     list: list as unknown as HTMLElement,
     allProjects: allProjects as unknown as HTMLButtonElement,
-    onActivate, onClose, onAllProjects, onReorder,
+    onActivate, onFilterProject, onClose, onAllProjects, onReorder,
   });
   const add = (id: string, cwd = `/projects/${id}`) => rail.upsert({ id, cwd }) as unknown as FakeEl;
-  return { list, allProjects, onActivate, onClose, onAllProjects, onReorder, add };
+  return { list, allProjects, onActivate, onFilterProject, onClose, onAllProjects, onReorder, add };
 }
 
 function control(row: FakeEl, selector = ".project-select"): FakeEl {
@@ -82,6 +83,23 @@ describe("persistent project rail", () => {
     expect(h.allProjects.getAttribute("aria-current")).toBeNull();
     expect(second.classList.contains("active")).toBe(true);
     expect(control(second).getAttribute("aria-current")).toBe("page");
+  });
+
+  it("filters exact Overview project identities without activating a workspace and restores normal navigation outside Overview", () => {
+    const h = harness(); const first = h.add("p1", "/first/same-name"); const second = h.add("p2", "/second/same-name");
+    rail.setActive("p2"); rail.setOverviewActive(true); rail.setProjectFilter("p1");
+    expect(first.classList.contains("is-filtered")).toBe(true); expect(second.classList.contains("active")).toBe(false);
+    expect(control(first).getAttribute("aria-pressed")).toBe("true"); expect(control(second).getAttribute("aria-pressed")).toBe("false");
+    expect(control(first).getAttribute("aria-label")).toBe("Filter Overview to project same-name");
+    expect(control(first).title).toContain("attention stays global");
+    control(second, ".project-path").click();
+    expect(h.onFilterProject).toHaveBeenCalledExactlyOnceWith("p2"); expect(h.onActivate).not.toHaveBeenCalled();
+    control(first, ".tab-close").click(); expect(h.onClose).toHaveBeenCalledExactlyOnceWith("p1");
+    rail.setOverviewActive(false);
+    expect(control(first).getAttribute("aria-pressed")).toBeNull(); expect(first.classList.contains("is-filtered")).toBe(false);
+    expect(second.classList.contains("active")).toBe(true); expect(control(second).getAttribute("aria-current")).toBe("page");
+    expect(control(first).getAttribute("aria-label")).toBe("Open project same-name");
+    control(first).click(); expect(h.onActivate).toHaveBeenCalledExactlyOnceWith("p1");
   });
 
   it("uses separate native select and close buttons, forwarding only the exact clicked ID", () => {

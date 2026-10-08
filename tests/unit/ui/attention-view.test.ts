@@ -108,7 +108,7 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
     element: element as unknown as HTMLElement, toggle: toggle as unknown as HTMLButtonElement,
     overviewToggle: overviewToggle as unknown as HTMLButtonElement,
     workspace: [workspace as unknown as HTMLElement],
-    bridge, onOverview, onInspect, onNavigate, onReveal, onViewChange, onNewProject,
+    bridge, onOverview, onInspect, onNavigate, onReveal, onViewChange, onNewProject, onProjectFilterChange: vi.fn(),
     onFocusTerminal: vi.fn().mockResolvedValue(null),
     onTerminalControl: vi.fn().mockResolvedValue({ ok: true }),
     onCandidateNavigate, onRevealCandidate,

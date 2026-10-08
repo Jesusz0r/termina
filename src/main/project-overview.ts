@@ -146,6 +146,7 @@ export function createProjectOverview(bindings: {
   startPlanTask: TerminaBridge["startPlanTask"];
   onTaskCreated(request: PlanTaskCreateRequest, task: PlanTask): void;
   onSelectionChange(): void;
+  onProjectFilterChange(projectId: string | null): void;
   onFocusTerminal(target: ReviewTarget, slot: HTMLElement, isCurrent: () => boolean): Promise<(() => void) | null>;
   onFocusChange(focused: boolean): void;
   onTerminalControl: Parameters<typeof createWorkInspector>[0]["onTerminalControl"];
@@ -156,6 +157,7 @@ export function createProjectOverview(bindings: {
   render(overview: WorkOverview): void;
   clearSelection(restoreFocus?: boolean): boolean;
   getSelectedAttentionId(): string | null;
+  setProjectFilter(projectId: string | null): boolean;
   selectTask(target: OverviewTaskTarget): boolean;
   selectAttention(id: string, opener: HTMLElement): boolean;
   leaveFocus(): void;
@@ -192,6 +194,17 @@ export function createProjectOverview(bindings: {
   newTaskButton.textContent = "New task";
   newTaskButton.setAttribute("aria-controls", "overview-new-task-form");
   toolbar.append(heading, filter, newTaskButton);
+  const projectFilterBar = document.createElement("div");
+  projectFilterBar.className = "overview-project-filter";
+  projectFilterBar.hidden = true;
+  const projectFilterLabel = document.createElement("p");
+  projectFilterLabel.id = "overview-project-filter-label";
+  const clearProjectFilter = document.createElement("button");
+  clearProjectFilter.type = "button";
+  clearProjectFilter.className = "overview-clear-project-filter";
+  clearProjectFilter.textContent = "All projects";
+  clearProjectFilter.setAttribute("aria-describedby", projectFilterLabel.id);
+  projectFilterBar.append(projectFilterLabel, clearProjectFilter);
   const newTaskElement = document.createElement("section");
   newTaskElement.id = "overview-new-task-form";
   const newTask = createNewTaskComposer({ element: newTaskElement, createPlanTask: bindings.createPlanTask,
@@ -200,7 +213,7 @@ export function createProjectOverview(bindings: {
   workspace.className = "overview-workspace";
   const content = document.createElement("div");
   content.className = "overview-work-list";
-  content.append(toolbar, newTaskElement, status, empty, newProject, list);
+  content.append(toolbar, projectFilterBar, newTaskElement, status, empty, newProject, list);
   const focusContent = document.createElement("section");
   focusContent.className = "focus-task";
   focusContent.hidden = true;
@@ -244,6 +257,7 @@ export function createProjectOverview(bindings: {
   let nextDescription = 0;
   let disposed = false;
   let available = true;
+  let projectFilter: { projectId: string; root: string } | null = null;
   let selection: { projectId: string; key: string; contextTerminalId?: string; attentionId?: string } | null = null;
   let selectionOpener: HTMLElement | null = null;
   let selectedNavigationKey = "";
@@ -327,6 +341,17 @@ export function createProjectOverview(bindings: {
     workspace.classList.remove("has-inspector");
     render();
     if (restoreFocus) (button?.isConnected ? button : filter).focus();
+    return true;
+  }
+
+  function setProjectFilter(projectId: string | null): boolean {
+    if (disposed) return false;
+    const project = overview?.projects.find((entry) => entry.projectId === projectId);
+    if (projectId !== null && (!available || !project)) return false;
+    projectFilter = project ? { projectId: project.projectId, root: project.root } : null;
+    returnToOverview();
+    bindings.onProjectFilterChange(projectFilter?.projectId ?? null);
+    render();
     return true;
   }
 
@@ -467,7 +492,14 @@ export function createProjectOverview(bindings: {
       } else inspector.unavailable("This work changed or closed. Select its current card to continue.");
     }
     workspace.classList.toggle("has-inspector", !!selection);
+    const scope = projectFilter;
+    const filteredProject = scope && overview.projects.find((project) => project.projectId === scope.projectId && project.root === scope.root);
+    projectFilterBar.hidden = !projectFilter;
+    newTaskButton.disabled = !!projectFilter && !filteredProject;
+    projectFilterLabel.textContent = projectFilter
+      ? `${filteredProject ? "Project lanes" : "Filtered project changed or closed"}: ${projectFilter.root} · Attention remains global.` : "";
     const projects = all.flatMap(({ project, cards }) => {
+      if (projectFilter && (project.projectId !== projectFilter.projectId || project.root !== projectFilter.root)) return [];
       const projectMatch = `${project.name}\n${project.root}`.toLocaleLowerCase().includes(query);
       const matching = projectMatch ? cards : cards.filter((card) =>
         `${card.title}\n${card.context}`.toLocaleLowerCase().includes(query));
@@ -496,7 +528,9 @@ export function createProjectOverview(bindings: {
       + (query ? ` · ${projects.length} matching project${projects.length === 1 ? "" : "s"}` : "")
       + " · Marked task state, agent activity and check evidence are separate facts.";
     empty.hidden = projects.length > 0;
-    empty.textContent = overview.projects.length ? "No projects or tasks match. Clear the filter to see all work." : "Open a project to see its work. Agents keep running when you switch views.";
+    empty.textContent = projectFilter && !filteredProject ? "The filtered project changed or closed. Choose All projects or select its current project in the rail."
+      : overview.projects.length ? "No projects or tasks match. Clear the search or choose All projects to see more work."
+        : "Open a project to see its work. Agents keep running when you switch views.";
     newProject.hidden = overview.projects.length > 0;
   }
 
@@ -505,9 +539,11 @@ export function createProjectOverview(bindings: {
     if (disposed) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest(".overview-new-project")) { bindings.onNewProject(); return; }
+    if (target?.closest(".overview-clear-project-filter")) { setProjectFilter(null); filter.focus(); return; }
     if (target?.closest(".overview-new-task")) {
+      if (newTaskButton.disabled) return;
       bindings.onSelectionChange();
-      newTask.open(selection?.projectId, newTaskButton);
+      newTask.open(projectFilter?.projectId ?? selection?.projectId, newTaskButton);
       return;
     }
     const projectId = target?.closest<HTMLElement>(".overview-project")?.dataset.projectId;
@@ -552,9 +588,10 @@ export function createProjectOverview(bindings: {
     render: (value) => { if (!disposed) { overview = value; available = true; newTask.setOverview(value); render(); } },
     clearSelection,
     getSelectedAttentionId: () => selection?.attentionId ?? null,
+    setProjectFilter,
     selectTask: (target) => {
       if (disposed || !available || !overview || !findOverviewTask(overview, target)) return false;
-      returnToOverview();
+      setProjectFilter(null);
       // An explicit global jump reveals its card even if a local filter hid it.
       filter.value = "";
       selection = { projectId: target.projectId, key: target.key };

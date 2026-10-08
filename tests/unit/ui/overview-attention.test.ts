@@ -50,19 +50,33 @@ function harness(value = overview()) {
   const onNavigate = vi.fn().mockResolvedValue(true);
   const onInspect = vi.fn().mockResolvedValue(true);
   const onReveal = vi.fn();
+  const onProjectFilterChange = vi.fn();
   view = createAttentionView({ element: element as unknown as HTMLElement, toggle: toggle as unknown as HTMLButtonElement,
     overviewToggle: overviewToggle as unknown as HTMLButtonElement, workspace: [workspace as unknown as HTMLElement], bridge,
-    onOverview: vi.fn(), onViewChange: vi.fn(), onInspect, onNavigate, onReveal, onNewProject: vi.fn(),
+    onOverview: vi.fn(), onViewChange: vi.fn(), onProjectFilterChange, onInspect, onNavigate, onReveal, onNewProject: vi.fn(),
     onFocusTerminal: vi.fn().mockResolvedValue(null), onTerminalControl: vi.fn(),
     onCandidateNavigate: vi.fn().mockResolvedValue(false), onRevealCandidate: vi.fn() });
   const attention = () => element.querySelectorAll(".attention-inspect");
   const inspector = () => element.querySelector("#project-work-inspector")!;
   return { element, workspace, getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, createPlanTask, startPlanTask,
-    onNavigate, onInspect, onReveal, attention, inspector,
+    onNavigate, onInspect, onReveal, onProjectFilterChange, attention, inspector,
     open: async () => { view.open(undefined, "overview"); await vi.advanceTimersByTimeAsync(150); await flush(); } };
 }
 
 describe("attention inspection inside Overview", () => {
+  it("uses All projects as a local filter reset without closing or retargeting an existing draft", async () => {
+    const h = harness(); await h.open();
+    h.element.querySelector(".overview-new-task")!.click();
+    const form = h.element.querySelector(".overview-task-composer")!;
+    const input = form.querySelector("input")!; input.value = "Preserve this outcome"; input.dispatch("input");
+    view.filterProject("project"); view.open(undefined, "overview");
+    expect(form.hidden).toBe(false); expect(input.value).toBe("Preserve this outcome");
+    expect(form.querySelector(".overview-task-project")!.value).toBe("project");
+    expect(h.element.querySelector(".overview-project-filter")!.hidden).toBe(true);
+    expect(h.onProjectFilterChange).toHaveBeenLastCalledWith(null);
+    expect(h.createPlanTask).not.toHaveBeenCalled(); expect(h.onNavigate).not.toHaveBeenCalled();
+  });
+
   it("projects persistent attention selection and expanded state without acknowledging or navigating", async () => {
     const value = overview([facts({ plan: [
       { text: "Recover first", paths: [], state: "pending", dispatchResult: { workerId: "old-1", outcome: "failed" } },
@@ -87,6 +101,35 @@ describe("attention inspection inside Overview", () => {
     expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.createPlanTask).not.toHaveBeenCalled(); expect(h.startPlanTask).not.toHaveBeenCalled();
     view.open(undefined, "attention"); await flush();
     expect(first!.getAttribute("aria-pressed")).toBeNull(); expect(first!.getAttribute("aria-expanded")).toBeNull();
+  });
+
+  it("filters only exact project lanes while cross-project attention, search and inline inspection remain global", async () => {
+    const value = workOverview([
+      projectWorkSummary({ id: "project", cwd: "/projects/first" }, [facts()]),
+      projectWorkSummary({ id: "other", cwd: "/other/first" }, [facts({ id: "other-owner", plan: [], workspace: { id: "ws-2", root: "/other/first", primary: true } })]),
+    ]);
+    const before = JSON.stringify(value); const h = harness(value); await h.open();
+    const filter = h.element.querySelector(".overview-toolbar")!.querySelector("input")!;
+    filter.value = "first"; filter.dispatch("input");
+    view.filterProject("other");
+    expect(h.element.querySelectorAll(".overview-project")).toHaveLength(1);
+    expect(h.element.querySelector(".overview-project")!.dataset.projectId).toBe("other");
+    expect(h.onProjectFilterChange).toHaveBeenLastCalledWith("other");
+    expect(h.attention()).toHaveLength(value.items.length); h.attention()[0]!.click(); await flush();
+    expect(h.inspector().querySelector(".overview-inspector-title")!.textContent).toBe("Recover the parser");
+    expect(h.element.querySelector(".overview-project")!.dataset.projectId).toBe("other");
+    expect(filter.value).toBe("first"); expect(h.element.hidden).toBe(false); expect(h.workspace.inert).toBe(true);
+    expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.inspectWorkAttention).not.toHaveBeenCalled();
+    expect(h.createPlanTask).not.toHaveBeenCalled(); expect(h.startPlanTask).not.toHaveBeenCalled();
+    view.filterProject("missing");
+    expect(h.element.querySelector(".overview-project")!.dataset.projectId).toBe("other");
+    expect(h.element.querySelector("#attention-message")!.textContent).toContain("unavailable or changed");
+    h.element.querySelector("#btn-refresh-attention")!.click(); await vi.advanceTimersByTimeAsync(150); await flush();
+    expect(h.element.querySelector(".overview-project")!.dataset.projectId).toBe("other"); expect(filter.value).toBe("first");
+    expect(JSON.stringify(value)).toBe(before);
+    h.element.querySelector(".overview-clear-project-filter")!.click();
+    expect(h.element.querySelectorAll(".overview-project")).toHaveLength(2); expect(h.attention()).toHaveLength(value.items.length);
+    expect(h.onProjectFilterChange).toHaveBeenLastCalledWith(null);
   });
 
   it("selects the exact task without activation or losing a local filter, then navigates only explicitly", async () => {

@@ -34,6 +34,7 @@ function harness(value = overview()) {
   const onNavigate = vi.fn();
   const onNewProject = vi.fn();
   const onSelectionChange = vi.fn();
+  const onProjectFilterChange = vi.fn();
   const getVerifyReport = vi.fn(async (_id: string, _generation: number): Promise<string | null> => "Canonical check output");
   const getReviewFiles = vi.fn<TerminaBridge["getReviewFiles"]>().mockResolvedValue({ ok: true, files: [], total: 0 });
   const getReviewDiff = vi.fn<TerminaBridge["getReviewDiff"]>().mockResolvedValue({ ok: false, error: "Baseline unavailable" });
@@ -47,18 +48,81 @@ function harness(value = overview()) {
   const startPlanTask = vi.fn<TerminaBridge["startPlanTask"]>().mockResolvedValue({ ok: true, dispatched: 1 });
   view = createProjectOverview({ element: element as unknown as HTMLElement, onNavigate, onNewProject, onSelectionChange,
     getVerifyReport, getReviewFiles, getReviewDiff, onFocusTerminal, onFocusChange,
-    onTerminalControl, onCandidateRecovery, onCandidateInspect: vi.fn(), createPlanTask, startPlanTask, onTaskCreated });
+    onTerminalControl, onCandidateRecovery, onCandidateInspect: vi.fn(), createPlanTask, startPlanTask, onTaskCreated, onProjectFilterChange });
   view.render(value);
   const filter = element.querySelector("input")!;
   const lanes = () => element.querySelectorAll(".overview-project");
   const cards = () => element.querySelectorAll(".overview-work-card");
-  return { element, filter, lanes, cards, onNavigate, onNewProject, onSelectionChange, getVerifyReport, onFocusTerminal, onFocusChange, releaseTerminal, onTerminalControl, onCandidateRecovery, onCandidateInspect: vi.fn(), createPlanTask, startPlanTask, onTaskCreated,
+  return { element, filter, lanes, cards, onNavigate, onNewProject, onSelectionChange, onProjectFilterChange, getVerifyReport, onFocusTerminal, onFocusChange, releaseTerminal, onTerminalControl, onCandidateRecovery, onCandidateInspect: vi.fn(), createPlanTask, startPlanTask, onTaskCreated,
     inspector: element.querySelector(".overview-work-inspector")!,
     primary: () => element.querySelector(".overview-inspector-primary")!,
     search: (query: string) => { filter.value = query; filter.dispatch("input"); } };
 }
 
 describe("real project overview", () => {
+  it("filters exact same-name project lanes without changing search, facts or selected work", () => {
+    const value = overview(); const before = JSON.stringify(value); const h = harness(value);
+    h.cards()[0]!.querySelector("button")!.click();
+    h.search("same-name");
+    expect(view.setProjectFilter("p2")).toBe(true);
+    expect(h.lanes()).toHaveLength(1); expect(h.lanes()[0]!.dataset.projectId).toBe("p2");
+    expect(h.filter.value).toBe("same-name"); expect(text(h.element.querySelector(".overview-project-filter")!)).toContain("/other/same-name");
+    expect(text(h.element.querySelector(".overview-project-filter")!)).toContain("Attention remains global");
+    expect(h.inspector.querySelector(".overview-inspector-title")!.textContent).toBe("Repair the parser");
+    expect(h.onProjectFilterChange).toHaveBeenLastCalledWith("p2");
+    expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.createPlanTask).not.toHaveBeenCalled(); expect(h.startPlanTask).not.toHaveBeenCalled();
+    expect(JSON.stringify(value)).toBe(before);
+    h.element.querySelector(".overview-clear-project-filter")!.click();
+    expect(h.lanes()).toHaveLength(2); expect(h.filter.value).toBe("same-name");
+    expect(h.onProjectFilterChange).toHaveBeenLastCalledWith(null); expect(dom.document.activeElement).toBe(h.filter);
+  });
+
+  it.each(["closed", "root"])("keeps a %s filtered project explicitly invalid until an explicit project choice", (change) => {
+    const value = overview(); const h = harness(value); expect(view.setProjectFilter("p1")).toBe(true);
+    const changed = structuredClone(value);
+    if (change === "closed") changed.projects.shift(); else changed.projects[0]!.root = "/replacement/same-name";
+    view.render(changed);
+    expect(h.lanes()).toHaveLength(0);
+    expect(text(h.element)).toContain("filtered project changed or closed");
+    expect(text(h.element.querySelector(".overview-project-filter")!)).toContain("/projects/same-name");
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    const opener = h.element.querySelector(".overview-new-task")!;
+    expect(opener.disabled).toBe(true); opener.click();
+    expect(h.element.querySelector(".overview-task-composer")!.hidden).toBe(true);
+    expect(h.createPlanTask).not.toHaveBeenCalled();
+    expect(view.setProjectFilter("p2")).toBe(true); expect(h.lanes()[0]!.dataset.projectId).toBe("p2");
+  });
+
+  it("rejects missing or unavailable filters without altering the current projection", () => {
+    const h = harness(); view.setProjectFilter("p1"); h.search("parser");
+    const before = text(h.element);
+    expect(view.setProjectFilter("missing")).toBe(false); expect(text(h.element)).toBe(before);
+    view.setUnavailable(); expect(view.setProjectFilter("p2")).toBe(false);
+    expect(h.filter.value).toBe("parser"); expect(h.lanes()[0]!.dataset.projectId).toBe("p1");
+    expect(h.onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("reveals an explicit global task jump beyond the rail filter without activating or executing", () => {
+    const value = overview(); const h = harness(value); view.setProjectFilter("p2"); h.search("nothing matches");
+    const result = searchWork(value, "Repair").rows[0]!;
+    if (result.target.kind !== "task") throw new Error("Expected task result");
+    expect(view.selectTask(result.target.task)).toBe(true);
+    expect(h.onProjectFilterChange).toHaveBeenLastCalledWith(null); expect(h.filter.value).toBe("");
+    expect(h.lanes()).toHaveLength(2); expect(h.inspector.querySelector(".overview-inspector-title")!.textContent).toBe("Repair the parser");
+    expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.startPlanTask).not.toHaveBeenCalled();
+  });
+
+  it("uses the filtered project for global New task without retargeting an existing draft", () => {
+    const h = harness(); h.cards()[0]!.querySelector("button")!.click(); view.setProjectFilter("p2");
+    h.element.querySelector(".overview-new-task")!.click();
+    const form = h.element.querySelector(".overview-task-composer")!;
+    expect(form.querySelector(".overview-task-project")!.value).toBe("p2");
+    const input = form.querySelector("input")!; input.value = "Draft for p2"; input.dispatch("input");
+    view.setProjectFilter("p1");
+    expect(form.querySelector(".overview-task-project")!.value).toBe("p2"); expect(input.value).toBe("Draft for p2");
+    expect(h.createPlanTask).not.toHaveBeenCalled(); expect(h.onNavigate).not.toHaveBeenCalled();
+  });
+
   it.each(["p1", "p2"])("opens the existing composer for contextual project %s, not the selected card", (projectId) => {
     const h = harness(); h.cards()[0]!.querySelector("button")!.click();
     const lane = h.lanes().find((entry) => entry.dataset.projectId === projectId)!;

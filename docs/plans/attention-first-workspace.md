@@ -133,6 +133,10 @@ Overview attention now uses **Inspect details** to select the existing inline in
 
 This is result availability and review attention, not persistent human acceptance. Reading details, changes or checks never acknowledges the result or changes source files. The existing task, roster, candidate and promotion owners remain authoritative; no second review store or execution path is introduced.
 
+### Project-rail filter follow-up
+
+Rail project buttons filter Overview lanes while Overview is open, without activating a workspace, changing the local text search, hiding global attention or retargeting an existing task draft. Outside Overview those buttons retain their existing workspace navigation. The transient filter is owned by `project-overview.ts` and freezes project id plus displayed root; the rail only projects its selection. A closed or changed project remains explicitly invalid until a new choice. All projects removes the project filter. Existing global task jumps explicitly reveal their target beyond both local filters.
+
 ## Recommendation
 
 **Organize Termina around the user's decisions and task outcomes, rather than around the number of terminal tabs.**

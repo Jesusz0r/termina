@@ -51,7 +51,7 @@ function harness(value = overview()) {
   const onTerminalControl = vi.fn().mockResolvedValue({ ok: true });
   view = createAttentionView({ element: element as unknown as HTMLElement, toggle: toggle as unknown as HTMLButtonElement,
     overviewToggle: overviewToggle as unknown as HTMLButtonElement, workspace: [workspace as unknown as HTMLElement], bridge,
-    onOverview, onViewChange: vi.fn(), onInspect: vi.fn().mockResolvedValue(false), onNavigate, onReveal, onNewProject: vi.fn(),
+    onOverview, onViewChange: vi.fn(), onProjectFilterChange: vi.fn(), onInspect: vi.fn().mockResolvedValue(false), onNavigate, onReveal, onNewProject: vi.fn(),
     onFocusTerminal, onTerminalControl, onCandidateNavigate: vi.fn().mockResolvedValue(false), onRevealCandidate: vi.fn() });
   return { element, workspace, getWorkOverview, onNavigate, onReveal, onOverview, onFocusTerminal, onTerminalControl,
     getVerifyReport, getReviewFiles, getReviewDiff, emit: (hook: string) => (callbacks.get(hook)! as (payload: unknown) => void)({ instanceId: "owner-1", projectId: "p1" }),
