@@ -1709,8 +1709,8 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
   if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
   // MCP annotations, bash commands, and child briefs cannot establish read-only
-  // behavior. Admit only the existing observational tools and local MCP discovery.
-  if (planToolsRestricted && !READ_TOOLS.has(use.name) && use.name !== "search_mcp_tools") {
+  // behavior. Admit only the existing built-in observational tools.
+  if (planToolsRestricted && !READ_TOOLS.has(use.name)) {
     return notExecuted(`error: ${use.name} is not executed on a /plan turn. Only reads and search are allowed; submit a non-/plan request to implement.`);
   }
   if (use.name === "read_file") {
@@ -4352,7 +4352,7 @@ async function runPrompt(
     }
     const requestId = randomUUID();
     const timeoutMs = 15_000;
-    sidecar.logEvent({ t: "preflight_request", requestId, hasImages, deadlineAt: Date.now() + timeoutMs });
+    sidecar.logEvent({ t: "preflight_request", requestId, hasImages, readOnly: planToolsRestricted, deadlineAt: Date.now() + timeoutMs });
     const ack = await waitForAck(eventsDir, terminalId, requestId, timeoutMs, bridgeId, {
       shouldStop: () => interrupted,
     });
@@ -4370,7 +4370,7 @@ async function runPrompt(
     preflight = { requestId, token: typeof ack.token === "string" ? ack.token : null };
   }
   // A server's startup can write project files; source admission comes first.
-  await ensureNamedMcp(prompt);
+  if (!planToolsRestricted) await ensureNamedMcp(prompt);
   flushMcpTools(true);
   if (interrupted || shutdownRequested) {
     cancelPreflight();
@@ -5416,9 +5416,8 @@ async function drainSteeringLines(): Promise<boolean> {
     if (!prepared.ok) throw new SessionStoreError(prepared.error);
     if (interrupted) break;
     pushUserPrompt(expandFileTags(canonicalCwd, line), prepared.images);
-    // Steering is a new non-command user request, not an assistant-granted
-    // mode switch. Only clear the refusal after the message is durable.
-    planToolsRestricted = false;
+    // The host admitted this run with its original tool scope. Steering
+    // cannot upgrade an observational run into an unreserved writer.
     // Enqueue may have happened before agent_start or in a preceding run.
     // Invalidate replay for the run that actually receives this message too.
     sidecar.logEvent({ t: "steer_input", behavior: "steer" });

@@ -1,0 +1,5 @@
+# Concurrent sessions
+
+An actual `/plan` run admits only the built-in observational tools. Named MCP startup, MCP discovery/calls, bash, edits, and subagent mutations are refused. Steering cannot expand that run's admitted scope; a later implementation submit starts a new run. Read scopes can share source files; independent writers retain exclusion, and coordinated workers retain their existing claims. Overlapping source activity invalidates replay provenance even when workspace IDs differ.
+
+Change Review records accepted tool outcomes and file changes observed during the session's admitted write scope. Readers and idle observers cannot advance that result. Revert requires the accepted result to remain current, rejects active source writers, and uses the native conditional file operation. An unattributed change with no accepted result cannot be reverted. Later edits, recreated deleted files, changed file types, and namespace races cannot be silently overwritten. Binary baselines continue to use their captured source blob.

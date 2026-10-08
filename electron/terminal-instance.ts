@@ -7,6 +7,7 @@ import { PtyTerminal } from "./pty-terminal.js";
 import { BracketedPasteModeTracker } from "./pty-bracketed-paste.js";
 import { PtyKeyboardModeTracker } from "./pty-keyboard-mode.js";
 import type { RunRecord } from "./worldlines/index.js";
+import type { PromotionEntryState } from "./worldlines/types.js";
 import type {
   ModifiedFile,
   PlanTask,
@@ -57,6 +58,8 @@ export class AgentTerminalInstance {
   baselines = new Map<string, string | null>();
   /** Run-start state anchoring each baseline; revert reads bytes from it. */
   baselineStates = new Map<string, string>();
+  /** Last observed result of this session's edits, frozen while it is idle. */
+  reviewStates = new Map<string, PromotionEntryState>();
   baselineBytes = 0;
   /** In-flight lazy baseline captures per path (Change Review waits for them). */
   baselineFills = new Map<string, Promise<void>>();

@@ -200,7 +200,13 @@ describe("real tool loop regressions", () => {
       expect(results[3].content).toContain("unknown tool");
       expect(results[4].content).toContain("unknown tool");
       expectPaired(result.messages);
+      expect(existsSync(join(result.root, "unmentioned-started.txt"))).toBe(false);
     }, 40_000, {
+      "unmentioned-server.mjs": `
+        import { writeFileSync } from "node:fs";
+        writeFileSync("unmentioned-started.txt", "must not start");
+        process.exit(1);
+      `,
       "mcp-server.mjs": `
         import { createInterface } from "node:readline";
         createInterface({ input: process.stdin }).on("line", (line) => {
@@ -218,8 +224,11 @@ describe("real tool loop regressions", () => {
     }, 'return "finished";', ({ home, project }) => {
       const dir = join(home, ".termina", "agent");
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: [join(project, "mcp-server.mjs")] } } }));
-    }, "Use fixture MCP for the tool lifecycle regression");
+      writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: {
+        fixture: { command: process.execPath, args: [join(project, "mcp-server.mjs")] },
+        unmentioned: { command: process.execPath, args: [join(project, "unmentioned-server.mjs")] },
+      } }));
+    }, "Use the fixture MCP server for this tool lifecycle regression.");
   });
 
   it("does not attribute ordinary tool-history growth as a prefix flip", async () => {

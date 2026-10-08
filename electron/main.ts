@@ -27,6 +27,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { revertReviewedFile } from "./review-revert.js";
+import { readPromotionEntry } from "./worldlines/promotion-recovery/entry-state.js";
 import { SessionForkClient } from "./session-fork.js";
 import { SessionRetentionOwner } from "./session-retention.js";
 import {
@@ -2030,7 +2032,7 @@ class TerminaApp {
           const abs = await this.canonicalPath(join(seed.primaryRoot, path.rel));
           const before = path.beforeExists ? await readFile(join(seed.beforeDir, path.rel)) : null;
           this.setBaseline(inst, abs, before === null ? null : before.toString("utf8"));
-          if (path.kind === "delete") await this.recordDeleted(inst, abs, rendererTarget);
+          if (path.kind === "delete") await this.recordDeleted(inst, abs, rendererTarget, false);
           else await this.recordModified(inst, abs, path.beforeExists ? "modified" : "created");
         }
         this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] }, rendererTarget);
@@ -4148,10 +4150,9 @@ class TerminaApp {
     for (const inst of this.verifyRuns.values()) {
       if (inst.workspaceId === workspaceId) return true;
     }
-    for (const [workerId, entry] of this.dispatchRuns) {
+    for (const workerId of this.dispatchRuns.keys()) {
       if (workerId === terminalId) continue;
-      const owner = this.runtime.get(entry.ownerId);
-      if (owner && owner.workspaceId === workspaceId) return true;
+      if (this.runtime.get(workerId)?.workspaceId === workspaceId) return true;
     }
     return false;
   }
@@ -4679,6 +4680,7 @@ class TerminaApp {
         changed = true;
       }
     }
+    for (const [p, state] of worker.reviewStates) this.setBounded(owner.reviewStates, p, state, TerminaApp.MAX_MODIFIED_FILES);
     for (const [p, b] of worker.baselines) {
       if (!owner.baselines.has(p)) this.setBaseline(owner, p, b, worker.baselineStates.get(p) ?? null);
     }
@@ -5273,7 +5275,7 @@ class TerminaApp {
       // ---- run-boundary events (WORLDLINES §6.3) ----
       case "preflight_request":
         {
-          const task = this.handlePreflightRequest(inst, String(event.requestId ?? ""), Number(event.deadlineAt), rendererTarget);
+          const task = this.handlePreflightRequest(inst, String(event.requestId ?? ""), Number(event.deadlineAt), rendererTarget, event.readOnly === true);
           this.trackRecordingTask(task);
           await task;
         }
@@ -5704,7 +5706,7 @@ class TerminaApp {
     }
   }
 
-  private async admitSource(inst: AgentTerminalInstance): Promise<{ ok: boolean; error?: string }> {
+  private async admitSource(inst: AgentTerminalInstance, readOnly = false): Promise<{ ok: boolean; error?: string }> {
     const ws = this.workspaceOfTerminal(inst);
     const project = this.projectOfTerminal(inst.id);
     if (!ws || !project) return { ok: false, error: "source folder is no longer open" };
@@ -5723,7 +5725,7 @@ class TerminaApp {
     const writer = !ws.primary ? this.sourceWorkspaceWriter(root) : null;
     if (writer) return { ok: false, error: `Source files overlap with a file operation in ${writer.root}. Try again after it finishes.` };
     const groupId = this.dispatchRuns.get(inst.id)?.ownerId ?? inst.id;
-    const result = this.sourceAdmissions.admit({ id: inst.id, generation: inst.generation, root, groupId, kind: "agent" });
+    const result = this.sourceAdmissions.admit({ id: inst.id, generation: inst.generation, root, groupId, kind: "agent", ...(readOnly ? { access: "read" as const } : {}) });
     if (result.ok) return result;
     return { ok: false, error: this.sourceConflictText(result.conflict) };
   }
@@ -5760,6 +5762,7 @@ class TerminaApp {
     requestId: string,
     deadlineAt: number,
     expected?: PtyRendererSendTarget | null,
+    readOnly = false,
   ): Promise<void> {
     if (!requestId) return;
     const startedAt = Date.now();
@@ -5796,7 +5799,7 @@ class TerminaApp {
       return;
     }
     try {
-      const admission = await this.admitSource(inst);
+      const admission = await this.admitSource(inst, readOnly);
       markStage("source");
       if (!admission.ok) {
         acknowledgeFailure(admission.error ?? "source admission failed");
@@ -6113,18 +6116,21 @@ class TerminaApp {
   /** Mark this run and every other open agent in the same workspace. */
   private markOverlappingAgents(inst: AgentTerminalInstance, run: RunRecord): void {
     if (inst.type !== "agent") return;
+    const root = this.workspaceOfTerminal(inst)?.canonicalRoot;
+    if (!root) return;
     for (const otherId of this.busyAgents) {
       if (otherId === inst.id) continue;
       const other = this.runtime.get(otherId);
-      if (!other || other.workspaceId !== inst.workspaceId) continue;
+      const otherRoot = other && this.workspaceOfTerminal(other)?.canonicalRoot;
+      if (!other || !otherRoot || !sourceTreesOverlap(root, otherRoot)) continue;
       run.overlap = true;
       run.replayable = false;
-      run.reason = "another agent ran in the same workspace";
+      run.reason = "another agent ran on the same source files";
       if (other.currentRun) {
         other.currentRun.overlap = true;
         if (other.currentRun.replayable) {
           other.currentRun.replayable = false;
-          other.currentRun.reason = "another agent ran in the same workspace";
+          other.currentRun.reason = "another agent ran on the same source files";
         }
       }
     }
@@ -7216,6 +7222,7 @@ class TerminaApp {
       for (const [oldest, previous] of evicted) {
         if (previous !== null) inst.baselineBytes -= Buffer.byteLength(previous, "utf8");
         inst.baselineStates.delete(oldest);
+        inst.reviewStates.delete(oldest);
       }
     }
   }
@@ -7225,6 +7232,7 @@ class TerminaApp {
     if (previous !== undefined && previous !== null) inst.baselineBytes -= Buffer.byteLength(previous, "utf8");
     inst.baselines.delete(path);
     inst.baselineStates.delete(path);
+    inst.reviewStates.delete(path);
   }
 
   private setRunSnapshot(inst: AgentTerminalInstance, path: string, content: string): void {
@@ -7290,7 +7298,7 @@ class TerminaApp {
     return changedLinesInAfter(before, after);
   }
 
-  private async recordModified(inst: AgentTerminalInstance, absPath: string, status: "created" | "modified"): Promise<void> {
+  private async recordModified(inst: AgentTerminalInstance, absPath: string, status: "created" | "modified", fromWatcher = false): Promise<void> {
     const p = await this.canonicalPath(absPath);
     // The first review entry for a file captures pre-run content. Anchor an
     // unanchored baseline to this run start so revert restores byte-exact
@@ -7299,6 +7307,10 @@ class TerminaApp {
     if (current !== undefined && current !== null && !inst.baselineStates.has(p)) {
       const anchor = inst.currentRun?.startStateId;
       if (anchor) inst.baselineStates.set(p, anchor);
+    }
+    if (!fromWatcher || this.sourceAdmissions.ownsWrite(inst.id, inst.generation, p)) {
+      try { this.setBounded(inst.reviewStates, p, (await readPromotionEntry(p)).state, TerminaApp.MAX_MODIFIED_FILES); }
+      catch { inst.reviewStates.delete(p); }
     }
     const existing = inst.modified.get(p);
     if (existing) {
@@ -7317,10 +7329,15 @@ class TerminaApp {
     inst: AgentTerminalInstance,
     absPath: string,
     expected?: PtyRendererSendTarget | null,
+    fromWatcher = true,
   ): Promise<void> {
     const p = await this.canonicalPath(absPath);
     const baseline = inst.baselines.get(p);
     if (baseline !== undefined && baseline !== null) {
+      if (!fromWatcher || this.sourceAdmissions.ownsWrite(inst.id, inst.generation, p)) {
+        try { this.setBounded(inst.reviewStates, p, (await readPromotionEntry(p)).state, TerminaApp.MAX_MODIFIED_FILES); }
+        catch { inst.reviewStates.delete(p); }
+      }
       // A pre-existing file was deleted and a baseline can restore it: keep
       // the entry so the user can revert.
       const entry = inst.modified.get(p);
@@ -7334,6 +7351,7 @@ class TerminaApp {
     } else {
       // Nothing to restore (created this run, or no baseline): drop the entry.
       inst.modified.delete(p);
+      inst.reviewStates.delete(p);
     }
     this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] }, expected);
   }
@@ -8065,7 +8083,7 @@ class TerminaApp {
       }
       if (owners.length > 0) {
         for (const inst of owners) {
-          await this.recordModified(inst, path, change.status);
+          await this.recordModified(inst, path, change.status, true);
           // Fork Any Moment: the path joins the terminal's next capture.
           this.addPendingHint(inst, relPath);
           this.scheduleMomentCapture(inst, rendererTarget);
@@ -8078,7 +8096,7 @@ class TerminaApp {
         }
       } else if (!verifyInWorkspace) {
         for (const inst of unowned) {
-          await this.recordModified(inst, path, change.status);
+          await this.recordModified(inst, path, change.status, true);
           this.addPendingHint(inst, relPath);
           this.scheduleMomentCapture(inst, rendererTarget);
           // An unowned change during a run is manual provenance: it marks
@@ -8130,7 +8148,7 @@ class TerminaApp {
       // preflight/promotion fences on a touch-only event.
       this.markCandidateEvidenceStale(ws.comparisonId);
       for (const inst of workspaceTerminals()) {
-        if (inst.busy) await this.recordModified(inst, canonical, status);
+        if (inst.busy) await this.recordModified(inst, canonical, status, true);
       }
     };
     watcher.onFileUncached = async (path, status) => {
@@ -8150,7 +8168,7 @@ class TerminaApp {
       this.scheduleProjectSnapshot(ws.id);
       for (const inst of workspaceTerminals()) {
         if (!inst.busy) continue;
-        await this.recordModified(inst, canonical, status);
+        await this.recordModified(inst, canonical, status, true);
         if (!inst.currentRun) continue;
         this.addPendingHint(inst, relPath);
         this.scheduleMomentCapture(inst, rendererTarget);
@@ -9442,17 +9460,12 @@ class TerminaApp {
       const p = managed.path;
       const b = inst.baselines.get(p);
       if (b === undefined) return { ok: false, error: "no baseline captured for this file" };
+      const root = managed.workspace.canonicalRoot;
+      if (this.sourceAdmissions.writerAt(root)) return { ok: false, error: "the source has an active writer; wait for it to finish before reverting" };
+      const reviewed = inst.reviewStates.get(p);
+      if (!reviewed) return { ok: false, error: "the last edit could not be verified; review the current file before reverting" };
       if (b === null) {
-        // The agent created the file. Remove it, but only a regular file.
-        const created = await lstat(p).catch((err: unknown) => {
-          if (isErrno(err, "ENOENT")) return null;
-          throw err;
-        });
-        if (created !== null && !created.isFile()) return { ok: false, error: "path is not a regular file" };
-        if (created !== null) {
-          await rm(p, { force: true });
-          syncParentDir(p);
-        }
+        await revertReviewedFile(root, p, reviewed, null);
         this.deleteBaseline(inst, p);
         return { ok: true };
       }
@@ -9472,14 +9485,7 @@ class TerminaApp {
           console.warn(`[main] review revert: blob read failed for ${p} (anchor ${anchor}): ${(err as Error).message}`);
         }
       }
-      // The file's parent may have been deleted with it.
-      await mkdir(dirname(p), { recursive: true });
-      const st = await lstat(p).catch((err: unknown) => {
-        if (isErrno(err, "ENOENT")) return null;
-        throw err;
-      });
-      if (st !== null && !st.isFile()) return { ok: false, error: "path is not a regular file" };
-      await this.durableReplaceFile(p, data, st === null ? undefined : st.mode & 0o777);
+      await revertReviewedFile(root, p, reviewed, data);
       this.deleteBaseline(inst, p);
       return { ok: true };
     } catch (err) {
