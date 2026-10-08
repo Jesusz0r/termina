@@ -85,9 +85,11 @@ check still counts after inspection. If facts cannot be loaded, the counts say
 **unknown** rather than implying there is no work or attention.
 
 Use `Tab` to reach a project button, `↑`/`↓` or `Home`/`End` to browse, and
-`Enter` or `Space` to activate. Drag vertically or use `Alt+↑`/`↓` to reorder
-projects; the order uses the existing project preferences. **All projects**
-opens global attention without filtering out other projects.
+`Enter` or `Space` to activate.
+
+Drag vertically or use `Alt+↑`/`↓` to reorder projects; the order uses the existing
+project preferences. **Open project**, **Open terminal**, and **Open plan**
+remain explicit workspace-navigation actions from Overview.
 
 Settling or blocking still plays a short chime and a named toast
 (`pi-editor is idle`, or `pi-editor · dispatch needs you` when that project
@@ -304,15 +306,34 @@ Starting work still opens the terminal/editor directly, not this view.
 
 Items identify their exact project path, task assignment when one is recorded,
 agent/model, work area, and reason. Blockers and unavailable workers appear
-before failed/incomplete/interrupted attempts, followed by check issues. A
-separate candidate tree is labelled separately from shared project files; it is
-not automatically a sandbox.
+before failed/incomplete/interrupted attempts, followed by check issues and
+**Result pending review**. A separate candidate tree is labelled separately from
+shared project files; it is not automatically a sandbox.
 
-**Inspect terminal**, **Inspect plan**, and **Inspect check** navigate to the
-current owner through main. Stale, closed, or superseded targets are rejected
-rather than opening a different project or terminal. Inspection never runs or
-cancels checks, retries a task, accepts changes, or resolves the item. Historical
-passing output remains **Outdated** when it no longer applies to current files.
+**Result pending review** means a task has a recorded completed attempt, not
+that an idle agent, a checked task box, or a passing check proves acceptance.
+Independent results additionally require an available captured candidate; the
+item names that result's root and version, not the source owner's checks.
+Inspection does not record human acceptance. A candidate that is explicitly
+promoted or discarded leaves this queue; a new attempt replaces its previous
+result. Shared-file results are historical completion records and do not claim
+that those files remain unapplied. Recording persistent human acceptance is not
+yet supported.
+
+In **All projects**, **Inspect details** opens the selected work's inspector
+without leaving Overview, switching projects, or clearing the local filter.
+Global attention remains visible. A check without a single recorded task opens
+its terminal context; it is not attributed to the first task on that Plan Board.
+**Check details** reads the recorded report inline. **Open terminal** and
+**Open plan** navigate only when explicitly chosen. Closing the inspector or
+pressing `Escape` in it returns focus to the attention button when available.
+
+In the compact **Attention** view, **Inspect terminal**, **Inspect plan**, and
+**Inspect check** still navigate to the current owner through main. Stale,
+closed, or superseded targets are rejected rather than opening a different
+project or terminal. Inspection never runs or cancels checks, retries a task,
+accepts changes, or resolves the item. Historical passing output remains
+**Outdated** when it no longer applies to current files.
 
 The view initially shows up to 50 items; **Show more** reveals the next page.
 **Refresh** loads current facts. A loading failure is explicit and retained rows
@@ -321,10 +342,12 @@ are marked potentially outdated, not replaced with a false empty-success state.
 
 ### New task from Overview
 
-In **All projects**, choose **New task**, select the exact project and an
-existing agent **Plan Board**, and describe the outcome in one line. Project
-paths distinguish repeated names; the destination remains visible beside the
-draft. **Create task** adds a pending task to that board without activating its
+In **All projects**, choose the global **New task** button and select the exact
+project, or choose **New task** in a project's heading to preselect that project
+without activating it. Choose an existing agent **Plan Board** and describe the
+outcome in one line. Both entry points use the same composer. Project paths
+distinguish repeated names; the destination remains visible beside the draft.
+**Create task** adds a pending task to that board without activating its
 project, creating a terminal or worker, or running anything. The new task is
 shown in Overview and is searchable through **Jump to work**. Select its inspector
 and choose **Start task**, or use the existing Plan Board controls, when you
@@ -340,7 +363,8 @@ schedule markers (`@every`, `@at`) are rejected. Existing tasks and their prior
 attempt results are preserved.
 
 **Cancel** or `Escape` before submission creates nothing and restores focus to
-**New task**. Once creation has been submitted, the controls are disabled while
+the exact **New task** button that opened the composer when it remains available.
+Once creation has been submitted, the controls are disabled while
 its result is pending; canceling is no longer offered as if it could undo the
 request. Canonical refreshes preserve the draft and its selected destination.
 

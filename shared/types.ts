@@ -257,7 +257,8 @@ export type WorkAttentionReason =
   | "task-incomplete"
   | "task-failed"
   | "task-interrupted"
-  | "worker-unavailable";
+  | "worker-unavailable"
+  | "pending-review";
 
 /** Navigation only. It never authorizes execution, review acceptance, or promotion. */
 export interface WorkSummaryAction {
@@ -328,7 +329,10 @@ export interface WorkAttentionItem {
   taskText: string | null;
   reason: WorkAttentionReason;
   detail: string | null;
+  /** Owner context used for navigation, not the retained candidate's mutation authority. */
   workArea: WorkAreaSummary | null;
+  /** Exact independent result being inspected, including after its worker closes. */
+  candidate?: PlanCandidateSummary;
   action: WorkSummaryAction;
 }
 

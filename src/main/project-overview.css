@@ -41,8 +41,10 @@
 .overview-status { margin: 12px 0 22px; color: var(--text-dim); font-size: 11px; line-height: 1.8; }
 .overview-projects { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; align-items: start; }
 .overview-project { margin-bottom: 8px; min-width: 0; }
+.work-overview .attention-item.is-selected { outline: 1px solid var(--accent); background: var(--bg-raised); }
 .overview-project-heading { margin-bottom: 12px; }
 .overview-project-heading > div { min-width: 0; }
+.overview-project-actions { display: flex; flex-direction: column; align-items: stretch; gap: 8px; flex-shrink: 0; }
 .overview-project-heading h3 { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
 .overview-project-path { font: 10px/1.8 var(--font-chrome); color: var(--text-dim); overflow-wrap: anywhere; }
 .overview-project-counts { font-size: 11px; line-height: 1.8; color: var(--text-dim); }

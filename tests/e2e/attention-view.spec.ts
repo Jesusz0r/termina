@@ -702,7 +702,7 @@ test("keyboard inspection reflows at native 200 percent zoom with enlarged inher
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeFocused();
   await page.keyboard.press("Tab");
-  const inspect = attentionItem(page, item).getByRole("button", { name: "Inspect check", exact: true });
+  const inspect = attentionItem(page, item).getByRole("button", { name: "Inspect details", exact: true });
   await expect(inspect).toBeFocused();
   expect(await inspect.evaluate((button) => getComputedStyle(button).outlineStyle)).not.toBe("none");
   const geometry = await region.evaluate((element) => {
@@ -725,7 +725,7 @@ test("keyboard inspection reflows at native 200 percent zoom with enlarged inher
   const semantics = await region.ariaSnapshot();
   expect(semantics).toContain('heading "All projects" [level=2]');
   expect(semantics).toContain(project.cwd);
-  expect(semantics).toContain('button "Inspect check"');
+  expect(semantics).toContain('button "Inspect details"');
   await testInfo.attach("attention-accessibility-geometry", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
   await testInfo.attach("attention-accessibility-tree", { body: semantics, contentType: "text/plain" });
   await testInfo.attach("attention-native-zoom-enlarged-text", { body: await page.screenshot(), contentType: "image/png" });
@@ -738,8 +738,25 @@ test("keyboard inspection reflows at native 200 percent zoom with enlarged inher
   await page.keyboard.press("Tab");
   await expect(inspect).toBeFocused();
   await page.keyboard.press("Enter");
+  const inspector = page.getByRole("complementary", { name: "Selected work details", exact: true });
+  await expect(inspector).toBeVisible();
+  await expect(inspector.locator(".overview-inspector-title")).toBeFocused();
+  await expect(region).toBeVisible();
+  expect(await inspector.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  await expect(inspector.locator(".overview-inspector-report")).toBeHidden();
+  const check = inspector.getByRole("button", { name: "Check details", exact: true });
+  await check.focus(); await page.keyboard.press("Enter");
+  await expect(inspector.locator(".overview-inspector-report")).toContainText("FAILED (exit code 7)");
+  await expect(region).toBeVisible();
+  expect((await activeProject(page)).id).toBe(project.id);
+  expect(await readVerifyStages(projectRoot)).toHaveLength(1);
+  expect((await page.evaluate(() => window.termina.getWorkOverview())).items.map((entry) => entry.id)).toContain(item.id);
+  await page.keyboard.press("Escape");
+  await expect(inspector).toBeHidden(); await expect(region).toBeVisible(); await expect(inspect).toBeFocused();
+  await page.keyboard.press("Enter"); await expect(inspector).toBeVisible();
+  await inspector.getByRole("button", { name: "Open terminal", exact: true }).focus();
+  await page.keyboard.press("Space");
   await expect(region).toBeHidden();
-  await expect(page.locator(".work-summary-report")).toContainText("**Status:** ❌ FAILED (exit code 7)");
   expect((await activeProject(page)).id).toBe(project.id);
   expect(await readVerifyStages(projectRoot)).toHaveLength(1);
   expect((await page.evaluate(() => window.termina.getWorkOverview())).items.map((entry) => entry.id)).toContain(item.id);

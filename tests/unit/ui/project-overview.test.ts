@@ -59,6 +59,44 @@ function harness(value = overview()) {
 }
 
 describe("real project overview", () => {
+  it.each(["p1", "p2"])("opens the existing composer for contextual project %s, not the selected card", (projectId) => {
+    const h = harness(); h.cards()[0]!.querySelector("button")!.click();
+    const lane = h.lanes().find((entry) => entry.dataset.projectId === projectId)!;
+    const opener = lane.querySelector(".overview-new-project-task")!;
+    expect(opener.getAttribute("aria-describedby")).toBe(lane.querySelector(".overview-project-path")!.id);
+    expect(opener.getAttribute("aria-controls")).toBe("overview-new-task-form");
+    opener.click();
+    const form = h.element.querySelector(".overview-task-composer")!;
+    expect(form.hidden).toBe(false);
+    expect(form.querySelector(".overview-task-project")!.value).toBe(projectId);
+    expect(text(form)).toContain(projectId === "p1" ? "/projects/same-name" : "/other/same-name");
+    expect(dom.document.activeElement).toBe(form.querySelector("input"));
+    expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.createPlanTask).not.toHaveBeenCalled();
+    expect(h.startPlanTask).not.toHaveBeenCalled(); expect(h.onFocusTerminal).not.toHaveBeenCalled();
+    if (projectId === "p2") {
+      expect(form.querySelector(".overview-task-actions")!.querySelectorAll("button")[0]!.disabled).toBe(true);
+      expect(text(form)).toContain("No existing agent");
+    }
+    form.querySelector("input")!.dispatch("keydown", { key: "Escape" });
+    expect(form.hidden).toBe(true); expect(dom.document.activeElement).toBe(opener);
+    opener.click(); form.querySelector(".overview-task-actions")!.querySelectorAll("button")[1]!.click();
+    expect(form.hidden).toBe(true); expect(dom.document.activeElement).toBe(opener);
+  });
+
+  it("keeps a contextual draft fenced when its destination closes without retargeting another project", () => {
+    const value = overview(); const h = harness(value);
+    h.lanes()[0]!.querySelector(".overview-new-project-task")!.click();
+    const form = h.element.querySelector(".overview-task-composer")!;
+    const input = form.querySelector("input")!; input.value = "Draft for the original project"; input.dispatch("input");
+    view.render({ projects: value.projects.slice(1), items: [] });
+    expect(form.querySelector(".overview-task-project")!.value).toBe("p1");
+    expect(input.value).toBe("Draft for the original project");
+    expect(form.querySelector(".overview-task-actions")!.querySelectorAll("button")[0]!.disabled).toBe(true);
+    expect(text(form)).toMatch(/unavailable|changed/i);
+    form.dispatch("submit");
+    expect(h.createPlanTask).not.toHaveBeenCalled(); expect(h.onNavigate).not.toHaveBeenCalled();
+  });
+
   it("reveals a global task jump beyond the local filter and first page without executing work", () => {
     const value = overview([terminal("owner", { plan: Array.from({ length: 72 }, (_, index) => ({
       text: `Saved task ${index}`, paths: [], state: "pending",

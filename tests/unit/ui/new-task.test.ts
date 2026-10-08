@@ -62,6 +62,12 @@ describe("inline New task composer", () => {
     expect(h.form.hidden).toBe(true);
     expect(dom.document.activeElement).toBe(h.opener);
   });
+  it("never substitutes the first project when an explicitly requested project is unavailable", () => {
+    const h = harness(); composer.open("closed-project", h.opener as unknown as HTMLElement); h.draft(); h.submit();
+    expect(h.project.value).toBe(""); expect(h.board.value).toBe(""); expect(h.buttons[0]!.disabled).toBe(true);
+    expect(h.status.textContent).toContain("unavailable or changed"); expect(h.createPlanTask).not.toHaveBeenCalled();
+    h.project.value = "p1"; h.project.dispatch("change"); expect(h.buttons[0]!.disabled).toBe(false);
+  });
   it("preserves draft and control focus during canonical refresh", () => {
     const h = harness(); h.draft(); h.board.focus(); composer.setOverview(snapshot());
     expect(h.input.value).toBe("Ship outcome");

@@ -387,7 +387,8 @@ export function createWorkInspector(bindings: {
         "Task state": card.state,
         Execution: card.execution,
         "Assigned context": card.context,
-        "Declared task paths": card.task ? card.task.task.paths.join("\n") || "No task paths declared" : "No Plan Board task assigned",
+        "Declared task paths": card.task ? card.task.task.paths.join("\n") || "No task paths declared"
+          : card.owner.tasks.length ? "No single task selected" : "No Plan Board task assigned",
         Evidence: card.evidence + (verify?.summary ? `\n${verify.summary}` : "")
           + (verify?.staleReason ? `\n${verify.staleReason}` : "")
           + (verify?.result ? `\n${verify.state === "stale" ? "Historical result" : "Recorded result"}: ${verify.result.state} · exit ${verify.result.exitCode ?? "unknown"}` : ""),

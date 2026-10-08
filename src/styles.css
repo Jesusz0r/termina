@@ -2592,7 +2592,7 @@ body.tab-reordering * {
   border-radius: 4px;
 }
 .project-tab:hover { background: var(--bg-hover); }
-.project-tab.active { background: var(--bg-raised); border-color: var(--accent); }
+.project-tab.active, .project-tab.is-filtered { background: var(--bg-raised); border-color: var(--accent); }
 .project-select {
   min-width: 0;
   flex: 1;

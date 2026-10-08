@@ -197,7 +197,7 @@ describe("main project work-summary orchestration", () => {
     ];
     main.dispatchRuns.set("term-worker", { ownerId: owner.id, taskText: "Assigned to term-worker" });
     let tasks = main.workSummary(project.id)!.terminals[0]!.tasks;
-    expect(tasks[0]).toEqual({ task: finished, worker: null, candidate: null, attention: [],
+    expect(tasks[0]).toEqual({ task: finished, worker: null, candidate: null, attention: ["pending-review"],
       startError: planStartError(null, owner.plan, finished),
       nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation } });
     expect(tasks[1]).toMatchObject({ worker: null, attention: ["task-incomplete"], task: { dispatchResult: { outcome: "incomplete" } } });
@@ -251,7 +251,9 @@ describe("main global attention and validated inspection", () => {
     const before = structuredClone({ runtime: main.runtime, activity: main.activityInputs, project });
     const single = main.workSummary(project.id)!;
     const overview = main.workOverview();
-    expect(overview).toEqual({ projects: [{ ...single, working: 0, attentionCount: 0 }], items: [] });
+    expect(overview.projects).toEqual([{ ...single, working: 0, attentionCount: 1 }]);
+    expect(overview.items).toEqual([expect.objectContaining({ reason: "pending-review", taskText: done.text,
+      action: { kind: "plan", terminalId: owner.id, generation: owner.generation } })]);
     expect(overview.projects[0]!.terminals[0]!.tasks.map(({ task }) => task)).toEqual([pending, done]);
     expect(overview.projects[0]!.terminals[1]!.workArea).toEqual({ workspaceId: candidate.id, root: candidate.root, kind: "candidate", comparisonId: candidate.comparisonId });
     expect(overview.projects[0]!.terminals[2]).toMatchObject({ type: "shell", activity: null, verify: null, model: null });
@@ -264,6 +266,33 @@ describe("main global attention and validated inspection", () => {
     expect({ runtime: main.runtime, activity: main.activityInputs, project }).toEqual(before);
     expect(main.send).not.toHaveBeenCalled();
     expect(main.persistOpenProjects).not.toHaveBeenCalled();
+  });
+
+  it("revalidates pending-review navigation against the exact retained capture and lifecycle", async () => {
+    const { main, project, add } = fixture();
+    const result: PlanTask = { text: "Review retained result", paths: ["done.ts"], state: "done",
+      dispatchResult: { workerId: "gone", outcome: "completed" }, candidate: { comparisonId: "cmp-result", label: "A" } };
+    add("term-owner", { plan: [result] });
+    const area: WorldlineSummary = { id: "cmp-result-A", comparisonId: "cmp-result", label: "A", role: "session",
+      root: "/worlds/result", version: 2, state: "settled", error: null, headStateId: "captured-result",
+      comparisonBaseStateId: "base", promotionBaseStateId: "base", sourceRunId: null, terminalId: null,
+      sessionFile: null, model: "test-model", thinkingLevel: null, createdAt: 1 };
+    project.worldlines = { recoverySummaries: () => [], list: () => [area] };
+    const item = main.workOverview().items[0]!;
+    expect(item.reason).toBe("pending-review");
+    expect((await main.inspectWorkAttention(item.id)).ok).toBe(true);
+    expect(main.workOverview().items).toContainEqual(item);
+    area.headStateId = "replacement-capture";
+    expect((await main.inspectWorkAttention(item.id)).ok).toBe(false);
+    const current = main.workOverview().items[0]!;
+    let release!: (value: boolean) => void;
+    main.agentNeedsLogin = () => new Promise((resolve) => { release = resolve; });
+    const inspection = main.inspectWorkAttention(current.id);
+    area.state = "promoted";
+    release(false);
+    expect((await inspection).ok).toBe(false);
+    expect(main.workOverview().items).toEqual([]);
+    expect(result.dispatchResult?.outcome).toBe("completed");
   });
 
   it("uses actual activation, returns exact navigation, and never resolves recorded attention", async () => {

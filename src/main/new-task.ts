@@ -208,7 +208,8 @@ export function createNewTaskComposer(options: {
       opener = nextOpener;
       outcome.value = "";
       form.hidden = false;
-      chooseProject(overview?.projects.find((item) => item.projectId === projectId)?.projectId ?? overview?.projects[0]?.projectId ?? "");
+      chooseProject(projectId ?? overview?.projects[0]?.projectId ?? "");
+      if (projectId && !selectedProject) { stale = true; updateStatus(); }
       outcome.focus();
     },
     close,

@@ -71,6 +71,18 @@ function taskCard(owner: TerminalWorkSummary, task: PlanWorkSummary, occurrence:
   };
 }
 
+function terminalCard(terminal: TerminalWorkSummary): OverviewWorkCard {
+  return {
+    owner: terminal, terminal, task: null,
+    key: JSON.stringify([terminal.terminalId, terminal.generation]),
+    title: `${terminal.type === "shell" ? "Shell" : "Agent"} · ${terminal.terminalId}`,
+    state: terminal.tasks.length ? "No single task selected" : "No Plan Board task assigned",
+    execution: execution(terminal), context: context(terminal, terminal.model),
+    evidence: evidence(terminal), attention: terminal.attention.map((reason) => ATTENTION_LABELS[reason]).join(" · "),
+    action: terminal.nextAction,
+  };
+}
+
 export function projectCards(project: ProjectWorkSummary): OverviewCard[] {
   const live = new Map(project.terminals.map((terminal) => [terminal.terminalId, terminal]));
   const assigned = new Set(project.terminals.flatMap((owner) => owner.tasks.flatMap(({ worker }) =>
@@ -87,14 +99,7 @@ export function projectCards(project: ProjectWorkSummary): OverviewCard[] {
     }
     // A live worker is represented by its real task, not a duplicate invented task.
     if (assigned.has(`${terminal.terminalId}:${terminal.generation}`)) return [];
-    return [{
-      owner: terminal, terminal, task: null,
-      key: JSON.stringify([terminal.terminalId, terminal.generation]),
-      title: `${terminal.type === "shell" ? "Shell" : "Agent"} · ${terminal.terminalId}`,
-      state: "No Plan Board task assigned", execution: execution(terminal), context: context(terminal, terminal.model),
-      evidence: evidence(terminal), attention: terminal.attention.map((reason) => ATTENTION_LABELS[reason]).join(" · "),
-      action: terminal.nextAction,
-    }];
+    return [terminalCard(terminal)];
   });
   for (const recovery of project.candidateRecoveries) cards.push({
     key: JSON.stringify(["candidate-recovery", recovery.comparisonId, recovery.label]), task: null, recovery,
@@ -150,7 +155,9 @@ export function createProjectOverview(bindings: {
 }): {
   render(overview: WorkOverview): void;
   clearSelection(restoreFocus?: boolean): boolean;
+  getSelectedAttentionId(): string | null;
   selectTask(target: OverviewTaskTarget): boolean;
+  selectAttention(id: string, opener: HTMLElement): boolean;
   leaveFocus(): void;
   setUnavailable(): void;
   invalidateEvidence(terminalId?: string): void;
@@ -231,13 +238,14 @@ export function createProjectOverview(bindings: {
   workspace.append(content, focusContent, inspectorElement);
   element.append(workspace);
   type CardRow = { element: HTMLElement; title: HTMLElement; state: HTMLElement; execution: HTMLElement; context: HTMLElement; evidence: HTMLElement; attention: HTMLElement; button: HTMLButtonElement };
-  type Lane = { element: HTMLElement; name: HTMLElement; path: HTMLElement; counts: HTMLElement; list: HTMLElement; empty: HTMLElement; more: HTMLButtonElement; rows: Map<string, CardRow>; limit: number };
+  type Lane = { element: HTMLElement; name: HTMLElement; path: HTMLElement; counts: HTMLElement; newTask: HTMLButtonElement; list: HTMLElement; empty: HTMLElement; more: HTMLButtonElement; rows: Map<string, CardRow>; limit: number };
   const lanes = new Map<string, Lane>();
   let overview: WorkOverview | null = null;
   let nextDescription = 0;
   let disposed = false;
   let available = true;
-  let selection: { projectId: string; key: string } | null = null;
+  let selection: { projectId: string; key: string; contextTerminalId?: string; attentionId?: string } | null = null;
+  let selectionOpener: HTMLElement | null = null;
   let selectedNavigationKey = "";
   let selectedWork: { project: Project; card: OverviewCard } | null = null;
   let focusSequence = 0;
@@ -310,8 +318,9 @@ export function createProjectOverview(bindings: {
     if (!selection) return false;
     returnToOverview();
     selectedWork = null;
-    const button = lanes.get(selection.projectId)?.rows.get(selection.key)?.button;
+    const button = selectionOpener?.isConnected ? selectionOpener : lanes.get(selection.projectId)?.rows.get(selection.key)?.button;
     selection = null;
+    selectionOpener = null;
     selectedNavigationKey = "";
     bindings.onSelectionChange();
     inspector.clear();
@@ -353,8 +362,17 @@ export function createProjectOverview(bindings: {
     open.className = "overview-open-project";
     open.textContent = "Open project";
     open.setAttribute("aria-describedby", path.id);
+    const newTask = document.createElement("button");
+    newTask.type = "button";
+    newTask.className = "overview-new-project-task";
+    newTask.textContent = "New task";
+    newTask.setAttribute("aria-controls", newTaskElement.id);
+    newTask.setAttribute("aria-describedby", path.id);
+    const actions = document.createElement("div");
+    actions.className = "overview-project-actions";
+    actions.append(newTask, open);
     identity.append(name, path, counts);
-    header.append(identity, open);
+    header.append(identity, actions);
     const cards = document.createElement("div");
     cards.className = "overview-task-grid";
     const empty = document.createElement("p");
@@ -365,7 +383,7 @@ export function createProjectOverview(bindings: {
     more.className = "overview-more";
     more.setAttribute("aria-describedby", path.id);
     node.append(header, cards, empty, more);
-    return { element: node, name, path, counts, list: cards, empty, more, rows: new Map(), limit: PAGE_SIZE };
+    return { element: node, name, path, counts, newTask, list: cards, empty, more, rows: new Map(), limit: PAGE_SIZE };
   }
 
   function renderCards(lane: Lane, cards: OverviewCard[], projectId: string): void {
@@ -428,7 +446,12 @@ export function createProjectOverview(bindings: {
     const all = overview.projects.map((project) => ({ project, cards: projectCards(project) }));
     if (selection) {
       const selectedProject = all.find(({ project }) => project.projectId === selection!.projectId);
-      const selectedCard = selectedProject?.cards.find((card) => card.key === selection!.key);
+      const contextTerminal = selectedProject?.project.terminals.find((terminal) => terminal.terminalId === selection!.contextTerminalId);
+      const contextCard = contextTerminal ? terminalCard(contextTerminal) : null;
+      const card = selection.contextTerminalId ? contextCard?.key === selection.key ? contextCard : null
+        : selectedProject?.cards.find((entry) => entry.key === selection!.key);
+      const attention = overview.items.find((item) => item.id === selection!.attentionId);
+      const selectedCard = card && !("recovery" in card) && attention ? { ...card, action: attention.action } : card;
       selectedWork = available && selectedProject && selectedCard ? { project: selectedProject.project, card: selectedCard } : null;
       if (focusTarget && JSON.stringify(focusTarget) !== JSON.stringify(targetOf(selectedWork))) returnToOverview();
       const navigationKey = JSON.stringify([selection, available && selectedProject && selectedCard
@@ -462,6 +485,7 @@ export function createProjectOverview(bindings: {
       const tasks = project.terminals.reduce((sum, terminal) => sum + terminal.tasks.length, 0);
       lane.name.textContent = project.name;
       lane.path.textContent = project.root;
+      lane.newTask.setAttribute("aria-label", `New task in ${project.name}`);
       lane.counts.textContent = `${tasks} Plan Board task${tasks === 1 ? "" : "s"} · ${project.working} working · ${project.attentionCount} attention`
         + (project.candidateRecoveries.length ? ` · ${project.candidateRecoveries.length} candidate startup issue${project.candidateRecoveries.length === 1 ? "" : "s"}` : "");
       renderCards(lane, cards, project.projectId);
@@ -489,7 +513,11 @@ export function createProjectOverview(bindings: {
     const projectId = target?.closest<HTMLElement>(".overview-project")?.dataset.projectId;
     const lane = projectId ? lanes.get(projectId) : undefined;
     if (!projectId || !lane) return;
-    if (target?.closest(".overview-open-project")) bindings.onNavigate(projectId, null);
+    const newTaskOpener = target?.closest<HTMLButtonElement>(".overview-new-project-task");
+    if (newTaskOpener) {
+      bindings.onSelectionChange();
+      newTask.open(projectId, newTaskOpener);
+    } else if (target?.closest(".overview-open-project")) bindings.onNavigate(projectId, null);
     else if (target?.closest(".overview-more")) {
       const before = lane.list.children.length;
       lane.limit += PAGE_SIZE;
@@ -500,6 +528,7 @@ export function createProjectOverview(bindings: {
       if (key && lane.rows.has(key)) {
         if (focusTarget) returnToOverview();
         selection = { projectId, key };
+        selectionOpener = null;
         selectedNavigationKey = "";
         render();
         inspector.focus();
@@ -522,12 +551,14 @@ export function createProjectOverview(bindings: {
   return {
     render: (value) => { if (!disposed) { overview = value; available = true; newTask.setOverview(value); render(); } },
     clearSelection,
+    getSelectedAttentionId: () => selection?.attentionId ?? null,
     selectTask: (target) => {
       if (disposed || !available || !overview || !findOverviewTask(overview, target)) return false;
       returnToOverview();
       // An explicit global jump reveals its card even if a local filter hid it.
       filter.value = "";
       selection = { projectId: target.projectId, key: target.key };
+      selectionOpener = null;
       selectedNavigationKey = "";
       render();
       const project = overview.projects.find((entry) => entry.projectId === target.projectId)!;
@@ -536,6 +567,29 @@ export function createProjectOverview(bindings: {
       lane.limit = Math.max(lane.limit, index + 1);
       render();
       lane.rows.get(target.key)?.element.scrollIntoView({ block: "nearest" });
+      inspector.focus();
+      return true;
+    },
+    selectAttention: (id, opener) => {
+      if (disposed || !available || !overview) return false;
+      const item = overview.items.find((entry) => entry.id === id);
+      const project = overview.projects.find((entry) => entry.projectId === item?.projectId);
+      const terminal = project?.terminals.find((entry) => entry.terminalId === item?.terminalId && entry.generation === item.generation);
+      if (!item || !project || !terminal || item.action.terminalId !== terminal.terminalId
+        || item.action.generation !== terminal.generation || JSON.stringify(item.workArea) !== JSON.stringify(terminal.workArea)) return false;
+      const cards = item.taskText === null ? [terminalCard(terminal)] : projectCards(project).filter((card): card is OverviewWorkCard => {
+        if ("recovery" in card || card.task?.task.text !== item.taskText) return false;
+        const owner = item.action.kind === "plan" ? card.owner : card.terminal;
+        return owner.terminalId === terminal.terminalId && owner.generation === terminal.generation;
+      });
+      if (cards.length !== 1) return false;
+      returnToOverview();
+      newTask.close(false);
+      selection = { projectId: project.projectId, key: cards[0]!.key, attentionId: id,
+        ...(item.taskText === null ? { contextTerminalId: terminal.terminalId } : {}) };
+      selectionOpener = opener;
+      selectedNavigationKey = "";
+      render();
       inspector.focus();
       return true;
     },

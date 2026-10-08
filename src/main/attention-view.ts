@@ -48,7 +48,7 @@ export function createAttentionView(bindings: {
       finally { refresh(); }
     },
     onTaskCreated: (request, task) => { void revealCreatedTask(request, task); },
-    onSelectionChange: () => { inspectSequence++; },
+    onSelectionChange: () => { inspectSequence++; renderSelection(); },
     onFocusTerminal: bindings.onFocusTerminal,
     onTerminalControl: bindings.onTerminalControl,
     onCandidateRecovery: (projectId, recovery) => { void navigateCandidate({ projectId, candidate: recovery, mode: recovery.recovery }); },
@@ -78,6 +78,21 @@ export function createAttentionView(bindings: {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
   let mode: "attention" | "overview" = "attention";
+
+  function renderSelection(): void {
+    const selectedId = mode === "overview" ? projectOverview.getSelectedAttentionId() : null;
+    for (const [id, row] of rows) {
+      const selected = id === selectedId;
+      row.element.classList.toggle("is-selected", selected);
+      if (mode === "overview") {
+        row.button.setAttribute("aria-pressed", String(selected));
+        row.button.setAttribute("aria-expanded", String(selected));
+      } else {
+        row.button.removeAttribute("aria-pressed");
+        row.button.removeAttribute("aria-expanded");
+      }
+    }
+  }
 
   function restoreWorkspace(): void {
     for (const [node, inert] of workspaceInert) node.inert = inert;
@@ -156,6 +171,30 @@ export function createAttentionView(bindings: {
     }
   }
 
+  async function selectAttention(id: string, opener: HTMLButtonElement): Promise<void> {
+    const sequence = ++inspectSequence;
+    const revision = loadSequence;
+    const isCurrent = (): boolean => !disposed && !element.hidden && mode === "overview" && sequence === inspectSequence;
+    message.textContent = "Loading current attention details…";
+    let value: WorkOverview;
+    try {
+      // Inspecting facts must not use inspectWorkAttention: that IPC activates its workspace.
+      value = await bridge.getWorkOverview();
+    } catch {
+      if (!isCurrent() || revision !== loadSequence) return;
+      overviewUnavailable();
+      message.textContent = "Attention details unavailable. Refresh to load current work.";
+      return;
+    }
+    if (!isCurrent() || revision !== loadSequence) return;
+    loadSequence++;
+    if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
+    receiveOverview(value);
+    render();
+    message.textContent = projectOverview.selectAttention(id, opener) ? ""
+      : "This attention changed or closed, or its task is unavailable. Select its current work.";
+  }
+
   async function inspect(id: string): Promise<void> {
     const sequence = ++inspectSequence;
     const isCurrent = (): boolean => !disposed && !element.hidden && sequence === inspectSequence;
@@ -219,7 +258,10 @@ export function createAttentionView(bindings: {
         button.className = "attention-inspect";
         button.setAttribute("aria-describedby", `${context.id} ${area.id} ${detail.id}`);
         const entry = { element: node, title, context, area, detail, button, item };
-        button.addEventListener("click", () => { void inspect(entry.item.id); });
+        button.addEventListener("click", () => {
+          if (mode === "overview") void selectAttention(entry.item.id, button);
+          else void inspect(entry.item.id);
+        });
         node.append(title, context, area, detail, button);
         row = entry;
         rows.set(item.id, row);
@@ -229,11 +271,14 @@ export function createAttentionView(bindings: {
       row.title.textContent = ATTENTION_LABELS[item.reason];
       row.context.textContent = `${project?.name ?? "Project unavailable"} · ${project?.root ?? "path unavailable"}\n`
         + `${item.taskText ?? "No single task assignment recorded"} · ${item.terminalId} · ${item.model ?? "model unknown"}`;
-      row.area.textContent = item.workArea
-        ? `${item.workArea.kind === "project" ? "Shared project files" : "Separate candidate tree"} · ${item.workArea.root}` : "Assigned work area unavailable";
+      row.area.textContent = item.candidate
+        ? `Separate candidate result · ${item.candidate.root} · version ${item.candidate.version}`
+        : item.workArea ? `${item.workArea.kind === "project" ? "Shared project files" : "Separate candidate tree"} · ${item.workArea.root}` : "Assigned work area unavailable";
       row.detail.textContent = item.reason === "blocked" ? presentBlockedLabel(item.detail) : item.detail ?? "";
       row.detail.hidden = !row.detail.textContent;
-      row.button.textContent = ACTION_LABELS[item.action.kind];
+      row.button.textContent = mode === "overview" ? "Inspect details" : ACTION_LABELS[item.action.kind];
+      if (mode === "overview") row.button.setAttribute("aria-controls", "project-work-inspector");
+      else row.button.removeAttribute("aria-controls");
       const position = list.children[index];
       if (position !== row.element) {
         const focused = row.element.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
@@ -241,6 +286,7 @@ export function createAttentionView(bindings: {
         focused?.focus({ preventScroll: true });
       }
     });
+    renderSelection();
     moreButton.hidden = overview.items.length <= limit;
     moreButton.textContent = `Show more (${Math.max(0, overview.items.length - limit)} remaining)`;
     status.textContent = unavailable ? "Attention unavailable. Previous rows may be outdated. Refresh to load current facts."
@@ -254,6 +300,15 @@ export function createAttentionView(bindings: {
     count.textContent = String(value.items.length);
     toggle.setAttribute("aria-label", `Attention across all projects: ${value.items.length} recorded items`);
     bindings.onOverview(value);
+  }
+
+  function overviewUnavailable(): void {
+    unavailable = true;
+    projectOverview.setUnavailable();
+    count.textContent = "?";
+    toggle.setAttribute("aria-label", "Attention across all projects: unavailable");
+    bindings.onOverview(null);
+    status.textContent = "Attention unavailable. Previous rows may be outdated. Refresh to load current facts.";
   }
 
   async function revealWork(target: WorkSearchTarget, externalCurrent: () => boolean): Promise<boolean> {
@@ -296,12 +351,7 @@ export function createAttentionView(bindings: {
       if (!element.hidden) render();
     } catch {
       if (disposed || sequence !== loadSequence) return;
-      unavailable = true;
-      projectOverview.setUnavailable();
-      count.textContent = "?";
-      toggle.setAttribute("aria-label", "Attention across all projects: unavailable");
-      bindings.onOverview(null);
-      status.textContent = "Attention unavailable. Previous rows may be outdated. Refresh to load current facts.";
+      overviewUnavailable();
     }
   }
 

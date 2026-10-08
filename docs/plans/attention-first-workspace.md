@@ -125,6 +125,14 @@ Coverage is in [`plan-start.test.ts`](../../tests/unit/electron/plan-start.test.
 
 Final observed checks passed: application/test typechecks, no-Git-CLI lint, the production build, **3450 tests in the complete unit suite**, **1024 focused tests across 80 files**, and **37 Electron tests with retries disabled** across Start task, New task, Overview, Jump to work, dispatched-worker inspection and Plan Board. The Start cases prove a real worker writes only the selected task's file, preserves a different active project's dirty editor, coalesces repeated clicks, supports keyboard input and Escape at native 200 percent zoom, and rejects stale snapshots and busy owners. The native disabled-button focus loss found during verification was fixed in the inspector; the physical-alias test now verifies both displayed identity and physical source identity alongside canonical task admission. Build large-chunk warnings and Electron GPU/exit-drain/shutdown diagnostics were non-failing. No Rust changes were made; Rust tests, manual assistive technology, other platforms and long-soak behavior were not run for this block.
 
+### Result attention follow-up
+
+Overview attention now uses **Inspect details** to select the existing inline inspector without activating a project, abandoning Overview or clearing its local filter. Open terminal, plan and check remain explicit actions. Each project heading provides **New task** through the same existing composer, with its exact project preselected and focus restored to its opener; an invalid destination is not replaced.
+
+**Result pending review** projects a task's recorded completed attempt, separately from its task mark, agent activity and check verdict. It does not infer a result from idle, a checked task box, a passing check or tracked paths. An independent result additionally requires a current canonical candidate with a retained capture in ready, settled, verifying or conflict state. Ready denotes an open candidate terminal; it does not invalidate a recorded completed attempt, and attention must not wait for the worker to exit. Its root, version and capture identify the result; source checks are never substituted. Promotion/discard or a new attempt removes/replaces that candidate result's attention. Shared-file results remain historical completion records, not an unapplied-files claim.
+
+This is result availability and review attention, not persistent human acceptance. Reading details, changes or checks never acknowledges the result or changes source files. The existing task, roster, candidate and promotion owners remain authoritative; no second review store or execution path is introduced.
+
 ## Recommendation
 
 **Organize Termina around the user's decisions and task outcomes, rather than around the number of terminal tabs.**

@@ -13,6 +13,7 @@ export const ATTENTION_LABELS: Record<WorkAttentionReason, string> = {
   "verify-stale": "Verify is outdated", "verify-cancelled": "Verify was cancelled",
   "task-incomplete": "Task attempt incomplete", "task-failed": "Task attempt failed",
   "task-interrupted": "Task attempt interrupted", "worker-unavailable": "Assigned worker unavailable",
+  "pending-review": "Result pending review",
 };
 export const ACTION_LABELS: Record<WorkSummaryAction["kind"], string> = {
   terminal: "Inspect terminal", plan: "Inspect plan", changes: "Inspect changes", evidence: "Inspect check", verify: "Open Verify controls",

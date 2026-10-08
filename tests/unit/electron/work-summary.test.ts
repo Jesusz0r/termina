@@ -51,7 +51,7 @@ describe("global factual attention", () => {
     expect(workOverview(summaries)).toEqual({ projects: [{ ...summaries[0], working: 1, attentionCount: 0 }], items: [] });
   });
 
-  it("retains pending and done tasks without attention, with canonical shell and candidate attribution", () => {
+  it("retains pending tasks and completed results with canonical shell and candidate attribution", () => {
     const pending = task();
     const done = { ...task("completed"), text: "Finished task", state: "done" as const };
     const summary = projectWorkSummary(project, [
@@ -61,7 +61,9 @@ describe("global factual attention", () => {
     ]);
     const before = structuredClone(summary);
     const overview = workOverview([summary]);
-    expect(overview).toEqual({ projects: [{ ...summary, working: 0, attentionCount: 0 }], items: [] });
+    expect(overview.projects).toEqual([{ ...summary, working: 0, attentionCount: 1 }]);
+    expect(overview.items).toEqual([expect.objectContaining({ reason: "pending-review", taskText: done.text,
+      action: { kind: "plan", terminalId: "term-1", generation: 3 } })]);
     expect(overview.projects[0]!.terminals).toBe(summary.terminals);
     expect(overview.projects[0]!.terminals[0]!.tasks.map(({ task }) => task)).toEqual([pending, done]);
     expect(overview.projects[0]!.terminals[1]!.workArea).toEqual({ workspaceId: "ws-candidate", root: "/worlds/candidate", kind: "candidate", comparisonId: "cmp-1" });
@@ -151,7 +153,7 @@ describe("factual project/task summary", () => {
     const row = projectWorkSummary(project, [owner], [], [area]).terminals[0]!.tasks[0]!;
     expect(row).toMatchObject({ task: result, worker: null,
       candidate: { comparisonId: "cmp-1", label: "A", root: area.root, version: 2, state: "settled", error: null },
-      nextAction: { kind: "plan", terminalId: owner.id }, attention: [] });
+      nextAction: { kind: "plan", terminalId: owner.id }, attention: ["pending-review"] });
     expect(row.candidate).not.toHaveProperty("sessionFile");
     expect(row.candidate).not.toHaveProperty("evidence");
     expect(row).not.toHaveProperty("verify");
@@ -209,7 +211,8 @@ describe("factual project/task summary", () => {
     expect(summary.verify?.state).toBe("untested");
     expect(summary.trackedChanges).toBe(2);
     expect(summary.attention).toEqual([]);
-    expect(summary.nextAction.kind).toBe("changes");
+    expect(summary.tasks[0]!.attention).toEqual(["pending-review"]);
+    expect(summary.nextAction.kind).toBe("plan");
     expect(summary).not.toHaveProperty("reviewed");
     expect(summary).not.toHaveProperty("accepted");
   });
@@ -246,6 +249,89 @@ describe("factual project/task summary", () => {
     expect(summary.activity).toBeNull();
     expect(summary.verify).toBeNull();
     expect(summary.model).toBeNull();
+  });
+
+  it.each(["ready", "settled", "verifying", "conflict"] as const)("keeps a captured %s result pending review independently of the source's checks", (state) => {
+    const area = candidate({ terminalId: state === "ready" ? "term-2" : null, state, headStateId: "captured-result" });
+    const result: PlanTask = { ...task("completed"), state: "done", model: "result/model",
+      candidate: { comparisonId: area.comparisonId, label: area.label } };
+    const owner = terminal({ plan: [result], verify: { state: "fail", command: "source check", summary: "source failed" } });
+    const before = structuredClone({ owner, area });
+    const summaries = [projectWorkSummary(project, [owner], [], [area])];
+    const overview = workOverview(summaries);
+    expect(overview.items.map(({ reason }) => reason)).toEqual(["verify-failed", "pending-review"]);
+    expect(overview.projects[0]!.attentionCount).toBe(2);
+    expect(overview.items[1]).toMatchObject({ projectId: project.id, terminalId: owner.id, generation: 3,
+      taskText: result.text, model: "result/model", workArea: { root: project.cwd, kind: "project" },
+      candidate: { ...result.candidate, root: area.root, version: 2, headStateId: area.headStateId, state },
+      action: { kind: "plan", terminalId: owner.id, generation: 3 } });
+    expect(overview.items[1]!.detail).toContain("Human review is not recorded");
+    expect(overview.items[1]!.detail).toContain("not applied");
+    expect(JSON.stringify(overview.items[1])).not.toContain("source failed");
+    expect(workOverview(summaries)).toEqual(overview);
+    expect({ owner, area }).toEqual(before);
+  });
+
+  it.each(["creating", "running", "promoting", "cancelled", "error", "discarding", "discarded", "promoted"] as const)("does not call a %s candidate pending review", (state) => {
+    const area = candidate({ state, headStateId: "captured-result" });
+    const result: PlanTask = { ...task("completed"), state: "done", candidate: { comparisonId: area.comparisonId, label: area.label } };
+    expect(workOverview([projectWorkSummary(project, [terminal({ plan: [result] })], [], [area])]).items).toEqual([]);
+  });
+
+  it("does not infer completion from a ready candidate's initial capture", () => {
+    const area = candidate({ state: "ready", headStateId: "initial-capture" });
+    for (const planTask of [task(), task("incomplete"), task("failed"), { ...task("completed"), state: "active" as const }]) {
+      const result = { ...planTask, candidate: { comparisonId: area.comparisonId, label: area.label } };
+      expect(workOverview([projectWorkSummary(project, [terminal({ plan: [result] })], [], [area])]).items
+        .some(({ reason }) => reason === "pending-review")).toBe(false);
+    }
+  });
+
+  it("requires an available captured candidate result instead of falling back to source evidence", () => {
+    const area = candidate({ state: "settled", headStateId: null });
+    const result: PlanTask = { ...task("completed"), state: "done", candidate: { comparisonId: area.comparisonId, label: area.label } };
+    const owner = terminal({ plan: [result], trackedChanges: 4, verify: { state: "pass", command: "source check", summary: "source passed" } });
+    for (const areas of [[], [area], [{ ...area, comparisonId: "different" }], [{ ...area, label: "B" as const }]]) {
+      expect(workOverview([projectWorkSummary(project, [owner], [], areas)]).items).toEqual([]);
+    }
+  });
+
+  it("does not infer review from idle, task marks, passing checks, tracked paths or an active attempt", () => {
+    const inputs = [
+      terminal({ plan: [{ ...task(), state: "done" }], trackedChanges: 4, verify: { state: "pass", command: "test", summary: "green" } }),
+      terminal({ plan: [{ ...task("completed"), state: "active", workerId: "missing" }] }),
+      terminal({ plan: [{ ...task("completed"), state: "active" }] }),
+      terminal({ type: "shell", plan: [{ ...task("completed"), state: "done" }] }),
+      terminal({ workspace: null, plan: [{ ...task("completed"), state: "done" }] }),
+      terminal({ workspace: { id: "candidate", root: "/candidate", primary: false }, plan: [{ ...task("completed"), state: "done" }] }),
+    ];
+    for (const input of inputs) {
+      expect(workOverview([projectWorkSummary(project, [input])]).items.some(({ reason }) => reason === "pending-review")).toBe(false);
+    }
+  });
+
+  it("keeps historical shared-file completion separate from acceptance or an unapplied candidate claim", () => {
+    const input = terminal({ plan: [{ ...task("completed"), state: "done" }] });
+    const overview = workOverview([projectWorkSummary(project, [input])]);
+    expect(overview.items).toHaveLength(1);
+    expect(overview.items[0]).toMatchObject({ reason: "pending-review", taskText: task().text });
+    expect(overview.items[0]!.detail).toContain("shared project files");
+    expect(overview.items[0]!.detail).not.toContain("not applied");
+    expect(overview.items[0]).not.toHaveProperty("candidate");
+    expect(input.plan[0]!.state).toBe("done");
+  });
+
+  it("scopes review attention to the exact captured result and removes it when the attempt is replaced", () => {
+    const area = candidate({ state: "settled", headStateId: "captured-result" });
+    const result: PlanTask = { ...task("completed"), state: "done", candidate: { comparisonId: area.comparisonId, label: area.label } };
+    const items = (candidateArea = area, plan = [result]) => workOverview([projectWorkSummary(project, [terminal({ plan })], [], [candidateArea])]).items;
+    const original = items()[0]!;
+    for (const changed of [{ ...area, root: "/different/result" }, { ...area, version: 3 }, { ...area, headStateId: "new-result" }]) {
+      expect(items(changed)[0]!.id).not.toBe(original.id);
+    }
+    expect(items(area, [{ ...result, state: "active", workerId: "new-worker", dispatchResult: undefined }])
+      .some(({ reason }) => reason === "pending-review")).toBe(false);
+    expect(items(area, [])).toEqual([]);
   });
 
   it("projects no heavy terminal buffers, diffs or per-file review lists", () => {

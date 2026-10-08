@@ -69,6 +69,12 @@ export function projectWorkSummary(
         if (task.dispatchResult?.outcome === "failed") taskAttention.push("task-failed");
         if (task.dispatchResult?.outcome === "interrupted") taskAttention.push("task-interrupted");
       }
+      // A completed attempt is a result to inspect, not human acceptance. Candidate
+      // results additionally need a retained capture, never the owner's source checks.
+      // Ready means the terminal is open, not that the recorded attempt is incomplete.
+      if (terminal.type === "agent" && !task.workerId && task.state !== "active" && task.dispatchResult?.outcome === "completed"
+        && (task.candidate ? candidate?.headStateId && ["ready", "settled", "verifying", "conflict"].includes(candidate.state)
+          : terminal.workspace?.primary)) taskAttention.push("pending-review");
       return {
         task,
         worker,
@@ -96,6 +102,7 @@ const ATTENTION_PRIORITY: Record<WorkAttentionReason, number> = {
   blocked: 0, "worker-unavailable": 0,
   "task-incomplete": 1, "task-failed": 1, "task-interrupted": 1,
   "verify-failed": 2, "verify-timeout": 2, "verify-stale": 2, "verify-cancelled": 2,
+  "pending-review": 3,
 };
 
 /** Compose canonical project summaries. This adds no execution or attention state. */
@@ -113,14 +120,15 @@ export function workOverview(summaries: readonly ProjectWorkSummary[]): WorkOver
       });
     }
     for (const terminal of project.terminals) {
-      const append = (reason: WorkAttentionReason, taskText: string | null, taskIdentity: unknown, detail: string | null, action: WorkSummaryAction) => {
+      const append = (reason: WorkAttentionReason, taskText: string | null, taskIdentity: unknown, detail: string | null,
+        action: WorkSummaryAction, candidate?: WorkAttentionItem["candidate"]) => {
         // Opaque content identity, not a capability or registry token. Recompute to validate.
         const identity = [project.projectId, project.root, terminal.terminalId, terminal.generation,
-          terminal.workArea, taskIdentity, taskText, reason, action];
+          terminal.workArea, taskIdentity, taskText, reason, action, candidate ?? null];
         const id = `work-${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
         items.push({ id, projectId: project.projectId, terminalId: terminal.terminalId,
           generation: terminal.generation, model: terminal.model, taskText, reason, detail,
-          workArea: terminal.workArea, action });
+          workArea: terminal.workArea, action, ...(candidate ? { candidate } : {}) });
       };
       const assignment = assignments.get(`${terminal.terminalId}:${terminal.generation}`);
       for (const reason of terminal.attention) {
@@ -131,11 +139,14 @@ export function workOverview(summaries: readonly ProjectWorkSummary[]): WorkOver
           ? [assignment.owner.terminalId, assignment.owner.generation, assignment.owner.workArea, assignment.index] : null,
           detail, { kind: reason === "blocked" ? "terminal" : "evidence", terminalId: terminal.terminalId, generation: terminal.generation });
       }
-      terminal.tasks.forEach(({ task, attention, nextAction }, index) => {
+      terminal.tasks.forEach(({ task, attention, nextAction, candidate }, index) => {
         for (const reason of attention) {
           const detail = reason === "worker-unavailable" ? `Assigned worker ${task.workerId} is unavailable.`
-            : task.dispatchResult ? `Previous attempt ${task.dispatchResult.outcome} (worker ${task.dispatchResult.workerId}).` : null;
-          append(reason, task.text, [terminal.terminalId, index, task.workerId ?? null, task.dispatchResult ?? null], detail, nextAction);
+            : reason === "pending-review" ? `Completed attempt (worker ${task.dispatchResult!.workerId}). Human review is not recorded. `
+              + (candidate ? "The captured candidate result is not applied to the project. Inspect its changes and checks."
+                : "This attempt used shared project files. Inspect the current changes and exact checks; completion does not establish acceptance.")
+              : task.dispatchResult ? `Previous attempt ${task.dispatchResult.outcome} (worker ${task.dispatchResult.workerId}).` : null;
+          append(reason, task.text, [terminal.terminalId, index, task.workerId ?? null, task.dispatchResult ?? null], detail, nextAction, candidate ?? undefined);
           // Task model is an explicit override; otherwise it inherits the owner.
           items[items.length - 1]!.model = task.model ?? terminal.model;
         }
