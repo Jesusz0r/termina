@@ -134,6 +134,19 @@ describe("TerminalRosterStore durable save", () => {
     expect(await readFile(path, "utf8")).toMatch(/}\n$/);
   });
 
+  it("durably saves independent result provenance and snapshots candidate metadata before queuing", async () => {
+    const path = await preparePath();
+    const store = openStore();
+    const terminal = { ...agent("term-1"), plan: [{ text: "Fix file.ts", paths: ["file.ts"], state: "pending" as const,
+      candidate: { comparisonId: "cmp-12", label: "A" as const }, dispatchResult: { workerId: "term-2", outcome: "interrupted" as const } }] };
+    store.save(path, [terminal], []);
+    terminal.plan[0]!.candidate!.comparisonId = "cmp-13";
+    await store.drain();
+    expect((await loadRosterFile(path)).entries[0]?.plan).toEqual([{ text: "Fix file.ts", paths: ["file.ts"], state: "pending",
+      candidate: { comparisonId: "cmp-12", label: "A" }, dispatchResult: { workerId: "term-2", outcome: "interrupted" } }]);
+    expect(probes.events).toEqual(["sync", "rename", "syncParentDir"]);
+  });
+
   it("replaces an existing roster with complete new JSON, never a mix", async () => {
     const path = await preparePath();
     const store = openStore();

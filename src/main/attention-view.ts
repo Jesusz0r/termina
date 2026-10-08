@@ -1,8 +1,10 @@
-import type { AgentActivityView, CandidateRecoverySummary, PlanTask, PlanTaskCreateRequest, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../shared/types";
+import type { AgentActivityView, PlanTask, PlanTaskCreateRequest, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../shared/types";
 import { presentBlockedLabel } from "../known-state";
 import { ACTION_LABELS, ATTENTION_LABELS } from "./work-summary";
 import { createProjectOverview, findOverviewTask, projectCards, taskTarget } from "./project-overview";
 import type { WorkSearchTarget } from "./work-search";
+
+import type { CandidateNavigationTarget } from "./candidate-navigation";
 
 const PAGE_SIZE = 50;
 
@@ -21,8 +23,8 @@ export function createAttentionView(bindings: {
   onNewProject(): void;
   onFocusTerminal: Parameters<typeof createProjectOverview>[0]["onFocusTerminal"];
   onTerminalControl: Parameters<typeof createProjectOverview>[0]["onTerminalControl"];
-  onCandidateRecovery(projectId: string, recovery: CandidateRecoverySummary, isCurrent: () => boolean): Promise<boolean>;
-  onRevealCandidate(recovery: CandidateRecoverySummary): void;
+  onCandidateNavigate(target: CandidateNavigationTarget, isCurrent: () => boolean): Promise<boolean>;
+  onRevealCandidate(target: CandidateNavigationTarget): void;
 }): {
   open(opener?: HTMLElement, mode?: "attention" | "overview"): void;
   revealWork(target: WorkSearchTarget, isCurrent: () => boolean): Promise<boolean>;
@@ -49,7 +51,8 @@ export function createAttentionView(bindings: {
     onSelectionChange: () => { inspectSequence++; },
     onFocusTerminal: bindings.onFocusTerminal,
     onTerminalControl: bindings.onTerminalControl,
-    onCandidateRecovery: (projectId, recovery) => { void navigateCandidate(projectId, recovery); },
+    onCandidateRecovery: (projectId, recovery) => { void navigateCandidate({ projectId, candidate: recovery, mode: recovery.recovery }); },
+    onCandidateInspect: (task) => { void navigateCandidate({ projectId: task.projectId, task, mode: "inspect" }); },
     onFocusChange: (focused) => {
       element.classList.toggle("task-focus", focused);
       title.textContent = focused ? "Focused work" : mode === "overview" ? "All projects" : "Attention across all projects";
@@ -116,16 +119,16 @@ export function createAttentionView(bindings: {
     }
   }
 
-  async function navigateCandidate(projectId: string, recovery: CandidateRecoverySummary): Promise<void> {
+  async function navigateCandidate(target: CandidateNavigationTarget): Promise<void> {
     if (disposed || element.hidden) return;
     const sequence = ++inspectSequence;
     const isCurrent = (): boolean => !disposed && !element.hidden && sequence === inspectSequence;
     try {
-      const navigated = await bindings.onCandidateRecovery(projectId, recovery, isCurrent);
+      const navigated = await bindings.onCandidateNavigate(target, isCurrent);
       if (!isCurrent()) return;
       if (!navigated) { message.textContent = "Candidate recovery unavailable or changed. Refresh to inspect current work."; refresh(); return; }
       close(false, true);
-      bindings.onRevealCandidate(recovery);
+      bindings.onRevealCandidate(target);
     } catch {
       if (isCurrent()) { message.textContent = "Candidate recovery unavailable. Refresh and try again."; refresh(); }
     }

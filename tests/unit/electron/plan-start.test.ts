@@ -12,7 +12,7 @@ const request: PlanTaskStartRequest = { owner, projectRoot: "/displayed/root", t
 describe("explicit task Start admission and snapshot validation", () => {
   it("copies owner and every task field without retaining mutable renderer input", () => {
     const value = { ...request, task: { ...task, workerId: "term-2", claimed: ["file.ts"],
-      dispatchResult: { workerId: "old", outcome: "failed" as const } } };
+      dispatchResult: { workerId: "old", outcome: "failed" as const }, candidate: { comparisonId: "cmp-1", label: "A" as const } } };
     const parsed = parsePlanTaskStartRequest(value)!;
     expect(parsed).toEqual(value);
     expect(parsed.owner).not.toBe(value.owner);
@@ -20,6 +20,7 @@ describe("explicit task Start admission and snapshot validation", () => {
     expect(parsed.task.paths).not.toBe(value.task.paths);
     expect(parsed.task.claimed).not.toBe(value.task.claimed);
     expect(parsed.task.dispatchResult).not.toBe(value.task.dispatchResult);
+    expect(parsed.task.candidate).not.toBe(value.task.candidate);
   });
 
   it.each([null, {}, { ...request, owner: null }, { ...request, projectRoot: "" },
@@ -30,6 +31,9 @@ describe("explicit task Start admission and snapshot validation", () => {
     { ...request, task: { ...task, workerId: {} } }, { ...request, task: { ...task, claimed: false } },
     { ...request, task: { ...task, dispatchResult: {} } },
     { ...request, task: { ...task, dispatchResult: { workerId: "old", outcome: "accepted" } } },
+    ...[null, {}, { comparisonId: "cmp-0", label: "A" }, { comparisonId: "../outside", label: "A" },
+      { comparisonId: "cmp-1", label: "C" }, { comparisonId: `cmp-${"1".repeat(64)}`, label: "A" },
+      { comparisonId: 1, label: "A" }].map((candidate) => ({ ...request, task: { ...task, candidate } })),
   ])("rejects malformed snapshot %j", (value) => expect(parsePlanTaskStartRequest(value)).toBeNull());
 
   it("requires exactly one initial pending row, not a historical attempt or active assignment", () => {
@@ -39,6 +43,7 @@ describe("explicit task Start admission and snapshot validation", () => {
     for (const changed of [
       { ...task, state: "active" as const }, { ...task, state: "done" as const },
       { ...task, workerId: "worker" }, { ...task, dispatchResult: { workerId: "old", outcome: "incomplete" as const } },
+      { ...task, candidate: { comparisonId: "cmp-1", label: "A" as const } },
     ]) expect(planStartError(null, [changed], changed)).toEqual(expect.any(String));
     expect(planStartError("busy", [task], task)).toBe("busy");
   });
@@ -57,7 +62,8 @@ describe("explicit task Start admission and snapshot validation", () => {
     expect(samePlanTaskSnapshot(task, structuredClone(task))).toBe(true);
     for (const changes of [{ text: "Other" }, { paths: ["other.ts"] }, { model: "provider/other" },
       { state: "active" as const }, { workerId: "term-2" }, { claimed: [] },
-      { dispatchResult: { workerId: "old", outcome: "failed" as const } }]) {
+      { dispatchResult: { workerId: "old", outcome: "failed" as const } },
+      { candidate: { comparisonId: "cmp-1", label: "B" as const } }]) {
       expect(samePlanTaskSnapshot(task, { ...task, ...changes })).toBe(false);
     }
   });
@@ -67,7 +73,7 @@ describe("explicit task Start admission and snapshot validation", () => {
     const facts = { id: owner.terminalId, generation: owner.generation, type: "agent" as const, model: null,
       activity: { state: "idle" as const, reason: null }, workspace: { id: owner.workspaceId, root: owner.root, primary: true },
       verify: { state: "untested" as const, command: null, summary: null }, trackedChanges: 0, plan: [task, retry],
-      planCreationError: "The Plan Board is full (20 tasks).", planStartOwnerError: null };
+      planCreationError: "The Plan Board is full (20 tasks).", planStartOwnerError: null, dispatchAssignment: null };
     const projected = projectWorkSummary({ id: owner.projectId, cwd: request.projectRoot }, [facts]).terminals[0]!;
     expect(projected.tasks[0]!.startError).toBeNull();
     expect(projected.tasks[1]!.startError).toBe(planStartError(null, facts.plan, retry));

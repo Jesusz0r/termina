@@ -2970,6 +2970,7 @@ class TerminaApp {
                 paths: t.paths,
                 state: t.state === "done" ? "done" : "pending",
                 ...(t.dispatchResult ? { dispatchResult: t.dispatchResult } : {}),
+                ...(t.candidate ? { candidate: { ...t.candidate } } : {}),
                 ...(model ? { model } : {}),
               };
             });
@@ -4024,7 +4025,18 @@ class TerminaApp {
     const workspaceGeneration = workspace.generation;
     const projectGeneration = project.activationGeneration;
     const canonicalRoot = project.canonicalRoot;
+    let assignedWorkerId: string | null = null;
+    let assignedCandidate: PlanTask["candidate"];
     const currentError = (): string | null => {
+      const sameTask = !!task && (assignedWorkerId === null
+        ? samePlanTaskSnapshot(task, request.task)
+        : task.text === request.task.text && ((task.workerId === assignedWorkerId
+            && task.state === "active" && task.dispatchResult === undefined
+            && JSON.stringify(task.claimed) === "[]")
+          || (task.workerId === undefined && task.claimed === undefined && task.dispatchResult?.workerId === assignedWorkerId))
+          && JSON.stringify(task.paths) === JSON.stringify(request.task.paths)
+          && task.model === request.task.model
+          && JSON.stringify(task.candidate) === JSON.stringify(assignedCandidate));
       if (this.projects.get(owner.projectId) !== project || project.cwd !== request.projectRoot
         || project.activationGeneration !== projectGeneration || project.canonicalRoot !== canonicalRoot
         || this.projectOfTerminal(inst.id) !== project || inst.projectId !== owner.projectId
@@ -4032,15 +4044,17 @@ class TerminaApp {
         || inst.generation !== owner.generation || inst.workspaceId !== owner.workspaceId
         || project.workspaces.get(owner.workspaceId) !== workspace || this.workspaceOfTerminal(inst) !== workspace
         || workspace.generation !== workspaceGeneration || workspace.root !== owner.root || inst.cwd !== owner.root
-        || inst.plan !== plan || !task || !samePlanTaskSnapshot(task, request.task)
+        || inst.plan !== plan || plan.filter((entry) => entry.text === request.task.text).length !== 1
+        || plan.find((entry) => entry.text === request.task.text) !== task || !sameTask
         || !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), expected)) {
         return "The Plan Board context has changed.";
       }
-      return planStartError(planOwnerError(this.planOwnerFacts(inst, project, workspace)), plan, task);
+      const ownerError = planOwnerError(this.planOwnerFacts(inst, project, workspace));
+      return assignedWorkerId === null ? planStartError(ownerError, plan, task) : ownerError;
     };
     const error = currentError();
     if (error) return { ok: false, error };
-    return this.dispatchRun(inst.id, request.task.text, undefined, currentError);
+    return this.dispatchRun(inst.id, request.task.text, undefined, currentError, (id) => { assignedWorkerId = id; assignedCandidate = task?.candidate ? { ...task.candidate } : undefined; });
   }
 
   private async createPlanTask(value: unknown): Promise<import("../shared/types.js").PlanTaskCreateResult> {
@@ -4256,8 +4270,8 @@ class TerminaApp {
     const used = new Set<string>();
     const owner = this.runtime.get(ownerId);
     if (!owner) return used;
-    for (const entry of this.dispatchRuns.values()) {
-      if (entry.ownerId !== ownerId) continue;
+    for (const [workerId, entry] of this.dispatchRuns) {
+      if (entry.ownerId !== ownerId || this.runtime.get(workerId)?.workspaceId !== owner.workspaceId) continue;
       const task = findTaskByText(owner.plan, entry.taskText);
       if (!task) continue;
       for (const p of task.paths) used.add(await this.taskPathKey(p, root));
@@ -4281,7 +4295,7 @@ class TerminaApp {
     const jobs: Array<{ task: PlanTask; id: string }> = [];
     const seen = new Set<string>();
     for (const [id, entry] of this.dispatchRuns) {
-      if (entry.ownerId !== owner.id) continue;
+      if (entry.ownerId !== owner.id || this.runtime.get(id)?.workspaceId !== owner.workspaceId) continue;
       const task = findTaskByText(owner.plan, entry.taskText);
       if (!task) continue;
       jobs.push({ task, id });
@@ -4318,6 +4332,7 @@ class TerminaApp {
     taskText?: string,
     model?: string,
     currentError?: () => string | null,
+    independentAssignment?: (terminalId: string) => void,
   ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     if (this.dispatchPreparations.has(ownerId)) return { ok: false, error: "A dispatch is already preparing for this Plan Board." };
     this.dispatchPreparations.add(ownerId);
@@ -4327,7 +4342,7 @@ class TerminaApp {
     };
     try {
       assertCurrent();
-      return await this.dispatchPreparedRun(ownerId, taskText, model, assertCurrent);
+      return await this.dispatchPreparedRun(ownerId, taskText, model, assertCurrent, independentAssignment);
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     } finally {
@@ -4340,6 +4355,7 @@ class TerminaApp {
     taskText: string | undefined,
     model: string | undefined,
     assertCurrent: () => void,
+    independentAssignment?: (terminalId: string) => void,
   ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     const owner = this.runtime.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
@@ -4358,9 +4374,131 @@ class TerminaApp {
     if (this.disposed || this.projectIsSwitching(dispatchOwnerId)) return { ok: false, error: "the project is changing" };
     const rendererTarget = this.captureRendererSendTarget();
     if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — run /plan first" };
+    const namedTask = taskText === undefined ? undefined : owner.plan.find((entry) => entry.text === taskText);
+    if (!independentAssignment && taskText === undefined) {
+      const isolated = owner.plan.filter((entry) => entry.candidate && !entry.workerId && entry.state !== "active" && entry.state !== "done");
+      let dispatched = 0;
+      let error: string | undefined;
+      for (const task of isolated) {
+        const result = await this.dispatchPreparedRun(ownerId, task.text, model, assertCurrent, () => {});
+        dispatched += result.dispatched ?? 0;
+        error = result.error ?? error;
+      }
+      if (isolated.length) {
+        if (owner.plan.some((entry) => !entry.candidate && !entry.workerId && entry.state !== "active" && entry.state !== "done")) {
+          // Isolated attempts above are now active or remain explicitly fenced
+          // by their candidate provenance; shared selection excludes them.
+          const result = await this.dispatchSharedPreparedRun(ownerId, taskText, ipcModel, assertCurrent);
+          dispatched += result.dispatched ?? 0;
+          error = result.error ?? error;
+        }
+        return dispatched ? { ok: true, dispatched } : { ok: false, error: error ?? "no dispatch worker started" };
+      }
+    }
+    if (independentAssignment || namedTask?.candidate) {
+      assertCurrent();
+      if (this.ownerDispatchCount(ownerId) >= MAX_DISPATCH_WORKERS) return { ok: false, error: "All task workers are busy." };
+      const task = owner.plan.find((entry) => entry.text === taskText);
+      if (!task || task.state === "active" || task.state === "done" || task.workerId) return { ok: false, error: "The task is no longer pending." };
+      const manager = this.projectOfTerminal(ownerId)?.worldlines;
+      if (!manager) return { ok: false, error: "Isolated task sessions are unavailable." };
+      const original = structuredClone(task);
+      const project = this.projectOfTerminal(ownerId)!;
+      const workspace = this.workspaceOfTerminal(owner);
+      const plan = owner.plan;
+      const projectGeneration = project.activationGeneration;
+      const canonicalRoot = project.canonicalRoot;
+      const projectRoot = project.cwd;
+      const ownerGeneration = owner.generation;
+      const ownerModel = owner.model;
+      const ownerThinkingLevel = owner.thinkingLevel;
+      const workspaceGeneration = workspace?.generation;
+      const workspaceRoot = workspace?.root;
+      const startupAssignment: { workerId: string | null; snapshot: PlanTask | null } = { workerId: null, snapshot: null };
+      const assertIndependentCurrent = (): void => {
+        assertCurrent();
+        const settled = startupAssignment.workerId !== null && task.workerId === undefined && task.claimed === undefined
+          && task.dispatchResult?.workerId === startupAssignment.workerId;
+        const snapshot = startupAssignment.snapshot ?? original;
+        const executionTask = settled ? { ...task, state: snapshot.state, workerId: snapshot.workerId,
+          claimed: snapshot.claimed, dispatchResult: snapshot.dispatchResult } : task;
+        if (this.runtime.get(ownerId) !== owner || this.projectOfTerminal(ownerId) !== project
+          || this.projects.get(project.id) !== project || project.activationGeneration !== projectGeneration
+          || project.canonicalRoot !== canonicalRoot || project.cwd !== projectRoot || owner.generation !== ownerGeneration
+          || owner.model !== ownerModel || owner.thinkingLevel !== ownerThinkingLevel
+          || this.workspaceOfTerminal(owner) !== workspace || workspace?.generation !== workspaceGeneration
+          || workspace?.root !== workspaceRoot || owner.cwd !== workspaceRoot || owner.plan !== plan
+          || plan.filter((entry) => entry.text === original.text).length !== 1
+          || plan.find((entry) => entry.text === original.text) !== task
+          || !samePlanTaskSnapshot(executionTask, snapshot)
+          || (rendererTarget !== null && !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget))) {
+          throw new Error("The Plan Board context has changed.");
+        }
+        const ownerError = planOwnerError(this.planOwnerFacts(owner, project, workspace));
+        if (ownerError) throw new Error(ownerError);
+      };
+      assertIndependentCurrent();
+      const workerModel = dispatchWorkerModel(task, ipcModel);
+      const result = await manager.createIndependentSession({
+        model: workerModel ?? owner.model, thinkingLevel: owner.thinkingLevel,
+        initialTask: task.text, assertCurrent: assertIndependentCurrent,
+        beforeSpawn: (id, candidate) => {
+          assertIndependentCurrent();
+          startupAssignment.workerId = id;
+          this.dispatchWorkers.set(id, task.text);
+          this.dispatchRuns.set(id, { ownerId, taskText: task.text });
+          task.workerId = id;
+          task.claimed = [];
+          task.candidate = candidate;
+          delete task.dispatchResult;
+          task.state = "active";
+          startupAssignment.snapshot = structuredClone(task);
+          independentAssignment?.(id);
+          this.savePlanRoster(owner);
+        },
+      });
+      if (!result.ok) {
+        const { workerId, snapshot } = startupAssignment;
+        if (workerId) {
+          const assignment = this.dispatchRuns.get(workerId);
+          if (!assignment || (assignment.ownerId === ownerId && assignment.taskText === original.text)) {
+            if (this.dispatchWorkers.get(workerId) === original.text) this.dispatchWorkers.delete(workerId);
+            if (assignment) this.dispatchRuns.delete(workerId);
+          }
+          for (const row of new Set([task, ...owner.plan])) {
+            if (row.workerId !== workerId) continue;
+            delete row.workerId;
+            delete row.claimed;
+            if (row.state === "active") row.state = original.state;
+            if (JSON.stringify(row.candidate) === JSON.stringify(snapshot?.candidate)) {
+              if (original.candidate) row.candidate = { ...original.candidate };
+              else delete row.candidate;
+            }
+            if (row.dispatchResult === undefined && original.dispatchResult) row.dispatchResult = { ...original.dispatchResult };
+          }
+        }
+        if (this.runtime.get(ownerId) === owner && this.projects.get(project.id) === project
+          && project.terminalIds.has(ownerId)) {
+          this.savePlanRoster(owner);
+          this.sendPlan(owner, rendererTarget);
+        }
+        return { ok: false, error: result.error ?? "The isolated task could not start." };
+      }
+      this.sendPlan(owner, rendererTarget);
+      return { ok: true, dispatched: 1 };
+    }
+    return this.dispatchSharedPreparedRun(ownerId, taskText, ipcModel, assertCurrent);
+  }
+
+  private async dispatchSharedPreparedRun(
+    ownerId: string, taskText: string | undefined, ipcModel: string | undefined, assertCurrent: () => void,
+  ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
+    const owner = this.runtime.get(ownerId);
+    if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
     const ownerWs = this.workspaceOfTerminal(owner);
-    for (const entry of this.dispatchRuns.values()) {
-      if (entry.ownerId === ownerId) continue;
+    const rendererTarget = this.captureRendererSendTarget();
+    for (const [workerId, entry] of this.dispatchRuns) {
+      if (entry.ownerId === ownerId || this.runtime.get(workerId)?.workspaceId !== ownerWs?.id) continue;
       const running = this.runtime.get(entry.ownerId);
       if (running && ownerWs && running.workspaceId === ownerWs.id) {
         return { ok: false, error: "a dispatch is already running" };
@@ -4370,7 +4508,7 @@ class TerminaApp {
     const inFlightPathKeys = await this.dispatchPathKeysInFlight(owner.id, dispatchRoot);
     assertCurrent();
     const picked = await pickDispatchTasks({
-      plan: owner.plan,
+      plan: owner.plan.filter((entry) => !entry.candidate),
       remainingSlots: MAX_DISPATCH_WORKERS - this.ownerDispatchCount(owner.id),
       inFlightPathKeys,
       pathKey: (p) => this.taskPathKey(p, dispatchRoot),
@@ -4381,8 +4519,7 @@ class TerminaApp {
     const chosen = picked.tasks;
     const alreadyDispatching = this.ownerDispatchCount(ownerId) > 0;
     if (owner.busy && !alreadyDispatching) owner.pty.write("\x03"); // the workers replace the owner's run
-    // Structured startup skips the interactive preflight. Hold a real write
-    // lease across the flush so the editor saves go through as a genuine
+    // Hold a real write lease across the flush so the editor saves go through as a genuine
     // holder (file:flush-save admits only the current holder).
     if (ownerWs) {
       const dispatchWriter = `dispatch:${ownerId}`;
@@ -4759,6 +4896,7 @@ class TerminaApp {
     owner: AgentTerminalInstance,
     expected?: PtyRendererSendTarget | null,
   ): void {
+    if (worker.workspaceId !== owner.workspaceId) return;
     let changed = false;
     for (const [p, f] of worker.modified) {
       if (!owner.modified.has(p)) {
@@ -5278,11 +5416,12 @@ class TerminaApp {
         id: inst.id, generation: inst.generation, type: inst.type, model: inst.model,
         activity: activityView(activityFor(this.activityInputs.get(id) ?? emptyActivityInput())),
         workspace, verify: inst.verify,
+        dispatchAssignment: this.dispatchRuns.get(inst.id) ?? null,
         trackedChanges: inst.modified.size, plan: inst.plan, planCreationError: this.planCreationError(inst, project, workspace),
         planStartOwnerError: planOwnerError(this.planOwnerFacts(inst, project, workspace)),
       }];
     });
-    return projectWorkSummary(project, terminals, project.worldlines?.recoverySummaries() ?? []);
+    return projectWorkSummary(project, terminals, project.worldlines?.recoverySummaries() ?? [], project.worldlines?.list() ?? []);
   }
 
   private workOverview(): WorkOverview {
@@ -5572,7 +5711,7 @@ class TerminaApp {
             this.savePlanRoster(ownerInst);
             this.sendPlan(ownerInst, rendererTarget);
             this.collectWorker(inst, ownerInst, rendererTarget);
-            this.maybeAutoVerify(ownerInst, task?.state === "done" ? task.text : null);
+            this.maybeAutoVerify(inst.workspaceId === ownerInst.workspaceId ? ownerInst : inst, task?.state === "done" ? task.text : null);
           }
           // The run entry goes; the tab label stays until the terminal exits.
           this.dispatchRuns.delete(inst.id);

@@ -3,6 +3,7 @@
  * handlers and calls these before any fs/pty/snapshot work.
  */
 import { isRecord } from "../../shared/guards.js";
+import { parsePlanTaskCandidate } from "../plan-board.js";
 import { CHALLENGE_PROFILES, type ChallengeProfile, type RendererIpcCapability, type UnsavedConfirmResult } from "../../shared/types.js";
 
 export function isChallengeProfile(value: unknown): value is ChallengeProfile {
@@ -143,8 +144,11 @@ export function parsePlanTaskStartRequest(value: unknown): import("../../shared/
   const result = task.dispatchResult;
   if (result !== undefined && (!isRecord(result) || !bounded(result.workerId, 64)
     || typeof result.outcome !== "string" || !["completed", "incomplete", "failed", "interrupted"].includes(result.outcome))) return null;
+  const candidate = parsePlanTaskCandidate(task.candidate);
+  if (task.candidate !== undefined && !candidate) return null;
   return { owner: envelope.owner, projectRoot: envelope.projectRoot, task: {
     text: task.text, paths: [...task.paths], state: task.state,
+    ...(candidate ? { candidate } : {}),
     ...(task.model !== undefined ? { model: task.model } : {}),
     ...(task.workerId !== undefined ? { workerId: task.workerId } : {}),
     ...(task.claimed !== undefined ? { claimed: [...task.claimed] } : {}),

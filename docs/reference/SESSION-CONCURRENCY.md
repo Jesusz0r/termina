@@ -4,6 +4,8 @@ New agent terminals automatically get an isolated work area when another live te
 
 The area uses the existing native snapshot/template, candidate sandbox, session store, and startup handshake. Its conversation starts fresh; restored legacy tabs keep their conversation through the existing session fork worker. The initial captured source is the merge base. Independent sessions have no invented source run or B candidate.
 
+Creating a task only adds it to the selected Plan Board. Explicit Start sends only that task to a new independent candidate. Preparation captures persisted source files without forcing dirty editor models to save or changing the active project. It does not apply, stage, or commit candidate changes to the source. Retry creates another candidate and retains the previous attempt.
+
 Independent session files and conversations survive project close, app shutdown, and crash recovery. Their captured template and source snapshot store remain retained, with a primary checkpoint for merge ancestry. Reopening the project restores each area through the normal candidate reopen handshake. Missing or unproven resources stay retained and cannot launch. `/clear` does not discard independent work areas. Review and merge results through the existing Worldlines actions; discard removes an area explicitly.
 
 The existing candidate requirements still apply: Git, the supported macOS sandbox, sufficient disk space, and a maximum of three candidate areas per project. Retained independent areas count toward that budget, including failed startups; explicit discard releases their slot. Failed preparation reports an error and never falls back to another unrestricted writer on the primary source.

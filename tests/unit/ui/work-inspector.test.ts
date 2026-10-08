@@ -16,14 +16,14 @@ function terminal(id: string, overrides: Partial<WorkSummaryTerminalFacts> = {})
   return {
     id, generation: 4, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: "ws-1", root: "/projects/example", primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, ...overrides,
+    verify: { state: "untested", command: null, summary: null }, dispatchAssignment: null, trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, ...overrides,
   };
 }
 function selection(kind: WorkSummaryAction["kind"] = "evidence", shell = false): { project: ProjectWorkSummary; card: OverviewWorkCard } {
   const project = projectWorkSummary({ id: "project-1", cwd: "/projects/example" }, [
     terminal("owner", { generation: 7, plan: [{ text: "Repair parser", state: "pending", paths: ["src/parser.ts"], workerId: "worker" }] }),
     terminal("worker", {
-      type: shell ? "shell" : "agent", generation: 12,
+      type: shell ? "shell" : "agent", generation: 12, dispatchAssignment: { ownerId: "owner", taskText: "Repair parser" },
       verify: { state: "stale", command: "pnpm test", summary: "Previous check passed", staleReason: "Source changed",
         result: { state: "pass", exitCode: 0, startedAt: 1, finishedAt: 2 } },
       trackedChanges: 3,
@@ -62,28 +62,71 @@ function harness(value = selection()) {
   const onClose = vi.fn();
   const onFocus = vi.fn();
   const onCandidateRecovery = vi.fn();
+  const onCandidateInspect = vi.fn();
   const getReviewFiles = vi.fn<TerminaBridge["getReviewFiles"]>().mockResolvedValue({ ok: true, files: [], total: 0 });
   const getReviewDiff = vi.fn<TerminaBridge["getReviewDiff"]>().mockResolvedValue({ ok: false, error: "Baseline unavailable" });
   const onTerminalControl = vi.fn<Parameters<typeof createWorkInspector>[0]["onTerminalControl"]>().mockResolvedValue({ ok: true });
   const startPlanTask = vi.fn<TerminaBridge["startPlanTask"]>().mockResolvedValue({ ok: true, dispatched: 1 });
-  view = createWorkInspector({ element: element as unknown as HTMLElement, getVerifyReport, getReviewFiles, getReviewDiff, startPlanTask, onNavigate, onClose, onFocus, onTerminalControl, onCandidateRecovery });
+  view = createWorkInspector({ element: element as unknown as HTMLElement, getVerifyReport, getReviewFiles, getReviewDiff, startPlanTask, onNavigate, onClose, onFocus, onTerminalControl, onCandidateRecovery, onCandidateInspect });
   view.render(value.project, value.card);
   const node = (name: string): FakeEl => {
     const found = element.querySelector(`.overview-inspector-${name}`);
     expect(found, `inspector ${name}`).not.toBeNull();
     return found!;
   };
-  return { ...value, element, node, getVerifyReport, getReviewFiles, getReviewDiff, startPlanTask, onNavigate, onClose, onFocus, onTerminalControl, onCandidateRecovery };
+  return { ...value, element, node, getVerifyReport, getReviewFiles, getReviewDiff, startPlanTask, onNavigate, onClose, onFocus, onTerminalControl, onCandidateRecovery, onCandidateInspect };
 }
 
 describe("selected work inspector", () => {
+  it.each([true, false])("keeps a closed independent result truthful (resolved=%s) and leaves source Plan controls available", (resolved) => {
+    const value = pendingSelection();
+    const task = value.card.task!;
+    task.task.candidate = { comparisonId: "cmp-retained", label: "B" };
+    task.task.state = "done";
+    task.candidate = resolved ? { ...task.task.candidate, root: "/worlds/result", version: 3, state: "settled", error: null, headStateId: "result-state" } : null;
+    value.card.owner.verify = { state: "pass", command: "owner-check", summary: "Owner success" };
+    const card = projectCards(value.project)[0]!;
+    if ("recovery" in card) throw new Error("Expected task");
+    const h = harness({ ...value, card });
+    expect(text(h.element)).not.toContain("Owner success");
+    expect(card.evidence).toContain("No live worker or check evidence");
+    expect(card.context).toContain(resolved ? "/worlds/result" : "Separate candidate unavailable");
+    for (const name of ["focus", "terminal", "check", "inspect-changes", "verify", "interrupt", "close-terminal"]) {
+      const control = h.node(name);
+      expect(control.hidden || control.disabled).toBe(true);
+      control.click();
+    }
+    expect(h.getReviewFiles).not.toHaveBeenCalled();
+    expect(h.getVerifyReport).not.toHaveBeenCalled();
+    expect(h.onFocus).not.toHaveBeenCalled();
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    h.node("candidate").click();
+    expect(h.onCandidateInspect).toHaveBeenCalledTimes(resolved ? 1 : 0);
+    h.node("primary").click();
+    expect(h.onNavigate).toHaveBeenCalledExactlyOnceWith("project-1", { kind: "plan", terminalId: "owner", generation: 7 });
+  });
+
+  it("reviews a live independent worker in its actual candidate area, not the source owner", async () => {
+    const value = selection("terminal");
+    value.card.task!.worker = { terminalId: "worker", generation: 12 };
+    value.card.task!.task.candidate = { comparisonId: "cmp-1", label: "B" };
+    value.card.task!.candidate = { comparisonId: "cmp-1", label: "B", root: "/worlds/B", version: 4, state: "running", error: null, headStateId: "worker-state" };
+    value.card.terminal.workArea = { workspaceId: "candidate-B", root: "/worlds/B", kind: "candidate", comparisonId: "cmp-1" };
+    const h = harness(value);
+    h.node("inspect-changes").click(); await flush();
+    expect(h.getReviewFiles).toHaveBeenCalledExactlyOnceWith({ projectId: "project-1", terminalId: "worker", generation: 12,
+      workspaceId: "candidate-B", root: "/worlds/B" }, 0);
+    h.node("focus").click(); expect(h.onFocus).toHaveBeenCalledOnce();
+    h.node("verify").click(); expect(h.onNavigate).toHaveBeenCalledWith("project-1", { kind: "verify", terminalId: "worker", generation: 12 });
+  });
+
   it("starts only the exact selected pending task without navigating or marking execution", async () => {
     const h = harness(pendingSelection());
     const before = JSON.stringify({ project: h.project, card: h.card });
     expect(h.startPlanTask).not.toHaveBeenCalled();
     expect(h.node("start").hidden).toBe(false);
     expect(h.node("start").disabled).toBe(false);
-    expect(h.node("start-status").textContent).toContain("shared project files");
+    expect(h.node("start-status").textContent).toContain("separate sandboxed candidate");
     expect(h.node("primary").classList.contains("is-secondary")).toBe(true);
     h.node("start").click(); h.node("start").click(); await flush();
     expect(h.startPlanTask).toHaveBeenCalledExactlyOnceWith({
@@ -91,7 +134,7 @@ describe("selected work inspector", () => {
         root: "/projects/example", terminalId: "owner", generation: 7 }, task: h.card.task!.task,
     });
     expect(h.startPlanTask.mock.calls[0]![0].task).not.toBe(h.card.task!.task);
-    expect(h.node("start-status").textContent).toContain("dispatched");
+    expect(h.node("start-status").textContent).toContain("dispatched to a separate candidate");
     expect(h.node("start-status").textContent).not.toMatch(/working|completed|verified/);
     expect(h.node("start").disabled).toBe(true);
     expect(h.onNavigate).not.toHaveBeenCalled();
@@ -111,7 +154,7 @@ describe("selected work inspector", () => {
     expect(h.node("start")).toBe(control);
     expect(control.disabled).toBe(true);
     expect(dom.document.activeElement).toBe(h.node("title"));
-    expect(h.node("start-status").textContent).toContain("Starting only this task");
+    expect(h.node("start-status").textContent).toContain("Starting this task");
     control.click(); expect(h.startPlanTask).toHaveBeenCalledOnce();
     resolve({ ok: false, error: "That task overlaps a running dispatch <literal>" }); await flush();
     expect(h.node("start-status").textContent).toContain("<literal>");

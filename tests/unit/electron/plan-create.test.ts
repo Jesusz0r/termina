@@ -28,7 +28,7 @@ describe("manual Plan Board creation", () => {
     const summary = projectWorkSummary({ id: owner.projectId, cwd: request.projectRoot }, [{
       id: owner.terminalId, generation: owner.generation, type: "agent", model: null,
       activity: { state: "idle", reason: null }, workspace: { id: owner.workspaceId, root: owner.root, primary: true },
-      verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], planCreationError: error, planStartOwnerError: error,
+      verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], planCreationError: error, planStartOwnerError: error, dispatchAssignment: null,
     }]);
     expect(summary.terminals[0]?.planCreationError).toBe(error);
     expect(planCreationError(eligible)).toBeNull();

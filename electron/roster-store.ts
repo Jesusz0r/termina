@@ -98,6 +98,7 @@ export class TerminalRosterStore {
           paths: t.paths.slice(0, 100),
           state: t.state,
           dispatchResult: t.dispatchResult,
+          ...(t.candidate ? { candidate: { ...t.candidate } } : {}),
         }));
       }
       if (inst.verify.state !== "untested" && inst.verify.state !== "running") {

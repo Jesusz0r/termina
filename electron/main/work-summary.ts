@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { planStartError } from "../plan-board.js";
 import type {
   AgentActivityView, CandidateRecoverySummary, PlanTask, ProjectWorkSummary, TerminalWorkSummary,
-  VerifyInfo, WorkAreaSummary, WorkAttentionItem, WorkAttentionReason, WorkOverview, WorkSummaryAction,
+  VerifyInfo, WorkAreaSummary, WorkAttentionItem, WorkAttentionReason, WorkOverview, WorkSummaryAction, WorldlineSummary,
 } from "../../shared/types.js";
 
 export interface WorkSummaryTerminalFacts {
@@ -18,6 +18,8 @@ export interface WorkSummaryTerminalFacts {
   plan: readonly PlanTask[];
   planCreationError: string | null;
   planStartOwnerError: string | null;
+  /** Live dispatcher provenance, never inferred from a task's persisted terminal id. */
+  dispatchAssignment: { ownerId: string; taskText: string } | null;
 }
 
 /** Presentation projection only. Activity, tasks, source validity and lifecycle stay with their owners. */
@@ -25,8 +27,10 @@ export function projectWorkSummary(
   project: { id: string; cwd: string },
   facts: readonly WorkSummaryTerminalFacts[],
   candidateRecoveries: CandidateRecoverySummary[] = [],
+  candidates: readonly WorldlineSummary[] = [],
 ): ProjectWorkSummary {
   const live = new Map(facts.map((terminal) => [terminal.id, terminal]));
+  const areas = new Map(candidates.map((candidate) => [`${candidate.comparisonId}:${candidate.label}`, candidate]));
   const terminals = facts.map((terminal): TerminalWorkSummary => {
     const area: WorkAreaSummary | null = terminal.workspace ? {
       workspaceId: terminal.workspace.id,
@@ -47,8 +51,16 @@ export function projectWorkSummary(
     if (verify?.state === "cancelled") attention.push("verify-cancelled");
     const tasks = terminal.plan.map((task) => {
       const assigned = task.workerId ? live.get(task.workerId) : undefined;
-      // An id outside this project/source scope is not a live task assignment.
-      const worker = terminal.workspace && assigned?.type === "agent" && assigned.workspace?.id === terminal.workspace.id
+      const area = task.candidate ? areas.get(`${task.candidate.comparisonId}:${task.candidate.label}`) : undefined;
+      const candidate = area ? { comparisonId: area.comparisonId, label: area.label, root: area.root,
+        version: area.version, state: area.state, error: area.error, headStateId: area.headStateId } : null;
+      // Only the dispatcher can certify a live assignment, including one on a separate candidate tree.
+      const assignment = assigned?.dispatchAssignment;
+      const sameSource = task.candidate ? area && assigned?.workspace?.primary === false
+        && assigned.workspace.comparisonId === area.comparisonId && assigned.workspace.root === area.root
+        : assigned?.workspace?.id === terminal.workspace?.id;
+      const worker = terminal.workspace && assigned?.type === "agent" && assigned.workspace && sameSource
+        && assignment?.ownerId === terminal.id && assignment.taskText === task.text
         ? { terminalId: assigned.id, generation: assigned.generation } : null;
       const taskAttention: WorkAttentionReason[] = [];
       if (task.workerId && !worker) taskAttention.push("worker-unavailable");
@@ -60,6 +72,7 @@ export function projectWorkSummary(
       return {
         task,
         worker,
+        candidate,
         attention: taskAttention,
         startError: planStartError(terminal.planStartOwnerError, terminal.plan, task),
         nextAction: worker ? { kind: "terminal" as const, ...worker } : action("plan"),

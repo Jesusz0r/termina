@@ -124,7 +124,7 @@ export type DispatchOutcome = (typeof DISPATCH_OUTCOMES)[number];
 export interface PlanTask {
   /** The task line text. */
   text: string;
-  /** File paths mentioned in the task (relative to the project). */
+  /** File paths mentioned in the task (relative to its work area). */
   paths: string[];
   state: "pending" | "active" | "done";
   /** Dispatch worker terminal id when this task is assigned. */
@@ -133,9 +133,13 @@ export interface PlanTask {
   claimed?: string[];
   /** Last finished attempt; separate from a currently running assignment. */
   dispatchResult?: { workerId: string; outcome: DispatchOutcome };
+  /** Current/last independent attempt. Retained across settlement and restart; retries stay independent. */
+  candidate?: { comparisonId: string; label: "A" | "B" };
   /** Worker model from an `@model provider/id` marker. Omit to inherit the owner tab. */
   model?: string;
 }
+
+export type PlanCandidateSummary = Pick<WorldlineSummary, "comparisonId" | "label" | "root" | "version" | "state" | "error" | "headStateId">;
 
 export interface PlanPayload {
   instanceId: string;
@@ -269,6 +273,8 @@ export interface PlanWorkSummary {
   task: PlanTask;
   /** Live assignment only; dispatchResult remains historical when this is null. */
   worker: { terminalId: string; generation: number } | null;
+  /** Resolved current/last independent area, including after its worker closes. */
+  candidate: PlanCandidateSummary | null;
   attention: WorkAttentionReason[];
   nextAction: WorkSummaryAction;
   /** Initial explicit Start admission; retry remains on the Plan Board. */

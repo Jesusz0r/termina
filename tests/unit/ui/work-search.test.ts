@@ -9,7 +9,7 @@ import { installFakeDom, type FakeEl } from "./fake-dom.ts";
 function facts(id: string, root: string, overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummaryTerminalFacts {
   return { id, generation: 3, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: `ws-${root}`, root, primary: true }, verify: { state: "untested", command: null, summary: null },
-    trackedChanges: 0, plan: [{ text: "Repair <parser> & tokens", paths: ["parser.ts"], state: "pending" }], planCreationError: null, planStartOwnerError: null, ...overrides };
+    dispatchAssignment: null, trackedChanges: 0, plan: [{ text: "Repair <parser> & tokens", paths: ["parser.ts"], state: "pending" }], planCreationError: null, planStartOwnerError: null, ...overrides };
 }
 function overview(): WorkOverview {
   return workOverview([
@@ -91,7 +91,8 @@ describe("canonical work search", () => {
     const value = workOverview([projectWorkSummary({ id: "p", cwd: "/primary" }, [
       facts("owner", root, { workspace: { id: "candidate", root, primary: false, comparisonId: "cmp-1" },
         plan: [{ text: "Worker task", paths: [], state: "active", workerId: "worker" }] }),
-      facts("worker", root, { workspace: { id: "candidate", root, primary: false, comparisonId: "cmp-1" }, plan: [] }),
+      facts("worker", root, { workspace: { id: "candidate", root, primary: false, comparisonId: "cmp-1" },
+        dispatchAssignment: { ownerId: "owner", taskText: "Worker task" }, plan: [] }),
     ])]);
     const row = searchWork(value, "Worker task").rows[0]!;
     expect(row.detail).toContain("Separate candidate tree /separate/source");
@@ -240,7 +241,7 @@ describe("Command Palette work integration", () => {
     const h = mount(); await flush();
     const value = overview();
     value.projects[0]!.terminals[0]!.tasks = Array.from({ length: 80 }, (_, index) => ({
-      task: { text: `Saved task ${index}`, paths: [], state: "pending" }, worker: null, attention: [], startError: null,
+      task: { text: `Saved task ${index}`, paths: [], state: "pending" }, worker: null, candidate: null, attention: [], startError: null,
       nextAction: { kind: "plan", terminalId: "owner-1", generation: 3 },
     }));
     qo.setWorkOverview(value); h.search("Saved");

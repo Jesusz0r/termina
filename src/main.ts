@@ -1,3 +1,4 @@
+import { prepareCandidateContext } from "./main/candidate-navigation";
 /**
  * Renderer entry — terminal-first architecture.
  *
@@ -661,6 +662,7 @@ function focusWorkContext(projectId: string, action: WorkSummaryAction | null): 
   else pane?.view.focus();
 }
 
+let preparedCandidate: { target: import("./main/candidate-navigation").CandidateNavigationTarget; candidate: import("../shared/types").WorldlineSummary } | null = null;
 const attentionView = createAttentionView({
   element: document.getElementById("attention-view")!,
   toggle: document.getElementById("btn-attention") as HTMLButtonElement,
@@ -700,31 +702,29 @@ const attentionView = createAttentionView({
     return true;
   },
   onReveal: focusWorkContext,
-  onCandidateRecovery: async (projectId, recovery, isCurrent) => {
+  onCandidateNavigate: async (target, isCurrent) => {
     try {
+      const projectId = target.projectId;
       if (!isCurrent() || !await activateProject(projectId) || !isCurrent() || activeProjectId !== projectId) return false;
       const generation = activeProjectGeneration;
       const current = (): boolean => isCurrent() && activeProjectId === projectId && activeProjectGeneration === generation;
-      const work = await window.termina.getProjectWorkSummary(projectId);
-      if (!current() || !work?.candidateRecoveries.some((candidate) => candidate.comparisonId === recovery.comparisonId
-        && candidate.label === recovery.label && candidate.root === recovery.root && candidate.version === recovery.version
-        && candidate.recovery === recovery.recovery)) return false;
-      const summaries = await window.termina.getWorldlines(projectId);
-      if (!current()) return false;
-      const candidate = summaries.find((summary) => summary.comparisonId === recovery.comparisonId && summary.label === recovery.label
-        && summary.root === recovery.root && summary.version === recovery.version);
-      if (!candidate) return false;
+      const candidate = await prepareCandidateContext(target, window.termina, current);
+      if (!candidate || !current()) return false;
       worldlinesView.upsert(candidate);
+      preparedCandidate = { target, candidate };
       return true;
     } catch {
       return false;
     }
   },
-  onRevealCandidate: (recovery) => {
+  onRevealCandidate: (target) => {
+    const prepared = preparedCandidate;
+    preparedCandidate = null;
+    if (!prepared || prepared.target !== target || activeProjectId !== target.projectId) return;
     activityTabs.select("worldlines");
     document.getElementById("worldline-panel")?.classList.remove("collapsed");
-    if (!worldlinesView.revealRecovery(recovery.comparisonId, recovery.label, recovery.recovery)) {
-      toast("Candidate recovery changed. Refresh work before acting.", "warning");
+    if (!worldlinesView.revealCandidate(prepared.candidate.comparisonId, prepared.candidate.label, target.mode)) {
+      toast("Candidate changed. Refresh work before acting.", "warning");
     }
   },
   onTerminalControl: (target, action) => {

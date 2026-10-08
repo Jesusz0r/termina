@@ -385,7 +385,8 @@ describe("flush-save lease gate (refs #168)", () => {
 
 describe("dispatch genuine-holder flush (refs #205)", () => {
   it("acquires a real lease around the dispatch flush in dispatchRun", () => {
-    const source = extractMethod(main, "private async dispatchPreparedRun(");
+    const source = extractMethod(main, "private async dispatchSharedPreparedRun(");
+    expect(extractMethod(main, "private async dispatchPreparedRun(")).toContain("this.dispatchSharedPreparedRun(");
     const acquireAt = source.indexOf("acquireWriteLease(ownerWs.id, dispatchWriter");
     const flushAt = source.indexOf("flushDirtyModels(dispatchWriter, ownerWs.id");
     const releaseAt = source.indexOf("releaseWriteLease(ownerWs.id, dispatchWriter");

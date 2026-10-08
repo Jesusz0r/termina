@@ -97,7 +97,7 @@ export function createNewTaskComposer(options: {
     board.disabled = pending;
     outcome.disabled = pending;
     cancel.disabled = pending;
-    status.textContent = pending ? "Creating task… The request is queued; it does not start execution." : requestError || error || "Creates a pending Plan Board task. It does not run the task.";
+    status.textContent = pending ? "Creating task… The request is queued; it does not start execution." : requestError || error || "Creates a pending Plan Board task without running it. Later, Start task uses a separate sandboxed candidate; nothing is automatically applied, staged or committed.";
   }
   function addOption(select: HTMLSelectElement, value: string, text: string, disabled = false) {
     const option = document.createElement("option");

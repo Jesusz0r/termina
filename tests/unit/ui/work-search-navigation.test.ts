@@ -11,7 +11,7 @@ function overview(): WorkOverview {
   return workOverview(["first", "other"].map((name, index) => projectWorkSummary({ id: `p${index}`, cwd: `/${name}/same-name` }, [{
     id: `owner-${index}`, generation: 3, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: `ws-${index}`, root: `/${name}/same-name`, primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, planCreationError: null, planStartOwnerError: null,
+    verify: { state: "untested", command: null, summary: null }, dispatchAssignment: null, trackedChanges: 0, planCreationError: null, planStartOwnerError: null,
     plan: [{ text: "Repair the parser", paths: ["parser.ts"], state: "pending" }],
   }])));
 }
@@ -52,7 +52,7 @@ function harness(value = overview()) {
   view = createAttentionView({ element: element as unknown as HTMLElement, toggle: toggle as unknown as HTMLButtonElement,
     overviewToggle: overviewToggle as unknown as HTMLButtonElement, workspace: [workspace as unknown as HTMLElement], bridge,
     onOverview, onViewChange: vi.fn(), onInspect: vi.fn().mockResolvedValue(false), onNavigate, onReveal, onNewProject: vi.fn(),
-    onFocusTerminal, onTerminalControl, onCandidateRecovery: vi.fn().mockResolvedValue(false), onRevealCandidate: vi.fn() });
+    onFocusTerminal, onTerminalControl, onCandidateNavigate: vi.fn().mockResolvedValue(false), onRevealCandidate: vi.fn() });
   return { element, workspace, getWorkOverview, onNavigate, onReveal, onOverview, onFocusTerminal, onTerminalControl,
     getVerifyReport, getReviewFiles, getReviewDiff, emit: (hook: string) => (callbacks.get(hook)! as (payload: unknown) => void)({ instanceId: "owner-1", projectId: "p1" }),
     inspector: () => element.querySelector("#project-work-inspector")! };

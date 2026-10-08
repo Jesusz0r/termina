@@ -144,11 +144,15 @@ describe("mid-teardown creation gates (refs #214)", () => {
   });
 
   it("re-checks the gate after the pick and flush awaits", () => {
-    const source = extractMethod(main, "private async dispatchPreparedRun(");
-    const gates = source.match(/the project is changing/g) ?? [];
+    const admission = extractMethod(main, "private async dispatchPreparedRun(");
+    const shared = extractMethod(main, "private async dispatchSharedPreparedRun(");
+    expect(admission).toContain("projectIsSwitching(dispatchOwnerId)");
+    expect(admission).toContain("this.dispatchSharedPreparedRun(");
+    const gates = (admission + shared).match(/the project is changing/g) ?? [];
     expect(gates.length).toBeGreaterThanOrEqual(2);
-    const flushAt = source.indexOf("flushDirtyModels(dispatchWriter");
-    const lastGate = source.lastIndexOf("projectIsSwitching(this.projectOfTerminal(ownerId)?.id)");
+    const flushAt = shared.indexOf("flushDirtyModels(dispatchWriter");
+    const lastGate = shared.lastIndexOf("projectIsSwitching(this.projectOfTerminal(ownerId)?.id)");
+    expect(flushAt).toBeGreaterThanOrEqual(0);
     expect(lastGate).toBeGreaterThan(flushAt);
   });
 

@@ -42,7 +42,7 @@ function terminal(id: string, overrides: Partial<WorkSummaryTerminalFacts> = {})
     activity: { state: "idle", reason: null },
     workspace: { id: "ws-1", root: "/projects/p1", primary: true },
     verify: { state: "untested", command: null, summary: null },
-    trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, ...overrides,
+    dispatchAssignment: null, trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, ...overrides,
   };
 }
 

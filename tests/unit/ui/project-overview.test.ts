@@ -15,10 +15,14 @@ function terminal(id: string, overrides: Partial<WorkSummaryTerminalFacts> = {})
   return {
     id, generation: 4, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
     workspace: { id: "ws-1", root: "/projects/first", primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, ...overrides,
+    verify: { state: "untested", command: null, summary: null }, dispatchAssignment: null, trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, ...overrides,
   };
 }
 function overview(facts = [terminal("term-1", { plan: [{ text: "Repair the parser", paths: ["parser.ts"], state: "pending" }] })]): WorkOverview {
+  for (const owner of facts) for (const task of owner.plan) {
+    const worker = facts.find((entry) => entry.id === task.workerId);
+    if (worker) worker.dispatchAssignment = { ownerId: owner.id, taskText: task.text };
+  }
   return workOverview([
     projectWorkSummary({ id: "p1", cwd: "/projects/same-name" }, facts),
     projectWorkSummary({ id: "p2", cwd: "/other/same-name" }, [terminal("term-2", { type: "shell" })]),
@@ -43,12 +47,12 @@ function harness(value = overview()) {
   const startPlanTask = vi.fn<TerminaBridge["startPlanTask"]>().mockResolvedValue({ ok: true, dispatched: 1 });
   view = createProjectOverview({ element: element as unknown as HTMLElement, onNavigate, onNewProject, onSelectionChange,
     getVerifyReport, getReviewFiles, getReviewDiff, onFocusTerminal, onFocusChange,
-    onTerminalControl, onCandidateRecovery, createPlanTask, startPlanTask, onTaskCreated });
+    onTerminalControl, onCandidateRecovery, onCandidateInspect: vi.fn(), createPlanTask, startPlanTask, onTaskCreated });
   view.render(value);
   const filter = element.querySelector("input")!;
   const lanes = () => element.querySelectorAll(".overview-project");
   const cards = () => element.querySelectorAll(".overview-work-card");
-  return { element, filter, lanes, cards, onNavigate, onNewProject, onSelectionChange, getVerifyReport, onFocusTerminal, onFocusChange, releaseTerminal, onTerminalControl, onCandidateRecovery, createPlanTask, startPlanTask, onTaskCreated,
+  return { element, filter, lanes, cards, onNavigate, onNewProject, onSelectionChange, getVerifyReport, onFocusTerminal, onFocusChange, releaseTerminal, onTerminalControl, onCandidateRecovery, onCandidateInspect: vi.fn(), createPlanTask, startPlanTask, onTaskCreated,
     inspector: element.querySelector(".overview-work-inspector")!,
     primary: () => element.querySelector(".overview-inspector-primary")!,
     search: (query: string) => { filter.value = query; filter.dispatch("input"); } };
@@ -408,6 +412,41 @@ describe("real project overview", () => {
     expect(h.cards()[0]!.classList.contains("is-selected")).toBe(true);
     expect(h.inspector.hidden).toBe(false);
     expect(dom.document.activeElement).toBe(focus);
+  });
+
+  it("retains a pending candidate Focus through expected fresh projection events and mounts its real terminal", async () => {
+    const value = overview([
+      terminal("owner", { plan: [{ text: "Candidate task", paths: ["hello.txt"], state: "active", workerId: "worker" }] }),
+      terminal("worker"),
+    ]);
+    const owner = value.projects[0]!.terminals[0]!;
+    const worker = value.projects[0]!.terminals[1]!;
+    worker.workArea = { workspaceId: "candidate", root: "/worlds/task-A", kind: "candidate", comparisonId: "cmp" };
+    owner.tasks[0]!.task.candidate = { comparisonId: "cmp", label: "A" };
+    owner.tasks[0]!.candidate = { comparisonId: "cmp", label: "A", root: "/worlds/task-A", version: 3, state: "running", error: null, headStateId: "captured-result" };
+    const h = harness(value);
+    const pane = dom.document.createElement("div"); pane.className = "terminal-pane";
+    dom.document.body.append(pane);
+    let complete!: () => void;
+    h.onFocusTerminal.mockImplementationOnce(async (_target, slot, isCurrent) => {
+      await new Promise<void>((resolve) => { complete = resolve; });
+      if (!isCurrent()) return null;
+      (slot as unknown as FakeEl).append(pane);
+      return () => { dom.document.body.append(pane); };
+    });
+    h.cards()[0]!.querySelector("button")!.click();
+    h.inspector.querySelector(".overview-inspector-focus")!.click();
+    view.render(structuredClone(value));
+    expect(h.onFocusTerminal.mock.calls[0]![2]()).toBe(true);
+    expect(text(h.element.querySelector(".focus-task")!)).toContain("One task. Full context.");
+    expect(text(h.element.querySelector(".focus-task")!)).toContain("worker · /worlds/task-A");
+    expect(h.onFocusTerminal.mock.calls[0]![0]).toEqual({ projectId: "p1", workspaceId: "candidate", root: "/worlds/task-A", terminalId: "worker", generation: 4 });
+    complete(); await Promise.resolve(); await Promise.resolve();
+    expect(h.element.querySelector(".focus-task-terminal")!.children).toContain(pane);
+    expect(h.element.querySelector(".focus-task-status")!.textContent).toContain("same running session");
+    expect(owner.workArea!.root).toBe("/projects/first");
+    h.element.querySelector(".focus-task-back")!.click();
+    expect(pane.parentElement).toBe(dom.document.body);
   });
 
   it("does not substitute the plan owner for an unavailable task worker", () => {

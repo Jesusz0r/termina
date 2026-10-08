@@ -6,7 +6,7 @@ import { parseTerminalTarget } from "../../../electron/main/ipc-validate.ts";
 import { planCreationError, planOwnerError, planStartError } from "../../../electron/plan-board.ts";
 import { projectWorkSummary, workOverview } from "../../../electron/main/work-summary.ts";
 import { formatVerifyContext, invalidateVerify } from "../../../electron/main/verify-source.ts";
-import type { FolderOpenedPayload, PlanTask, ProjectWorkSummary, VerifyInfo, WorkAttentionInspectResult, WorkOverview } from "../../../shared/types.ts";
+import type { FolderOpenedPayload, PlanTask, ProjectWorkSummary, VerifyInfo, WorkAttentionInspectResult, WorkOverview, WorldlineSummary } from "../../../shared/types.ts";
 
 // Run the actual main methods with in-memory owners, without importing Electron,
 // instantiating an app/provider, or reading session files from the host.
@@ -56,12 +56,13 @@ interface Project {
   terminalIds: Set<string>;
   workspaces: Map<string, Workspace>;
   activationGeneration: number;
-  worldlines?: { recoverySummaries(): ProjectWorkSummary["candidateRecoveries"] };
+  worldlines?: { recoverySummaries(): ProjectWorkSummary["candidateRecoveries"]; list(): WorldlineSummary[] };
 }
 interface MainHarness {
   projects: Map<string, Project>;
   runtime: Map<string, Terminal>;
   activityInputs: Map<string, AgentActivityInput>;
+  dispatchRuns: Map<string, { ownerId: string; taskText: string }>;
   workSummary(projectId: unknown): ProjectWorkSummary | null;
   workOverview(): WorkOverview;
   inspectWorkAttention(id: unknown): Promise<WorkAttentionInspectResult>;
@@ -89,7 +90,7 @@ function fixture() {
     activityFor, activityView, emptyActivityInput, parseTerminalTarget, projectWorkSummary, workOverview, formatVerifyContext, planCreationError, planOwnerError,
   ) as MainHarness;
   Object.assign(main, {
-    projects: new Map([[project.id, project]]), runtime: new Map(), activityInputs: new Map(),
+    projects: new Map([[project.id, project]]), runtime: new Map(), activityInputs: new Map(), dispatchRuns: new Map(),
     switchingProjects: new Set(), projectClosePromises: new Map(), disposed: false,
     terminalCloseRequests: new WeakMap(), dispatchWorkers: new Map(),
     activeProjectId: null, projectSelectionAction: 0, projectSelectionActionSeq: 0, projectActivationGeneration: 0,
@@ -125,7 +126,7 @@ describe("main project work-summary orchestration", () => {
     const { main, project } = fixture();
     const recovery = { comparisonId: "cmp-failed", label: "B" as const, root: "/worlds/failed", version: 2,
       error: "Session did not start", recovery: "open" as const };
-    project.worldlines = { recoverySummaries: vi.fn(() => [recovery]) };
+    project.worldlines = { recoverySummaries: vi.fn(() => [recovery]), list: () => [] };
     expect(main.workSummary(project.id)).toMatchObject({ terminals: [], candidateRecoveries: [recovery] });
     expect(project.worldlines.recoverySummaries).toHaveBeenCalledOnce();
     expect(main.runtime.size).toBe(0);
@@ -194,8 +195,9 @@ describe("main project work-summary orchestration", () => {
         dispatchResult: { workerId: "term-gone", outcome: "failed" },
       })),
     ];
+    main.dispatchRuns.set("term-worker", { ownerId: owner.id, taskText: "Assigned to term-worker" });
     let tasks = main.workSummary(project.id)!.terminals[0]!.tasks;
-    expect(tasks[0]).toEqual({ task: finished, worker: null, attention: [],
+    expect(tasks[0]).toEqual({ task: finished, worker: null, candidate: null, attention: [],
       startError: planStartError(null, owner.plan, finished),
       nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation } });
     expect(tasks[1]).toMatchObject({ worker: null, attention: ["task-incomplete"], task: { dispatchResult: { outcome: "incomplete" } } });

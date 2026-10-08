@@ -8,7 +8,14 @@
  */
 import { isAbsolute, relative } from "node:path";
 import { planListEntries } from "../shared/plan-task.ts";
+import { isRecord } from "../shared/guards.ts";
 import type { CanonicalizePath, DispatchOutcome, PlanTask } from "../shared/types.ts";
+
+export function parsePlanTaskCandidate(value: unknown): PlanTask["candidate"] | undefined {
+  if (!isRecord(value) || typeof value.comparisonId !== "string" || value.comparisonId.length > 64
+    || !/^cmp-[1-9][0-9]*$/.test(value.comparisonId) || (value.label !== "A" && value.label !== "B")) return undefined;
+  return { comparisonId: value.comparisonId, label: value.label };
+}
 
 const MAX_PLAN_TASKS = 20;
 const MAX_PATHS_PER_TASK = 5;
@@ -123,7 +130,7 @@ export function planStartError(ownerError: string | null, plan: readonly PlanTas
   if (ownerError) return ownerError;
   const matches = plan.filter((entry) => entry.text === task.text);
   if (matches.length !== 1 || matches[0] !== task) return "The task is not uniquely on the Plan Board.";
-  if (task.state !== "pending" || task.workerId !== undefined || task.dispatchResult !== undefined) {
+  if (task.state !== "pending" || task.workerId !== undefined || task.dispatchResult !== undefined || task.candidate !== undefined) {
     return "Only an initial pending task can be started here. Use the Plan Board for retries.";
   }
   return null;
@@ -132,6 +139,7 @@ export function planStartError(ownerError: string | null, plan: readonly PlanTas
 /** Compare all execution-relevant fields, not merely the named row. */
 export function samePlanTaskSnapshot(task: PlanTask, snapshot: PlanTask): boolean {
   return task.text === snapshot.text && task.state === snapshot.state && task.model === snapshot.model
+    && JSON.stringify(task.candidate) === JSON.stringify(snapshot.candidate)
     && task.workerId === snapshot.workerId
     && JSON.stringify(task.paths) === JSON.stringify(snapshot.paths)
     && JSON.stringify(task.claimed) === JSON.stringify(snapshot.claimed)
@@ -162,7 +170,7 @@ export function markPlanProgress(plan: PlanTask[], relPath: string): boolean {
   if (plan.length === 0 || !relPath) return false;
   let changed = false;
   for (const task of plan) {
-    if (task.state === "done") continue;
+    if (task.state === "done" || task.candidate) continue;
     if (!taskMentionsPath(task, relPath)) continue;
     if (task.state === "active") continue;
     task.state = "active";
@@ -202,7 +210,7 @@ export function finalizePlanTasks(
   outcomes: ReadonlyMap<string, "ok" | "error">,
 ): void {
   for (const task of plan) {
-    if (taskIsComplete(task.paths, touched, outcomes)) task.state = "done";
+    if (!task.candidate && taskIsComplete(task.paths, touched, outcomes)) task.state = "done";
   }
 }
 
@@ -216,14 +224,15 @@ export function reattachDispatchAssignments(
   previousPlan: PlanTask[],
 ): void {
   for (const task of plan) {
-    const result = findTaskByText(previousPlan, task.text)?.dispatchResult;
-    if (result) task.dispatchResult = result;
+    const previous = findTaskByText(previousPlan, task.text);
+    if (previous?.dispatchResult) task.dispatchResult = previous.dispatchResult;
+    if (previous?.candidate) task.candidate = { ...previous.candidate };
   }
   for (const entry of assignments) {
     const task = findTaskByText(plan, entry.taskText);
     if (!task) continue;
     task.workerId = entry.workerId;
-    task.claimed = [...task.paths];
+    task.claimed = task.candidate ? [] : [...task.paths];
     if (task.state === "pending") task.state = "active";
   }
 }

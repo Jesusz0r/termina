@@ -1,5 +1,5 @@
 import type { CandidateRecoverySummary, InstanceSummary, ProjectWorkSummary, ProjectWorkspaceRef, ReviewTarget, TerminalCloseResult, TerminaBridge, WorkSummaryAction } from "../../shared/types";
-import type { OverviewCandidateCard, OverviewCard, OverviewWorkCard } from "./project-overview";
+import { taskTarget, type OverviewTaskTarget, type OverviewCandidateCard, type OverviewCard, type OverviewWorkCard } from "./project-overview";
 import { createWorkChanges } from "./work-changes";
 
 const OPEN_LABELS: Record<WorkSummaryAction["kind"], string> = {
@@ -16,6 +16,7 @@ export function createWorkInspector(bindings: {
   onNavigate(projectId: string, action: WorkSummaryAction): void;
   onTerminalControl(target: ReviewTarget, action: "interrupt" | "close"): Promise<TerminalCloseResult>;
   onCandidateRecovery(projectId: string, recovery: CandidateRecoverySummary): void;
+  onCandidateInspect(target: OverviewTaskTarget): void;
   onFocus(): void;
   onClose(): void;
 }): {
@@ -75,8 +76,9 @@ export function createWorkInspector(bindings: {
   startStatus.setAttribute("role", "status");
   startStatus.id = "overview-inspector-start-status";
   start.setAttribute("aria-describedby", startStatus.id);
-  start.title = "Start only this task through Plan Board. The worker uses shared project files, not a separate candidate.";
+  start.title = "Start only this task through Plan Board. The worker uses a separate sandboxed candidate. Nothing is automatically applied, staged or committed.";
   const primary = button("overview-inspector-primary", "");
+  const candidateControl = button("overview-inspector-candidate", "Open candidate controls");
   const terminal = button("overview-inspector-terminal", "Open terminal");
   const plan = button("overview-inspector-plan", "Open plan");
   const check = button("overview-inspector-check", "Check details");
@@ -101,7 +103,7 @@ export function createWorkInspector(bindings: {
   foot.textContent = "Selecting or inspecting does not resolve attention. Marked task state, agent activity and check evidence are separate facts.";
   header.append(caption, close);
   element.append(header, title, status, facts, actions, startStatus, changesElement, report, foot);
-  let selected: { projectId: string; projectRoot: string; card: OverviewWorkCard } | null = null;
+  let selected: { projectId: string; projectRoot: string; project: ProjectWorkSummary; card: OverviewWorkCard } | null = null;
   let selectedRecovery: { projectId: string; card: OverviewCandidateCard } | null = null;
   let evidenceKey = "";
   let reportSequence = 0;
@@ -125,7 +127,8 @@ export function createWorkInspector(bindings: {
   }
 
   async function inspectEvidence(): Promise<void> {
-    if (disposed || !available || !selected?.card.terminal.verify) return;
+    if (disposed || !available || !selected?.card.terminal.verify || selected.card.task?.task.candidate &&
+      (selected.card.task.worker?.terminalId !== selected.card.terminal.terminalId || selected.card.task.worker.generation !== selected.card.terminal.generation)) return;
     const target = selected.card.terminal;
     const key = evidenceKey;
     const sequence = ++reportSequence;
@@ -223,13 +226,13 @@ export function createWorkInspector(bindings: {
     setStartDisabled(true);
     start.setAttribute("aria-busy", "true");
     startStatus.hidden = false;
-    startStatus.textContent = "Starting only this task through Plan Board…";
+    startStatus.textContent = "Starting this task in a separate candidate…";
     let accepted = false;
     try {
       const result = await bindings.startPlanTask(request);
       if (!isCurrent()) return;
       accepted = result.ok;
-      startStatus.textContent = result.ok ? "Task dispatched. Its worker reports startup and execution separately."
+      startStatus.textContent = result.ok ? "Task dispatched to a separate candidate. Its worker reports startup and execution separately. Nothing is automatically applied, staged or committed."
         : result.error ?? "The task could not be started. Refresh work and try again.";
     } catch {
       if (isCurrent()) startStatus.textContent = "The task could not be started. Refresh work and try again.";
@@ -248,7 +251,7 @@ export function createWorkInspector(bindings: {
     bindings.onNavigate(selected.projectId, action);
   }
   const onPrimary = (): void => {
-    if (disposed || !available) return;
+    if (disposed || !available || primary.disabled) return;
     if (selectedRecovery) {
       bindings.onCandidateRecovery(selectedRecovery.projectId, selectedRecovery.card.recovery);
       return;
@@ -259,7 +262,7 @@ export function createWorkInspector(bindings: {
   };
   const onTerminal = (): void => {
     const target = selected?.card.terminal;
-    if (target) navigate({ kind: "terminal", terminalId: target.terminalId, generation: target.generation });
+    if (target && !terminal.hidden && !terminal.disabled) navigate({ kind: "terminal", terminalId: target.terminalId, generation: target.generation });
   };
   const onPlan = (): void => {
     const owner = selected?.card.owner;
@@ -274,6 +277,11 @@ export function createWorkInspector(bindings: {
     const terminal = selected?.card.terminal;
     if (terminal && !verifyControl.hidden && !verifyControl.disabled) navigate({ kind: "verify", terminalId: terminal.terminalId, generation: terminal.generation });
   };
+  const onCandidate = (): void => {
+    if (!disposed && available && selected?.card.task?.candidate && !candidateControl.hidden && !candidateControl.disabled) {
+      bindings.onCandidateInspect(taskTarget(selected.project, selected.card));
+    }
+  };
   const onStart = (): void => { void startTask(); };
   const onInterrupt = (): void => { void controlTerminal("interrupt"); };
   const onCloseTerminal = (): void => { void controlTerminal("close"); };
@@ -281,6 +289,7 @@ export function createWorkInspector(bindings: {
   const onFocus = (): void => { if (!disposed && available && !focusTask.disabled) bindings.onFocus(); };
   const onChanges = (): void => { if (!disposed && available) changes.open(); };
   const onClose = (): void => { if (!disposed) bindings.onClose(); };
+  candidateControl.addEventListener("click", onCandidate);
   start.addEventListener("click", onStart);
   primary.addEventListener("click", onPrimary);
   terminal.addEventListener("click", onTerminal);
@@ -299,6 +308,7 @@ export function createWorkInspector(bindings: {
     resetControl();
     resetStart();
     start.hidden = true;
+    candidateControl.hidden = true;
     primary.classList.remove("is-secondary");
     changes.clear();
     selected = null;
@@ -332,13 +342,17 @@ export function createWorkInspector(bindings: {
       selectedRecovery = null;
       focusTask.hidden = focused;
       primary.hidden = false;
-      const verify = card.terminal.verify;
+      const resultOnly = !!card.task?.task.candidate && (card.task.worker?.terminalId !== card.terminal.terminalId
+        || card.task.worker.generation !== card.terminal.generation);
+      const verify = resultOnly ? null : card.terminal.verify;
+      candidateControl.hidden = !card.task?.candidate;
+      candidateControl.disabled = !card.task?.candidate;
       const nextControlKey = JSON.stringify([project.projectId, project.root, card.key, card.owner.terminalId, card.owner.generation,
         card.owner.workArea, card.terminal.terminalId, card.terminal.generation, card.terminal.workArea]);
       if (nextControlKey !== controlKey || !available) resetControl();
       controlKey = nextControlKey;
       const key = JSON.stringify([project.projectId, project.root, card.key, card.terminal.terminalId,
-        card.terminal.generation, card.terminal.workArea, verify]);
+        card.terminal.generation, card.terminal.workArea, card.task?.task.candidate, card.task?.candidate, verify]);
       if (key !== evidenceKey || !available) clearReport();
       evidenceKey = key;
       const nextStartKey = JSON.stringify([project.projectId, project.root, card.key, card.owner.terminalId,
@@ -351,16 +365,16 @@ export function createWorkInspector(bindings: {
       setStartDisabled(startPending || !card.owner.workArea || card.task?.startError !== null);
       startStatus.hidden = start.hidden;
       if (!start.hidden && !startStatus.textContent) startStatus.textContent = card.task?.startError
-        ?? "Starts one worker through Plan Board in shared project files. It does not create an isolated candidate.";
+        ?? "Starts one worker in a separate sandboxed candidate. Nothing is automatically applied, staged or committed.";
       primary.classList.toggle("is-secondary", !start.hidden);
       const previousTrackedChanges = selected?.card.terminal.trackedChanges;
-      selected = { projectId: project.projectId, projectRoot: project.root, card };
-      const area = card.terminal.workArea;
+      selected = { projectId: project.projectId, projectRoot: project.root, project, card };
+      const area = resultOnly ? null : card.terminal.workArea;
       changes.render(area ? {
         projectId: project.projectId, workspaceId: area.workspaceId, root: area.root,
         terminalId: card.terminal.terminalId, generation: card.terminal.generation,
       } : null, JSON.stringify([project.root, card.key, card.owner.terminalId, card.owner.generation,
-        card.owner.workArea, card.terminal.workArea]));
+        card.owner.workArea, card.terminal.workArea, card.task?.task.candidate, card.task?.candidate]));
       if (previousTrackedChanges !== undefined && previousTrackedChanges !== card.terminal.trackedChanges) changes.invalidate();
       inspectChanges.hidden = !area;
       inspectChanges.disabled = !area;
@@ -401,6 +415,9 @@ export function createWorkInspector(bindings: {
       plan.hidden = !card.task || card.action.kind === "plan";
       check.hidden = !verify || card.action.kind === "evidence";
       for (const control of [primary, terminal, plan, check]) control.disabled = false;
+      terminal.hidden = terminal.hidden || resultOnly;
+      check.hidden = check.hidden || resultOnly;
+      primary.disabled = resultOnly && card.action.kind !== "plan";
     },
     unavailable: (message) => {
       if (disposed || !selected && !selectedRecovery) return;
@@ -408,7 +425,7 @@ export function createWorkInspector(bindings: {
       resetControl();
       resetStart();
       clearReport();
-      for (const control of [retry, verifyControl, interrupt, closeTerminal]) control.disabled = true;
+      for (const control of [candidateControl, retry, verifyControl, interrupt, closeTerminal]) control.disabled = true;
       changes.unavailable();
       inspectChanges.disabled = true;
       focusTask.disabled = true;
@@ -472,6 +489,7 @@ export function createWorkInspector(bindings: {
       changes.dispose();
       selected = null;
       selectedRecovery = null;
+      candidateControl.removeEventListener("click", onCandidate);
       start.removeEventListener("click", onStart);
       primary.removeEventListener("click", onPrimary);
       terminal.removeEventListener("click", onTerminal);

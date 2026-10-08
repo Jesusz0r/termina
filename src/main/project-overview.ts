@@ -1,4 +1,4 @@
-import type { CandidateRecoverySummary, InstanceSummary, PlanTask, PlanTaskCreateRequest, PlanWorkSummary, ProjectWorkspaceRef, ReviewTarget, TerminalWorkSummary, TerminaBridge, WorkOverview, WorkSummaryAction } from "../../shared/types";
+import type { CandidateRecoverySummary, InstanceSummary, PlanTask, PlanTaskCreateRequest, PlanWorkSummary, ProjectWorkSummary, ProjectWorkspaceRef, ReviewTarget, TerminalWorkSummary, TerminaBridge, WorkOverview, WorkSummaryAction } from "../../shared/types";
 import { presentBlockedLabel } from "../known-state";
 import { ATTENTION_LABELS } from "./work-summary";
 import { createWorkInspector } from "./work-inspector";
@@ -49,6 +49,8 @@ function taskCard(owner: TerminalWorkSummary, task: PlanWorkSummary, occurrence:
   const assigned = task.worker ? live.get(task.worker.terminalId) : undefined;
   const worker = assigned?.generation === task.worker?.generation ? assigned : undefined;
   const terminal = worker ?? owner;
+  const independent = !!task.task.candidate;
+  const candidate = task.candidate;
   const reasons = [...task.attention, ...(worker?.attention ?? [])];
   return {
     owner, terminal, task,
@@ -57,15 +59,19 @@ function taskCard(owner: TerminalWorkSummary, task: PlanWorkSummary, occurrence:
     state: `Marked ${task.task.state}`,
     execution: (worker ? `${execution(worker)} · worker ${worker.terminalId}` : "No live worker assigned")
       + (task.task.dispatchResult ? ` · Previous attempt ${task.task.dispatchResult.outcome} (${task.task.dispatchResult.workerId})` : ""),
-    context: `Plan owner ${owner.terminalId}\n${context(terminal, terminal.model)}`
+    context: `Plan owner ${owner.terminalId}\n${worker || !independent ? context(terminal, terminal.model)
+      : candidate ? `Separate candidate tree · ${candidate.root}\nCandidate ${candidate.label} · ${candidate.state}${candidate.error ? ` · ${candidate.error}` : ""}`
+        : "Separate candidate unavailable. Shared project files are not this task's result."}`
       + (task.task.model ? `\nTask model pin ${task.task.model}` : ""),
-    evidence: evidence(terminal, worker ? "Worker check" : "Owner check"),
+    evidence: independent && !worker ? "No live worker or check evidence to inspect."
+      + (candidate ? " Use candidate controls to review the retained result." : " Candidate context unavailable; owner checks are not task evidence.")
+      : evidence(terminal, worker ? "Worker check" : "Owner check"),
     attention: reasons.map((reason) => ATTENTION_LABELS[reason]).join(" · "),
     action: task.nextAction,
   };
 }
 
-export function projectCards(project: Project): OverviewCard[] {
+export function projectCards(project: ProjectWorkSummary): OverviewCard[] {
   const live = new Map(project.terminals.map((terminal) => [terminal.terminalId, terminal]));
   const assigned = new Set(project.terminals.flatMap((owner) => owner.tasks.flatMap(({ worker }) =>
     worker ? [`${worker.terminalId}:${worker.generation}`] : [])));
@@ -109,11 +115,11 @@ export interface OverviewTaskTarget {
   scope: string;
 }
 
-export function taskTarget(project: Project, card: OverviewWorkCard): OverviewTaskTarget {
+export function taskTarget(project: ProjectWorkSummary, card: OverviewWorkCard): OverviewTaskTarget {
   return {
     projectId: project.projectId, root: project.root, key: card.key,
     scope: JSON.stringify([card.owner.workArea, card.terminal.terminalId, card.terminal.generation,
-      card.terminal.workArea, card.task?.task.paths, card.task?.worker]),
+      card.terminal.workArea, card.task?.task.paths, card.task?.worker, card.task?.task.candidate, card.task?.candidate]),
   };
 }
 
@@ -139,6 +145,7 @@ export function createProjectOverview(bindings: {
   onFocusChange(focused: boolean): void;
   onTerminalControl: Parameters<typeof createWorkInspector>[0]["onTerminalControl"];
   onCandidateRecovery(projectId: string, recovery: CandidateRecoverySummary): void;
+  onCandidateInspect(target: OverviewTaskTarget): void;
   onNewProject(): void;
 }): {
   render(overview: WorkOverview): void;
@@ -217,6 +224,7 @@ export function createProjectOverview(bindings: {
     onNavigate: bindings.onNavigate,
     onTerminalControl: bindings.onTerminalControl,
     onCandidateRecovery: bindings.onCandidateRecovery,
+    onCandidateInspect: bindings.onCandidateInspect,
     onFocus: () => { void focusWork(); },
     onClose: () => { clearSelection(true); },
   });
@@ -239,6 +247,8 @@ export function createProjectOverview(bindings: {
 
   function targetOf(work: { project: Project; card: OverviewCard } | null): ReviewTarget | null {
     if (!work || "recovery" in work.card) return null;
+    const task = work.card.task;
+    if (task && (task.worker?.terminalId !== work.card.terminal.terminalId || task.worker.generation !== work.card.terminal.generation)) return null;
     const area = work.card.terminal.workArea;
     return work && area ? {
       projectId: work.project.projectId, workspaceId: area.workspaceId, root: area.root,

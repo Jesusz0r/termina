@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { projectWorkSummary, workOverview, type WorkSummaryTerminalFacts } from "../../../electron/main/work-summary.ts";
-import type { DispatchOutcome, PlanTask, VerifyInfo } from "../../../shared/types.ts";
+import type { DispatchOutcome, PlanTask, VerifyInfo, WorldlineSummary } from "../../../shared/types.ts";
 
 const project = { id: "proj-1", cwd: "/projects/same-name" };
 function terminal(overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummaryTerminalFacts {
@@ -9,7 +9,7 @@ function terminal(overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummar
     activity: { state: "idle", reason: null },
     workspace: { id: "ws-1", root: project.cwd, primary: true },
     verify: { state: "untested", command: null, summary: null },
-    trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, ...overrides,
+    trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, dispatchAssignment: null, ...overrides,
   };
 }
 function task(outcome?: DispatchOutcome): PlanTask {
@@ -88,12 +88,13 @@ describe("global factual attention", () => {
 
   it("attributes live worker attention to a single canonical task, never guesses among multiple assignments", () => {
     const worker = terminal({ id: "worker", generation: 9, activity: { state: "blocked", reason: "stalled" },
-      verify: { state: "fail", command: "test", summary: "failed" } });
+      verify: { state: "fail", command: "test", summary: "failed" },
+      dispatchAssignment: { ownerId: "term-1", taskText: task().text } });
     const assigned = { ...task(), workerId: worker.id, state: "active" as const };
     const owner = terminal({ plan: [assigned] });
     const single = workOverview([projectWorkSummary(project, [owner, worker])]);
     expect(single.items.map((item) => item.taskText)).toEqual([assigned.text, assigned.text]);
-    const ambiguous = workOverview([projectWorkSummary(project, [{ ...owner, plan: [assigned, { ...assigned, text: "Another task" }] }, worker])]);
+    const ambiguous = workOverview([projectWorkSummary(project, [{ ...owner, plan: [assigned, { ...assigned }] }, worker])]);
     expect(ambiguous.items.map((item) => item.taskText)).toEqual([null, null]);
     const foreignSource = workOverview([projectWorkSummary(project, [owner, { ...worker, workspace: { id: "candidate", root: "/candidate", primary: false } }])]);
     expect(foreignSource.items.filter((item) => item.terminalId === worker.id).every((item) => item.taskText === null)).toBe(true);
@@ -112,6 +113,60 @@ describe("global factual attention", () => {
 });
 
 describe("factual project/task summary", () => {
+  function candidate(overrides: Partial<WorldlineSummary> = {}): WorldlineSummary {
+    return { id: "cmp-1-A", comparisonId: "cmp-1", label: "A", role: "session", root: "/worlds/cmp-1/A",
+      comparisonBaseStateId: null, promotionBaseStateId: null, headStateId: null, sourceRunId: null,
+      terminalId: "term-2", version: 2, state: "running", error: null, sessionFile: null,
+      model: "provider/model", thinkingLevel: null, createdAt: 1, ...overrides };
+  }
+
+  it("certifies an independent worker using dispatch provenance and the canonical candidate root", () => {
+    const area = candidate();
+    const assigned: PlanTask = { ...task(), state: "active", workerId: "term-2", candidate: { comparisonId: area.comparisonId, label: area.label } };
+    const owner = terminal({ plan: [assigned] });
+    const worker = terminal({ id: "term-2", generation: 9, activity: { state: "blocked", reason: "stalled" },
+      workspace: { id: "ws-candidate", root: area.root, primary: false, comparisonId: area.comparisonId },
+      dispatchAssignment: { ownerId: owner.id, taskText: assigned.text } });
+    const summary = projectWorkSummary(project, [owner, worker], [], [area]);
+    expect(summary.terminals[0]!.tasks[0]).toMatchObject({ worker: { terminalId: worker.id, generation: 9 },
+      candidate: { comparisonId: area.comparisonId, label: "A", root: area.root, version: 2, state: "running" },
+      attention: [], nextAction: { kind: "terminal", terminalId: worker.id, generation: 9 } });
+    expect(workOverview([summary]).items[0]).toMatchObject({ taskText: assigned.text, workArea: { root: area.root, kind: "candidate" } });
+    for (const changed of [
+      { ...worker, dispatchAssignment: null },
+      { ...worker, dispatchAssignment: { ownerId: "other", taskText: assigned.text } },
+      { ...worker, dispatchAssignment: { ownerId: owner.id, taskText: "Different task" } },
+      { ...worker, workspace: { ...worker.workspace!, root: "/worlds/other" } },
+      { ...worker, workspace: { ...worker.workspace!, comparisonId: "cmp-2" } },
+    ]) expect(projectWorkSummary(project, [owner, changed], [], [area]).terminals[0]!.tasks[0])
+      .toMatchObject({ worker: null, attention: ["worker-unavailable"] });
+    expect(projectWorkSummary(project, [owner, worker], [], []).terminals[0]!.tasks[0])
+      .toMatchObject({ worker: null, candidate: null, attention: ["worker-unavailable"] });
+  });
+
+  it("retains the canonical independent result area after closing the worker without borrowing source evidence", () => {
+    const area = candidate({ terminalId: null, state: "settled", headStateId: "captured-result" });
+    const result: PlanTask = { ...task("completed"), state: "done", candidate: { comparisonId: area.comparisonId, label: area.label } };
+    const owner = terminal({ plan: [result], verify: { state: "pass", command: "source check", summary: "source passed" } });
+    const row = projectWorkSummary(project, [owner], [], [area]).terminals[0]!.tasks[0]!;
+    expect(row).toMatchObject({ task: result, worker: null,
+      candidate: { comparisonId: "cmp-1", label: "A", root: area.root, version: 2, state: "settled", error: null },
+      nextAction: { kind: "plan", terminalId: owner.id }, attention: [] });
+    expect(row.candidate).not.toHaveProperty("sessionFile");
+    expect(row.candidate).not.toHaveProperty("evidence");
+    expect(row).not.toHaveProperty("verify");
+    expect(projectWorkSummary(project, [owner], [], []).terminals[0]!.tasks[0])
+      .toMatchObject({ task: result, worker: null, candidate: null });
+  });
+
+  it("refuses same-source worker ids without matching dispatcher ownership", () => {
+    const assigned = { ...task(), workerId: "term-2", state: "active" as const };
+    const owner = terminal({ plan: [assigned] });
+    const worker = terminal({ id: "term-2", dispatchAssignment: { ownerId: "someone-else", taskText: assigned.text } });
+    expect(projectWorkSummary(project, [owner, worker]).terminals[0]!.tasks[0])
+      .toMatchObject({ worker: null, candidate: null, attention: ["worker-unavailable"] });
+  });
+
   it("keeps exact project identity, owner, task text and model without inventing completion from idle", () => {
     const input = terminal({ plan: [task()] });
     const summary = projectWorkSummary(project, [input]);
@@ -130,7 +185,8 @@ describe("factual project/task summary", () => {
 
   it("separates a live retry from the previous incomplete attempt", () => {
     const retry = { ...task("incomplete"), state: "active" as const, workerId: "term-3" };
-    const summary = projectWorkSummary(project, [terminal({ plan: [retry] }), terminal({ id: "term-3", generation: 6, activity: { state: "working", reason: null } })]);
+    const summary = projectWorkSummary(project, [terminal({ plan: [retry] }), terminal({ id: "term-3", generation: 6, activity: { state: "working", reason: null },
+      dispatchAssignment: { ownerId: "term-1", taskText: retry.text } })]);
     expect(summary.terminals[0]!.tasks[0]).toMatchObject({ worker: { terminalId: "term-3", generation: 6 },
       attention: [], task: { dispatchResult: { outcome: "incomplete" } }, nextAction: { kind: "terminal", terminalId: "term-3", generation: 6 } });
   });

@@ -1,3 +1,6 @@
+import { prepareCandidateContext } from "../../../src/main/candidate-navigation.ts";
+import { projectCards, taskTarget, type OverviewWorkCard } from "../../../src/main/project-overview.ts";
+import type { WorldlineSummary } from "../../../shared/types.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAttentionView } from "../../../src/main/attention-view.ts";
 import type { PlanTask, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../../shared/types.ts";
@@ -98,7 +101,7 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
   const onReveal = vi.fn();
   const onViewChange = vi.fn();
   const onNewProject = vi.fn();
-  const onCandidateRecovery = vi.fn().mockResolvedValue(false);
+  const onCandidateNavigate = vi.fn().mockResolvedValue(false);
   const onRevealCandidate = vi.fn();
   const onInspect = vi.fn(async (_result: Extract<WorkAttentionInspectResult, { ok: true }>, _isCurrent: () => boolean): Promise<boolean> => false);
   view = createAttentionView({
@@ -108,11 +111,11 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
     bridge, onOverview, onInspect, onNavigate, onReveal, onViewChange, onNewProject,
     onFocusTerminal: vi.fn().mockResolvedValue(null),
     onTerminalControl: vi.fn().mockResolvedValue({ ok: true }),
-    onCandidateRecovery, onRevealCandidate,
+    onCandidateNavigate, onRevealCandidate,
   });
   return {
     element, toggle, overviewToggle, workspace, title, projectContent, attentionHeading,
-    onNavigate, onReveal, onViewChange, onNewProject, onCandidateRecovery, onRevealCandidate,
+    onNavigate, onReveal, onViewChange, onNewProject, onCandidateNavigate, onRevealCandidate,
     count, list, status, message, close, refresh, more, outside,
     getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, createPlanTask, startPlanTask, onOverview, onInspect, unsubs,
     emit: (hook: typeof hooks[number], payload: unknown = {}) => callbacks.get(hook)!(payload),
@@ -125,7 +128,7 @@ function overviewWithTask(extra: PlanTask[] = []): WorkOverview {
   const project = projectWorkSummary({ id: "proj-1", cwd: "/projects/first" }, [{
     id: "term-1", generation: 3, type: "agent", model: "provider/model",
     activity: { state: "idle", reason: null }, workspace: { id: "ws-1", root: "/projects/first", primary: true },
-    verify: { state: "untested", command: null, summary: null }, trackedChanges: 0, planCreationError: null, planStartOwnerError: null,
+    verify: { state: "untested", command: null, summary: null }, dispatchAssignment: null, trackedChanges: 0, planCreationError: null, planStartOwnerError: null,
     plan: [{ text: "Repair the parser", paths: [], state: "pending" }, ...extra],
   }]);
   const value = workOverview([project]);
@@ -134,6 +137,29 @@ function overviewWithTask(extra: PlanTask[] = []): WorkOverview {
 }
 
 describe("integrated All projects surface", () => {
+  it("reveals retained candidate controls only for the current task selection", async () => {
+    const value = overviewWithTask([{ text: "Other task", paths: [], state: "pending" }]);
+    const task = value.projects[0]!.terminals[0]!.tasks[0]!;
+    task.task.candidate = { comparisonId: "retained", label: "A" };
+    task.candidate = { ...task.task.candidate, root: "/worlds/A", version: 3, state: "settled", error: null, headStateId: "captured-result" };
+    task.task.state = "done";
+    const h = harness(value); view!.open(undefined, "overview"); await refreshDelay();
+    h.projectContent.querySelectorAll(".overview-inspect")[0]!.click();
+    const pending = deferred<boolean>();
+    h.onCandidateNavigate.mockReturnValueOnce(pending.promise);
+    h.projectContent.querySelector(".overview-inspector-candidate")!.click();
+    expect(h.onCandidateNavigate).toHaveBeenCalledWith({ mode: "inspect", projectId: "proj-1", task: expect.objectContaining({ projectId: "proj-1" }) }, expect.any(Function));
+    h.projectContent.querySelectorAll(".overview-inspect")[1]!.click();
+    pending.resolve(true); await flush();
+    expect(h.onRevealCandidate).not.toHaveBeenCalled();
+    expect(h.element.hidden).toBe(false);
+    h.projectContent.querySelectorAll(".overview-inspect")[0]!.click();
+    h.onCandidateNavigate.mockResolvedValueOnce(true);
+    h.projectContent.querySelector(".overview-inspector-candidate")!.click(); await flush();
+    expect(h.onRevealCandidate).toHaveBeenCalledOnce();
+    expect(h.element.hidden).toBe(true);
+    expect(h.startPlanTask).not.toHaveBeenCalled();
+  });
   it("refreshes the actual selected task assignment after explicit Start without activation or fabricated progress", async () => {
     const h = harness(overviewWithTask()); view!.open(undefined, "overview"); await refreshDelay();
     h.projectContent.querySelector(".overview-inspect")!.click();
@@ -228,12 +254,12 @@ describe("integrated All projects surface", () => {
       error: "Session startup failed", recovery: "open" as const };
     value.projects[0]!.candidateRecoveries = [recovery];
     const h = harness(value);
-    h.onCandidateRecovery.mockResolvedValue(true);
+    h.onCandidateNavigate.mockResolvedValue(true);
     view!.open(undefined, "overview"); await refreshDelay();
     h.projectContent.querySelector(".overview-inspect")!.click();
     h.projectContent.querySelector(".overview-inspector-primary")!.click(); await flush();
-    expect(h.onCandidateRecovery).toHaveBeenCalledExactlyOnceWith("proj-1", recovery, expect.any(Function));
-    expect(h.onRevealCandidate).toHaveBeenCalledExactlyOnceWith(recovery);
+    expect(h.onCandidateNavigate).toHaveBeenCalledExactlyOnceWith({ projectId: "proj-1", candidate: recovery, mode: recovery.recovery }, expect.any(Function));
+    expect(h.onRevealCandidate).toHaveBeenCalledExactlyOnceWith({ projectId: "proj-1", candidate: recovery, mode: recovery.recovery });
     expect(h.element.hidden).toBe(true);
     expect(h.onNavigate).not.toHaveBeenCalled();
     expect(h.inspectWorkAttention).not.toHaveBeenCalled();
@@ -247,7 +273,7 @@ describe("integrated All projects surface", () => {
       error: "Session startup failed", recovery: "discard" }];
     const h = harness(value);
     const pending = deferred<boolean>();
-    h.onCandidateRecovery.mockReturnValueOnce(pending.promise);
+    h.onCandidateNavigate.mockReturnValueOnce(pending.promise);
     view!.open(undefined, "overview"); await refreshDelay();
     h.projectContent.querySelector(".overview-inspect")!.click();
     h.projectContent.querySelector(".overview-inspector-primary")!.click();
@@ -879,5 +905,43 @@ describe("explicit current-owner inspection", () => {
     expect(h.list.children).toHaveLength(1);
     expect(h.count.textContent).toBe("1");
     expect(text(h.list)).toContain("Task attempt incomplete");
+  });
+});
+
+
+describe("canonical retained candidate navigation", () => {
+  function context() {
+    const candidate = { comparisonId: "retained", label: "B" as const, root: "/worlds/B", version: 4, state: "settled" as const, error: null, headStateId: "captured-result" };
+    const project = projectWorkSummary({ id: "p", cwd: "/source" }, [{ id: "owner", generation: 7, type: "agent", model: null,
+      activity: { state: "idle", reason: null }, workspace: { id: "source", root: "/source", primary: true },
+      verify: { state: "pass", command: "owner-check", summary: null }, trackedChanges: 1,
+      planCreationError: null, planStartOwnerError: null, dispatchAssignment: null,
+      plan: [{ text: "Task", paths: [], state: "done", candidate: { comparisonId: candidate.comparisonId, label: candidate.label } }] }],
+      [], [candidate as WorldlineSummary]);
+    const card = projectCards(project)[0] as OverviewWorkCard;
+    const target = { mode: "inspect" as const, projectId: "p", task: taskTarget(project, card) };
+    const bridge = { getProjectWorkSummary: vi.fn().mockResolvedValue(project), getWorldlines: vi.fn().mockResolvedValue([candidate]) };
+    return { candidate, project, target, bridge };
+  }
+  it("resolves the retained task link through fresh work and manager summaries without opening a session", async () => {
+    const h = context();
+    expect(await prepareCandidateContext(h.target, h.bridge, () => true)).toEqual(h.candidate);
+    expect(h.bridge.getProjectWorkSummary).toHaveBeenCalledTimes(2);
+  });
+  it.each(["selection", "root", "version", "link", "unavailable", "manager version"])("rejects changed %s across awaits", async (change) => {
+    const h = context(); const pending = deferred<WorldlineSummary[]>();
+    h.bridge.getWorldlines.mockReturnValueOnce(pending.promise);
+    let current = true;
+    const result = prepareCandidateContext(h.target, h.bridge, () => current);
+    await Promise.resolve(); await Promise.resolve();
+    const next = structuredClone(h.project);
+    if (change === "selection") current = false;
+    if (change === "root") next.terminals[0]!.tasks[0]!.candidate!.root = "/replacement";
+    if (change === "version") next.terminals[0]!.tasks[0]!.candidate!.version++;
+    if (change === "link") next.terminals[0]!.tasks[0]!.task.candidate!.comparisonId = "retry";
+    if (change === "unavailable") next.terminals[0]!.tasks[0]!.candidate = null;
+    h.bridge.getProjectWorkSummary.mockResolvedValue(next);
+    pending.resolve([{ ...h.candidate, version: change === "manager version" ? 99 : h.candidate.version } as WorldlineSummary]);
+    expect(await result).toBeNull();
   });
 });

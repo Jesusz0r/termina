@@ -4,7 +4,8 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
   dispatchWorkerModel, MAX_DISPATCH_WORKERS, pickDispatchTasks, planOwnerError,
-  planStartError, samePlanTaskSnapshot,
+  planStartError, samePlanTaskSnapshot, parsePlanTaskCandidate,
+  markPlanProgress, finalizePlanTasks, reattachDispatchAssignments, settleDispatchTask,
 } from "../../../electron/plan-board.ts";
 import { parsePlanTaskStartRequest } from "../../../electron/main/ipc-validate.ts";
 import type { PlanTask, PlanTaskStartRequest, PlanTaskStartResult } from "../../../shared/types.ts";
@@ -31,9 +32,9 @@ function fixture() {
   const task: PlanTask = { text: "Fix file.ts", paths: ["file.ts"], state: "pending", model: "provider/task-model" };
   const other: PlanTask = { text: "Fix other.ts", paths: ["other.ts"], state: "pending" };
   const inst = { id: "term-1", generation: 2, projectId: project.id, workspaceId: workspace.id, cwd: workspace.root,
-    type: "agent", persist: true, busy: false, closed: false, pty: { hasExited: false, write: vi.fn() }, plan: [task, other] };
+    model: "provider/owner-model", thinkingLevel: "high", type: "agent", persist: true, busy: false, closed: false, pty: { hasExited: false, write: vi.fn() }, plan: [task, other] };
   const main = loadMethods(["startPlanTask", "planOwnerFacts", "dispatchRun", "dispatchPreparedRun",
-    "ownerDispatchCount", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching"], {
+    "dispatchSharedPreparedRun", "ownerDispatchCount", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching"], {
     parsePlanTaskStartRequest, planOwnerError, planStartError, samePlanTaskSnapshot,
     pickDispatchTasks, MAX_DISPATCH_WORKERS, dispatchWorkerModel,
     dispatchViewerId: (id: string) => `dispatch:${id}`,
@@ -67,12 +68,30 @@ function fixture() {
       await stage("create-return");
       return worker;
     }),
-    closeTerminal: vi.fn((id: string) => runtime.delete(id)), sendPlan: vi.fn(),
+    closeTerminal: vi.fn((id: string) => runtime.delete(id)), sendPlan: vi.fn(), savePlanRoster: vi.fn(),
   };
+  const nativeIndependentSpawn = vi.fn();
+  const createIndependentSession = vi.fn(async (opts) => {
+    try {
+      for (const name of ["claims", "path", "lease", "flush", "briefing", "control"] as const) {
+        opts.assertCurrent();
+        await stage(name);
+        opts.assertCurrent();
+      }
+      opts.beforeSpawn("term-10", { comparisonId: "cmp-1", label: "A" });
+      opts.assertCurrent();
+      await stage("create-return");
+      opts.assertCurrent();
+      nativeIndependentSpawn();
+      return { ok: true, terminalId: "term-10" };
+    } catch (error) { return { ok: false, error: String(error) }; }
+  });
+  Object.assign(project, { worldlines: { createIndependentSession } });
+  Object.assign(state, { createIndependentSession });
   Object.assign(main, state);
   const request: PlanTaskStartRequest = { owner: { projectId: project.id, workspaceId: workspace.id,
     root: workspace.root, terminalId: inst.id, generation: inst.generation }, projectRoot: project.cwd, task: structuredClone(task) };
-  return { main, state, project, workspace, inst, task, other, request, hooks, runtime,
+  return { main, state, project, workspace, inst, task, other, request, hooks, runtime, createIndependentSession, nativeIndependentSpawn,
     replaceRenderer: () => { target = {}; } };
 }
 
@@ -90,6 +109,8 @@ function mutate(f: ReturnType<typeof fixture>, change: string) {
     case "workspace-membership": f.workspace.terminalIds.delete(f.inst.id); break;
     case "busy": f.inst.busy = true; break;
     case "closed": f.inst.closed = true; break;
+    case "owner-replaced": f.runtime.set(f.inst.id, { ...f.inst }); break;
+    case "owner-model": f.inst.model = "provider/changed-owner"; break;
     case "exited": f.inst.pty.hasExited = true; break;
     case "changing": f.state.switchingProjects.add(f.project.id); break;
     case "closing": f.state.terminalCloseRequests.set(f.inst, {}); break;
@@ -117,150 +138,105 @@ const changes = ["workspace-generation", "project-generation", "canonical-root",
   "worker-owner", "shell-owner", "transient-owner", "candidate-owner"];
 
 describe("main explicit Start task", () => {
-  it("dispatches only the exact background owner's selected task without activation or interruption", async () => {
+  it("starts one isolated background task with inherited thinking and no shared-source launch", async () => {
     const f = fixture();
-    const otherBefore = structuredClone(f.other);
     expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
-    expect(f.state.activeProjectId).toBe("different-project");
-    expect(f.state.createTerminal).toHaveBeenCalledExactlyOnceWith(undefined, expect.objectContaining({
-      projectId: "background", workspaceId: "primary", fromTerminalId: "term-1", model: "provider/task-model", spawnGuard: expect.any(Function),
+    expect(f.createIndependentSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      model: "provider/task-model", thinkingLevel: "high", initialTask: f.task.text,
     }));
-    expect(f.state.writeDispatchStartupControl).toHaveBeenCalledExactlyOnceWith("term-10", f.task.text);
-    expect(f.task).toMatchObject({ state: "active", workerId: "term-10", claimed: ["file.ts"] });
-    expect(f.other).toEqual(otherBefore);
-    expect(f.inst.pty.write).not.toHaveBeenCalled();
-    expect(f.state.dispatchRuns.get("term-10")).toEqual({ ownerId: "term-1", taskText: f.task.text });
-    expect(f.state.runtime.subscribe).toHaveBeenCalledExactlyOnceWith("term-10", "dispatch:term-1");
-    expect(f.state.releaseWriteLease).toHaveBeenCalledExactlyOnceWith("primary", "dispatch:term-1");
-    expect(f.state.sendPlan).toHaveBeenCalledOnce();
-  });
-
-  it("starts a task on a full board and permits named tasks with no parsed paths", async () => {
-    const f = fixture();
-    f.inst.plan.push(...Array.from({ length: 18 }, (_, i): PlanTask => ({ text: `Task ${i}`, paths: [], state: "pending" })));
-    f.task.paths = []; f.request.task.paths = [];
-    expect(f.inst.plan).toHaveLength(20);
-    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
-    expect(f.state.createTerminal).toHaveBeenCalledOnce();
-  });
-
-  it.each([null, {}, { task: {} }, { owner: null, task: {} }])("rejects malformed request %j before preparation", async (request) => {
-    const f = fixture();
-    expect(await f.main.startPlanTask(request)).toMatchObject({ ok: false });
+    expect(f.state.createTerminal).not.toHaveBeenCalled();
     expect(f.state.dispatchPathKeysInFlight).not.toHaveBeenCalled();
-    expect(f.state.createTerminal).not.toHaveBeenCalled();
-  });
-
-  it.each(["project", "displayed-root", "actual-root", "workspace", "terminal", "generation", "task-text", "task-paths", "task-model"])(
-    "rejects incorrect requested %s before awaits", async (change) => {
-      const f = fixture();
-      switch (change) {
-        case "project": f.request.owner.projectId = "other"; break;
-        case "displayed-root": f.request.projectRoot = f.workspace.root; break;
-        case "actual-root": f.request.owner.root = f.project.cwd; break;
-        case "workspace": f.request.owner.workspaceId = "other"; break;
-        case "terminal": f.request.owner.terminalId = "other"; break;
-        case "generation": f.request.owner.generation++; break;
-        case "task-text": f.request.task.text = "Missing"; break;
-        case "task-paths": f.request.task.paths = ["other.ts"]; break;
-        case "task-model": f.request.task.model = "provider/other"; break;
-      }
-      expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-      expect(f.state.dispatchPathKeysInFlight).not.toHaveBeenCalled();
-      expect(f.state.createTerminal).not.toHaveBeenCalled();
-    });
-
-  it.each(changes)("rejects %s changing during path canonicalization without privileged preparation", async (change) => {
-    const f = fixture();
-    f.hooks.path = () => mutate(f, change);
-    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-    expect(f.state.acquireWriteLease).not.toHaveBeenCalled();
-    expect(f.state.writeDispatchBriefing).not.toHaveBeenCalled();
-    expect(f.state.createTerminal).not.toHaveBeenCalled();
+    expect(f.state.activeProjectId).toBe("different-project");
     expect(f.inst.pty.write).not.toHaveBeenCalled();
-    expect(f.state.sendPlan).not.toHaveBeenCalled();
+    expect(f.task).toMatchObject({ state: "active", workerId: "term-10", claimed: [] });
+    expect(f.other.state).toBe("pending");
+    expect(f.state.dispatchRuns.get("term-10")).toEqual({ ownerId: f.inst.id, taskText: f.task.text });
+  });
+  it("accepts pathless named tasks on a full board and inherits the owner model", async () => {
+    const f = fixture(); delete f.task.model; delete f.request.task.model;
+    f.task.paths = []; f.request.task.paths = [];
+    f.inst.plan.push(...Array.from({ length: 18 }, (_, i): PlanTask => ({ text: `Task ${i}`, paths: [], state: "pending" })));
+    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
+    expect(f.createIndependentSession).toHaveBeenCalledWith(expect.objectContaining({ model: "provider/owner-model" }));
+  });
+  it.each(changes)("fences %s after preparation awaits", async (change) => {
+    const f = fixture(); f.hooks.path = () => mutate(f, change);
+    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
+    expect(f.state.createTerminal).not.toHaveBeenCalled();
+    expect(f.state.dispatchRuns.size).toBe(0);
     expect(f.state.dispatchPreparations.size).toBe(0);
   });
-
-  it.each(["claims", "lease", "flush", "briefing", "control", "create-return"] as const)(
-    "fences a changed task after the %s await and cleans up acquired resources", async (stage) => {
-      const f = fixture();
-      f.hooks[stage] = () => { f.task.paths.push("changed.ts"); };
-      expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-      if (stage === "claims") expect(f.state.acquireWriteLease).not.toHaveBeenCalled();
-      if (stage === "lease") expect(f.state.flushDirtyModels).not.toHaveBeenCalled();
-      if (["lease", "flush", "briefing", "control", "create-return"].includes(stage)) expect(f.state.releaseWriteLease).toHaveBeenCalledOnce();
-      if (["claims", "lease", "flush"].includes(stage)) expect(f.state.writeDispatchBriefing).not.toHaveBeenCalled();
-      if (stage === "briefing") expect(f.state.writeDispatchStartupControl).not.toHaveBeenCalled();
-      if (stage !== "create-return") expect(f.state.createTerminal).not.toHaveBeenCalled();
-      if (["briefing", "control", "create-return"].includes(stage)) {
-        expect(f.state.clearMailbox).toHaveBeenCalledWith("term-10");
-        expect(f.state.removeDispatchStartupControl).toHaveBeenCalledWith("term-10");
-      }
-      if (stage === "create-return") expect(f.state.closeTerminal).toHaveBeenCalledExactlyOnceWith("term-10");
-      expect(f.task.workerId).toBeUndefined();
-      expect(f.task.state).toBe("pending");
-      expect(f.state.dispatchWorkers.size).toBe(0);
-      expect(f.state.dispatchRuns.size).toBe(0);
-      expect(f.state.sendPlan).not.toHaveBeenCalled();
-      expect(f.state.dispatchPreparations.size).toBe(0);
-    });
-
-  it.each(["duplicate", "busy", "outcome", "assignment", "state", "worker-owner", "shell-owner", "transient-owner", "candidate-owner"])(
-    "rejects ineligible %s before preparation", async (change) => {
-      const f = fixture();
-      mutate(f, change);
-      f.request.task = structuredClone(f.task);
-      expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-      expect(f.state.dispatchPathKeysInFlight).not.toHaveBeenCalled();
-      expect(f.inst.pty.write).not.toHaveBeenCalled();
-    });
-
-  it.each(["initial-first", "dispatch-first"])("excludes double requests and existing dispatch races (%s)", async (order) => {
-    const f = fixture();
-    let release!: () => void;
+  it.each(["claims", "lease", "flush", "briefing", "control", "create-return"] as const)("cleans failed admission at %s", async (stage) => {
+    const f = fixture(); f.hooks[stage] = () => { f.task.paths.push("changed.ts"); };
+    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
+    expect(f.task.workerId).toBeUndefined(); expect(f.task.state).toBe("pending");
+    expect(f.state.dispatchRuns.size).toBe(0); expect(f.state.dispatchWorkers.size).toBe(0);
+    expect(f.state.createTerminal).not.toHaveBeenCalled();
+  });
+  it("installs metadata before execution and permits exact fast settlement", async () => {
+    const f = fixture(); f.hooks["create-return"] = () => {
+      expect(f.state.dispatchRuns.get("term-10")).toEqual({ ownerId: f.inst.id, taskText: f.task.text });
+      expect(f.task.workerId).toBe("term-10");
+      delete f.task.workerId; delete f.task.claimed; f.task.state = "done";
+      f.task.dispatchResult = { workerId: "term-10", outcome: "completed" };
+    };
+    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
+    expect(f.task.state).toBe("done");
+  });
+  it.each(["sandbox unavailable", "worldline budget exhausted", "capture unavailable"])("does not fall back after %s", async (error) => {
+    const f = fixture(); f.createIndependentSession.mockResolvedValueOnce({ ok: false, error });
+    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: false, error });
+    expect(f.state.createTerminal).not.toHaveBeenCalled(); expect(f.task.state).toBe("pending");
+  });
+  it.each(["initial-first", "dispatch-first"])("serializes starts and ordinary dispatch (%s)", async (order) => {
+    const f = fixture(); let release!: () => void;
     f.hooks.path = () => new Promise<void>((resolve) => { release = resolve; });
     const first = order === "initial-first" ? f.main.startPlanTask(f.request) : f.main.dispatchRun(f.inst.id, f.task.text);
     await vi.waitFor(() => expect(release).toBeTypeOf("function"));
     expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false, error: expect.stringContaining("preparing") });
     expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toMatchObject({ ok: false, error: expect.stringContaining("preparing") });
-    release();
-    expect(await first).toEqual({ ok: true, dispatched: 1 });
-    expect(f.state.createTerminal).toHaveBeenCalledOnce();
-    expect(f.state.dispatchPreparations.size).toBe(0);
+    release(); expect(await first).toEqual({ ok: true, dispatched: 1 });
     expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-    expect(f.state.createTerminal).toHaveBeenCalledOnce();
   });
-
-  it("retains deliberate busy-owner interruption only for ordinary Plan Board dispatch", async () => {
+  it("keeps named Retry in a fresh independent candidate and preserves old area on budget refusal", async () => {
+    const f = fixture();
+    Object.assign(f.task, { candidate: { comparisonId: "cmp-old", label: "A" }, dispatchResult: { workerId: "old", outcome: "incomplete" } });
+    f.createIndependentSession.mockResolvedValueOnce({ ok: false, error: "budget exhausted" });
+    expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toEqual({ ok: false, error: "budget exhausted" });
+    expect(f.task.candidate).toEqual({ comparisonId: "cmp-old", label: "A" });
+    expect(f.state.createTerminal).not.toHaveBeenCalled();
+    expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toEqual({ ok: true, dispatched: 1 });
+    expect(f.task.candidate).toEqual({ comparisonId: "cmp-1", label: "A" });
+    expect(f.task.dispatchResult).toBeUndefined();
+    expect(f.state.createTerminal).not.toHaveBeenCalled();
+  });
+  it("batch Dispatch keeps candidate rows isolated while ordinary rows use existing shared execution", async () => {
+    const f = fixture(); f.task.candidate = { comparisonId: "cmp-old", label: "A" };
+    expect(await f.main.dispatchRun(f.inst.id)).toEqual({ ok: true, dispatched: 2 });
+    expect(f.createIndependentSession).toHaveBeenCalledOnce();
+    expect(f.state.createTerminal).toHaveBeenCalledOnce();
+    expect(f.task.candidate).toEqual({ comparisonId: "cmp-1", label: "A" });
+    expect(f.other.workerId).toBeDefined();
+  });
+  it("initial Start ignores shared path claims and another source owner's dispatch", async () => {
+    const f = fixture();
+    f.state.dispatchRuns.set("shared-worker", { ownerId: "other-owner", taskText: f.task.text });
+    f.state.dispatchPathKeysInFlight.mockResolvedValueOnce(new Set(["/actual/root/file.ts"]));
+    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
+    expect(f.state.dispatchPathKeysInFlight).not.toHaveBeenCalled();
+  });
+  it("enforces owner worker limits even for isolated starts", async () => {
+    const f = fixture();
+    for (let i = 0; i < MAX_DISPATCH_WORKERS; i++) f.state.dispatchRuns.set(`worker-${i}`, { ownerId: f.inst.id, taskText: `other-${i}` });
+    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
+    expect(f.createIndependentSession).not.toHaveBeenCalled();
+  });
+  it("keeps busy-owner interruption exclusive to ordinary dispatch", async () => {
     const f = fixture(); f.inst.busy = true;
-    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false, error: expect.stringContaining("busy") });
+    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
     expect(f.inst.pty.write).not.toHaveBeenCalled();
     expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toEqual({ ok: true, dispatched: 1 });
     expect(f.inst.pty.write).toHaveBeenCalledExactlyOnceWith("\x03");
-  });
-
-  it("waits for private launch-file cleanup before releasing the preparation lock", async () => {
-    const f = fixture();
-    f.hooks.control = () => mutate(f, "paths");
-    let release!: () => void;
-    f.state.clearMailbox.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
-    const result = f.main.startPlanTask(f.request);
-    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-    expect(f.state.removeDispatchStartupControl).toHaveBeenCalledWith("term-10");
-    expect(f.state.dispatchPreparations.has(f.inst.id)).toBe(true);
-    expect(f.state.createTerminal).not.toHaveBeenCalled();
-    release();
-    expect(await result).toMatchObject({ ok: false });
-    expect(f.state.dispatchPreparations.size).toBe(0);
-  });
-
-  it("releases the preparation lock on failure so a fresh valid request may start", async () => {
-    const f = fixture();
-    f.state.acquireWriteLease.mockResolvedValueOnce({ ok: false });
-    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-    expect(f.state.dispatchPreparations.size).toBe(0);
-    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
   });
 });
 
@@ -319,5 +295,117 @@ describe("createTerminal strict internal spawn fence", () => {
     expect(ptySpawn).not.toHaveBeenCalled();
     expect(admit).not.toHaveBeenCalled();
     expect(f.project.terminalIds).toEqual(new Set([f.inst.id]));
+  });
+});
+
+describe("candidate final PTY admission fence", () => {
+  it("forwards the guard through asynchronous terminal preparation to the final spawn", async () => {
+    const main = loadMethods(["createCandidate"], { awaitCandidateAbortable: (value: Promise<unknown>) => value });
+    let stale = false;
+    const ptySpawn = vi.fn(); const routing = vi.fn(); const guard = vi.fn(() => { if (stale) throw new Error("stale inspector"); });
+    const tailer = {};
+    const stopSidecar = vi.fn();
+    Object.assign(main, {
+      allocateTerminalId: () => "term-10", bindSidecarHold: vi.fn(),
+      runtime: { startCandidateSidecar: () => tailer, sidecarWatchGeneration: () => 4,
+        watchCandidateReady: async () => true, stopSidecar },
+      createTerminal: async (_root: unknown, opts: { spawnGuard(): void }) => {
+        expect(routing).toHaveBeenCalledOnce();
+        await Promise.resolve(); stale = true; opts.spawnGuard(); ptySpawn();
+      },
+    });
+    await expect(main.createCandidate({ root: "/candidate", workspaceId: "candidate",
+      launch: { cmd: "/node", args: [], env: { TERMINA_EVENTS_DIR: "/events" } },
+      beforeSpawn: routing, spawnGuard: guard,
+    })).rejects.toThrow("stale inspector");
+    expect(guard).toHaveBeenCalledOnce(); expect(ptySpawn).not.toHaveBeenCalled();
+    expect(stopSidecar).toHaveBeenCalledExactlyOnceWith("term-10", 4);
+  });
+});
+
+describe("canonical task candidate reference", () => {
+  it("copies the bounded durable identity without unknown fields", () => {
+    const input = { comparisonId: "cmp-12", label: "A", extra: "ignored" };
+    expect(parsePlanTaskCandidate(input)).toEqual({ comparisonId: "cmp-12", label: "A" });
+    expect(parsePlanTaskCandidate(input)).not.toBe(input);
+    expect(parsePlanTaskCandidate({ comparisonId: "cmp-1", label: "B" })).toEqual({ comparisonId: "cmp-1", label: "B" });
+  });
+  it.each([null, {}, { comparisonId: "cmp-0", label: "A" }, { comparisonId: "cmp-01", label: "A" },
+    { comparisonId: "cmp-1", label: "C" }, { comparisonId: "cmp-" + "1".repeat(61), label: "A" },
+    { comparisonId: "../cmp-1", label: "A" }])("rejects malformed candidate %j", (value) => {
+    expect(parsePlanTaskCandidate(value)).toBeUndefined();
+  });
+});
+
+describe("isolated task durable execution provenance", () => {
+  it("preserves candidate provenance through settlement and Plan Board reattachment", () => {
+    const task: PlanTask = { text: "Fix file.ts", paths: ["file.ts"], state: "active", workerId: "worker",
+      claimed: [], candidate: { comparisonId: "cmp-4", label: "A" } };
+    expect(settleDispatchTask(task, { id: "worker", touched: new Set(["file.ts"]), toolOutcomes: new Map([["file.ts", "ok"]]) }, "settled")).toBe("completed");
+    expect(task.workerId).toBeUndefined(); expect(task.candidate).toEqual({ comparisonId: "cmp-4", label: "A" });
+    const replacement: PlanTask = { text: task.text, paths: [...task.paths], state: "pending" };
+    reattachDispatchAssignments([replacement], [{ workerId: "next-worker", taskText: task.text }], [task]);
+    expect(replacement).toMatchObject({ candidate: task.candidate, claimed: [], workerId: "next-worker", state: "active" });
+  });
+  it("does not infer isolated task completion from shared-source progress", () => {
+    const isolated: PlanTask = { text: "Fix file.ts", paths: ["file.ts"], state: "pending", candidate: { comparisonId: "cmp-4", label: "A" } };
+    expect(markPlanProgress([isolated], "file.ts")).toBe(false);
+    finalizePlanTasks([isolated], new Set(["file.ts"]), new Map([["file.ts", "ok"]]));
+    expect(isolated.state).toBe("pending");
+  });
+});
+
+describe("independent Retry final lifecycle fence", () => {
+  function retryFixture() {
+    const f = fixture();
+    f.task.candidate = { comparisonId: "cmp-4", label: "A" };
+    f.task.dispatchResult = { workerId: "previous", outcome: "incomplete" };
+    return f;
+  }
+  it.each(["closed", "owner-replaced", "owner-model", "plan-replaced", "task-replaced", "paths", "model", "root", "project-generation", "workspace-generation", "renderer"])(
+    "refuses %s before assignment without native execution", async (change) => {
+      const f = retryFixture(); f.hooks.path = () => mutate(f, change);
+      expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toMatchObject({ ok: false });
+      expect(f.nativeIndependentSpawn).not.toHaveBeenCalled();
+      expect(f.state.dispatchRuns.size).toBe(0); expect(f.state.dispatchWorkers.size).toBe(0);
+    });
+  it.each(["closed", "owner-replaced", "owner-model", "plan-replaced", "task-replaced", "paths", "model", "root", "project-generation", "workspace-generation", "renderer"])(
+    "refuses %s after assignment at final native admission", async (change) => {
+      const f = retryFixture(); f.hooks["create-return"] = () => mutate(f, change);
+      expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toMatchObject({ ok: false });
+      expect(f.nativeIndependentSpawn).not.toHaveBeenCalled();
+      expect(f.state.dispatchRuns.size).toBe(0); expect(f.state.dispatchWorkers.size).toBe(0);
+      expect(f.inst.plan.every((row) => row.workerId !== "term-10")).toBe(true);
+      expect(f.task.candidate).toEqual({ comparisonId: "cmp-4", label: "A" });
+    });
+  it("clears reattached assignments while preserving manual completion and edited fields", async () => {
+    const f = retryFixture();
+    f.hooks["create-return"] = () => {
+      const replacement: PlanTask = { text: f.task.text, paths: ["user-change.ts"], model: "provider/user-model", state: "pending" };
+      reattachDispatchAssignments([replacement], [{ workerId: "term-10", taskText: f.task.text }], f.inst.plan);
+      replacement.state = "done";
+      f.inst.plan = [replacement];
+    };
+    expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toMatchObject({ ok: false });
+    expect(f.nativeIndependentSpawn).not.toHaveBeenCalled();
+    expect(f.inst.plan[0]).toMatchObject({ state: "done", paths: ["user-change.ts"], model: "provider/user-model",
+      candidate: { comparisonId: "cmp-4", label: "A" }, dispatchResult: { workerId: "previous", outcome: "incomplete" } });
+    expect(f.inst.plan[0].workerId).toBeUndefined(); expect(f.inst.plan[0].claimed).toBeUndefined();
+    expect(f.state.dispatchRuns.size).toBe(0); expect(f.state.dispatchWorkers.size).toBe(0);
+  });
+  it("admits a background independent Retry without a renderer while retaining source guards", async () => {
+    const f = retryFixture();
+    Object.assign(f.main, { captureRendererSendTarget: () => null });
+    expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toEqual({ ok: true, dispatched: 1 });
+    expect(f.nativeIndependentSpawn).toHaveBeenCalledOnce();
+    expect(f.state.createTerminal).not.toHaveBeenCalled();
+  });
+  it("retains ordinary named shared Dispatch and admits an unchanged independent Retry", async () => {
+    const shared = fixture();
+    expect(await shared.main.dispatchRun(shared.inst.id, shared.task.text)).toEqual({ ok: true, dispatched: 1 });
+    expect(shared.state.createTerminal).toHaveBeenCalledOnce(); expect(shared.createIndependentSession).not.toHaveBeenCalled();
+    const independent = retryFixture();
+    expect(await independent.main.dispatchRun(independent.inst.id, independent.task.text)).toEqual({ ok: true, dispatched: 1 });
+    expect(independent.nativeIndependentSpawn).toHaveBeenCalledOnce(); expect(independent.state.createTerminal).not.toHaveBeenCalled();
   });
 });
