@@ -29,6 +29,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { fileURLToPath } from "node:url";
 import { revertReviewedFile } from "./review-revert.js";
 import { readPromotionEntry } from "./worldlines/promotion-recovery/entry-state.js";
+import { ensureBoundRelativeDirectory } from "./worldlines/promotion-recovery/bound-dirs.js";
 import { SessionForkClient } from "./session-fork.js";
 import { SessionRetentionOwner } from "./session-retention.js";
 import {
@@ -537,20 +538,7 @@ class TerminaApp {
     sendExit: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code) =>
       this.sendPtyExit(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code),
     isDisposed: () => this.disposed,
-    shouldAdmitSidecar: (terminalId) => {
-      if (this.disposed) return false;
-      // A candidate's PTY can publish session_ready during the synchronous
-      // spawn inside createTerminal, before adopt installs the instance.
-      // Accepting it here would make handleSidecarEvent drop the startup
-      // boundary as "terminal closed". Child subagent streams are tailed on
-      // the shared tailer but owned by the subagent host. Unknown ids stay
-      // on disk.
-      if (!this.runtime.has(terminalId) && !this.subagents.hasStream(terminalId)) return false;
-      // A project switch is a temporary admission stop. Returning without
-      // accepting keeps the durable record at the tailer's cursor.
-      if (this.projectIsSwitching(this.projectOfTerminal(terminalId)?.id)) return false;
-      return true;
-    },
+    shouldAdmitSidecar: (terminalId) => this.shouldAdmitTerminalSidecar(terminalId),
     onSidecarEvent: (terminalId, event) => this.handleSidecarEvent(terminalId, event),
     onSidecarError: (error, failedEvent) => console.warn(`[main] sidecar ${failedEvent.t} failed: ${error.message}`),
     onPtyExitBeforeRelease: (inst, rendererTarget, details) => this.handlePtyExitBeforeRelease(inst, rendererTarget, details),
@@ -619,6 +607,18 @@ class TerminaApp {
   private projectIsSwitching(projectId: string | undefined): boolean {
     return projectId !== undefined
       && (this.switchingProjects.has(projectId) || this.projectClosePromises.has(projectId));
+  }
+
+  private shouldAdmitTerminalSidecar(terminalId: string): boolean {
+    if (this.disposed) return false;
+    // A synchronous spawn can emit before adoption; leave unknown ids on disk.
+    if (!this.runtime.has(terminalId) && !this.subagents.hasStream(terminalId)) return false;
+    const project = this.projectOfTerminal(terminalId);
+    if (!this.projectIsSwitching(project?.id)) return true;
+    // Opening awaits these registered startup handshakes. Closing still
+    // holds every event at its durable cursor until teardown finishes.
+    return !!project && !this.projectClosePromises.has(project.id)
+      && !!project.worldlines?.candidateContextOf(terminalId);
   }
 
   /** A workspace by id, across all projects. Ids are globally unique. */
@@ -1981,7 +1981,18 @@ class TerminaApp {
         }),
       trustHashes: async () => this.computeTrustHashes(project),
       captureHead: (root, gitDir, parent) => worldlineCaptureHead(project.storePromise, root, gitDir, parent),
-      capturePrimary: () => worldlineCapturePrimary(project.storePromise, this.primaryWorkspace(project)),
+      capturePrimary: async () => {
+        const primary = this.primaryWorkspace(project);
+        const state = await worldlineCapturePrimary(project.storePromise, primary);
+        if (state && primary) primary.lastStateCommit = state;
+        return state;
+      },
+      restorePrimaryLineage: async (parentStateId) => {
+        const primary = this.primaryWorkspace(project);
+        const state = await worldlineCapturePrimary(project.storePromise, primary, parentStateId);
+        if (!state || !primary) throw new Error("the saved source lineage is unavailable; work areas were retained");
+        primary.lastStateCommit = state;
+      },
       releaseState: async (stateId) => {
         await this.releaseStateIfUnused(stateId, undefined, undefined, project);
       },
@@ -2009,7 +2020,13 @@ class TerminaApp {
       onPromotionApply: (relPaths) => {
         this.promotionPaths = relPaths ? new Set(relPaths) : null;
       },
-      primarySessionDir: (cwd) => this.coreProjectSessionDir(cwd),
+      primarySessionDir: async (cwd) => {
+        const path = await this.canonicalPath(this.userDataDir);
+        const identity = await boundPromotionOpenDirectory({ path });
+        const root = { path, dev: identity.dev, ino: identity.ino, capability: identity.capability };
+        const projectDir = await this.coreProjectSessionDir(cwd);
+        return ensureBoundRelativeDirectory(root, ["agent-sessions", basename(projectDir)], "primary session directory");
+      },
       installPromoted: async (seed) => {
         const rendererTarget = this.captureRendererSendTarget();
         const inst = await this.createTerminal(
@@ -2227,6 +2244,7 @@ class TerminaApp {
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
     beforeSpawn?: (terminalId: string) => void;
     signal?: AbortSignal;
+    spawnGuard?: () => void;
   }): Promise<{ terminalId: string; pid: number }> {
     const eventsDir = opts.launch.env.TERMINA_EVENTS_DIR;
     // Allocate the id and arm the candidate-owned tailer before constructing
@@ -2260,6 +2278,10 @@ class TerminaApp {
         id: terminalId,
         sidecarTailer: tailer,
         skipSidecarWatch: true,
+        spawnGuard: () => {
+          if (opts.signal?.aborted) throw new Error("candidate startup was cancelled");
+          opts.spawnGuard?.();
+        },
       });
       if (opts.signal?.aborted) {
         this.terminateCandidate(inst.id);
@@ -2788,7 +2810,8 @@ class TerminaApp {
   }
 
   private async coreProjectSessionDir(cwd: string): Promise<string> {
-    return join(this.coreSessionRoot(), sanitizeSessionDir(await this.canonicalPath(cwd)));
+    const [root, project] = await Promise.all([this.canonicalPath(this.coreSessionRoot()), this.canonicalPath(cwd)]);
+    return join(root, sanitizeSessionDir(project));
   }
 
   private async coreSessionFile(sessionId: string, cwd: string): Promise<string> {
@@ -2900,10 +2923,10 @@ class TerminaApp {
       // empty roster is the durable result of closing the project's last tab.
       if (!loaded.exists) {
         try {
-          await this.createTerminal(project.cwd, {
+          await this.createUserTerminal({
             projectId: project.id,
             workspaceId: this.primaryWorkspace(project)?.id,
-          });
+          }, true);
         } catch {
           /* The agent can be unavailable while the folder still opens. */
         }
@@ -2915,7 +2938,11 @@ class TerminaApp {
     for (const rec of loaded.entries) {
       this.noteTerminalId(rec.id);
       try {
-        const inst = await this.createTerminal(await this.shellRestoreCwd(rec, project.cwd), {
+        const inst = rec.type === "agent" ? await this.createUserTerminal({
+          id: rec.id, type: "agent", engine: "core", projectId: project.id,
+          workspaceId: this.primaryWorkspace(project)?.id, persist: true, skipRosterSave: true,
+          resume: { sessionId: rec.sessionId ?? null, sessionFile: rec.sessionFile ?? null }, model: rec.model ?? null,
+        }, true) : await this.createTerminal(await this.shellRestoreCwd(rec, project.cwd), {
           id: rec.id,
           type: rec.type,
           engine: "core",
@@ -2956,7 +2983,9 @@ class TerminaApp {
       }
     }
     for (const item of spawned) {
-      if (!this.runtime.get(item.id)?.persist) unrestored.push(item.rec);
+      const live = this.runtime.get(item.id);
+      const migrated = project.worldlines?.candidateContextOf(item.id)?.sourceRunId === null;
+      if (!live?.persist && !migrated) unrestored.push(item.rec);
     }
     // A non-empty roster is authoritative. Do not replace failed restores
     // with a fresh core tab: retaining both would make the old tab appear as
@@ -3103,6 +3132,52 @@ class TerminaApp {
     const [first] = this.preferences.recentModels ?? [];
     if (!first) return null;
     return { model: `${first.provider}/${first.model}`, thinkingLevel: null };
+  }
+
+  /** Serialize admission and spawn so concurrent clicks cannot create two
+   * unrestricted writers on the same source. */
+  private userTerminalCreation: Promise<void> = Promise.resolve();
+
+  private async createUserTerminal(opts: Parameters<TerminaApp["createTerminal"]>[1], restoring = false): Promise<AgentTerminalInstance> {
+    const previous = this.userTerminalCreation;
+    let release!: () => void;
+    this.userTerminalCreation = new Promise<void>((done) => { release = done; });
+    await previous;
+    try {
+      if (opts?.projectId && !this.projects.has(opts.projectId)) throw new Error("unknown project");
+      const project = (opts?.projectId ? this.projects.get(opts.projectId) : undefined) ?? this.project();
+      if (this.disposed || (!restoring && project && this.projectIsSwitching(project.id))) throw new Error("the project is changing");
+      const root = project?.canonicalRoot;
+      const occupied = root && [...this.runtime.values()].some((inst) => {
+        const ws = this.workspaceOfTerminal(inst);
+        return !inst.closed && !inst.pty.hasExited && ws && sourceTreesOverlap(root, ws.canonicalRoot);
+      });
+      const sourceSessionFile = project && opts?.resume?.sessionId
+        ? await this.coreSessionFile(opts.resume.sessionId, project.cwd) : opts?.resume?.sessionFile;
+      if (restoring && sourceSessionFile && project?.worldlines) {
+        const existing = await project.worldlines.openMigratedSession(sourceSessionFile);
+        if (existing) {
+          if (!existing.ok || !existing.terminalId) throw new Error(existing.error ?? "the saved session could not reopen");
+          const restored = this.runtime.get(existing.terminalId);
+          if (!restored) throw new Error("the saved session closed during restore");
+          return restored;
+        }
+      }
+      if (project && occupied && opts?.type !== "shell") {
+        const source = opts?.fromTerminalId ? this.runtime.get(opts.fromTerminalId) : null;
+        const remembered = this.rememberedAgentSettings();
+        const result = await project.worldlines?.createIndependentSession({
+          model: opts?.model ?? source?.model ?? remembered?.model ?? null,
+          thinkingLevel: source?.thinkingLevel ?? null,
+          ...(sourceSessionFile ? { sourceSessionFile } : {}),
+        });
+        if (!result?.ok || !result.terminalId) throw new Error(result?.error ?? "isolated sessions are unavailable for this project");
+        const inst = this.runtime.get(result.terminalId);
+        if (!inst) throw new Error("the new session closed during preparation");
+        return inst;
+      }
+      return await this.createTerminal(project?.cwd, opts);
+    } finally { release(); }
   }
 
   // Keep: terminal spawn/exit stay on TerminaApp; TerminalRuntime owns the instance map.
@@ -6997,7 +7072,7 @@ class TerminaApp {
     // Worldlines: discard every live comparison of this project.
     const project = this.projectOfTerminal(terminalId);
     if (project?.worldlines) {
-      const ids = [...new Set(project.worldlines.list().map((s) => s.comparisonId))];
+      const ids = [...new Set(project.worldlines.list().filter((s) => s.role !== "session").map((s) => s.comparisonId))];
       for (const id of ids) void project.worldlines.discard(id).catch(() => undefined);
     }
   }
@@ -7577,6 +7652,7 @@ class TerminaApp {
       // Spawn the terminal before folder:opened so the renderer can show
       // that pane when it switches the project view.
       await this.restoreProjectTerminals(project);
+      await project.worldlines?.restoreIndependentSessions();
       // A close can select this project as the replacement while its own
       // asynchronous open is still restoring terminals. In that ordering
       // close's immediate folder push has no workspace yet; publish once the
@@ -7801,6 +7877,7 @@ class TerminaApp {
       this.editorDraftSession.forgetProject(projectId);
       this.pendingDraftDiscards.delete(projectId);
       await project.worldlines?.dispose().catch(() => undefined);
+      const retainSnapshots = project.worldlines?.retainsSnapshotStore() ?? false;
       project.worldlines = null;
       await this.clearMineFiles(project);
       // Drain only this project's terminals. Other open projects keep running.
@@ -7841,6 +7918,7 @@ class TerminaApp {
         closingTerminals
           .filter(({ id, inst }) => closingInstanceOurs(id, inst) || !this.runtime.has(id))
           .map(({ id }) => id),
+        retainSnapshots,
       );
       const projectIds = [...this.projects.keys()];
       const closingIndex = projectIds.indexOf(projectId);
@@ -7897,9 +7975,9 @@ class TerminaApp {
 
   /**
    * Tear down the snapshot store and worker of the previous project.
-   * The store is app-owned and deleted with its project session.
+   * Retained user areas keep the native store that owns their merge lineage.
    */
-  private async teardownRecording(project: ProjectState, closingWorkspaceIds: Set<string>, closingTerminalIds: Iterable<string>): Promise<void> {
+  private async teardownRecording(project: ProjectState, closingWorkspaceIds: Set<string>, closingTerminalIds: Iterable<string>, retainSnapshots: boolean): Promise<void> {
     for (const [token, pending] of [...this.pendingPreflights]) {
       if (!closingWorkspaceIds.has(pending.workspaceId)) continue;
       clearTimeout(pending.timer);
@@ -7923,7 +8001,7 @@ class TerminaApp {
     }
     const storeDir = project.storeDir;
     project.storeDir = null;
-    if (store && storeDir) {
+    if (store && storeDir && !retainSnapshots) {
       try {
         await store.destroy();
       } catch (err) {
@@ -8699,7 +8777,7 @@ class TerminaApp {
         if (this.disposed || (createTarget && this.projectIsSwitching(createTarget.id))) {
           return { ok: false, error: "the project is changing" };
         }
-        const t = await this.createTerminal(undefined, { type, shell, engine, fromTerminalId, projectId });
+        const t = await this.createUserTerminal({ type, shell, engine, fromTerminalId, projectId });
         return { ok: true, id: t.id };
       } catch (err) {
         return { ok: false, error: (err as Error).message };

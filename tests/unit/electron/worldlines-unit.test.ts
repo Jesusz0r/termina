@@ -1,3 +1,4 @@
+import { ensureBoundDirectory } from "../../../electron/worldlines/promotion-recovery/bound-dirs.ts";
 import { describe, it, expect, afterAll } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -43,6 +44,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       trustHashes: async () => ({}),
       captureHead: async () => ({ commit: "", tree: "" }),
       capturePrimary: async () => null,
+      restorePrimaryLineage: async () => {},
       releaseState: async () => {},
       terminalBusy: () => false,
       terminalLive: () => true,
@@ -62,7 +64,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       benchmarkConfigFrom: async () => null,
       onEvidenceUpdate: () => {},
       onPromotionApply: () => {},
-      primarySessionDir: async () => root,
+      primarySessionDir: async () => ensureBoundDirectory(root, "test session directory"),
       installPromoted: async () => ({ terminalId: "unused" }),
     };
 
@@ -155,6 +157,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       trustHashes: async () => ({}),
       captureHead: async () => ({ commit: "", tree: "" }),
       capturePrimary: async () => null,
+      restorePrimaryLineage: async () => {},
       releaseState: async () => {},
       terminalBusy: () => false,
       terminalLive: () => attachable,
@@ -174,7 +177,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       benchmarkConfigFrom: async () => null,
       onEvidenceUpdate: () => {},
       onPromotionApply: () => {},
-      primarySessionDir: async () => root,
+      primarySessionDir: async () => ensureBoundDirectory(root, "test session directory"),
       installPromoted: async () => ({ terminalId: "unused" }),
     };
 
@@ -323,7 +326,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       return src.slice(start, end < 0 ? src.length : end);
     };
     expect(src.match(/private async constructComparison\(/g)?.length).toBe(1);
-    expect(src.match(/this\.constructComparison\(/g)?.length).toBe(3);
+    expect(src.match(/this\.constructComparison\(/g)?.length).toBe(4);
     expect(src.match(/this\.allocateComparisonDirectory\(/g)?.length).toBe(1);
     expect(src.match(/writeComparisonMarkerBound\(/g)?.length).toBe(1);
 
@@ -645,6 +648,7 @@ async function makeReadyManager(): Promise<{ manager: WorldlineManager; root: st
     trustHashes: async () => ({}),
     captureHead: async () => ({ commit: "captured-head", tree: "tree" }),
     capturePrimary: async () => null,
+      restorePrimaryLineage: async () => {},
     releaseState: async () => {},
     terminalBusy: () => false,
     terminalLive: () => true,
@@ -664,7 +668,7 @@ async function makeReadyManager(): Promise<{ manager: WorldlineManager; root: st
     benchmarkConfigFrom: async () => null,
     onEvidenceUpdate: () => {},
     onPromotionApply: () => {},
-    primarySessionDir: async (cwd: string) => join(cwd, "sessions"),
+    primarySessionDir: async (cwd: string) => ensureBoundDirectory(join(cwd, "sessions"), "test session directory"),
     installPromoted: async () => ({ terminalId: "unused" }),
   });
   await (manager as unknown as { ready: Promise<void> }).ready;

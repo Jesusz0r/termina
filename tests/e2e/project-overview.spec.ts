@@ -1,12 +1,9 @@
 import { test as base, expect } from "./fixtures.ts";
-import { mkdir, writeFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { basename, join } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import type { PlanTask } from "../../shared/types.ts";
-import { sanitizeSessionDir } from "../../electron/main/project-workspace.ts";
-import { rosterFilePath } from "../../electron/roster-store.ts";
+import { activeProject, savedPlanProject } from "./saved-plan-project.ts";
 import { MAX_ROSTER_PLAN_TASKS } from "../../electron/terminal-roster.ts";
 import { readVerifyStages, writeVerifyPackage } from "../fixtures/verify-package.ts";
 
@@ -18,31 +15,10 @@ const test = base.extend({
   },
 });
 
-async function activeProject(page: Page) {
-  const project = (await page.evaluate(() => window.termina.projectList())).find((entry) => entry.active);
-  expect(project).toBeTruthy();
-  return project!;
-}
 async function savedProject(page: Page, projectRoot: string, runRoot: string, index: number, plan: PlanTask[]) {
-  const parent = join(runRoot, `overview-${index}`);
-  await mkdir(parent);
-  const root = join(parent, basename(projectRoot));
-  execFileSync("git", ["clone", "-q", "--no-hardlinks", projectRoot, root]);
-  const instances = await page.evaluate(() => window.termina.getInstances());
-  const nextTerminal = Math.max(0, ...instances.map((instance) => Number(instance.id.slice("term-".length)))) + 1;
-  // Saved Plan Board data goes through the real roster parser. Respect its
-  // per-owner cap and allocate unused IDs, including when a shell is already open.
-  // No sidecar events, fabricated overview payloads, executed agents or preload overrides.
-  const boards = Array.from({ length: Math.ceil(plan.length / MAX_ROSTER_PLAN_TASKS) }, (_, board) => ({
-    id: `term-${nextTerminal + board}`, type: "agent", engine: "core",
-    plan: plan.slice(board * MAX_ROSTER_PLAN_TASKS, (board + 1) * MAX_ROSTER_PLAN_TASKS),
-  }));
-  await writeFile(rosterFilePath(join(runRoot, "user-data"), sanitizeSessionDir(realpathSync(root))), JSON.stringify({ terminals: boards }));
-  expect(await page.evaluate((root) => window.termina.projectOpenPath(root), root)).toMatchObject({ cwd: root });
-  const project = await activeProject(page);
-  await expect.poll(() => page.evaluate(async (ids) => Promise.all(ids.map((id) => window.termina.getPlan(id).then((tasks) => tasks.length))), boards.map((board) => board.id)))
-    .toEqual(boards.map((board) => board.plan.length));
-  return project;
+  const boards = Array.from({ length: Math.ceil(plan.length / MAX_ROSTER_PLAN_TASKS) }, (_, board) =>
+    plan.slice(board * MAX_ROSTER_PLAN_TASKS, (board + 1) * MAX_ROSTER_PLAN_TASKS));
+  return (await savedPlanProject(page, projectRoot, runRoot, index, boards)).project;
 }
 async function openOverview(page: Page) {
   await page.locator("#btn-all-projects").click();

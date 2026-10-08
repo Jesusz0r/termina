@@ -39,7 +39,7 @@ async function identities(page: Page) {
 test("queues on the exact background owner and preserves the active dirty editor without executing work", async ({ page, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const previous: PlanTask = { text: "Previous incomplete task", paths: [], state: "pending", dispatchResult: { workerId: "term-999", outcome: "incomplete" } };
-  const first = await savedPlanProject(page, projectRoot, runRoot, 1, [[previous], []]);
+  const first = await savedPlanProject(page, projectRoot, runRoot, 1, [[], [previous]]);
   const second = await savedPlanProject(page, projectRoot, runRoot, 2);
   expect(basename(first.project.cwd)).toBe(basename(second.project.cwd));
   await page.locator("#explorer-tree .explorer-row").filter({ hasText: "greeting.ts" }).dblclick();
@@ -58,25 +58,25 @@ test("queues on the exact background owner and preserves the active dirty editor
   const form = await openComposer(page);
   await expect(form.getByLabel("Project").locator("option").filter({ hasText: first.project.cwd })).toHaveCount(1);
   await expect(form.getByLabel("Project").locator("option").filter({ hasText: second.project.cwd })).toHaveCount(1);
-  await selectDestination(page, first.project.id, first.owners[1]!);
+  await selectDestination(page, first.project.id, first.owners[0]!);
   await expect(form.locator(".overview-task-destination")).toContainText(first.project.cwd);
   const text = "New <outcome> & literal: improve `hello.txt`";
   await form.getByLabel("Outcome", { exact: true }).fill(text);
   await form.getByRole("button", { name: "Create task", exact: true }).click();
   await expect(form).toBeHidden();
   const queued: PlanTask = { text, paths: ["hello.txt"], state: "pending" };
-  await expect.poll(() => page.evaluate((id) => window.termina.getPlan(id), first.owners[1]!)).toEqual([queued]);
-  expect(await page.evaluate((id) => window.termina.getPlan(id), first.owners[0]!)).toEqual([previous]);
+  await expect.poll(() => page.evaluate((id) => window.termina.getPlan(id), first.owners[0]!)).toEqual([queued]);
+  expect(await page.evaluate((id) => window.termina.getPlan(id), first.owners[1]!)).toEqual([previous]);
   for (const owner of second.owners) expect(await page.evaluate((id) => window.termina.getPlan(id), owner)).toEqual([]);
   await expect(page.locator(".overview-work-card").filter({ hasText: text })).toHaveCount(1);
   await expect(page.locator(".overview-work-card").filter({ hasText: text })).toContainText("Marked pending");
   await expect(page.locator("#project-work-inspector .overview-inspector-title")).toHaveText(text);
-  await expect(page.locator("#project-work-inspector")).toContainText(first.owners[1]!);
+  await expect(page.locator("#project-work-inspector")).toContainText(first.owners[0]!);
   await expect(page.locator("#project-work-inspector")).toContainText("No live worker assigned");
   await expect(page.locator("#project-work-inspector outcome")).toHaveCount(0);
   expect((await activeProject(page)).id).toBe(second.project.id);
   expect(await identities(page)).toEqual(before);
-  await expect.poll(async () => (JSON.parse(await readFile(first.roster, "utf8")) as { terminals: Array<{ id: string; plan?: PlanTask[] }> }).terminals.find((entry) => entry.id === first.owners[1])?.plan).toEqual([queued]);
+  await expect.poll(async () => (JSON.parse(await readFile(first.roster, "utf8")) as { terminals: Array<{ id: string; plan?: PlanTask[] }> }).terminals.find((entry) => entry.id === first.owners[0])?.plan).toEqual([queued]);
   expect(await readFile(join(second.project.cwd, "greeting.ts"), "utf8")).toBe(source);
   await page.keyboard.press("Escape");
   await page.keyboard.press("Escape");
@@ -103,7 +103,7 @@ test("Cancel and Escape preserve plans, project and terminals at native 200 perc
     window.webContents.setZoomFactor(2);
   });
   const form = await openComposer(page);
-  await selectDestination(page, target.project.id, target.owners[1]!);
+  await selectDestination(page, target.project.id, target.owners[0]!);
   const input = form.getByLabel("Outcome", { exact: true });
   await input.fill("Cancelled task");
   await expect(input).toBeFocused();
@@ -165,7 +165,7 @@ test("a closed background destination invalidates the draft rather than retarget
   const current = await savedPlanProject(page, projectRoot, runRoot, 2);
   const before = await identities(page);
   const form = await openComposer(page);
-  await selectDestination(page, target.project.id, target.owners[1]!);
+  await selectDestination(page, target.project.id, target.owners[0]!);
   await form.getByLabel("Outcome").fill("Draft for closed destination");
   await page.evaluate((id) => {
     const close = document.querySelector<HTMLButtonElement>(`#project-tabs .project-tab[data-project-id="${id}"] .tab-close`);

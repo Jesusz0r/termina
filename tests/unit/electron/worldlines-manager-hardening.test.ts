@@ -1,3 +1,4 @@
+import { ensureBoundDirectory } from "../../../electron/worldlines/promotion-recovery/bound-dirs.ts";
 import { describe, it, expect } from "vitest";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -65,6 +66,7 @@ describe("manager hardening (issue #202)", () => {
       trustHashes: async () => ({}),
       captureHead: async () => ({ commit: "", tree: "" }),
       capturePrimary: async () => null,
+      restorePrimaryLineage: async () => {},
       releaseState: async () => {},
       terminalBusy: () => false,
       terminalLive: () => true,
@@ -84,7 +86,7 @@ describe("manager hardening (issue #202)", () => {
       benchmarkConfigFrom: async () => null,
       onEvidenceUpdate: () => {},
       onPromotionApply: () => {},
-      primarySessionDir: async (cwd: string) => join(cwd, "sessions"),
+      primarySessionDir: async (cwd: string) => ensureBoundDirectory(join(cwd, "sessions"), "test session directory"),
       installPromoted: async () => ({ terminalId: "unused" }),
     });
     try {
@@ -206,6 +208,7 @@ describe("manager hardening (issue #202)", () => {
         trustHashes: async () => ({}),
         captureHead: async () => ({ commit: "", tree: "" }),
         capturePrimary: async () => null,
+      restorePrimaryLineage: async () => {},
         releaseState: async () => {},
         terminalBusy: () => false,
         terminalLive: () => true,
@@ -225,7 +228,7 @@ describe("manager hardening (issue #202)", () => {
         benchmarkConfigFrom: async () => null,
         onEvidenceUpdate: () => {},
         onPromotionApply: () => {},
-        primarySessionDir: async (cwd: string) => join(cwd, "sessions"),
+        primarySessionDir: async (cwd: string) => ensureBoundDirectory(join(cwd, "sessions"), "test session directory"),
         installPromoted: async () => ({ terminalId: "unused" }),
       });
       try {

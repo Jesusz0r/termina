@@ -26,6 +26,14 @@ export async function savedPlanProject(page: Page, projectRoot: string, runRoot:
   const roster = rosterFilePath(join(runRoot, "user-data"), sanitizeSessionDir(realpathSync(root)));
   await writeFile(roster, JSON.stringify({ terminals: boards }));
   expect(await page.evaluate((root) => window.termina.projectOpenPath(root), root)).toMatchObject({ cwd: root });
-  await expect.poll(() => page.evaluate(async (ids) => Promise.all(ids.map((id) => window.termina.getPlan(id))), boards.map((board) => board.id))).toEqual(boards.map((board) => board.plan));
-  return { project: await activeProject(page), owners: boards.map((board) => board.id), roster };
+  const project = await activeProject(page);
+  // Restored concurrent agents receive new independent-session terminal IDs.
+  // The canonical instance list preserves the project's terminal strip order.
+  const restored = await page.evaluate(async (projectId) => (await window.termina.getInstances())
+    .filter((instance) => instance.projectId === projectId), project.id);
+  expect(restored).toHaveLength(boards.length);
+  expect(restored.map((instance) => instance.type)).toEqual(boards.map((board) => board.type));
+  const owners = restored.map((instance) => instance.id);
+  await expect.poll(() => page.evaluate(async (ids) => Promise.all(ids.map((id) => window.termina.getPlan(id))), owners)).toEqual(boards.map((board) => board.plan));
+  return { project, owners, roster };
 }

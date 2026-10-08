@@ -56,6 +56,7 @@ async function setup(model: string | null, thinkingLevel: string | null): Promis
     trustHashes: async () => ({}),
     captureHead: async () => ({ commit: "", tree: "" }),
     capturePrimary: async () => null,
+      restorePrimaryLineage: async () => {},
     releaseState: async () => {},
     terminalBusy: () => false,
     terminalLive: () => true,
@@ -75,7 +76,7 @@ async function setup(model: string | null, thinkingLevel: string | null): Promis
     benchmarkConfigFrom: async () => null,
     onEvidenceUpdate: () => {},
     onPromotionApply: () => {},
-    primarySessionDir: async (cwd: string) => join(cwd, "sessions"),
+    primarySessionDir: async (cwd: string) => ensureBoundDirectory(join(cwd, "sessions"), "test session directory"),
     installPromoted: async () => ({ terminalId: "unused" }),
   });
   await (manager as unknown as { ready: Promise<void> }).ready;

@@ -6184,7 +6184,14 @@ async function main(): Promise<void> {
   const bootList = currentCatalog();
   if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
   mcpBusy = false;
-  const resumeResult = sessionEnvironment.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
+  let resumeResult = sessionEnvironment.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
+  if (resumeResult.ok && !streamPrepared && IS_WORLDLINE_CANDIDATE) {
+    try {
+      ensureFreshSession();
+      persistRouteSettings();
+    }
+    catch (error) { resumeResult = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+  }
   let structured = "";
   let structuredImages: Array<{ name: string; mediaType: string }> = [];
   let startupPrefilled = false;

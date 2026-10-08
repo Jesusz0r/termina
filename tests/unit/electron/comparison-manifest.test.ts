@@ -38,6 +38,14 @@ describe("comparison manifest parser", () => {
     expect(parseComparisonManifest({ ...manifest, candidates: { A: candidate, B: candidate } })).toBeNull();
   });
 
+  it("requires a complete durable origin for an independent session", () => {
+    expect(parseComparisonManifest({ ...manifest, sourceRunId: null })).toBeNull();
+    const session = { primaryRoot: path, sourceGitDir: join(path, ".git"), baseStateId: "base", model: null, thinkingLevel: null };
+    expect(parseComparisonManifest({ ...manifest, sourceRunId: null, session })?.session).toEqual(session);
+    expect(parseComparisonManifest({ ...manifest, sourceRunId: null, session: { ...session, primaryRoot: "relative" } })).toBeNull();
+    expect(parseComparisonManifest({ ...manifest, sourceRunId: null, session, expectedCandidates: 2 })).toBeNull();
+  });
+
   it("rejects malformed candidate and artifact fields before use", () => {
     for (const fields of [{ pid: -1 }, { pid: 1.5 }, { pid: undefined }, { lstart: undefined }, { paths: [] }, { paths: [42] }, { paths: ["relative"] }]) {
       expect(parseComparisonManifest({ ...manifest, candidates: { A: { ...candidate, ...fields } } })).toBeNull();

@@ -1,3 +1,4 @@
+import { ensureBoundDirectory } from "../../../electron/worldlines/promotion-recovery/bound-dirs.ts";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -219,7 +220,7 @@ describe("Worldline Runtime Flow Suite", () => {
       benchmarkConfigFrom: async () => null,
       onEvidenceUpdate: () => {},
       onPromotionApply: () => {},
-      primarySessionDir: async () => root,
+      primarySessionDir: async () => ensureBoundDirectory(root, "test session directory"),
       installPromoted: async () => ({ terminalId: "unused" }),
     };
     

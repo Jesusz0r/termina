@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import { readVerifyStages, writeVerifyPackage } from "../fixtures/verify-package.ts";
 import type { Page } from "@playwright/test";
 import { parseSidecarRecord } from "../../electron/sidecar.ts";
+import { mockLifecycleDialogs, lifecycleDialogs } from "./lifecycle-dialog.ts";
 import type { TimelineEvent, WorldlineSummary } from "../../shared/types.ts";
 
 function complete(response: ServerResponse, text: string, call?: { id: string; name: "write_file" | "bash"; args: Record<string, string> }) {
@@ -179,6 +180,77 @@ test.describe("Candidate admission through the real sandbox", () => {
     } finally {
       for (const [key, value] of previous) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     }
+  });
+
+  test("an independent area remains usable before its first prompt", async ({ page, projectRoot, electronApp }) => {
+    await expect(page.locator("#splash")).toBeHidden();
+    const owner = (await page.evaluate(() => window.termina.getInstances())).find((i) => i.type === "agent")!;
+    expect((await page.evaluate((id) => window.termina.createTerminal({ projectId: id }), owner.projectId!)).ok).toBe(true);
+    const candidate = (await page.evaluate((id) => window.termina.getWorldlines(id), owner.projectId!))[0]!;
+    expect(candidate.state).toBe("ready");
+    writeFileSync(join(candidate.root, "before-first-prompt.txt"), "saved before a prompt\n");
+    await mockLifecycleDialogs(electronApp, 0);
+    expect((await page.evaluate((id) => window.termina.projectClose(id), owner.projectId!)).ok).toBe(true);
+    await page.evaluate((path) => window.termina.projectOpenPath(path), projectRoot);
+    const reopened = (await page.evaluate(() => window.termina.projectList())).find((p) => p.active)!;
+    const restored = (await page.evaluate((id) => window.termina.getWorldlines(id), reopened.id))[0]!;
+    expect(restored.state, restored.error ?? "").toBe("ready");
+    const preview = await page.evaluate((id) => window.termina.promoteWorldline(id, "A"), restored.comparisonId);
+    expect(preview.confirm).toContain("no evidence");
+    const promoted = await page.evaluate((id) => window.termina.promoteWorldline(id, "A", true), restored.comparisonId);
+    expect(promoted.ok, promoted.error ?? promoted.confirm).toBe(true);
+    expect(readFileSync(join(projectRoot, "before-first-prompt.txt"), "utf8")).toBe("saved before a prompt\n");
+  });
+
+  test("new terminals run concurrently in automatic isolated areas and survive project reopen", async ({ page, runRoot, projectRoot, electronApp }) => {
+    await expect(page.locator("#splash")).toBeHidden();
+    const owner = (await page.evaluate(() => window.termina.getInstances())).find((i) => i.type === "agent")!;
+    await expect.poll(() => records(join(runRoot, "events", `${owner.id}.jsonl`)).some((r) => r.t === "session_ready" && r.ok)).toBe(true);
+    expect(await page.evaluate((id) => window.termina.getRuns(id), owner.id)).toEqual([]);
+    const created = await page.evaluate(async (projectId) => Promise.all([
+      window.termina.createTerminal({ projectId }), window.termina.createTerminal({ projectId }),
+    ]), owner.projectId!);
+    expect(created.every((r) => r.ok && r.id)).toBe(true);
+    const candidates = await page.evaluate((id) => window.termina.getWorldlines(id), owner.projectId!);
+    expect(candidates).toHaveLength(2);
+    expect(candidates.every((c) => c.role === "session" && c.sourceRunId === null && c.state === "ready")).toBe(true);
+    expect(new Set(candidates.map((c) => c.root)).size).toBe(2);
+    await page.evaluate((id) => window.termina.writeTerminal(id, "keep-primary-working-e2e\r"), owner.id);
+    await expect.poll(() => primaryResponse !== null).toBe(true);
+    for (let index = 0; index < candidates.length; index++) {
+      await page.evaluate(({ id, index }) => window.termina.writeTerminal(id, `attention-six-run-candidate-${index}\r`), { id: candidates[index]!.terminalId!, index });
+    }
+    for (const candidate of candidates) await expect.poll(() => existsSync(join(candidate.root, "six-running.pid"))).toBe(true);
+    expect(existsSync(join(projectRoot, "six-result.txt"))).toBe(false);
+    const running = await page.evaluate(() => window.termina.getInstances());
+    expect(running.filter((i) => [owner.id, ...created.map((r) => r.id)].includes(i.id) && i.busy)).toHaveLength(3);
+    for (const candidate of candidates) writeFileSync(join(candidate.root, ".six-agent-release"), "release\n");
+    complete(primaryResponse!, "Primary run complete.");
+    primaryResponse = null;
+    await expect.poll(async () => (await page.evaluate(() => window.termina.getInstances())).filter((i) => i.busy).length).toBe(0);
+    // /clear affects conversation, not another session's durable source tree.
+    await page.evaluate((id) => window.termina.writeTerminal(id, "/clear\r"), owner.id);
+    for (const candidate of candidates) expect(existsSync(join(candidate.root, "six-result.txt"))).toBe(true);
+    await mockLifecycleDialogs(electronApp, 0);
+    const closed = await page.evaluate((id) => window.termina.projectClose(id), owner.projectId!);
+    expect(closed.ok, JSON.stringify({ closed, dialogs: await lifecycleDialogs(electronApp) })).toBe(true);
+    expect(JSON.stringify(await lifecycleDialogs(electronApp))).not.toContain("Their work areas and activity will be discarded");
+    for (const candidate of candidates) expect(existsSync(candidate.root)).toBe(true);
+    await page.evaluate((path) => window.termina.projectOpenPath(path), projectRoot);
+    const reopened = (await page.evaluate(() => window.termina.projectList())).find((p) => p.active)!;
+    const restored = await page.evaluate((id) => window.termina.getWorldlines(id), reopened.id);
+    expect(restored.filter((c) => c.role === "session")).toHaveLength(2);
+    for (const candidate of restored) {
+      expect(candidate.state, candidate.error ?? "").toBe("ready");
+      expect(candidate.sourceRunId).toBeNull();
+      expect(existsSync(join(candidate.root, "six-result.txt"))).toBe(true);
+    }
+    const preview = await page.evaluate((id) => window.termina.promoteWorldline(id, "A"), restored[0]!.comparisonId);
+    expect(preview.confirm).toContain("no evidence");
+    const promoted = await page.evaluate((id) => window.termina.promoteWorldline(id, "A", true), restored[0]!.comparisonId);
+    expect(promoted.ok, promoted.error).toBe(true);
+    expect(readFileSync(join(projectRoot, "six-result.txt"), "utf8")).toMatch(/attention-six-run-candidate-[01]/);
+    expect(existsSync(restored[1]!.root)).toBe(true);
   });
 
   test("confirms both result-based candidates before reporting successful admission", async ({ page, runRoot }) => {

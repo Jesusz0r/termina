@@ -1,3 +1,4 @@
+import { ensureBoundDirectory } from "../../../electron/worldlines/promotion-recovery/bound-dirs.ts";
 import { afterAll, beforeEach, describe, it, expect, vi } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -128,7 +129,7 @@ async function makeManager(): Promise<{ manager: WorldlineManager; root: string;
     benchmarkConfigFrom: async () => null,
     onEvidenceUpdate: () => {},
     onPromotionApply: () => {},
-    primarySessionDir: async (cwd: string) => join(cwd, "sessions"),
+    primarySessionDir: async (cwd: string) => ensureBoundDirectory(join(cwd, "sessions"), "test session directory"),
     installPromoted: async () => ({ terminalId: "unused" }),
   } as never);
   const ready = (manager as unknown as { ready: Promise<void> }).ready;
