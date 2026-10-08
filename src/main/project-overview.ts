@@ -213,7 +213,32 @@ export function createProjectOverview(bindings: {
   workspace.className = "overview-workspace";
   const content = document.createElement("div");
   content.className = "overview-work-list";
-  content.append(toolbar, projectFilterBar, newTaskElement, status, empty, newProject, list);
+  const onboarding = document.createElement("section");
+  onboarding.className = "overview-onboarding";
+  onboarding.hidden = true;
+  const onboardingHeading = document.createElement("h3");
+  onboardingHeading.id = "overview-onboarding-title";
+  onboardingHeading.textContent = "Start with a project";
+  onboarding.setAttribute("aria-labelledby", onboardingHeading.id);
+  const onboardingIntro = document.createElement("p");
+  onboardingIntro.textContent = "Open a project to see its work. Files and a shell are useful before connecting a provider.";
+  const steps = document.createElement("ol");
+  steps.className = "overview-setup-steps";
+  for (const [title, description] of [
+    ["Open a project", "Choose the folder you want to work in. Its files and terminals stay together."],
+    ["Connect in the terminal", "Already connected? Skip this step. Otherwise, run /login in the agent terminal."],
+    ["Describe an outcome", "Tell the agent what you want to achieve and how to check it. The terminal stays the source of truth."],
+  ]) {
+    const step = document.createElement("li");
+    const heading = document.createElement("h4");
+    heading.textContent = title;
+    const copy = document.createElement("p");
+    copy.textContent = description;
+    step.append(heading, copy);
+    steps.append(step);
+  }
+  onboarding.append(onboardingHeading, onboardingIntro, steps, newProject);
+  content.append(toolbar, projectFilterBar, newTaskElement, status, empty, onboarding, list);
   const focusContent = document.createElement("section");
   focusContent.className = "focus-task";
   focusContent.hidden = true;
@@ -527,7 +552,8 @@ export function createProjectOverview(bindings: {
     status.textContent = `${overview.projects.length} project${overview.projects.length === 1 ? "" : "s"} · ${tasks} Plan Board task${tasks === 1 ? "" : "s"}`
       + (query ? ` · ${projects.length} matching project${projects.length === 1 ? "" : "s"}` : "")
       + " · Marked task state, agent activity and check evidence are separate facts.";
-    empty.hidden = projects.length > 0;
+    onboarding.hidden = overview.projects.length > 0 || !!projectFilter;
+    empty.hidden = projects.length > 0 || !onboarding.hidden;
     empty.textContent = projectFilter && !filteredProject ? "The filtered project changed or closed. Choose All projects or select its current project in the rail."
       : overview.projects.length ? "No projects or tasks match. Clear the search or choose All projects to see more work."
         : "Open a project to see its work. Agents keep running when you switch views.";

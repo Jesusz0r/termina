@@ -378,6 +378,23 @@ describe("real project overview", () => {
     expect(dom.document.activeElement).toBe(h.cards()[50]!.querySelector("button"));
   });
 
+  it("shows progressive empty guidance only for an empty workspace, never for a search with no matches", () => {
+    const h = harness({ projects: [], items: [] });
+    const onboarding = h.element.querySelector(".overview-onboarding")!;
+    expect(onboarding.hidden).toBe(false); expect(h.element.querySelector(".overview-empty")!.hidden).toBe(true);
+    expect(onboarding.querySelectorAll("li").map((step) => step.querySelector("h4")!.textContent)).toEqual([
+      "Open a project", "Connect in the terminal", "Describe an outcome",
+    ]);
+    expect(text(onboarding)).toContain("/login"); expect(text(onboarding)).toContain("Already connected? Skip this step.");
+    expect(onboarding.querySelectorAll("button")).toHaveLength(1);
+    expect(h.lanes()).toHaveLength(0); expect(h.cards()).toHaveLength(0);
+    expect(h.onNavigate).not.toHaveBeenCalled(); expect(h.createPlanTask).not.toHaveBeenCalled();
+    view.render(overview()); h.search("nothing matches");
+    expect(onboarding.hidden).toBe(true); expect(h.element.querySelector(".overview-empty")!.hidden).toBe(false);
+    expect(h.element.querySelector(".overview-empty")!.textContent).toContain("No projects or tasks match");
+    expect(h.element.querySelector(".overview-new-project")!.hidden).toBe(true);
+  });
+
   it("offers the existing project-opening path for an empty workspace and never fabricates tasks", () => {
     const h = harness({ projects: [], items: [] });
     expect(h.lanes()).toHaveLength(0);

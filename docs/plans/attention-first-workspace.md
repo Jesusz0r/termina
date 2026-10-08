@@ -133,9 +133,23 @@ Overview attention now uses **Inspect details** to select the existing inline in
 
 This is result availability and review attention, not persistent human acceptance. Reading details, changes or checks never acknowledges the result or changes source files. The existing task, roster, candidate and promotion owners remain authoritative; no second review store or execution path is introduced.
 
+### Visual orientation follow-up
+
+Overview adopts the mock's vertical project lanes and two-column task cards, collapsing cards to one column at narrow widths. Attention selection derives from the existing inspector selection, with visible highlighting and `aria-pressed` / `aria-expanded`; inspection and closing still do not acknowledge attention. The empty surface offers an ordered Open a project → Connect in the terminal (`/login`, only if needed) → Describe an outcome guide, reusing its existing project-opening action. No credential form, mandatory setup gate, sample work or persistent review state is added.
+
 ### Project-rail filter follow-up
 
 Rail project buttons filter Overview lanes while Overview is open, without activating a workspace, changing the local text search, hiding global attention or retargeting an existing task draft. Outside Overview those buttons retain their existing workspace navigation. The transient filter is owned by `project-overview.ts` and freezes project id plus displayed root; the rail only projects its selection. A closed or changed project remains explicitly invalid until a new choice. All projects removes the project filter. Existing global task jumps explicitly reveal their target beyond both local filters.
+
+### Follow-up verification
+
+The final complete unit run passed **3,622 tests** with `--maxWorkers=1`. Earlier concurrent runs encountered intermittent native harness/cost failures; both affected suites also passed focused runs without changing their assertions. Application and test typechecks and the production build passed after the behavior changes.
+
+Electron coverage passed with `--workers=1 --retries=0`: **3 tests** in `pending-review.spec.ts`, and **12 tests** across `overview-context.spec.ts`, `overview-rail.spec.ts` and `project-overview.spec.ts`. The result suite exercises a real independent worker, successful Bash verification, an immutable captured head distinct from its base, inline inspection without acknowledgement or workspace activation, retained attention after the real `/exit`, and removal only after explicit discard. Negative cases verify actual fixture Git changes and a passing owner check without inventing a completed result. Rail and context cases prove exact same-name project identity, invalid closed destinations, preserved drafts/search/inspection, global attention, keyboard focus at native 200 percent zoom, layout and the optional empty-state connection guide.
+
+The shared-writer integration review for `pending-review.spec.ts` is closed. The final file preserves the original three scenarios and the correction pass: canonical plan actions, supported restored task states, real changed fixture files, the existing `perm always` policy and a successful `review-bash` event. It also retains exact roots and identities, plan and dirty-editor preservation, inline inspection without acknowledgement, captured-head provenance, worker-exit retention and explicit discard. A fresh test typecheck, production build and standalone Electron run passed all three cases with retries disabled; the file's SHA-256 was identical before and after verification. No further test or production edits were needed to combine the coverage.
+
+Process identification became available again without changing fixture identity checks, isolation, cleanup or sandbox policy. Build large-chunk warnings and Electron GPU/exit-drain diagnostics were non-failing. No Rust code was changed; Rust tests, the full unrelated Electron matrix, manual assistive technology, other platforms and long-soak checks were not run for this follow-up.
 
 ## Recommendation
 

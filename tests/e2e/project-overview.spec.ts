@@ -52,9 +52,14 @@ test("All projects shows three real projects and six Plan Board tasks; filtering
   const positions = await page.locator(".overview-project").evaluateAll((projects) => projects.map((project) => {
     const box = project.getBoundingClientRect(); return { x: box.x, y: box.y };
   }));
-  expect(positions[1]!.x).toBeGreaterThan(positions[0]!.x);
-  expect(positions[2]!.x).toBeGreaterThan(positions[1]!.x);
-  expect(positions.map((box) => box.y)).toEqual([positions[0]!.y, positions[0]!.y, positions[0]!.y]);
+  expect(positions.map((box) => box.x)).toEqual([positions[0]!.x, positions[0]!.x, positions[0]!.x]);
+  expect(positions[1]!.y).toBeGreaterThan(positions[0]!.y);
+  expect(positions[2]!.y).toBeGreaterThan(positions[1]!.y);
+  const cards = await lane(page, first.id).locator(".overview-work-card").evaluateAll((cards) => cards.map((card) => {
+    const box = card.getBoundingClientRect(); return { x: box.x, y: box.y };
+  }));
+  expect(cards[1]!.x).toBeGreaterThan(cards[0]!.x); expect(cards[1]!.y).toBe(cards[0]!.y);
+  expect(cards[2]!.x).toBe(cards[0]!.x); expect(cards[2]!.y).toBeGreaterThan(cards[0]!.y);
   await expect(page.locator(".overview-status")).toContainText("3 projects · 6 Plan Board tasks");
   await expect(page.locator("#attention-list .attention-item")).toHaveCount(2);
   await expect(page.locator("#btn-all-projects")).toHaveAttribute("aria-current", "page");
@@ -249,8 +254,15 @@ test("an empty workspace gives a real project-opening action instead of sample t
   await expect(page.locator("#project-tabs .project-tab")).toHaveCount(0);
   await openOverview(page);
   await expect(page.locator(".overview-project")).toHaveCount(0);
-  await expect(page.locator(".overview-empty")).toContainText("Open a project to see its work");
-  await expect(page.getByRole("button", { name: "Open a project", exact: true })).toBeVisible();
+  const onboarding = page.getByRole("region", { name: "Start with a project", exact: true });
+  await expect(onboarding).toBeVisible();
+  await expect(onboarding).toContainText("Open a project to see its work");
+  await expect(onboarding.locator("li h4")).toHaveText(["Open a project", "Connect in the terminal", "Describe an outcome"]);
+  await expect(onboarding).toContainText("Already connected? Skip this step.");
+  await expect(onboarding).toContainText("/login");
+  await expect(onboarding.getByRole("button")).toHaveCount(1);
+  await expect(onboarding.getByRole("button", { name: "Open a project", exact: true })).toBeVisible();
+  await expect(page.locator(".overview-empty")).toBeHidden();
   await expect(page.locator(".overview-status")).toContainText("0 projects · 0 Plan Board tasks");
   expect(await page.evaluate(() => window.termina.getWorkOverview())).toEqual({ projects: [], items: [] });
 });

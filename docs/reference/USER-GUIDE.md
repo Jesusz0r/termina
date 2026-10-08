@@ -92,6 +92,13 @@ visible; **All projects** removes that project filter. The local search remains
 separate. A changed or closed filtered project is shown as unavailable until
 you make an explicit choice, never replaced by another project.
 
+Overview stacks project lanes vertically, with two task-card columns when there
+is room and one at narrower widths or increased zoom. Selected attention remains
+highlighted while its inline inspector is open; closing the inspector removes
+the selection, not the attention. An empty Overview offers three steps: open a
+project, use the terminal's existing `/login` flow if needed, then describe an
+outcome. Files and shells remain useful before connecting a provider.
+
 Drag vertically or use `Alt+↑`/`↓` to reorder projects; the order uses the existing
 project preferences. **Open project**, **Open terminal**, and **Open plan**
 remain explicit workspace-navigation actions from Overview.
