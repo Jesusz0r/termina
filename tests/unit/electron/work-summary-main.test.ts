@@ -12,7 +12,7 @@ import type { FolderOpenedPayload, PlanTask, ProjectWorkSummary, VerifyInfo, Wor
 // instantiating an app/provider, or reading session files from the host.
 const sourceFile = ts.createSourceFile("main.ts", readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
 const methodNames = ["planOwnerFacts", "planCreationError", "workSummary", "workOverview", "inspectWorkAttention", "verifyReport", "projectOfTerminal", "workspaceOfTerminal", "registerIpc",
-  "activateProject", "sendFolderOpened", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration"];
+  "activateProject", "displayedWorkspace", "sendFolderOpened", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration"];
 const methods = new Map<string, ts.MethodDeclaration>();
 function visit(node: ts.Node): void {
   if (ts.isMethodDeclaration(node) && methodNames.includes(node.name.getText(sourceFile))) {
@@ -269,7 +269,8 @@ describe("main global attention and validated inspection", () => {
     const before = structuredClone(owner.plan);
     const result = await main.inspectWorkAttention(item.id);
     expect(result).toEqual({ ok: true, folder: { cwd: project.cwd, projectId: project.id,
-      workspaceId: "ws-primary", activationGeneration: 1, needsLogin: false }, action: item.action });
+      workspaceId: "ws-primary", activationGeneration: 1, needsLogin: false,
+      projectRoot: project.cwd, primaryWorkspaceId: "ws-primary" }, action: item.action });
     expect(main.send).toHaveBeenCalledWith("folder:opened", expect.objectContaining({ activationGeneration: 1 }), null);
     expect(main.activeProjectId).toBe(project.id);
     expect(main.workOverview().items).toContainEqual(item);

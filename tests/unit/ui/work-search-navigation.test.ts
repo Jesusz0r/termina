@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAttentionView } from "../../../src/main/attention-view.ts";
 import { searchWork, type WorkSearchTarget } from "../../../src/main/work-search.ts";
@@ -61,6 +63,45 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+describe("canonical terminal navigation readiness", () => {
+  function navigationHarness() {
+    const source = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+    const file = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
+    const declaration = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "navigateWorkAction");
+    if (!declaration) throw new Error("Missing canonical navigation owner");
+    const code = ts.transpileModule(declaration.getText(file), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    const pane = { instanceId: "worker", projectId: "p", generation: 4 };
+    const panes = new Map([[pane.instanceId, pane]]);
+    const pending = deferred<boolean>();
+    const activatePane = vi.fn().mockReturnValue(pending.promise);
+    const focusWorkContext = vi.fn();
+    const layout = { revealTerminal: vi.fn(), setModifiedVisible: vi.fn() };
+    const navigate = new Function("panes", "activatePane", "focusWorkContext", "layout",
+      `let activeProjectId = "p"; let activeId = "worker"; ${code}; return navigateWorkAction;`)(panes, activatePane, focusWorkContext, layout) as
+      (action: { kind: "terminal"; terminalId: string; generation: number }, projectId: string) => Promise<boolean>;
+    return { navigate, pane, panes, pending, activatePane, focusWorkContext };
+  }
+  it("waits for canonical candidate selection even when the renderer tab is already active", async () => {
+    const h = navigationHarness();
+    const result = h.navigate({ kind: "terminal", terminalId: "worker", generation: 4 }, "p");
+    await flush();
+    expect(h.activatePane).toHaveBeenCalledExactlyOnceWith("worker");
+    expect(h.focusWorkContext).not.toHaveBeenCalled();
+    h.pending.resolve(true);
+    expect(await result).toBe(true);
+    expect(h.focusWorkContext).toHaveBeenCalledOnce();
+  });
+  it.each(["refused", "generation", "replaced"])("does not reveal a %s target after canonical selection settles", async (change) => {
+    const h = navigationHarness();
+    const result = h.navigate({ kind: "terminal", terminalId: "worker", generation: 4 }, "p");
+    if (change === "generation") h.pane.generation++;
+    if (change === "replaced") h.panes.set("worker", { ...h.pane });
+    h.pending.resolve(change !== "refused");
+    expect(await result).toBe(false);
+    expect(h.focusWorkContext).not.toHaveBeenCalled();
+  });
+});
 
 describe("Jump to work navigation", () => {
   it("activates the exact task project, then selects its inspector without worker execution or evidence fetch", async () => {

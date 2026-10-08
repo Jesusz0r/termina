@@ -26,7 +26,8 @@ function overview(items: WorkAttentionItem[] = [item()]): WorkOverview {
 function inspectResult(terminalId = "current-term", projectId = "proj-2"): Extract<WorkAttentionInspectResult, { ok: true }> {
   return {
     ok: true,
-    folder: { cwd: "/projects/full/path/other", projectId, workspaceId: "current-ws", activationGeneration: 7, needsLogin: false },
+    folder: { cwd: "/projects/full/path/other", projectId, workspaceId: "current-ws", activationGeneration: 7, needsLogin: false,
+      projectRoot: "/projects/full/path/other", primaryWorkspaceId: "current-ws" },
     action: { kind: "evidence", terminalId, generation: 9 },
   };
 }

@@ -262,7 +262,8 @@ check("folder pushes carry an activation epoch and re-check after auth I/O", mai
   && main.includes("this.projectSelectionAction === selectionAction")
   && main.includes("const needsLogin = await this.agentNeedsLogin()")
   && main.includes("if (!current()) return null")
-  && main.includes("const folder: FolderOpenedPayload = { cwd, projectId, workspaceId, activationGeneration, needsLogin }")
+  && main.includes("const folder: FolderOpenedPayload = { cwd, projectId, workspaceId, activationGeneration, needsLogin,")
+  && main.includes("projectRoot: project.cwd, primaryWorkspaceId: primary.id")
   && main.includes('this.send("folder:opened", folder, rendererTarget)')
   && main.includes("return folder;"));
 check("activation replies carry the same authoritative context as pushes", main.includes("return folder ? { ok: true, folder } : { ok: false }")

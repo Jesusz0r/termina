@@ -712,9 +712,12 @@ export interface WorldlineDetails {
 }
 
 export interface FolderOpenedPayload {
+  /** Displayed workspace root; the project identity remains projectRoot. */
   cwd: string;
   projectId: string;
   workspaceId: string;
+  projectRoot: string;
+  primaryWorkspaceId: string;
   /** Monotonic main-side project activation epoch. */
   activationGeneration: number;
   /** True when the agent has no provider in auth.json or in the process environment. */
@@ -817,7 +820,7 @@ export interface TerminaBridge {
   /** Retire one PTY sequence after xterm has consumed it. */
   acknowledgePtyData(payload: Pick<PtyDataPayload, "id" | "generation" | "windowGeneration" | "rendererGeneration" | "sequence">): void;
   /** Report the selected pane for native actions; main validates ownership and generation. */
-  selectTerminal(id: string, generation: number): Promise<{ ok: boolean }>;
+  selectTerminal(id: string, generation: number): Promise<ProjectActivateResult>;
   closeTerminal(id: string, generation: number): Promise<TerminalCloseResult>;
   /** Confirm and send Ctrl+C to one exact terminal; does not stop separate workers or checks. */
   interruptTerminal(id: string, generation: number): Promise<TerminalCloseResult>;
@@ -969,13 +972,13 @@ export interface TerminaBridge {
   saveFile(path: string, content: string, owner: ProjectWorkspaceRef, restore?: boolean): Promise<{ ok: boolean; error?: string }>;
 
   // file explorer
-  listDir(projectId: string, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }>;
-  createEntry(projectId: string, relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
-  renameEntry(projectId: string, relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
-  deleteEntry(projectId: string, relPath: string): Promise<{ ok: boolean; error?: string }>;
+  listDir(owner: ProjectWorkspaceRef, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }>;
+  createEntry(owner: ProjectWorkspaceRef, relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
+  renameEntry(owner: ProjectWorkspaceRef, relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
+  deleteEntry(owner: ProjectWorkspaceRef, relPath: string): Promise<{ ok: boolean; error?: string }>;
   /** Explorer clipboard paste: copy (or move, for a cut entry) srcRel under
    *  the target directory. Collisions get a " copy" / " copy N" suffix. */
-  pasteEntry(projectId: string, targetDirRel: string, srcRel: string, move: boolean): Promise<{ ok: boolean; error?: string; name?: string }>;
+  pasteEntry(owner: ProjectWorkspaceRef, targetDirRel: string, srcRel: string, move: boolean): Promise<{ ok: boolean; error?: string; name?: string }>;
   getUpdateState(): Promise<AppUpdateState>;
   checkUpdate(): Promise<AppUpdateState>;
   installUpdate(): Promise<{ ok: boolean; error?: string }>;

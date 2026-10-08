@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { resolveFileNavigation } from "../../../src/main/file-navigation";
 
 const projects = new Map([
-  ["parent", { id: "parent", cwd: "/projects/app", workspaceId: "primary-parent" }],
-  ["nested", { id: "nested", cwd: "/projects/app/nested", workspaceId: "primary-nested" }],
-  ["other", { id: "other", cwd: "/projects/other", workspaceId: "primary-other" }],
+  ["parent", { id: "parent", cwd: "/projects/app", workspaceId: "primary-parent", workspace: { id: "primary-parent", root: "/projects/app" } }],
+  ["nested", { id: "nested", cwd: "/projects/app/nested", workspaceId: "primary-nested", workspace: { id: "primary-nested", root: "/projects/app/nested" } }],
+  ["other", { id: "other", cwd: "/projects/other", workspaceId: "primary-other", workspace: { id: "primary-other", root: "/projects/other" } }],
 ]);
 const parent = { projectId: "parent", workspaceId: "primary-parent" };
 
@@ -18,8 +18,8 @@ describe("file navigation ownership", () => {
 
   it("uses the canonical macOS spelling for both file paths and visible project roots", () => {
     const aliases = new Map([
-      ["parent", { id: "parent", cwd: "/var/source", workspaceId: "primary-parent" }],
-      ["nested", { id: "nested", cwd: "/var/source/nested", workspaceId: "primary-nested" }],
+      ["parent", { id: "parent", cwd: "/var/source", workspaceId: "primary-parent", workspace: { id: "primary-parent", root: "/var/source" } }],
+      ["nested", { id: "nested", cwd: "/var/source/nested", workspaceId: "primary-nested", workspace: { id: "primary-nested", root: "/var/source/nested" } }],
     ]);
     const physical = resolveFileNavigation("/private/var/source/nested/file.ts", aliases, parent);
     const visible = resolveFileNavigation("/var/source/nested/file.ts", aliases, parent);
@@ -63,6 +63,19 @@ describe("file navigation ownership", () => {
     expect(resolveFileNavigation("/worlds/candidate/file.ts", projects, candidate)).toEqual({
       path: "/worlds/candidate/file.ts", owner: candidate,
     });
+  });
+
+  it("resolves a relative candidate link against the displayed workspace without changing project identity", () => {
+    const selected = new Map(projects);
+    selected.set("parent", { ...selected.get("parent")!, workspace: { id: "candidate-A", root: "/worlds/candidate" } });
+    const candidate = { projectId: "parent", workspaceId: "candidate-A" };
+    expect(resolveFileNavigation("hello.txt", selected, candidate)).toEqual({ path: "/worlds/candidate/hello.txt", owner: candidate });
+    expect(selected.get("parent")?.cwd).toBe("/projects/app");
+    expect(resolveFileNavigation("hello.txt", selected, parent)).toEqual({ path: "/projects/app/hello.txt", owner: parent });
+  });
+
+  it("refuses a relative candidate link when its root is unavailable instead of using source bytes", () => {
+    expect(resolveFileNavigation("hello.txt", projects, { projectId: "parent", workspaceId: "missing-candidate" })).toBeNull();
   });
 
   it("never silently replaces a candidate owner with a primary workspace", () => {

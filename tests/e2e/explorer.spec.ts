@@ -514,7 +514,7 @@ test.describe("Explorer symlink safety (list-dir)", () => {
     const res = await page.evaluate(async (root) => {
       const projects = await window.termina.projectList();
       const active = projects.find((p) => p.active) ?? projects[0];
-      return window.termina.listDir(active.id, root);
+      return window.termina.listDir({ projectId: active.id, workspaceId: active.workspaceId }, root);
     }, projectRoot);
 
     const names = res.entries.map((e) => e.name).sort();

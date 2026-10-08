@@ -790,6 +790,11 @@ class TerminaApp {
   private coreTerminalFocused = false;
   /** Native terminal actions use the exact pane selected by this renderer document. */
   private terminalSelection: { id: string; generation: number; target: PtyRendererSendTarget } | null = null;
+  /** One canonical workspace activation, shared by pushes and selection replies. */
+  private workspaceActivation: {
+    projectId: string; workspaceId: string; activationGeneration: number; selectionAction: number;
+    target: PtyRendererSendTarget | null; current: () => boolean; promise: Promise<FolderOpenedPayload | null>;
+  } | null = null;
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /clear (/new alias) slash-command detection (terminals:write is per keystroke). */
   private newCommandBuffers = new Map<string, string>();
@@ -4171,11 +4176,13 @@ class TerminaApp {
     source: unknown,
   ): Promise<{ entries: Array<{ relPath: string; matches?: number[] }>; truncated?: boolean }> {
     const project = this.project();
-    const cwd = project?.cwd ?? null;
-    if (!project || !cwd) return { entries: [] };
+    const workspace = project ? this.displayedWorkspace(project) : null;
+    const cwd = workspace?.root;
+    if (!project || !workspace || !cwd) return { entries: [] };
     const root = await this.canonicalPath(cwd);
     const { source: lane, seq } = this.fileSearchSeq.next(source);
-    const stop = () => this.disposed || !this.fileSearchSeq.current(lane, seq);
+    const stop = () => this.disposed || !this.fileSearchSeq.current(lane, seq)
+      || this.project() !== project || this.displayedWorkspace(project) !== workspace || workspace.root !== cwd;
     // Score the cached inventory when there is one: only the first search of a
     // project pays for the walk, and a superseded query still returns nothing
     // rather than a partial result.
@@ -4183,9 +4190,10 @@ class TerminaApp {
     // Empty queries lead with this project's recent files (rankProjectPaths
     // drops recents that left the tree); scored queries ignore them.
     const recent = (this.preferences.recentFiles ?? [])
-      .filter((file) => file.projectId === project.id)
+      .filter((file) => workspace.primary && file.projectId === project.id)
       .map((file) => file.relPath);
     const { entries, truncated } = await searchProjectFiles(root, query, { shouldStop: stop, candidates, recent });
+    if (stop()) return { entries: [] };
     return truncated ? { entries, truncated: true } : { entries };
   }
 
@@ -4203,13 +4211,16 @@ class TerminaApp {
     const unsafe = validateGrepPattern(pattern);
     if (unsafe) return { hits: [], error: unsafe };
     const project = this.project();
-    const cwd = project?.cwd ?? null;
-    if (!project || !cwd) return { hits: [] };
+    const workspace = project ? this.displayedWorkspace(project) : null;
+    const cwd = workspace?.root;
+    if (!project || !workspace || !cwd) return { hits: [] };
     const root = await this.canonicalPath(cwd);
     const { source: lane, seq } = this.contentSearchSeq.next(source);
-    const stop = () => this.disposed || !this.contentSearchSeq.current(lane, seq);
+    const stop = () => this.disposed || !this.contentSearchSeq.current(lane, seq)
+      || this.project() !== project || this.displayedWorkspace(project) !== workspace || workspace.root !== cwd;
     const candidates = await this.pathIndex.candidates(root, stop);
     const { hits, truncated } = await searchProjectContent(root, pattern, { shouldStop: stop, candidates });
+    if (stop()) return { hits: [] };
     return truncated ? { hits, truncated: true } : { hits };
   }
 
@@ -5074,15 +5085,28 @@ class TerminaApp {
     this.sendInstances();
   }
 
-  private selectTerminal(id: unknown, generation: unknown): { ok: boolean } {
+  private async selectTerminal(id: unknown, generation: unknown): Promise<import("../shared/types.js").ProjectActivateResult> {
     const ref = parseTerminalTarget(id, generation);
     const inst = ref ? this.runtime.get(ref.id) : undefined;
     const target = this.captureRendererSendTarget();
-    if (!ref || !inst || inst.closed || inst.generation !== ref.generation || !target
-      || this.disposed || this.projectIsSwitching(this.activeProjectId ?? undefined)
-      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId) return { ok: false };
+    const project = inst ? this.projectOfTerminal(inst.id) : null;
+    const workspace = inst ? this.workspaceOfTerminal(inst) : null;
+    if (!ref || !inst || inst.closed || inst.generation !== ref.generation || !target || !project || !workspace
+      || this.disposed || this.projectIsSwitching(project.id) || project.id !== this.activeProjectId) return { ok: false };
     this.terminalSelection = { ...ref, target };
-    return { ok: true };
+    const activation = this.workspaceActivation;
+    // Repeated selection waits for the same in-flight activation rather than
+    // advancing its epoch and superseding the original caller.
+    const pending = activation?.projectId === project.id && activation.workspaceId === workspace.id
+      && activation.activationGeneration === project.activationGeneration
+      && activation.selectionAction === this.projectSelectionAction
+      && !!activation.target && isPtyRendererSendTargetCurrent(target, activation.target) && activation.current()
+      ? activation.promise : this.activateProject(project.id, target, undefined, workspace.id, ref);
+    const folder = await pending;
+    if (!folder || this.selectedTerminal() !== inst || inst.generation !== ref.generation
+      || this.workspaceOfTerminal(inst) !== workspace || folder.workspaceId !== workspace.id
+      || project.activationGeneration !== folder.activationGeneration) return { ok: false };
+    return { ok: true, folder };
   }
 
   private selectedTerminal(): AgentTerminalInstance | null {
@@ -5091,7 +5115,8 @@ class TerminaApp {
     const inst = this.runtime.get(selected.id);
     if (!inst || inst.closed || inst.generation !== selected.generation
       || this.disposed || this.projectIsSwitching(this.activeProjectId ?? undefined)
-      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId) return null;
+      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId
+      || !this.projectWorkspace({ projectId: inst.projectId, workspaceId: inst.workspaceId })) return null;
     return inst;
   }
 
@@ -7681,58 +7706,85 @@ class TerminaApp {
     }
   }
 
+  /** The displayed work area never replaces the project's primary identity. */
+  private displayedWorkspace(project: ProjectState): WorkspaceState | null {
+    const activation = this.workspaceActivation;
+    if (this.activeProjectId === project.id && activation?.projectId === project.id) {
+      return project.workspaces.get(activation.workspaceId) ?? null;
+    }
+    return this.primaryWorkspace(project);
+  }
+
   /** Switch the renderer to another open project. Nothing is torn down. */
   private async activateProject(
     projectId: string,
     expected?: PtyRendererSendTarget | null,
     expectedSelectionAction?: number,
+    workspaceId?: string,
+    selection?: { id: string; generation: number },
   ): Promise<FolderOpenedPayload | null> {
     const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
     const project = this.projects.get(projectId);
     if (!project || this.projectIsSwitching(projectId)) return null;
+    const workspace = workspaceId ? project.workspaces.get(workspaceId) : this.displayedWorkspace(project);
+    if (!workspace) return null;
     const selectionAction = expectedSelectionAction ?? this.beginProjectSelectionAction();
     if (expectedSelectionAction !== undefined && this.projectSelectionAction !== expectedSelectionAction) return null;
     const activationGeneration = this.nextProjectActivationGeneration();
     this.activeProjectId = projectId;
     project.activationGeneration = activationGeneration;
     const sent = await this.sendFolderOpened(
-      project.cwd,
+      workspace.primary ? project.cwd : workspace.root,
       project.id,
-      this.primaryWorkspace(project)?.id ?? "",
+      workspace.id,
       activationGeneration,
       selectionAction,
       rendererTarget,
+      selection,
     );
     if (sent) void this.persistOpenProjects();
     return sent;
   }
 
   /** Push folder:opened with a login hint flag. The renderer never reads auth.json. */
-  private async sendFolderOpened(
+  private sendFolderOpened(
     cwd: string,
     projectId: string,
     workspaceId: string,
     activationGeneration: number,
     selectionAction = this.projectSelectionAction,
     expected?: PtyRendererSendTarget | null,
+    selection?: { id: string; generation: number },
   ): Promise<FolderOpenedPayload | null> {
     const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
     const project = this.projects.get(projectId);
+    const workspace = project?.workspaces.get(workspaceId);
+    const workspaceRoot = workspace?.root;
+    const terminal = selection ? this.runtime.get(selection.id) : null;
+    const primary = project ? this.primaryWorkspace(project) : null;
     const current = () => !this.disposed
-      && !!workspaceId
+      && !!workspace && !!primary
       && this.projects.get(projectId) === project
+      && project?.workspaces.get(workspaceId) === workspace && workspace.root === workspaceRoot
       && this.activeProjectId === projectId
       && project?.activationGeneration === activationGeneration
       && this.projectActivationGeneration === activationGeneration
-      && this.projectSelectionAction === selectionAction;
-    if (!current()) return null;
-    const needsLogin = await this.agentNeedsLogin();
-    // Auth I/O is asynchronous. Re-check every active-project fence before
-    // publishing; an earlier request must never resurrect a closed/hidden tab.
-    if (!current()) return null;
-    const folder: FolderOpenedPayload = { cwd, projectId, workspaceId, activationGeneration, needsLogin };
-    this.send("folder:opened", folder, rendererTarget);
-    return folder;
+      && this.projectSelectionAction === selectionAction
+      && (!rendererTarget || isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget))
+      && (!selection || (!!terminal && this.selectedTerminal() === terminal
+        && terminal.generation === selection.generation && this.workspaceOfTerminal(terminal) === workspace));
+    if (!current() || !project || !primary) return Promise.resolve(null);
+    const promise = (async () => {
+      const needsLogin = await this.agentNeedsLogin();
+      // Auth I/O is asynchronous; a replaced workspace or selection cannot publish.
+      if (!current()) return null;
+      const folder: FolderOpenedPayload = { cwd, projectId, workspaceId, activationGeneration, needsLogin,
+        projectRoot: project.cwd, primaryWorkspaceId: primary.id };
+      this.send("folder:opened", folder, rendererTarget);
+      return folder;
+    })();
+    this.workspaceActivation = { projectId, workspaceId, activationGeneration, selectionAction, target: rendererTarget, current, promise };
+    return promise;
   }
 
   /**
@@ -8322,13 +8374,11 @@ class TerminaApp {
     return relative(await this.canonicalPath(root), p);
   }
 
-  private explorerWorkspace(projectId: unknown): { project: ProjectState; workspace: WorkspaceState } | { error: string } {
-    if (typeof projectId !== "string") return { error: "invalid project" };
-    const project = this.projects.get(projectId);
-    if (!project || this.projectIsSwitching(projectId)) return { error: "project is not open" };
-    const workspace = this.primaryWorkspace(project);
-    if (!workspace) return { error: "project workspace is not available" };
-    return { project, workspace };
+  private explorerWorkspace(owner: unknown): { project: ProjectState; workspace: WorkspaceState } | { error: string } {
+    const target = this.projectWorkspace(owner);
+    if (!target) return { error: "invalid project workspace" };
+    if (this.projectIsSwitching(target.project.id)) return { error: "project is not open" };
+    return target;
   }
 
   /** The project/workspace must still be owned and open before a write commits. */
@@ -8342,11 +8392,12 @@ class TerminaApp {
 
   /** Serialize one Explorer mutation with capture, close, and other writers. */
   private async mutateExplorer(
-    projectId: unknown,
+    owner: unknown,
     mutation: (workspace: WorkspaceState, live: () => boolean) => Promise<{ ok: boolean; error?: string; name?: string }>,
   ): Promise<{ ok: boolean; error?: string; name?: string }> {
-    const target = this.explorerWorkspace(projectId);
+    const target = this.explorerWorkspace(owner);
     if ("error" in target) return { ok: false, error: target.error };
+    if (!target.workspace.primary) return { ok: false, error: "Candidate files are read-only. Use candidate controls to promote or export changes." };
     const requester = `explorer:${target.project.id}:${randomUUID()}`;
     const lease = await this.acquireWriteLease(target.workspace.id, requester, 5000);
     if (!lease.ok) return { ok: false, error: lease.error ?? "the project workspace is busy" };
@@ -8399,9 +8450,14 @@ class TerminaApp {
     await handle.close().catch(() => undefined);
   }
 
-  private async listDir(projectId: unknown, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
-    const target = this.explorerWorkspace(projectId);
+  private async listDir(owner: unknown, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
+    const target = this.explorerWorkspace(owner);
     if ("error" in target) return { entries: [], error: target.error };
+    const root = target.workspace.root;
+    const generation = target.workspace.generation;
+    const current = () => this.projectWorkspace(owner)?.workspace === target.workspace
+      && !this.projectIsSwitching(target.project.id)
+      && target.workspace.root === root && target.workspace.generation === generation;
     try {
       if (await this.hasDanglingSymlink(absPath)) return { entries: [], error: "path outside the project workspace" };
       const [rootCanon, dir] = await Promise.all([
@@ -8451,6 +8507,7 @@ class TerminaApp {
           type: isDir ? "dir" : "file",
         });
       }
+      if (!current()) return { entries: [], error: "project workspace changed while listing" };
       return truncated ? { entries, truncated: true } : { entries };
     } catch (err) {
       return { entries: [], error: (err as Error).message };
@@ -9167,14 +9224,14 @@ class TerminaApp {
       if (target) this.editorDraftSession.forget(token, { projectId: target.project.id, workspaceId: target.workspace.id });
     });
 
-    ipcMain.handle("explorer:list-dir", (_e, projectId: unknown, absPath: unknown) => {
-      if (typeof projectId !== "string" || typeof absPath !== "string") return { entries: [], error: "invalid path" };
-      return this.listDir(projectId, absPath);
+    ipcMain.handle("explorer:list-dir", (_e, owner: unknown, absPath: unknown) => {
+      if (typeof absPath !== "string") return { entries: [], error: "invalid path" };
+      return this.listDir(owner, absPath);
     });
-    ipcMain.handle("explorer:create", async (_e, projectId: unknown, relPath: unknown, kind: unknown) => {
+    ipcMain.handle("explorer:create", async (_e, owner: unknown, relPath: unknown, kind: unknown) => {
       if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
       if (kind !== "file" && kind !== "dir") return { ok: false, error: "kind must be file or dir" };
-      return this.mutateExplorer(projectId, async (workspace, live) => {
+      return this.mutateExplorer(owner, async (workspace, live) => {
         const abs = await this.projectAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
         if (kind === "dir") {
@@ -9194,21 +9251,21 @@ class TerminaApp {
         return { ok: true };
       }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
-    ipcMain.handle("explorer:rename", async (_e, projectId: unknown, relPath: unknown, newName: unknown) => {
+    ipcMain.handle("explorer:rename", async (_e, owner: unknown, relPath: unknown, newName: unknown) => {
       if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
       if (typeof newName !== "string" || !newName || newName.includes("/") || newName === "." || newName === "..") {
         return { ok: false, error: "invalid name" };
       }
-      return this.mutateExplorer(projectId, async (workspace, live) => {
+      return this.mutateExplorer(owner, async (workspace, live) => {
         const abs = await this.projectAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
         await renameBoundEntry(workspace.root, abs, join(dirname(abs), newName));
         return { ok: true };
       }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
-    ipcMain.handle("explorer:delete", async (_e, projectId: unknown, relPath: unknown) => {
+    ipcMain.handle("explorer:delete", async (_e, owner: unknown, relPath: unknown) => {
       if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
-      return this.mutateExplorer(projectId, async (workspace, live) => {
+      return this.mutateExplorer(owner, async (workspace, live) => {
         const abs = await this.projectAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
         await rm(abs, { recursive: true, force: true });
@@ -9225,12 +9282,12 @@ class TerminaApp {
     // Deterministic collisions already get copy-names; a racy one fails
     // closed for moves (no-replace rename) and best-effort for copies
     // (errorOnExist is checked, not atomic).
-    ipcMain.handle("explorer:paste", async (_e, projectId: unknown, targetDirRel: unknown, srcRel: unknown, move: unknown) => {
+    ipcMain.handle("explorer:paste", async (_e, owner: unknown, targetDirRel: unknown, srcRel: unknown, move: unknown) => {
       if (typeof targetDirRel !== "string" || typeof srcRel !== "string" || typeof move !== "boolean") {
         return { ok: false, error: "invalid arguments" };
       }
       if (!srcRel || srcRel === ".") return { ok: false, error: "invalid source" };
-      return this.mutateExplorer(projectId, async (workspace, live) => {
+      return this.mutateExplorer(owner, async (workspace, live) => {
         const src = await this.projectAbs(workspace, srcRel);
         let dirAbs: string;
         if (targetDirRel === "" || targetDirRel === ".") {

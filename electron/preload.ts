@@ -180,11 +180,11 @@ const bridge: TerminaBridge = {
     ipcRenderer.invoke("file:save", path, content, owner, restore === true),
 
   // ---- file explorer ----
-  listDir: (projectId, absPath): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> => ipcRenderer.invoke("explorer:list-dir", projectId, absPath),
-  createEntry: (projectId, relPath, kind) => ipcRenderer.invoke("explorer:create", projectId, relPath, kind),
-  renameEntry: (projectId, relPath, newName) => ipcRenderer.invoke("explorer:rename", projectId, relPath, newName),
-  deleteEntry: (projectId, relPath) => ipcRenderer.invoke("explorer:delete", projectId, relPath),
-  pasteEntry: (projectId, targetDirRel, srcRel, move) => ipcRenderer.invoke("explorer:paste", projectId, targetDirRel, srcRel, move),
+  listDir: (owner, absPath): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> => ipcRenderer.invoke("explorer:list-dir", owner, absPath),
+  createEntry: (owner, relPath, kind) => ipcRenderer.invoke("explorer:create", owner, relPath, kind),
+  renameEntry: (owner, relPath, newName) => ipcRenderer.invoke("explorer:rename", owner, relPath, newName),
+  deleteEntry: (owner, relPath) => ipcRenderer.invoke("explorer:delete", owner, relPath),
+  pasteEntry: (owner, targetDirRel, srcRel, move) => ipcRenderer.invoke("explorer:paste", owner, targetDirRel, srcRel, move),
   getUpdateState: (): Promise<AppUpdateState> => ipcRenderer.invoke("update:get"),
   checkUpdate: (): Promise<AppUpdateState> => ipcRenderer.invoke("update:check"),
   installUpdate: () => ipcRenderer.invoke("update:install"),

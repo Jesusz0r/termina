@@ -111,7 +111,7 @@ describe("applyInstanceSummary (issue #276)", () => {
     expect(main).toContain("applyInstanceSummary(pane, inst,");
     expect(main).toContain("handleWorldlineInstances(list,");
     expect(main).not.toContain("worldlinesView.labelOfTerminal(p.instanceId) === null");
-    expect(main).toContain("p.workspaceId === view.workspaceId");
+    expect(main).toContain("p.workspaceId === view.workspace.id");
     expect(main).not.toContain('engine: instance.engine ?? "core"');
     expect(main).not.toContain("modified: instance.modified ?? []");
     expect(main).not.toContain('recorderState: instance.recorderState ?? "paused"');

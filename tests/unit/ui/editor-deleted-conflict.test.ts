@@ -46,8 +46,9 @@ describe("external deletion keeps dirty buffers (refs #127)", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     const handler = renderer.slice(start, renderer.indexOf("function syncExplorerChanged", start));
     expect(handler).toContain("projectViews.get(p.projectId)");
-    expect(handler).toContain("view.workspaceId !== p.workspaceId");
-    expect(handler).toContain("view.editorMgr?.closeIfOpen(p.path)");
+    expect(handler).toContain("view.editorMgr?.hasFile(p.path, owner)");
+    expect(handler).toContain("view.workspace.id !== p.workspaceId");
+    expect(handler).toContain("view.editorMgr.closeIfOpen(p.path)");
   });
 
   it("restores a deleted buffer through one save IPC, not a renderer create-then-save", () => {

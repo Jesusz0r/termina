@@ -497,8 +497,12 @@ export class EditorManager {
     return key;
   }
 
-  hasFile(path: string): boolean {
-    return this.resolveKey(path) !== null;
+  hasFile(path: string, owner?: ProjectWorkspaceRef): boolean {
+    const key = this.resolveKey(path);
+    if (key === null) return false;
+    if (!owner) return true;
+    const tab = this.tabs.get(key);
+    return tab?.owner?.projectId === owner.projectId && tab.owner.workspaceId === owner.workspaceId;
   }
 
   /** Recover only paths that main still attributes to this project's live workspaces. */
