@@ -25,14 +25,31 @@ jobs:
           toolchain: 1.97.1
       # packageManager pins pnpm; corepack activates that exact version.
       - run: corepack enable
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-pnpm-
       - run: pnpm install --frozen-lockfile
-      # Artifact prerequisite for the gate below: the release graph needs
-      # the built core and bundles before it can validate staging.
-      - run: pnpm run build
-      # Canonical release gate (package.json test:release): app + test
-      # typechecks, unit tests, Rust tests, then the portable native suites.
-      # The macOS build job adds the platform spike and live gates.
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.9.2
+        with:
+          workspaces: core -> target
+          shared-key: ubuntu-22.04-${{ runner.arch }}
+          cache-bin: false
+      # The canonical gate checks types before building and testing artifacts.
       - run: pnpm run test:release
+      - name: Archive the tested Linux build
+        run: tar -czf "${RUNNER_TEMP}/termina-tested-linux.tar.gz" dist-electron dist-renderer core/target/release/termina-core
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: termina-tested-linux-${{ github.sha }}
+          path: ${{ runner.temp }}/termina-tested-linux.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
 
   build:
     needs: test
@@ -58,14 +75,43 @@ jobs:
         with:
           node-version: 22.23.2
       - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.2.0
+        if: matrix.os == 'macos-15'
         with:
           toolchain: 1.97.1
       # packageManager pins pnpm; corepack activates that exact version.
       - run: corepack enable
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-pnpm-
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec tsc --noEmit
-      # Builds the Rust core, main + preload, and the renderer.
-      - run: pnpm run build
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.9.2
+        if: matrix.os == 'macos-15'
+        with:
+          workspaces: core -> target
+          shared-key: ${{ matrix.os }}-${{ runner.arch }}
+          cache-bin: false
+      # Linux consumes the exact artifact validated by the test job in this run.
+      # A tar archive preserves executable modes through artifact upload.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: matrix.os == 'ubuntu-22.04'
+        with:
+          name: termina-tested-linux-${{ github.sha }}
+          path: ${{ runner.temp }}/termina-tested-linux
+      - name: Restore the tested Linux build
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          tar -xzf "${RUNNER_TEMP}/termina-tested-linux/termina-tested-linux.tar.gz"
+          test -x core/target/release/termina-core
+          test -x dist-electron/termina-core
+          test -s dist-renderer/index.html
+      - name: Build macOS artifacts
+        if: matrix.os == 'macos-15'
+        run: pnpm run build
       # Stages the bundled node runtime and the core binary.
       - run: node --experimental-strip-types scripts/prepare-resources.ts
       - name: Run macOS release gate
@@ -75,20 +121,7 @@ jobs:
         if: matrix.os == 'macos-15'
         run: pnpm run test:release-macos
       - name: Package
-        # Signs and notarizes when the Apple credentials exist as secrets;
-        # otherwise the build stays unsigned. Retries once: the electron
-        # download on fresh runners is flaky.
-        run: |
-          EXTRA=""
-          # Notarizing an unsigned app fails; require the signing secret and
-          # the team id too. The gate only applies to macOS packaging.
-          if [ "$(uname -s)" = "Darwin" ] && [ -n "${CSC_LINK}" ] && [ -n "${APPLE_ID}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD}" ] && [ -n "${APPLE_TEAM_ID}" ]; then
-            EXTRA="-c.mac.notarize=true"
-          fi
-          pnpm exec electron-builder $EXTRA --publish never || {
-            echo "Packaging failed; retrying once"
-            pnpm exec electron-builder $EXTRA --publish never
-          }
+        run: bash scripts/package-release.sh
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -104,6 +137,7 @@ jobs:
         with:
           name: termina-release-${{ matrix.artifact }}
           if-no-files-found: error
+          overwrite: true
           path: |
             release/*.dmg
             release/*.zip

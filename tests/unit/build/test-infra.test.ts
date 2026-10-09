@@ -43,7 +43,7 @@ describe("Test Infrastructure & Gate Invariants", () => {
     const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
     expect(scripts["test:agent-core-main"]).toContain("tests/unit/agent-core/main-*.test.ts");
     expect(scripts["test"]).toContain("pnpm run test:unit");
-    expect(scripts["test:release"]).toContain("pnpm run test");
+    expect(scripts["test:release"]).toContain("pnpm run test:unit");
   });
 
   it("runs isolated E2E specs through the shared playwright runner", () => {
