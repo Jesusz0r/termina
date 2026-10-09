@@ -18,3 +18,5 @@ test-results/
 playwright-report/
 .e2e-tmp/
 .intent/
+# CI timing reports must not enter source snapshots.
+.ci-results/

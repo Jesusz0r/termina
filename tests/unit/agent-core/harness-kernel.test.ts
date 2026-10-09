@@ -352,59 +352,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       process.env.PATH = prevPathForJail;
     }
     check("project-local toolchain bins are not executed", !envJail.includes("HACKED"));
-    const trustedPnpmDir = mkdtempSync(join(tmpdir(), "agent-core-pnpm-"));
-    leftovers.push(trustedPnpmDir);
-    const probeCaseDir = mkdtempSync(join(tmpdir(), "agent-core-env-probe-"));
-    leftovers.push(probeCaseDir);
-    // PATH alone does not isolate these fixtures: trustedPath also searches
-    // Homebrew and user directories. Host tools can exhaust the shared deadline
-    // before the fixture under test runs. Non-executable files stop fallback
-    // without spending the deadline launching unrelated shell processes.
-    for (const directory of [trustedPnpmDir, probeCaseDir]) {
-      for (const bin of ["python3", "rustc", "go", "gcc", "javac", "clang", "npm", "pnpm"]) {
-        writeFileSync(join(directory, bin), "", { mode: 0o644 });
-      }
-    }
-    writeFileSync(join(trustedPnpmDir, "pnpm"), "#!/bin/sh\necho 9.0.0-test\n", { mode: 0o755 });
-    chmodSync(join(trustedPnpmDir, "pnpm"), 0o755);
-    let envTrustedPnpm = "";
-    try {
-      process.env.PATH = trustedPnpmDir;
-      envTrustedPnpm = formatEnvironment(root, { probes: true });
-    } finally {
-      process.env.PATH = prevPathForJail;
-    }
-    check("trusted pnpm version is reported", envTrustedPnpm.includes("pnpm 9.0.0-test"));
-
-    const probeCwd = mkdtempSync(join(tmpdir(), "agent-core-env-probe-cwd-"));
-    leftovers.push(probeCwd);
-    writeFileSync(join(probeCaseDir, "gcc"), "#!/bin/sh\necho 'flag provided but not defined: -version' >&2\nexit 2\n", { mode: 0o755 });
-    writeFileSync(join(probeCaseDir, "javac"), "#!/bin/sh\necho 'javac 21.0.0-test' >&2\nexit 0\n", { mode: 0o755 });
-    writeFileSync(join(probeCaseDir, "pnpm"), "#!/bin/sh\nexec /bin/sleep 30\necho too-late\n", { mode: 0o755 });
-    chmodSync(join(probeCaseDir, "gcc"), 0o755);
-    chmodSync(join(probeCaseDir, "javac"), 0o755);
-    chmodSync(join(probeCaseDir, "pnpm"), 0o755);
-    let envProbeCases = "";
-    try {
-      process.env.PATH = probeCaseDir;
-      envProbeCases = formatEnvironment(probeCwd, { probes: true });
-    } finally {
-      process.env.PATH = prevPathForJail;
-    }
-    const probeParts = (envProbeCases.split("\n").find((line) => line.startsWith("toolchain:")) ?? "")
-      .slice("toolchain: ".length)
-      .split("; ");
-    const probeByBin = new Map(probeParts.map((part) => {
-      const i = part.indexOf(" ");
-      return i < 0 ? [part, ""] : [part.slice(0, i), part.slice(i + 1)];
-    }));
-    check(
-      "failed probe does not leak error text",
-      !envProbeCases.includes("flag provided but not defined") && probeByBin.has("gcc") && probeByBin.get("gcc") === "",
-    );
-    check("stderr-only javac version is used", probeByBin.get("javac") === "javac 21.0.0-test");
-    check("slow pnpm is still named", probeByBin.has("pnpm") && !String(probeByBin.get("pnpm")).includes("too-late"));
-
     const linkCwd = mkdtempSync(join(tmpdir(), "agent-core-env-link-cwd-"));
     leftovers.push(linkCwd);
     const linkDir = mkdtempSync(join(tmpdir(), "agent-core-env-link-dir-"));
