@@ -59,8 +59,9 @@ function readComparisonManifest(dir: string): Promise<ComparisonManifest | null>
 
 
 /** Count every entry in an uncertain comparison tree, including files that
- * are not part of the normal candidate/session schema. Symlinks, special
- * entries, unreadable paths, and arithmetic overflow fail closed.
+ * are not part of the normal candidate/session schema. Symbolic links count
+ * as leaves: their own metadata and size are measured, never their targets.
+ * Special entries, unreadable paths, and arithmetic overflow fail closed.
  *
  * The walk is structural, not incidental (issue #192): proving a retained
  * tree unchanged needs every file's stat, because a content-only write does
@@ -94,17 +95,14 @@ async function measureUncertainComparisonTree(root: string, isClosing: () => boo
     if (entries > MAX_UNCERTAIN_COMPARISON_ENTRIES) {
       return { ok: false, error: "uncertain comparison evidence contains too many entries; explicitly discard or export it before retrying" };
     }
-    if (info.isSymbolicLink()) {
-      return { ok: false, error: "uncertain comparison evidence contains a symbolic link; explicitly discard or export it before retrying" };
-    }
-    if (!info.isDirectory() && !info.isFile()) {
+    if (!info.isDirectory() && !info.isFile() && !info.isSymbolicLink()) {
       return { ok: false, error: "uncertain comparison evidence contains an unsupported entry; explicitly discard or export it before retrying" };
     }
     bytes += info.size;
     if (bytes > limit) {
       return { ok: false, error: "uncertain comparison evidence exceeds its 4 GB bound; explicitly discard or export it before retrying" };
     }
-    digest.update(`${current.relative}\0${info.isDirectory() ? "d" : "f"}\0${JSON.stringify(uncertainIdentityOf(info))}\n`);
+    digest.update(`${current.relative}\0${info.isDirectory() ? "d" : info.isSymbolicLink() ? "l" : "f"}\0${JSON.stringify(uncertainIdentityOf(info))}\n`);
     if (!info.isDirectory()) {
       if ((entries & 63) === 0) {
         if (isClosing()) return { ok: false, error: "worldline manager disposed" };

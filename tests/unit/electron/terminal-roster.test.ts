@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { fitTerminalRoster, isRosterModel, parseTerminalRoster } from "../../../electron/terminal-roster.ts";
+import { composeTerminalRoster, fitTerminalRoster, isRosterModel, MAX_ROSTER_FILE_BYTES, MAX_ROSTER_HANDOFF_BYTES, parseTerminalRoster } from "../../../electron/terminal-roster.ts";
 
 describe("terminal roster model pin", () => {
   it("accepts a provider-qualified model on agent entries", () => {
@@ -132,7 +132,7 @@ describe("roster handoff wiring", () => {
     expect(main.includes("this.sendPlan(inst);"))
       .toBe(true);
     // Save fits the byte budget by degrading handoff before identity.
-    expect(store.includes("fitTerminalRoster(composeTerminalRoster(live, unrestored))"))
+    expect(store.includes("fitTerminalRoster(roster)"))
       .toBe(true);
     // Board and verdict mutations persist the handoff (transients excluded).
     expect(main.includes("this.savePlanRoster(inst);"))
@@ -171,5 +171,45 @@ describe("roster handoff wiring", () => {
       .toBe(true);
     expect(main.includes("if (!this.projectIsSwitching(project.id)) this.saveTerminalRoster(project);"))
       .toBe(true);
+  });
+});
+
+describe("uncapped durable roster identities", () => {
+  it("parses and fits 100 mixed identities without truncating", () => {
+    const entries = Array.from({ length: 100 }, (_, i) => ({
+      id: `term-${i + 1}`, type: i % 2 ? "shell" as const : "agent" as const,
+      ...(i % 2 ? { shell: "/bin/zsh", cwd: "/project" } : { model: "openai/gpt-5" }),
+    }));
+    const parsed = parseTerminalRoster(entries);
+    expect(parsed).toHaveLength(100);
+    expect(fitTerminalRoster(parsed)).toEqual(parsed);
+  });
+
+  it("retains failed restores and prefers live entries over duplicates", () => {
+    const failed = Array.from({ length: 40 }, (_, i) => ({ id: `term-${i + 1}`, type: "agent" as const, model: "openai/old" }));
+    const live = [{ id: "term-20", type: "agent" as const, model: "openai/new" }];
+    const composed = composeTerminalRoster(live, [...failed, failed[0]!]);
+    expect(composed).toHaveLength(40);
+    expect(composed[0]).toEqual(live[0]);
+    expect(new Set(composed.map((entry) => entry.id)).size).toBe(40);
+  });
+
+  it("bounds only handoff bytes when identities already exceed 64 KiB", () => {
+    const entries = Array.from({ length: 100 }, (_, i) => ({
+      id: `term-${i + 1}`, type: "shell" as const, cwd: `/${"x".repeat(900)}`,
+      verifyOutput: "x".repeat(6000),
+    }));
+    const fitted = fitTerminalRoster(entries);
+    expect(fitted).toHaveLength(100);
+    expect(fitted.every((entry) => entry.verifyOutput === undefined)).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify({ terminals: fitted }))).toBeGreaterThan(MAX_ROSTER_HANDOFF_BYTES);
+    expect(fitted.map((entry) => entry.id)).toEqual(entries.map((entry) => entry.id));
+  });
+
+  it("refuses identities above the load limit instead of slicing", () => {
+    const entries = Array.from({ length: 17000 }, (_, i) => ({ id: `term-${i + 1}`, type: "shell" as const, cwd: `/${"x".repeat(1000)}` }));
+    expect(Buffer.byteLength(JSON.stringify({ terminals: entries }))).toBeGreaterThan(MAX_ROSTER_FILE_BYTES);
+    expect(() => fitTerminalRoster(entries))
+      .toThrow("identities exceed");
   });
 });

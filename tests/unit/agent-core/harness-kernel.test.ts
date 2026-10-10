@@ -3792,7 +3792,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("composeTerminalRoster prefers live id", composed[0]?.id === "term-3" && composed[0]?.engine === "core");
     check("composeTerminalRoster keeps unrestored sibling", composed[1]?.id === "term-1" && composed.length === 2);
     const manyLive = Array.from({ length: 20 }, (_, i) => ({ id: `term-${i + 1}`, type: "agent", engine: "core" })) as unknown as TerminalRosterEntry[];
-    check("composeTerminalRoster caps at 16", rosterMod.composeTerminalRoster(manyLive, []).length === rosterMod.MAX_TERMINAL_ROSTER);
+    check("composeTerminalRoster retains every requested terminal", rosterMod.composeTerminalRoster(manyLive, []).length === manyLive.length);
     
     const rotFixed = new Date(2026, 7, 26, 15, 4, 5).getTime();
     check("sessionRotateStamp is filesystem-safe", sessionRotateStamp(rotFixed) === "2026-08-26T15-04-05");

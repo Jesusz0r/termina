@@ -20,7 +20,6 @@ export interface IndependentSessionOptions {
 export interface IndependentSessionHost {
   deps: WorldlineDeps;
   acquireAdmission(): Promise<{ ok: true; lease: UncertainComparisonAdmissionLease } | { ok: false; error: string }>;
-  liveCount(): number;
   construct(spec: {
     sourceRunId: null; sourceSessionFile?: string; sourceGitDir: string; baseStateId: string;
     model: string | null; thinkingLevel: string | null; expectedCandidates: 1;
@@ -49,7 +48,6 @@ export async function createIndependentSession(host: IndependentSessionHost, opt
   let requester: string | null = null;
   let workspaceId: string | null = null;
   try {
-    if (host.liveCount() + 1 > 3) throw new Error("the live worldline budget is exhausted");
     const workspace = await host.deps.workspaceAt(host.deps.primaryRoot);
     if (!workspace) throw new Error("the source folder is no longer open");
     workspaceId = workspace.id;

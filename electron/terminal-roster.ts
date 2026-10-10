@@ -1,6 +1,6 @@
 /**
  * Per-project terminal roster. Main owns when to load and save.
- * This module only parses and caps the on-disk shape.
+ * This module only validates the on-disk shape and bounds handoff details.
  */
 // Use .ts so the source harness can load this module with strip-types.
 import { isCoreSessionId } from "../agent-core/session.ts";
@@ -8,8 +8,8 @@ import { isRecord } from "../shared/guards.ts";
 import { DISPATCH_OUTCOMES, type PlanTask, type VerifyInfo } from "../shared/types.ts";
 import { parseStoredVerify, parseStoredVerifyOutput } from "./main/verify-source.ts";
 
-export const MAX_TERMINAL_ROSTER = 16;
-export const MAX_ROSTER_BYTES = 64 * 1024;
+export const MAX_ROSTER_FILE_BYTES = 16 * 1024 * 1024;
+export const MAX_ROSTER_HANDOFF_BYTES = 64 * 1024;
 /** Handoff tasks per terminal: the board survives restarts, not archives. */
 export const MAX_ROSTER_PLAN_TASKS = 50;
 const MAX_PLAN_TEXT = 500;
@@ -124,34 +124,36 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
     }
     seen.add(entry.id);
     out.push(entry);
-    if (out.length >= MAX_TERMINAL_ROSTER) break;
   }
   return out;
 }
 
 /**
- * Fit entries into the roster byte budget, degrading handoff state before
- * identity: output tails go first, then other entries' plans and verdicts. The first
- * entry keeps its plan longest. Core resume fields always fit, so tabs are
- * never lost to a full board.
+ * Bound handoff details separately from durable identities. Output tails go
+ * first, then other entries' plans, then all plans and verdicts.
+ * Refuse identities that cannot be loaded rather than silently dropping tabs.
  */
 export function fitTerminalRoster(entries: TerminalRosterEntry[]): TerminalRosterEntry[] {
-  const size = (list: TerminalRosterEntry[]): number => Buffer.byteLength(JSON.stringify({ terminals: list }), "utf8");
-  if (size(entries) <= MAX_ROSTER_BYTES) return entries;
+  const size = (list: TerminalRosterEntry[]): number => Buffer.byteLength(JSON.stringify({ terminals: list }), "utf8") + 1;
+  const bare = entries.map(({ plan: _plan, verify: _verify, verifyOutput: _output, ...rest }) => rest);
+  const identityBytes = size(bare);
+  if (identityBytes > MAX_ROSTER_FILE_BYTES) {
+    throw new Error(`Terminal roster identities exceed the ${MAX_ROSTER_FILE_BYTES}-byte file limit`);
+  }
+  const budget = Math.min(MAX_ROSTER_FILE_BYTES, identityBytes + MAX_ROSTER_HANDOFF_BYTES);
+  if (size(entries) <= budget) return entries;
   const withoutOutput = entries.map(({ verifyOutput: _output, ...rest }) => rest);
-  if (size(withoutOutput) <= MAX_ROSTER_BYTES) return withoutOutput;
+  if (size(withoutOutput) <= budget) return withoutOutput;
   const stripped = withoutOutput.map((entry, i) =>
     i === 0 ? entry : { ...entry, plan: undefined },
   );
-  if (size(stripped) <= MAX_ROSTER_BYTES) return stripped;
-  const bare = stripped.map(({ plan: _plan, verify: _verify, ...rest }) => rest);
-  if (size(bare) <= MAX_ROSTER_BYTES) return bare;
-  return bare.slice(0, MAX_TERMINAL_ROSTER);
+  if (size(stripped) <= budget) return stripped;
+  return bare;
 }
 
 /**
  * Live persist tabs win. Failed restores stay on the roster so a later
- * launch can retry them. The cap prefers live tabs.
+ * launch can retry them. Live identities take precedence over duplicates.
  */
 export function composeTerminalRoster(
   live: TerminalRosterEntry[],
@@ -161,7 +163,7 @@ export function composeTerminalRoster(
   const seen = new Set<string>();
   for (const list of [live, unrestored]) {
     for (const entry of list) {
-      if (seen.has(entry.id) || out.length >= MAX_TERMINAL_ROSTER) continue;
+      if (seen.has(entry.id)) continue;
       seen.add(entry.id);
       out.push(entry);
     }

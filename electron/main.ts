@@ -108,10 +108,7 @@ import {
   splitImageDropBudget,
   validatePathDropTargets,
 } from "./terminal-drop.js";
-import {
-  MAX_TERMINAL_ROSTER,
-  type TerminalRosterEntry,
-} from "./terminal-roster.js";
+import type { TerminalRosterEntry } from "./terminal-roster.js";
 import { rosterFilePath, type RosterTerminal } from "./roster-store.js";
 import { processCwd } from "./process-cwd.js";
 import { terminalWebUrl } from "../shared/terminal-link.js";
@@ -3266,9 +3263,6 @@ class TerminaApp {
       // candidates alone auto-approve via electron/worldlines/.
     } else {
       throw new Error("unsupported terminal type");
-    }
-    if (persist && owner && this.persistLive(owner).length >= MAX_TERMINAL_ROSTER) {
-      throw new Error("this project already has the maximum number of saved terminals");
     }
     const sidecarTailer = opts?.sidecarTailer ?? this.tailer;
     const terminalRoot = cwd ?? this.terminalCwd();

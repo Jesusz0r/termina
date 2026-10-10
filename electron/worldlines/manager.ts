@@ -371,12 +371,6 @@ export class WorldlineManager {
         const cmp = this.comparisons.get(saved.manifest.id)!;
         cmp.rootBinding = saved.binding;
         cmp.rootIdentity = promotionIdentityOf(saved.binding);
-        if (this.liveWorldlineCount() > 3) {
-          cmp.error = "the work area budget is exhausted; saved work was retained";
-          const candidate = cmp.candidates.get("A");
-          if (candidate) candidate.error = cmp.error;
-          continue;
-        }
         await restoreIndependentSession(cmp, saved.manifest, saved.binding, this.deps);
       }
     })().catch((error: unknown) => {
@@ -2637,7 +2631,6 @@ export class WorldlineManager {
     return createIndependentSession({
       deps: this.deps,
       acquireAdmission: () => this.acquireUncertainComparisonAdmission(),
-      liveCount: () => this.liveWorldlineCount(),
       construct: (spec) => this.constructComparison(spec),
       buildTemplate: (cmp, store, state) => this.buildTemplateFromState(cmp, store, state),
       clone: (cmp) => this.cloneCandidates(cmp),
@@ -3010,9 +3003,9 @@ export class WorldlineManager {
   private liveWorldlineCount(): number {
     let n = 0;
     for (const cmp of this.comparisons.values()) {
-      // A draining comparison still holds trees and processes until its
-      // teardown releases them; only a finished drain frees budget.
-      if (cmp.sourceRunId === null || cmp.phase === "running" || cmp.phase === "creating" || cmp.teardownPromise !== null) n += cmp.candidates.size;
+      // User sessions are not experiments and have no candidate-count quota.
+      // A draining experiment keeps its slots until teardown finishes.
+      if (cmp.sourceRunId !== null && (cmp.phase === "running" || cmp.phase === "creating" || cmp.teardownPromise !== null)) n += cmp.candidates.size;
     }
     return n;
   }

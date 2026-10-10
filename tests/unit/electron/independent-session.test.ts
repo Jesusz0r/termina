@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { ComparisonManifest } from "../../../electron/worldlines/types.ts";
 
 describe("independent session preparation", () => {
-  it("keeps the durable role and origin even when startup recovery is capped", () => {
+  it("keeps the durable role and origin during startup recovery", () => {
     const manager = Object.assign(Object.create(WorldlineManager.prototype), {
       comparisons: new Map(), deps: { primaryRoot: "/source" },
     }) as WorldlineManager;
@@ -26,14 +26,13 @@ describe("independent session preparation", () => {
     expect(retained.sourceSessionFile).toBe(manifest.session!.sourceSessionFile);
     expect(retained.baseStateId).toBe("base");
   });
-  it("counts retained failed user areas before another startup can allocate", () => {
-    const manager = Object.assign(Object.create(WorldlineManager.prototype), {
-      comparisons: new Map([1, 2, 3].map((id) => [`cmp-${id}`, {
-        sourceRunId: null, phase: "error", teardownPromise: null, candidates: new Map([["A", {}]]),
-      }])),
-    }) as WorldlineManager;
-    const count = (manager as unknown as { liveWorldlineCount(): number }).liveWorldlineCount();
-    expect(count).toBe(3);
+  it("does not charge running, failed or draining user sessions to the experiment quota", () => {
+    const comparisons = new Map(["running", "error", "creating"].map((phase, id) => [`cmp-${id}`, {
+      sourceRunId: null as string | null, phase, teardownPromise: phase === "error" ? Promise.resolve() : null, candidates: new Map([["A", {}]]),
+    }]));
+    comparisons.set("experiment", { sourceRunId: "run-1", phase: "running", teardownPromise: null, candidates: new Map([["A", {}], ["B", {}]]) });
+    const manager = Object.assign(Object.create(WorldlineManager.prototype), { comparisons }) as WorldlineManager;
+    expect((manager as unknown as { liveWorldlineCount(): number }).liveWorldlineCount()).toBe(2);
   });
   it("checks the real sandbox before allocating or launching a session", async () => {
     const constructComparison = vi.fn();

@@ -1,7 +1,7 @@
 /**
  * Terminal roster persistence.
  *
- * terminal-roster.ts owns the on-disk shape (parse and cap); this module owns
+ * terminal-roster.ts owns the on-disk shape (validation and detail bounds); this module owns
  * the roster file: path shaping, atomic load/save, and the per-roster commit
  * chain that preserves close/open ordering off the main loop. The terminal
  * runtime owns the store instance and save/drain; main decides when restore
@@ -9,12 +9,12 @@
  * TerminalRosterHost seam.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename as fsRename, rm, stat } from "node:fs/promises";
+import { mkdir, open, rename as fsRename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { syncParentDir } from "../shared/fsync.js";
 import type { PlanTask, VerifyInfo } from "../shared/types.js";
 import {
-  MAX_ROSTER_BYTES,
+  MAX_ROSTER_FILE_BYTES,
   MAX_ROSTER_PLAN_TASKS,
   composeTerminalRoster,
   fitTerminalRoster,
@@ -59,8 +59,26 @@ export async function loadRosterFile(path: string): Promise<{ exists: boolean; e
     return { exists: (error as NodeJS.ErrnoException)?.code !== "ENOENT", entries: [] };
   }
   try {
-    if (!info.isFile() || info.size > MAX_ROSTER_BYTES) return { exists: true, entries: [] };
-    const raw = JSON.parse(await readFile(path, "utf8")) as unknown;
+    if (!info.isFile() || info.size > MAX_ROSTER_FILE_BYTES) return { exists: true, entries: [] };
+    const handle = await open(path, "r");
+    let text: string;
+    try {
+      const current = await handle.stat();
+      if (!current.isFile() || current.size > MAX_ROSTER_FILE_BYTES) return { exists: true, entries: [] };
+      // Read at most one extra byte. A growing file cannot bypass the guard.
+      const bytes = Buffer.alloc(current.size + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const read = await handle.read(bytes, length, bytes.length - length, null);
+        if (read.bytesRead === 0) break;
+        length += read.bytesRead;
+      }
+      if (length > current.size) return { exists: true, entries: [] };
+      text = bytes.toString("utf8", 0, length);
+    } finally {
+      await handle.close();
+    }
+    const raw = JSON.parse(text) as unknown;
     return { exists: true, entries: parseTerminalRoster(raw) };
   } catch {
     // A present but unreadable roster must not be mistaken for first launch:
@@ -110,13 +128,14 @@ export class TerminalRosterStore {
 
   save(path: string, terminals: RosterTerminal[], unrestored: TerminalRosterEntry[]): void {
     const live = terminals.map((inst) => this.entryFor(inst));
-    const entries = fitTerminalRoster(composeTerminalRoster(live, unrestored));
+    const roster = composeTerminalRoster(live, unrestored);
     const dir = dirname(path);
     const previous = this.commits.get(path) ?? Promise.resolve();
     // Local writer: same exclusive-temp + file sync + rename as
     // shared/durable-write.ts, but parent-dir fsync is sync (`syncParentDir`)
     // so roster tests can probe that sequence. Commit chaining stays here.
     const commit = previous.then(async () => {
+      const entries = fitTerminalRoster(roster);
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
       let handle: Awaited<ReturnType<typeof open>> | undefined;
