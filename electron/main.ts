@@ -150,7 +150,7 @@ import {
 } from "./main/project-workspace.js";
 import { isPdfPreviewUrl, previewContentType, previewKind } from "../shared/preview-media.js";
 import { decodeEditorText, readEditorFile } from "./main/editor-file.js";
-import { reviewBaseline, reviewFiles, reviewDiff } from "./main/change-review.js";
+import { reviewBaseline } from "./main/change-review.js";
 import { EditorDraftStore } from "./editor-drafts.js";
 import { EditorDraftSession } from "./main/editor-draft-session.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
@@ -2465,35 +2465,6 @@ class TerminaApp {
       }
     }
     return match?.workspace ?? null;
-  }
-
-  private reviewScope(target: unknown) {
-    const pair = this.projectWorkspace(target);
-    if (!pair || !target || typeof target !== "object") return null;
-    const value = target as { terminalId?: unknown; generation?: unknown; root?: unknown };
-    if (typeof value.terminalId !== "string" || typeof value.generation !== "number"
-      || !Number.isSafeInteger(value.generation) || value.root !== pair.workspace.root) return null;
-    const inst = this.runtime.get(value.terminalId);
-    if (!inst || inst.closed || inst.generation !== value.generation || inst.projectId !== pair.project.id
-      || inst.workspaceId !== pair.workspace.id || !pair.workspace.terminalIds.has(inst.id)) return null;
-    const root = pair.workspace.root;
-    const canonicalRoot = pair.workspace.canonicalRoot;
-    const generation = pair.workspace.generation;
-    const watcher = pair.workspace.watcher;
-    const observation = watcher?.sourceVersion();
-    const live = () => {
-      const current = this.projectWorkspace(target);
-      const version = watcher?.sourceVersion();
-      return this.runtime.get(inst.id) === inst && !inst.closed && inst.generation === value.generation
-        && inst.projectId === pair.project.id && inst.workspaceId === pair.workspace.id
-        && current?.project === pair.project && current.workspace === pair.workspace
-        && pair.workspace.terminalIds.has(inst.id) && pair.workspace.root === root
-        && pair.workspace.canonicalRoot === canonicalRoot && pair.workspace.generation === generation
-        && pair.workspace.watcher === watcher && version?.revision === observation?.revision
-        && version?.observationEpoch === observation?.observationEpoch
-        && version?.activityRevision === observation?.activityRevision;
-    };
-    return { inst, workspace: pair.workspace, live };
   }
 
   /** Resolve a renderer-provided owner to the live project/workspace pair. */
@@ -5789,8 +5760,8 @@ class TerminaApp {
   ): Promise<{ ok: boolean; failed: string[] }> {
     const project = this.projectOfWorkspace(workspaceId);
     if (!project) return Promise.resolve({ ok: false, failed: ["workspace is no longer owned by a project"] });
-    // Only the primary workspace has an editable project view. Candidate files
-    // are inspected read-only; there is no candidate editor to flush.
+    // Candidate preparation uses persisted files. Its editor tabs are read-only;
+    // recovered drafts must not be flushed into the candidate tree.
     if (project.workspaces.get(workspaceId)?.primary === false) return Promise.resolve({ ok: true, failed: [] });
     return new Promise((resolve) => {
       // Random per-request id: sequential ids let a stale or foreign report
@@ -8455,6 +8426,14 @@ class TerminaApp {
     return target;
   }
 
+  /** Renderer file writes are only permitted in the open primary workspace. */
+  private writableProjectWorkspace(owner: unknown): { project: ProjectState; workspace: WorkspaceState } | { error: string } {
+    const target = this.explorerWorkspace(owner);
+    if ("error" in target) return target;
+    if (!target.workspace.primary) return { error: "Candidate files are read-only. Use candidate controls to promote or export changes." };
+    return target;
+  }
+
   /** The project/workspace must still be owned and open before a write commits. */
   private explorerWorkspaceIsLive(projectId: string, project: ProjectState, workspace: WorkspaceState, requester: string): boolean {
     return !this.projectIsSwitching(projectId)
@@ -8469,9 +8448,8 @@ class TerminaApp {
     owner: unknown,
     mutation: (workspace: WorkspaceState, live: () => boolean) => Promise<{ ok: boolean; error?: string; name?: string }>,
   ): Promise<{ ok: boolean; error?: string; name?: string }> {
-    const target = this.explorerWorkspace(owner);
+    const target = this.writableProjectWorkspace(owner);
     if ("error" in target) return { ok: false, error: target.error };
-    if (!target.workspace.primary) return { ok: false, error: "Candidate files are read-only. Use candidate controls to promote or export changes." };
     const requester = `explorer:${target.project.id}:${randomUUID()}`;
     const lease = await this.acquireWriteLease(target.workspace.id, requester, 5000);
     if (!lease.ok) return { ok: false, error: lease.error ?? "the project workspace is busy" };
@@ -8983,11 +8961,6 @@ class TerminaApp {
       if (!ref) return { ok: false, error: "invalid terminal target" };
       return this.requestTerminalClose(ref.id, ref.generation);
     });
-    ipcMain.handle("terminals:interrupt", (_event, id: unknown, generation: unknown) => {
-      const ref = parseTerminalTarget(id, generation);
-      if (!ref) return { ok: false, error: "invalid terminal target" };
-      return this.requestTerminalInterrupt(ref.id, ref.generation);
-    });
     ipcMain.handle("terminals:write", (_e, id: unknown, data: unknown) => {
       if (typeof id !== "string" || typeof data !== "string") return;
       const inst = this.runtime.get(id);
@@ -9128,8 +9101,8 @@ class TerminaApp {
       // The TypeScript annotation is not runtime validation: null (or any
       // non-string/empty value) must never match an idle workspace's holder.
       if (typeof writerId !== "string" || writerId.length === 0) return { ok: false, error: "the flush does not hold the write lease" };
-      const target = this.projectWorkspace(owner);
-      if (!target) return { ok: false, error: "invalid project workspace" };
+      const target = this.writableProjectWorkspace(owner);
+      if ("error" in target) return { ok: false, error: target.error };
       const managed = await this.managedPath(absPath, target.workspace.id);
       if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
       // Join the holder's lease across the write: a stale holder that
@@ -9239,37 +9212,6 @@ class TerminaApp {
       const managed = inst ? await this.managedPath(path, inst.workspaceId) : null;
       if (!inst || !live() || !managed || managed.workspace !== workspace) return { status: "modified", baseline: undefined };
       return reviewBaseline(inst, managed.path, live);
-    });
-    ipcMain.handle("review:files", (_e, target: unknown, offset: unknown) => {
-      const scope = this.reviewScope(target);
-      return scope ? reviewFiles(scope.inst.modified, offset) : { ok: false, error: "invalid review target" };
-    });
-    ipcMain.handle("review:diff", async (_e, target: unknown, path: unknown) => {
-      const scope = this.reviewScope(target);
-      if (!scope || typeof path !== "string") return { ok: false, error: "invalid review target or path" };
-      const file = scope.inst.modified.get(path);
-      if (!file) return { ok: false, error: "file is not in this terminal's modified list" };
-      const status = file.status;
-      const relPath = file.relPath;
-      const live = () => scope.live() && scope.inst.modified.get(path) === file
-        && file.status === status && file.relPath === relPath && file.path === path;
-      try {
-        const managed = await this.managedPath(path, scope.inst.workspaceId);
-        if (!live() || !managed || managed.path !== path || managed.workspace !== scope.workspace) {
-          return { ok: false, error: "review path is no longer managed by this workspace" };
-        }
-        const result = await reviewDiff(scope.inst, file, live, MAX_OPEN_FILE_SIZE);
-        if (!live()) return { ok: false, error: "review target changed while reading" };
-        if (!result.ok) return result;
-        const after = await this.managedPath(path, scope.inst.workspaceId);
-        if (!live() || !after || after.path !== path || after.workspace !== scope.workspace
-          || scope.inst.baselines.get(path) !== result.baseline) {
-          return { ok: false, error: "review path changed while reading" };
-        }
-        return result;
-      } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : "could not read review diff" };
-      }
     });
     ipcMain.handle("review:revert", (_e, terminalId: string, path: string) => this.revertReviewFile(terminalId, path));
 
@@ -9446,6 +9388,7 @@ class TerminaApp {
     const managed = await this.managedPath(absPath, target.workspace.id);
     if (!managed) return { ok: false, path: absPath, error: "path is outside a managed workspace" };
     const kind = previewKind(managed.path);
+    const readOnly = !managed.workspace.primary;
     const rendererGeneration = this.rendererGeneration;
     try {
       const draft = kind || purpose !== "editor" ? null
@@ -9462,7 +9405,7 @@ class TerminaApp {
       if (recoverySaveBlocked && !draft) return { ok: false, path: managed.path, error: "not a file" };
       if (kind && st) {
         if (st.size > MAX_PREVIEW_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to preview (${st.size} bytes)` };
-        return { ok: true, path: managed.path, preview: kind, version: st.mtimeMs };
+        return { ok: true, path: managed.path, readOnly, preview: kind, version: st.mtimeMs };
       }
       let content = "";
       try {
@@ -9477,8 +9420,8 @@ class TerminaApp {
         return { ok: false, path: managed.path, error: "file owner is no longer current" };
       }
       const changedLines = managed.workspace.changeLines.get(managed.path);
-      if (purpose !== "editor") return { ok: true, path: managed.path, content, changedLines };
-      return { ok: true, path: managed.path, content,
+      if (purpose !== "editor") return { ok: true, path: managed.path, readOnly, content, changedLines };
+      return { ok: true, path: managed.path, readOnly, content,
         recoveredDraft: draft?.content, deleted, recoveryDiskError, recoverySaveBlocked, changedLines };
     } catch (err) {
       return { ok: false, path: managed.path, error: (err as Error).message };
@@ -9631,8 +9574,8 @@ class TerminaApp {
   private async saveEditorFile(absPath: unknown, content: unknown, owner: unknown, restore: unknown): Promise<{ ok: boolean; error?: string }> {
     if (typeof absPath !== "string") return { ok: false, error: "invalid path" };
     if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
-    const target = this.projectWorkspace(owner);
-    if (!target) return { ok: false, error: "invalid project workspace" };
+    const target = this.writableProjectWorkspace(owner);
+    if ("error" in target) return { ok: false, error: target.error };
     const requester = `save:${randomUUID()}`;
     const lease = await this.acquireWriteLease(target.workspace.id, requester, 0);
     if (!lease.ok) return { ok: false, error: lease.error ?? "the workspace is busy" };

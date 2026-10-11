@@ -16,7 +16,7 @@ import { validateGrepPattern } from "../../../shared/grep-pattern.ts";
 
 // Exercise production orchestration without importing Electron or touching host sessions.
 const source = ts.createSourceFile("main.ts", readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-const names = ["selectTerminal", "selectedTerminal", "activateProject", "displayedWorkspace", "sendFolderOpened", "projectNavigationTerminal", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration", "projectWorkspace", "explorerWorkspace", "explorerWorkspaceIsLive", "mutateExplorer", "listDir", "searchProjectFiles", "searchProjectContent"];
+const names = ["selectTerminal", "selectedTerminal", "activateProject", "displayedWorkspace", "sendFolderOpened", "projectNavigationTerminal", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration", "projectWorkspace", "explorerWorkspace", "writableProjectWorkspace", "explorerWorkspaceIsLive", "mutateExplorer", "listDir", "searchProjectFiles", "searchProjectContent"];
 const methods = new Map<string, string>();
 function visit(node: ts.Node): void {
   if (ts.isMethodDeclaration(node) && names.includes(node.name.getText(source))) methods.set(node.name.getText(source), node.getText(source));

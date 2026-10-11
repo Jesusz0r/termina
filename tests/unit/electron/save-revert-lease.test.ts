@@ -25,6 +25,9 @@ import { SourceAdmissions, sourceTreesOverlap } from "../../../electron/main/sou
 
 const root = process.cwd();
 const main = readFileSync(join(root, "electron", "main.ts"), "utf8");
+const mainSource = ts.createSourceFile("main.ts", main, ts.ScriptTarget.Latest, true);
+const mainClass = mainSource.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === "TerminaApp");
+if (!mainClass) throw new Error("missing TerminaApp class");
 const terminalInstance = readFileSync(join(root, "electron", "terminal-instance.ts"), "utf8");
 
 function methodBody(source: string, signature: string, nextSignature: string): string {
@@ -66,7 +69,9 @@ function extractMethod(source: string, signature: string): string {
 }
 
 function loadMethod(factoryName: string, signature: string, names: string[], values: unknown[]): unknown {
-  const methodSource = extractMethod(main, signature).replace(/^private /, "");
+  const declaration = mainClass!.members.find((node): node is ts.MethodDeclaration => ts.isMethodDeclaration(node) && node.name.getText(mainSource) === factoryName);
+  if (!declaration) throw new Error(`missing method ${signature}`);
+  const methodSource = declaration.getText(mainSource).replace(/^private /, "");
   const factory = ts.transpileModule(`return ({ ${methodSource} }).${factoryName};`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
@@ -87,6 +92,7 @@ type PrepareRunBaselines = (inst: FakeInst) => void;
 
 interface FakeWorkspace {
   id: string;
+  primary: boolean;
   root: string;
   canonicalRoot: string;
   writerId: string | null;
@@ -116,6 +122,10 @@ const TerminaAppConsts = {
   MAX_BASELINE_FILES: 2000,
   MAX_BASELINE_BYTES: 64 * 1024 * 1024,
 };
+
+type WorkspaceResult = { project: { id: string }; workspace: FakeWorkspace } | { error: string };
+const realExplorerWorkspace = loadMethod("explorerWorkspace", "private explorerWorkspace(", [], []) as (owner: unknown) => WorkspaceResult;
+const realWritableWorkspace = loadMethod("writableProjectWorkspace", "private writableProjectWorkspace(", [], []) as (owner: unknown) => WorkspaceResult;
 
 const saveEditorFile = loadMethod(
   "saveEditorFile",
@@ -182,7 +192,7 @@ async function tolerantCanonical(p: string): Promise<string> {
 }
 
 function makeWorkspace(wsRoot: string): FakeWorkspace {
-  return { id: "ws-1", root: wsRoot, canonicalRoot: wsRoot, writerId: null, leaseDepth: 0, generation: 1 };
+  return { id: "ws-1", primary: true, root: wsRoot, canonicalRoot: wsRoot, writerId: null, leaseDepth: 0, generation: 1 };
 }
 
 function makeInst(ws: FakeWorkspace): FakeInst {
@@ -240,6 +250,9 @@ function makeSaveApp(ws: FakeWorkspace, opts: { swapLeaf?: boolean } = {}) {
   const app = {
     ...makeLeaseBroker(ws),
     projectWorkspace: (owner: unknown) => (owner === "owner" ? { project: { id: "proj-1" }, workspace: ws } : null),
+    projectIsSwitching: () => false,
+    explorerWorkspace: (owner: unknown) => realExplorerWorkspace.call(app, owner),
+    writableProjectWorkspace: (owner: unknown) => realWritableWorkspace.call(app, owner),
     managedPath: makeManagedPath(ws, opts),
     // Lease-behavior tests only need a faithful write; the crash-durability
     // sequence of the real helper has its own suite (durable-replace.test.ts).

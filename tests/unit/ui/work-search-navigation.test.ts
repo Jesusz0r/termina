@@ -37,9 +37,7 @@ function harness(value = overview()) {
   const callbacks = new Map<string, () => void>();
   const getWorkOverview = vi.fn(async (): Promise<WorkOverview> => value);
   const getVerifyReport = vi.fn().mockResolvedValue(null);
-  const getReviewFiles = vi.fn().mockResolvedValue({ ok: true, files: [], total: 0 });
-  const getReviewDiff = vi.fn().mockResolvedValue({ ok: false, error: "unavailable" });
-  const bridge = { getWorkOverview, getVerifyReport, getReviewFiles, getReviewDiff } as unknown as TerminaBridge;
+  const bridge = { getWorkOverview, getVerifyReport } as unknown as TerminaBridge;
   for (const hook of ["onInstances", "onPlanUpdate", "onModifiedList", "onFileChanged", "onFileDeleted", "onVerifyState",
     "onTimelineClear", "onFolderOpened", "onProjectClosed", "onAgentStatus", "onTimelinePrefix"] as const) {
     bridge[hook] = ((callback: () => void) => { callbacks.set(hook, callback); return () => {}; }) as never;
@@ -50,7 +48,7 @@ function harness(value = overview()) {
   view = createAttentionView({ element: element as unknown as HTMLElement, heading: heading as unknown as HTMLElement,
     bridge, onOverview, onInspect: vi.fn().mockResolvedValue(false), onNavigate, onReveal });
   return { element, workspace, getWorkOverview, onNavigate, onReveal, onOverview, onTerminalControl,
-    getVerifyReport, getReviewFiles, getReviewDiff, emit: (hook: string) => (callbacks.get(hook)! as (payload: unknown) => void)({ instanceId: "owner-1", projectId: "p1" }) };
+    getVerifyReport, emit: (hook: string) => (callbacks.get(hook)! as (payload: unknown) => void)({ instanceId: "owner-1", projectId: "p1" }) };
 }
 
 function deferred<T>() {
@@ -107,7 +105,7 @@ describe("Jump to work navigation", () => {
     const action = { kind: "plan", terminalId: "owner-1", generation: 3, taskText: "Repair the parser" };
     expect(h.onNavigate).toHaveBeenCalledExactlyOnceWith("p1", action, expect.any(Function));
     expect(h.onReveal).toHaveBeenCalledExactlyOnceWith("p1", action);
-    for (const action of [h.onTerminalControl, h.getVerifyReport, h.getReviewFiles, h.getReviewDiff]) {
+    for (const action of [h.onTerminalControl, h.getVerifyReport]) {
       expect(action).not.toHaveBeenCalled();
     }
     expect(JSON.stringify(value)).toBe(before);

@@ -24,7 +24,26 @@ always navigates directly to the real workspace/terminal, and Command palette
 task results open the exact owner's existing Plan Board. Plan Board dispatch and
 controls, Checks, Worldlines, Change Review, editor buffers and draft recovery
 remain with their existing owners; this removal adds no replacement task UI or
-executor.
+executor. The inspector-only review bridge and unused renderer interrupt bridge
+are removed with their handlers, result types and helpers. Regular Change Review
+and native terminal interruption remain available.
+
+Candidate file inspection is read-only in both the explorer and editor. Main
+returns each file's access with its open result, and cached tabs retain that
+access across terminal selections and agent unlocks. Ordinary save, restore and
+lease-held flush-save reject candidate writes. Candidate preparation uses
+persisted files without requesting editor saves. If a renderer flush encounters
+a dirty read-only buffer, it reports a failed flush and retains the draft instead
+of treating it as saved. Primary source files remain editable when idle;
+candidate agents still write within their
+existing admitted workspace. Coverage is in
+[`editor-workspace-access.test.ts`](../../tests/unit/electron/editor-workspace-access.test.ts),
+[`editor-read-only.test.ts`](../../tests/unit/ui/editor-read-only.test.ts) and
+[`editor-workspace-access.spec.ts`](../../tests/e2e/editor-workspace-access.spec.ts).
+
+Plan Board dispatch is not uniformly isolated: tasks without an existing
+candidate reference use shared dispatch, while retries with that reference
+retain candidate isolation. This cleanup does not change that execution policy.
 
 Current navigation/search owners are [`src/main.ts`](../../src/main.ts),
 [`work-search.ts`](../../src/main/work-search.ts),
@@ -56,13 +75,15 @@ Implementation owners: `src/main/project-overview.ts` (historical; retired), `sr
 
 After the inspector integration, observed checks passed: application and test typechecks, all 661 tests across the UI unit directory and the two Electron work-summary unit suites, the production build, and 24 Electron tests with retries disabled (23 across overview, attention and work-summary, plus the scoped lone-dispatch Plan Board case). The overview fixture restores three projects, six saved Plan Board tasks and two recorded attention items through real roster parsing; these are not six executed workers. The Plan Board case uses a real dispatched worker with the existing offline provider fixture and verifies selection survives its transition to a recorded incomplete attempt. A real background verification failure supplies the inspector report; moving its source invalidates that output, and inspection does not rerun the command. Desktop columns, local filtering with selected context retained, explicit plan/terminal targeting, preserved attention, unsaved-buffer preservation, empty/closed projects, pagination of 72 saved tasks across capped owners, keyboard close/focus restoration at native 200 percent zoom, reduced motion and bounded shell-output loads are covered. The full test matrix and manual assistive-technology validation were not run for this slice. Build output retains its large-chunk warnings; Electron teardown emitted exit-drain timeout and GPU diagnostics without failing the scoped suites.
 
-### On-demand terminal change review
+### On-demand terminal change review (retired investigation)
 
-The next local block adds `Inspect changes` inside the selected-work inspector. It loads the effective terminal's canonical cumulative review list, distinct from declared task paths, in explicit pages of 50 paths through `getReviewFiles` / `review:files`. Recorded status and terminal/work-area scope are labelled; the list does not attribute files to a single task. An empty recorded list is not proof that the work area is unchanged.
+This section records a retired inspector experiment, not the current product contract. The unconsumed renderer review-list/diff endpoints and their endpoint-only helpers and tests have been removed. Regular Change Review remains supported through its existing navigation and baseline handling.
 
-Selecting a path loads `getReviewDiff` / `review:diff` and renders a read-only inline Monaco diff between its captured baseline and current disk contents. Unsaved editor buffers are not included. A recorded path that no longer differs is explicitly identified. Creation and deletion remain distinguished even for empty files. Missing baselines, binary/unsupported text, oversized files and read errors are unavailable results, never fabricated empty baselines or deletions. The inspector has no Accept, Revert, Save or Clear action; the existing full change-review navigation stays explicit.
+The retired experiment added `Inspect changes` inside the selected-work inspector. It loaded the effective terminal's canonical cumulative review list, distinct from declared task paths, in explicit pages of 50 paths through the former inspector review-list endpoint. Recorded status and terminal/work-area scope were labelled; the list did not attribute files to a single task. An empty recorded list was not proof that the work area was unchanged.
 
-Main validates project/workspace ownership, terminal identity and generation, displayed/canonical roots, workspace generation, watcher observation version, modified-entry identity and managed paths before and after asynchronous reads. The renderer fences responses by selected card and effective source identity, clears loaded lists/models on relevant terminal or workspace events, and retains unchanged selection controls through refresh/filtering. Monaco controls may consume Escape before the inspector and overview close sequence. Baseline reads and Monaco model lifecycle each have one shared owner, reused by the existing full review. Opening the diff inherits the current application theme instead of resetting it.
+Selecting a path loaded the former inspector review-diff endpoint and rendered a read-only inline Monaco diff between its captured baseline and current disk contents. Unsaved editor buffers were not included. A recorded path that no longer differed was explicitly identified. Creation and deletion remained distinguished even for empty files. Missing baselines, binary/unsupported text, oversized files and read errors were unavailable results, never fabricated empty baselines or deletions. The inspector had no Accept, Revert, Save or Clear action; the existing full change-review navigation stayed explicit.
+
+The experiment's main handlers validated project/workspace ownership, terminal identity and generation, displayed/canonical roots, workspace generation, watcher observation version, modified-entry identity and managed paths before and after asynchronous reads. The renderer fenced responses by selected card and effective source identity, cleared loaded lists/models on relevant terminal or workspace events, and retained unchanged selection controls through refresh/filtering. Monaco controls could consume Escape before the inspector and overview close sequence. Baseline reads and Monaco model lifecycle each had one shared owner, reused by the existing full review. Opening the diff inherited the current application theme instead of resetting it.
 
 Additional owners: `src/main/work-changes.ts` (historical; retired), [`review-diff.ts`](../../src/review-diff.ts), and [`change-review.ts`](../../electron/main/change-review.ts). Additional coverage: `tests/unit/ui/work-changes.test.ts` (historical; retired), [`review-diff.test.ts`](../../tests/unit/ui/review-diff.test.ts), [`change-review.test.ts`](../../tests/unit/electron/change-review.test.ts), and `tests/e2e/work-inspector-changes.spec.ts` (historical; retired).
 
@@ -74,7 +95,7 @@ At that milestone, the full focused-task presentation beyond the read-only inspe
 
 Six additional scenarios are authored in `tests/e2e/work-inspector-worker.spec.ts` (historical; retired) and `tests/e2e/work-inspector-candidate.spec.ts` (historical; retired). Two exercise real Plan Board dispatch, worker close/interruption and explicit retry with a new worker. Four exercise a sandboxed candidate's close/reopen or discard, separately with a loaded diff and an outstanding review response. Reopening replaces the terminal and workspace identities while retaining the candidate directory; these cases do not simulate moving a live agent to another directory or abrupt producer crashes.
 
-The assertions cover worker-versus-plan-owner targeting, cumulative paths beyond the declared task paths, fresh baselines after retry/reopen, rejection of closed or mismatched review targets, cleared stale lists/diffs, and preservation of the active background project, attention, overview and unsaved editor buffer. The worker's distinct pre-dispatch content is seeded in its private fixture; `/plan` remains read-only. [`review-response-gate.ts`](../../tests/e2e/review-response-gate.ts) delays delivery of a real guarded main-process result, preserving its capability arguments and canonical file reads rather than fabricating review data.
+The assertions cover worker-versus-plan-owner targeting, cumulative paths beyond the declared task paths, fresh baselines after retry/reopen, rejection of closed or mismatched review targets, cleared stale lists/diffs, and preservation of the active background project, attention, overview and unsaved editor buffer. The worker's distinct pre-dispatch content is seeded in its private fixture; `/plan` remains read-only. The now-retired review response gate delayed delivery of a real guarded main-process result rather than fabricating review data; it was removed with its unconsumed endpoints.
 
 Application/test typechecks, the 225 focused inspector/review/work-summary unit tests, the production build and six-case Playwright discovery pass. **At that stage, the new integration cases were not proven.** The attempted candidate run failed before reaching its scenarios because `/bin/ps` was denied and `OwnedProcessTree` could not identify the launched Electron process. Native sandbox checks also encountered `sandbox_apply: Operation not permitted`. Process identity, cleanup, permission and sandbox safeguards were not relaxed. The earlier successful review E2E evidence above does not establish success for these new lifecycle scenarios.
 

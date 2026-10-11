@@ -83,7 +83,6 @@ const bridge: TerminaBridge = {
   acknowledgePtyData: (payload) => ipcRenderer.send("pty:ack", payload),
   selectTerminal: (id, generation) => ipcRenderer.invoke("terminals:select", id, generation),
   closeTerminal: (id, generation) => ipcRenderer.invoke("terminals:close", id, generation),
-  interruptTerminal: (id, generation) => ipcRenderer.invoke("terminals:interrupt", id, generation),
   writeTerminal: (id, data) => ipcRenderer.invoke("terminals:write", id, data),
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke("terminals:resize", id, cols, rows),
   getInstances: (): Promise<InstanceSummary[]> => ipcRenderer.invoke("terminals:list"),
@@ -152,8 +151,6 @@ const bridge: TerminaBridge = {
   getMineFiles: (owner: ProjectWorkspaceRef) => ipcRenderer.invoke("mine:list", owner),
   getTimelineContent: (terminalId, seq) => ipcRenderer.invoke("timeline:content", terminalId, seq),
   clearModified: (terminalId) => ipcRenderer.invoke("modified:clear", terminalId),
-  getReviewFiles: (target, offset) => ipcRenderer.invoke("review:files", target, offset),
-  getReviewDiff: (target, path) => ipcRenderer.invoke("review:diff", target, path),
   reviewBaseline: (terminalId, path) => ipcRenderer.invoke("review:baseline", terminalId, path),
   reviewRevert: (terminalId, path) => ipcRenderer.invoke("review:revert", terminalId, path),
 

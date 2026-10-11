@@ -20,12 +20,6 @@ export interface ReviewTarget extends ProjectWorkspaceRef {
   root: string;
 }
 
-export type ReviewFilesResult = { ok: true; files: ModifiedFile[]; total: number } | { ok: false; error: string };
-export type ReviewDiffResult = {
-  ok: true; path: string; relPath: string; status: ModifiedFile["status"];
-  baseline: string | null; current: string; deleted: boolean;
-} | { ok: false; error: string };
-
 /** Main-issued capability bound to one renderer document and its main frame. */
 export interface RendererIpcCapability {
   windowGeneration: number;
@@ -780,8 +774,8 @@ export interface UnsavedConfirmResult {
 }
 
 export type EditorFileResult =
-  | { ok: true; path: string; content: string; recoveredDraft?: string; deleted?: boolean; recoveryDiskError?: string; recoverySaveBlocked?: boolean; changedLines?: number[] }
-  | { ok: true; path: string; preview: "image" | "pdf"; version: number }
+  | { ok: true; path: string; readOnly: boolean; content: string; recoveredDraft?: string; deleted?: boolean; recoveryDiskError?: string; recoverySaveBlocked?: boolean; changedLines?: number[] }
+  | { ok: true; path: string; readOnly: boolean; preview: "image" | "pdf"; version: number }
   | { ok: false; path: string; error: string };
 
 export interface TerminaBridge {
@@ -827,8 +821,6 @@ export interface TerminaBridge {
   /** Report the selected pane for native actions; main validates ownership and generation. */
   selectTerminal(id: string, generation: number): Promise<ProjectActivateResult>;
   closeTerminal(id: string, generation: number): Promise<TerminalCloseResult>;
-  /** Confirm and send Ctrl+C to one exact terminal; does not stop separate workers or checks. */
-  interruptTerminal(id: string, generation: number): Promise<TerminalCloseResult>;
   writeTerminal(id: string, data: string): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   getInstances(): Promise<InstanceSummary[]>;
@@ -943,8 +935,6 @@ export interface TerminaBridge {
   /** Clear the terminal's modified-file list. Main owns the list; the
    *  next change re-adds only files that change after the clear. */
   clearModified(terminalId: string): Promise<{ ok: boolean; error?: string }>;
-  getReviewFiles(target: ReviewTarget, offset: number): Promise<ReviewFilesResult>;
-  getReviewDiff(target: ReviewTarget, path: string): Promise<ReviewDiffResult>;
   reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified" | "deleted"; baseline: string | null | undefined }>;
   reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 

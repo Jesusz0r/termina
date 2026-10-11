@@ -75,9 +75,7 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
   if (pending) getWorkOverview.mockReturnValueOnce(pending);
   const inspectWorkAttention = vi.fn(async (_id: string): Promise<WorkAttentionInspectResult> => inspectResult());
   const getVerifyReport = vi.fn(async (_id: string, _generation: number): Promise<string | null> => "Check output");
-  const getReviewFiles = vi.fn<TerminaBridge["getReviewFiles"]>().mockResolvedValue({ ok: true, files: [], total: 0 });
-  const getReviewDiff = vi.fn<TerminaBridge["getReviewDiff"]>().mockResolvedValue({ ok: false, error: "Baseline unavailable" });
-  const bridge = { getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff } as unknown as TerminaBridge;
+  const bridge = { getWorkOverview, inspectWorkAttention, getVerifyReport } as unknown as TerminaBridge;
   hooks.forEach((hook, index) => {
     bridge[hook] = ((callback: (payload: unknown) => void) => {
       callbacks.set(hook, callback);
@@ -95,7 +93,7 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
   return {
     element, heading, workspace, onNavigate, onReveal,
     count, list, status, message, refresh, more, outside,
-    getWorkOverview, inspectWorkAttention, getVerifyReport, getReviewFiles, getReviewDiff, onOverview, onInspect, unsubs,
+    getWorkOverview, inspectWorkAttention, getVerifyReport, onOverview, onInspect, unsubs,
     emit: (hook: typeof hooks[number], payload: unknown = {}) => callbacks.get(hook)!(payload),
     ready: flush,
     inspectButton: (index = 0) => list.children[index]!.querySelector("button")!,

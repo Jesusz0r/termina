@@ -3,8 +3,8 @@
  *
  * The editor is a *live viewer*: content is driven by the file watcher in the
  * main process, so whatever the agent writes/edits on disk shows up here in
- * real time. While the agent is streaming the editor is locked read-only;
- * when idle you can edit and save with Cmd+S.
+ * real time. Candidate files and snapshots stay read-only. Source files are
+ * locked while the agent is streaming; when idle you can edit and save with Cmd+S.
  */
 import * as monaco from "monaco-editor";
 import { canonicalizePath } from "../shared/canonical-path";
@@ -151,6 +151,7 @@ function acquireSharedFileModel(
 interface TextTab {
   key: string;
   media: null;
+  readOnly: boolean;
   model: monaco.editor.ITextModel;
   owner: ProjectWorkspaceRef | null;
   releaseModel: () => void;
@@ -292,9 +293,10 @@ export class EditorManager {
     this.editor.updateOptions({ wordWrap: enabled ? "on" : "off" });
   }
 
-  /** Read-only when locked by a busy agent or when a snapshot is active. */
+  /** File access comes from main and survives agent unlocks and tab switches. */
   private updateReadOnly(): void {
-    this.editor.updateOptions({ readOnly: this.locked || this.isTimelineActive() });
+    const tab = this.activeKey ? this.tabs.get(this.activeKey) : undefined;
+    this.editor.updateOptions({ readOnly: this.locked || this.isTimelineActive() || !!(tab && isTextTab(tab) && tab.readOnly) });
   }
 
   /** Called when a project folder is opened or closed. */
@@ -424,7 +426,7 @@ export class EditorManager {
     }
     const lease = acquireSharedFileModel(key, owner);
     const model = lease.model;
-    const tab = this.makeTab(key, owner, { model, releaseModel: lease.release });
+    const tab = this.makeTab(key, owner, { model, releaseModel: lease.release, readOnly: res.readOnly });
     if (!isTextTab(tab)) {
       lease.release();
       throw new Error("text file did not create a text tab");
@@ -697,7 +699,7 @@ export class EditorManager {
   private makeTab(
     key: string,
     owner: ProjectWorkspaceRef | null,
-    source: { model: monaco.editor.ITextModel; releaseModel: () => void } | { media: MediaTab["media"] },
+    source: { model: monaco.editor.ITextModel; releaseModel: () => void; readOnly: boolean } | { media: MediaTab["media"] },
   ): OpenTab {
     const dom = document.createElement("div");
     dom.className = "editor-tab";
@@ -722,6 +724,7 @@ export class EditorManager {
       ? {
           key,
           media: null,
+          readOnly: source.readOnly,
           model: source.model,
           owner,
           releaseModel: source.releaseModel,
@@ -945,7 +948,7 @@ export class EditorManager {
   async saveActive(): Promise<void> {
     if (!this.activeKey || this.activeKey.startsWith("timeline:")) return;
     const tab = this.tabs.get(this.activeKey);
-    if (!tab || !isTextTab(tab)) return;
+    if (!tab || !isTextTab(tab) || tab.readOnly) return;
     if (!tab.owner) {
       toast(`could not save ${pathBasename(tab.key)}: file owner is unavailable`, "error");
       return;
@@ -1033,7 +1036,7 @@ export class EditorManager {
       if (!this.userDirty.has(key)) continue;
       const tab = this.tabs.get(key);
       if (!tab || !isTextTab(tab)) continue;
-      if (!tab.owner) {
+      if (!tab.owner || tab.readOnly) {
         failed.push(key);
         continue;
       }
@@ -1285,7 +1288,7 @@ export class EditorManager {
     }
     const replacingPreview = this.previewKey && this.previewKey !== key ? this.previewKey : null;
     const model = monaco.editor.createModel(content, languageForPath(relPath), monaco.Uri.parse(`timeline://${terminalId}/${encodeURIComponent(eventKey)}`));
-    const tab = this.makeTab(key, null, { model, releaseModel: () => model.dispose() });
+    const tab = this.makeTab(key, null, { model, releaseModel: () => model.dispose(), readOnly: true });
     tab.dom.classList.add("timeline-tab");
     tab.dom.title = `${relPath} — ${label}`;
     this.tabs.set(key, tab);

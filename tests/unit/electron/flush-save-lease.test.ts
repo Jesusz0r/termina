@@ -22,6 +22,9 @@ import { sourceTreesOverlap } from "../../../electron/main/source-admission.ts";
 
 const root = process.cwd();
 const main = readFileSync(join(root, "electron", "main.ts"), "utf8");
+const mainSource = ts.createSourceFile("main.ts", main, ts.ScriptTarget.Latest, true);
+const mainClass = mainSource.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === "TerminaApp");
+if (!mainClass) throw new Error("missing TerminaApp class");
 
 function extractMethod(source: string, signature: string): string {
   const start = source.indexOf(signature);
@@ -52,7 +55,9 @@ function extractMethod(source: string, signature: string): string {
 }
 
 function loadMethod(factoryName: string, signature: string, names: string[], values: unknown[]): unknown {
-  const methodSource = extractMethod(main, signature).replace(/^private /, "");
+  const declaration = mainClass!.members.find((node): node is ts.MethodDeclaration => ts.isMethodDeclaration(node) && node.name.getText(mainSource) === factoryName);
+  if (!declaration) throw new Error(`missing method ${signature}`);
+  const methodSource = declaration.getText(mainSource).replace(/^private /, "");
   const factory = ts.transpileModule(`return ({ ${methodSource} }).${factoryName};`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
@@ -100,6 +105,7 @@ type FlushSave = (
 
 interface FakeWorkspace {
   id: string;
+  primary: boolean;
   root: string;
   canonicalRoot: string;
   writerId: string | null;
@@ -113,6 +119,8 @@ interface FakeApp {
   sourceWorkspaceWriter: (root: string, except?: FakeWorkspace) => FakeWorkspace | null;
   workspaceById: (id: string) => FakeWorkspace | undefined;
   projectWorkspace: (value: unknown) => { project: { id: string }; workspace: FakeWorkspace } | null;
+  explorerWorkspace: (value: unknown) => WorkspaceResult;
+  writableProjectWorkspace: (value: unknown) => WorkspaceResult;
   managedPath: (absPath: string, workspaceId: string) => Promise<{ path: string; workspace: FakeWorkspace } | null>;
   joinWriteLease: (wsId: string, requesterId: string) => boolean;
   releaseWriteLease: (wsId: string, requesterId: string) => void;
@@ -127,6 +135,10 @@ interface FakeApp {
   terminalsOnWorkspace: (ws: FakeWorkspace) => unknown[];
   kickWorkspaceMomentCapture: (ws: FakeWorkspace) => void;
 }
+
+type WorkspaceResult = { project: { id: string }; workspace: FakeWorkspace } | { error: string };
+const realExplorerWorkspace = loadMethod("explorerWorkspace", "private explorerWorkspace(", [], []) as (owner: unknown) => WorkspaceResult;
+const realWritableWorkspace = loadMethod("writableProjectWorkspace", "private writableProjectWorkspace(", [], []) as (owner: unknown) => WorkspaceResult;
 
 const realSourceWriter = loadMethod("sourceWorkspaceWriter", "private sourceWorkspaceWriter(", ["sourceTreesOverlap"], [sourceTreesOverlap]) as (
   root: string,
@@ -164,7 +176,7 @@ const flushSave = loadFlushSave(["MAX_OPEN_FILE_SIZE"], [MAX_OPEN_FILE_SIZE]) as
 
 function makeHarness(opts: { durableReplace?: (path: string, data: string | Buffer, mode?: number) => Promise<void> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "termina-flush-gate-"));
-  const ws: FakeWorkspace = { id: "ws-1", root: dir, canonicalRoot: dir, writerId: null, generation: 1 };
+  const ws: FakeWorkspace = { id: "ws-1", primary: true, root: dir, canonicalRoot: dir, writerId: null, generation: 1 };
   const owner = { projectId: "proj-1", workspaceId: ws.id };
   const app: FakeApp = {
     disposed: false,
@@ -175,6 +187,8 @@ function makeHarness(opts: { durableReplace?: (path: string, data: string | Buff
       value && typeof value === "object" && (value as { workspaceId?: string }).workspaceId === ws.id
         ? { project: { id: "proj-1" }, workspace: ws }
         : null,
+    explorerWorkspace: (value: unknown) => realExplorerWorkspace.call(app, value),
+    writableProjectWorkspace: (value: unknown) => realWritableWorkspace.call(app, value),
     managedPath: async (absPath: string, workspaceId: string) => {
       if (workspaceId !== ws.id) return null;
       const rel = relative(dir, absPath);
@@ -212,7 +226,7 @@ describe("physical source scopes for privileged writes", () => {
     const h = makeHarness();
     try {
       const foreign: FakeWorkspace = {
-        id: "foreign", root: "/display-alias", canonicalRoot: scope(h.dir), writerId: "promotion:foreign", generation: 1,
+        id: "foreign", primary: true, root: "/display-alias", canonicalRoot: scope(h.dir), writerId: "promotion:foreign", generation: 1,
       };
       h.app.projects.set("foreign-project", { workspaces: new Map([[foreign.id, foreign]]) });
       expect(await h.app.acquireWriteLease(h.ws.id, "editor"))
@@ -225,7 +239,7 @@ describe("physical source scopes for privileged writes", () => {
     const h = makeHarness();
     try {
       const foreign: FakeWorkspace = {
-        id: "foreign", root: `${h.dir}-sibling`, canonicalRoot: `${h.dir}-sibling`, writerId: "promotion:foreign", generation: 1,
+        id: "foreign", primary: true, root: `${h.dir}-sibling`, canonicalRoot: `${h.dir}-sibling`, writerId: "promotion:foreign", generation: 1,
       };
       h.app.projects.set("foreign-project", { workspaces: new Map([[foreign.id, foreign]]) });
       expect(await h.app.acquireWriteLease(h.ws.id, "editor")).toMatchObject({ ok: true });
