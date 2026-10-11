@@ -25,21 +25,35 @@ shape. Fixture pins and third-party versions live in
 
 ## Pull-request CI
 
-`.github/workflows/lint.yml` runs on `push` and `pull_request`.
+`.github/workflows/lint.yml` runs on pushes to `main` and on `pull_request`.
+It cancels superseded runs for the same PR or branch. Branch pushes and tags
+do not duplicate the PR and release validation.
 
 | Check | Path / command | Honesty |
 |---|---|---|
 | No git CLI in app TypeScript | `scripts/no-git-cli.sh` via job `no-git-cli`; local `pnpm run lint:no-git-cli` | **Governor.** Static `git grep` over `agent-core`, `electron`, `src`, `shared`. `tests/` is exempt. Dynamic commands (`bash -c`, MCP configs) are out of scope and **unchecked**. |
 | App typecheck | `pnpm run typecheck` (`tsc --noEmit`) | **Governor** |
 | Test typecheck | `pnpm run typecheck:tests` | **Governor** |
-| Build Rust core and bundles | `node --experimental-strip-types scripts/build.ts` | **Governor.** Compiles `core/` and stages `dist-electron`. The Vite renderer build is skipped. |
-| Unit tests | `pnpm run test:unit` (`vitest run`) | **Governor.** Needs the built core: `tests/unit/electron/core-client-read-budget.test.ts` spawns `termina-core`. |
+| Build Rust core and bundles | `node --experimental-strip-types scripts/build.ts` | **Governor** for full coverage. Compiles `core/` and stages `dist-electron`. The Vite renderer build is skipped. |
+| Unit tests | `pnpm run test:unit` (`vitest run`) | **Governor** for full coverage. Needs the built core: `tests/unit/electron/core-client-read-budget.test.ts` spawns `termina-core`. |
+| Content tests | `pnpm run test:content` | **Governor** for content-only changes. Covers docs, website, review-guide text, and script assertions that read those files. |
 | Install | `pnpm install --frozen-lockfile` after `corepack enable` | **Governor.** `package.json` `packageManager` is `pnpm@11.13.1`. |
 | Toolchain | Node `22.23.2`, Rust `1.97.1` | **Governor** on CI only. No `rust-toolchain` file in the repo. Local rustc is **unchecked**. |
 
-`pnpm run test` is `typecheck` then `test:unit`. Pull-request CI runs
-those steps plus `typecheck:tests` and `scripts/build.ts`. It does
-**not** run Rust tests, native spikes, or Playwright.
+`scripts/ci-scope.ts` selects content coverage only for Markdown under `docs/`,
+files under `website/`, and the root `README.md`, `CONTRIBUTING.md`, and
+`RELEASING.md`. It diffs the actual checkout against the event base, includes
+deleted files and both sides of renames, and falls back to full coverage
+for an empty or unproven diff. Code, test, harness, dependency, and workflow
+changes use full coverage.
+
+Both scopes run app and test typechecks. Full coverage also builds and runs
+all unit tests; content coverage runs its focused suite without a Rust build.
+The required `checks` job fails explicitly if `no-git-cli` fails. No workflow
+path filter can leave that check pending. CI caches Cargo dependencies and the
+pnpm store, but still invokes Cargo to validate compilation inputs. Unit reports
+with per-file timings are retained as the `unit-results` artifact for 14 days.
+Pull-request CI does **not** run Rust tests, native spikes, or Playwright.
 
 ## Release CI
 
@@ -52,10 +66,17 @@ release jobs themselves are **release-only**.
 
 | Check | Path / command | Honesty |
 |---|---|---|
-| Release graph | `pnpm run test:release` = `pnpm run test` + `typecheck:tests` + `test:rust` + `test:native` | **Release-only.** `test:rust` is `cargo test --manifest-path core/Cargo.toml`. |
+| Release graph | `pnpm run test:release` = `lint:no-git-cli` + `typecheck` + `typecheck:tests` + `build` + `test:unit` + `test:rust` + `test:native` | **Release-only.** Fast checks precede the build; artifact-dependent suites follow it. |
 | Native spikes | `pnpm run test:native` (capture, merge, tree-delta, gitignore, terminal-roster, core-session-promotion, promotion-transaction, watcher-idle, promotion-native-boundary) | **Release-only** on Ubuntu. The `platform` spike is not in this graph. |
 | macOS packaging layer | `pnpm run test:release-macos` = `spike -- platform` + `test:sandbox-security-live` + `test:e2e-release-smoke` | **Release-only**, `macos-15` only, before Package. |
 | Frozen lockfile and toolchain | Same Node, Rust, and pnpm pins as lint | **Release-only** (and **governor** on pull requests via lint) |
+
+The Linux packaging job consumes the tested build from the same workflow run
+and commit. Its tar archive preserves executable modes and remains available
+for 30 days to support failed-job reruns. macOS builds its own native artifacts.
+`scripts/package-release.sh` packages with publication disabled and retries once
+only for named transient network failures. Publication still requires the
+complete asset set from both platforms.
 
 `.github/workflows/pages.yml` deploys `website/` on pushes to `main`.
 It is not a code governor.

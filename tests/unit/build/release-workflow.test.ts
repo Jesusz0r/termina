@@ -49,15 +49,18 @@ describe("Release Workflow & CI Publication Invariants", () => {
     expect(buildJob).not.toMatch(/draft=false/);
     expect(buildJob).not.toMatch(/uses:\s*[^\n]*(?:gh-?release|release-action|publish-release)/i);
 
-    const builderCommands = [...buildJob.matchAll(/^\s*(?:pnpm\s+exec\s+)?electron-builder\b.*$/gm)].map((match) => match[0]);
+    const packageScript = readFileSync(resolve("scripts/package-release.sh"), "utf8");
+    const builderCommands = [...packageScript.matchAll(/pnpm\s+exec\s+electron-builder\b.*$/gm)].map((match) => match[0]);
     expect(builderCommands.length).toBeGreaterThanOrEqual(1);
     for (const command of builderCommands) {
-      expect(command).toMatch(/--publish\s+never\b/);
+      expect(command).toContain('"$@"');
     }
+    expect(packageScript).toContain("set -- --publish never");
+    expect(buildJob).toContain("run: bash scripts/package-release.sh");
     expect(buildJob).not.toMatch(/\bsleep\b/);
     expect(buildJob).not.toMatch(/GH_TOKEN:\s*\$\{\{\s*secrets\.GITHUB_TOKEN\s*\}\}/);
 
-    expect(buildJob).toMatch(/-c\.mac\.notarize=true/);
+    expect(packageScript).toMatch(/-c\.mac\.notarize=true/);
     for (const secret of ["CSC_LINK", "CSC_KEY_PASSWORD", "CSC_NAME", "APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID"]) {
       expect(buildJob).toMatch(new RegExp(`\\b${secret}:`));
     }
@@ -117,7 +120,7 @@ describe("Release Workflow & CI Publication Invariants", () => {
       expect(step).toMatch(/GH_REPO:\s*\$\{\{\s*github\.repository\s*\}\}/);
     }
 
-    expect(countCommand(packageScripts["test:release"], "pnpm run test")).toBe(1);
+    expect(countCommand(packageScripts["test:release"], "pnpm run test:unit")).toBe(1);
     expect(typeof packageScripts["test:release-macos"]).toBe("string");
     expect(countCommand(packageScripts["test:release-macos"], "pnpm run test:sandbox-security-live")).toBe(1);
     expect(countCommand(packageScripts["test:release-macos"], "pnpm run test:e2e-release-smoke")).toBe(1);

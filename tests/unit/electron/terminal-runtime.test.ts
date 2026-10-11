@@ -1,4 +1,4 @@
-import { describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { TerminalRuntime, type TerminalRuntimeHost } from "../../../electron/terminal-runtime.ts";
 import type { AgentTerminalInstance } from "../../../electron/terminal-instance.ts";
@@ -93,6 +93,16 @@ function hostWithSends(sends: ChunkSend[]): TerminalRuntimeHost {
   };
 }
 
+// These ownership tests have no renderer to acknowledge the exit marker.
+// Advance the real drain policy on a virtual clock instead of waiting on it.
+async function finishWithoutViewer(inst: AgentTerminalInstance, code = 0, origin: "native" | "forced" = "native"): Promise<void> {
+  const onExit = inst.pty.onExit as (code: number, origin: "native" | "forced") => void;
+  const exit = Promise.resolve(onExit(code, origin));
+  await Promise.all([exit, vi.advanceTimersByTimeAsync(10_000)]);
+}
+
+afterEach(() => vi.useRealTimers());
+
 describe("TerminalRuntime", () => {
   it("rejects admission before spawning or watching a child", () => {
     const runtime = new TerminalRuntime(hostWithSends([]), { eventsDir: "/tmp/termina-admission-test" });
@@ -111,10 +121,11 @@ describe("TerminalRuntime", () => {
   });
 
   it("keeps native ownership after forced logical release and fences a recycled id", async () => {
+    vi.useFakeTimers();
     const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
     const old = fakeTerminal("term-1", 1).inst;
     runtime.adopt(old, { tailer: fakeTailer(), rendererTarget: null });
-    await (old.pty.onExit as (code: number, origin: "forced") => void)(137, "forced");
+    await finishWithoutViewer(old, 137, "forced");
     assert.equal(runtime.has(old.id), false);
     assert.deepEqual([...runtime.nativeValues()], [old]);
     const current = fakeTerminal("term-1", 2).inst;
@@ -123,7 +134,7 @@ describe("TerminalRuntime", () => {
     assert.deepEqual([...runtime.nativeValues()], [current]);
     assert.equal(runtime.get(current.id), current);
     current.pty.onNativeExit();
-    await current.pty.onExit(0);
+    await finishWithoutViewer(current);
     assert.deepEqual([...runtime.nativeValues()], []);
     runtime.disposeEgress();
   });
@@ -241,6 +252,7 @@ describe("TerminalRuntime", () => {
   });
 
   it("releases the instance when the before-exit host hook throws", async () => {
+    vi.useFakeTimers();
     const tailer = fakeTailer();
     const after: string[] = [];
     const runtime = new TerminalRuntime({
@@ -251,7 +263,7 @@ describe("TerminalRuntime", () => {
     const { inst } = fakeTerminal("term-1", 1);
     runtime.adopt(inst, { tailer, rendererTarget: null });
     assert.equal(runtime.subscribe("term-1", "renderer"), true);
-    await assert.rejects(Promise.resolve(inst.pty.onExit(0)), /before-release failed/);
+    await assert.rejects(finishWithoutViewer(inst), /before-release failed/);
     assert.equal(runtime.has("term-1"), false);
     assert.deepEqual(tailer.stopped, ["term-1"]);
     assert.deepEqual(after, ["term-1"]);
@@ -349,18 +361,20 @@ describe("TerminalRuntime", () => {
   });
 
   it("stopSidecar then release does not stopWatching twice", async () => {
+    vi.useFakeTimers();
     const tailer = fakeTailer();
     const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
     const { inst } = fakeTerminal("term-1", 1);
     runtime.adopt(inst, { tailer, rendererTarget: null });
     runtime.stopSidecar("term-1");
-    await Promise.resolve(inst.pty.onExit(0));
+    await finishWithoutViewer(inst);
     assert.deepEqual(tailer.stopped, ["term-1"]);
     assert.equal(runtime.has("term-1"), false);
     runtime.disposeEgress();
   });
 
   it("owns candidate start/stop and does not stopWatching the primary", async () => {
+    vi.useFakeTimers();
     const primaryStopped: string[] = [];
     const runtime = new TerminalRuntime(hostWithSends([]), {
       eventsDir: "/tmp/termina-candidate-sidecar-owner",
@@ -382,7 +396,7 @@ describe("TerminalRuntime", () => {
     const { inst } = fakeTerminal("term-1", 1);
     runtime.adopt(inst, { tailer: candidate, skipSidecarWatch: true, rendererTarget: null });
     assert.deepEqual(candidate.watched, ["term-1"]);
-    await Promise.resolve(inst.pty.onExit(0));
+    await finishWithoutViewer(inst);
     assert.deepEqual(candidate.stopped, ["term-1"]);
     assert.equal(candidate.fullyStopped, 1);
     assert.equal(runtime.hasCandidateSidecar("term-1"), false);
@@ -391,6 +405,7 @@ describe("TerminalRuntime", () => {
   });
 
   it("recycled term-N cannot cancel another worldline candidate watch", async () => {
+    vi.useFakeTimers();
     const primaryStopped: string[] = [];
     const runtime = new TerminalRuntime(hostWithSends([]), {
       eventsDir: "/tmp/termina-recycled-term-sidecar",
@@ -408,7 +423,7 @@ describe("TerminalRuntime", () => {
     runtime.ownCandidateSidecar("term-1", first);
     const { inst: instA } = fakeTerminal("term-1", 1);
     runtime.adopt(instA, { tailer: first, skipSidecarWatch: true, rendererTarget: null });
-    await Promise.resolve(instA.pty.onExit(0));
+    await finishWithoutViewer(instA);
     assert.deepEqual(first.stopped, ["term-1"]);
     assert.equal(first.fullyStopped, 1);
 
@@ -417,19 +432,20 @@ describe("TerminalRuntime", () => {
     const { inst: instB } = fakeTerminal("term-1", 2);
     runtime.adopt(instB, { tailer: second, skipSidecarWatch: true, rendererTarget: null });
     instA.exitHandled = false;
-    await Promise.resolve(instA.pty.onExit(0));
+    await finishWithoutViewer(instA);
     assert.equal(runtime.get("term-1"), instB);
     assert.deepEqual(second.stopped, []);
     assert.equal(second.fullyStopped, 0);
     assert.equal(runtime.hasCandidateSidecar("term-1"), true);
     assert.deepEqual(primaryStopped, []);
-    await Promise.resolve(instB.pty.onExit(0));
+    await finishWithoutViewer(instB);
     assert.deepEqual(second.stopped, ["term-1"]);
     assert.equal(second.fullyStopped, 1);
     runtime.disposeEgress();
   });
 
   it("stale stopSidecar generation cannot cancel a recycled term-N watch", async () => {
+    vi.useFakeTimers();
     const runtime = new TerminalRuntime(hostWithSends([]), {
       eventsDir: "/tmp/termina-stale-stop-sidecar",
       flushIntervalMs: 0,
@@ -441,7 +457,7 @@ describe("TerminalRuntime", () => {
     assert.equal(typeof staleGeneration, "number");
     const { inst: instA } = fakeTerminal("term-1", 1);
     runtime.adopt(instA, { tailer: first, skipSidecarWatch: true, rendererTarget: null });
-    await Promise.resolve(instA.pty.onExit(0));
+    await finishWithoutViewer(instA);
 
     runtime.ownCandidateSidecar("term-1", second);
     assert.equal(await runtime.watchCandidateReady("term-1"), true);

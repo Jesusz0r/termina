@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -49,8 +50,10 @@ describe("Agent Core Failed Provider Trace Contract", () => {
 
     const root = mkdtempSync(join(tmpdir(), "agent-core-main-failure-trace-"));
     const events = join(root, "events");
+    const project = join(root, "project");
+    const home = join(root, "home");
     const terminalId = "term-main-failure";
-    mkdirSync(events, { recursive: true, mode: 0o700 });
+    for (const dir of [events, project, home]) mkdirSync(dir, { recursive: true, mode: 0o700 });
     const providerBase = "https://api.openai.com/v1";
     const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
     const mainPath = fileURLToPath(mainUrl);
@@ -79,13 +82,18 @@ describe("Agent Core Failed Provider Trace Contract", () => {
       process.argv = [process.execPath, ${JSON.stringify(mainPath)}, "-p", "provider failure trace probe"];
       await import(${JSON.stringify(mainUrl)});
     `;
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("TERMINA_") || key.startsWith("PI_")) delete env[key];
+    }
     const child = spawn(
       process.execPath,
       ["--input-type=module", "--experimental-strip-types", "--no-warnings", "-e", childScript],
       {
-        cwd: process.cwd(),
+        cwd: project,
         env: {
-          ...process.env,
+          ...env,
+          HOME: home,
           TERMINA_CORE_TEST: "1",
           TERMINA_CORE_PROVIDER: "openai",
           TERMINA_CORE_MODEL: "gpt-5.6-sol",
@@ -94,22 +102,30 @@ describe("Agent Core Failed Provider Trace Contract", () => {
           TERMINA_EVENTS_DIR: events,
           TERMINA_TERMINAL_ID: terminalId,
           TERMINA_CORE_SESSION_ID: `${terminalId}-session`,
-          TERMINA_AUTH_PATH: join(root, "auth.json"),
+          TERMINA_CORE_SESSION_FILE: join(root, "sessions", "current", "session.jsonl"),
+          TERMINA_AUTH_PATH: join(home, "auth.json"),
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
     let stderr = "";
+    child.stdout.resume();
     child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const closed = new Promise<{ code: number | null; signal: string | null }>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    const timer = setTimeout(() => { child.kill("SIGKILL"); }, 40_000);
+    const acked = new Set<string>();
     const ackTimer = setInterval(() => {
       try {
         const request = [...readJsonLines(join(events, `${terminalId}.jsonl`))].reverse().find((record) => record.t === "preflight_request");
-        if (request?.requestId) {
-          writeFileSync(
-            join(events, `ack-${terminalId}-${request.requestId}.json`),
-            JSON.stringify({ ok: true }),
-            { mode: 0o600 },
-          );
+        if (request?.requestId && !acked.has(request.requestId)) {
+          const ack = join(events, `ack-${terminalId}-${request.requestId}.json`);
+          // Publish once, atomically: the child claims and removes this file.
+          writeFileSync(`${ack}.tmp`, JSON.stringify({ ok: true }), { mode: 0o600 });
+          renameSync(`${ack}.tmp`, ack);
+          acked.add(request.requestId);
         }
       } catch {
         /* Wait for startup. */
@@ -117,22 +133,13 @@ describe("Agent Core Failed Provider Trace Contract", () => {
     }, 10);
 
     try {
-      const result = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
-        const timer = setTimeout(() => {
-          child.kill("SIGKILL");
-          resolve({ code: -1, signal: "SIGKILL" });
-        }, 40_000);
-        child.on("exit", (code, signal) => {
-          clearTimeout(timer);
-          resolve({ code, signal });
-        });
-      });
+      const result = await closed;
       assert.equal(result.code, 0, stderr);
       const sidecar = readJsonLines(join(events, `${terminalId}.jsonl`));
       const sidecarTypes = sidecar.map((record) => record.t).join(",");
       assert.ok(
         sidecar.some((record) => record.t === "agent_start"),
-        `agent-core never started a run; events=${sidecarTypes || "(none)"}; stderr=${stderr}`,
+        `agent-core never started a run; events=${sidecarTypes || "(none)"}; rejection=${JSON.stringify(sidecar.find((record) => record.t === "agent_start_rejected"))}; stderr=${stderr}`,
       );
       const traceDir = join(events, `${terminalId}.traces`);
       const traces = readdirSync(traceDir)
@@ -154,7 +161,10 @@ describe("Agent Core Failed Provider Trace Contract", () => {
       assert.equal(settlement.finalAttemptId, terminal.attemptId);
       console.log("agent-core failed-provider trace contract passed");
     } finally {
+      clearTimeout(timer);
       clearInterval(ackTimer);
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await closed.catch(() => {});
       rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);

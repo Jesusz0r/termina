@@ -1,11 +1,11 @@
 /**
  * Release-gate graph regressions (issue #132).
  *
- * package.json owns one canonical release graph: app + test typechecks,
+ * package.json owns one canonical release graph: lint, app + test typechecks, build,
  * unit tests, Rust tests, then the portable native suites — each suite
  * once, with the macOS-only layer (platform spike, sandbox-live,
  * built-Electron smoke) at the packaging layer. release.yml wires build
- * artifacts before the gate and publication after it. Required
+ * artifacts from the gate and publication after it. Required
  * artifact-dependent checks must fail, not silently pass, when their
  * prerequisite is missing.
  */
@@ -37,12 +37,15 @@ function jobBlock(name: string): string {
 describe("release graph (#132)", () => {
   it("defines one canonical gate with explicit prerequisites, each suite once", () => {
     const release = scripts["test:release"];
-    expect(countStep(release, "pnpm run test")).toBe(1);
+    expect(countStep(release, "pnpm run lint:no-git-cli")).toBe(1);
+    expect(countStep(release, "pnpm run typecheck")).toBe(1);
     expect(countStep(release, "pnpm run typecheck:tests")).toBe(1);
+    expect(countStep(release, "pnpm run build")).toBe(1);
+    expect(countStep(release, "pnpm run test:unit")).toBe(1);
     expect(countStep(release, "pnpm run test:rust")).toBe(1);
     expect(countStep(release, "pnpm run test:native")).toBe(1);
-    // Prerequisite order: types + unit, then test types, Rust, native.
-    const order = ["pnpm run test", "pnpm run typecheck:tests", "pnpm run test:rust", "pnpm run test:native"].map((s) =>
+    // Validate types before building. Artifact-dependent tests follow the build.
+    const order = ["pnpm run lint:no-git-cli", "pnpm run typecheck", "pnpm run typecheck:tests", "pnpm run build", "pnpm run test:unit", "pnpm run test:rust", "pnpm run test:native"].map((s) =>
       release.indexOf(s),
     );
     expect([...order].sort((a, b) => a - b)).toEqual(order);
@@ -92,10 +95,11 @@ describe("release graph (#132)", () => {
     const testJob = jobBlock("test");
     const buildJob = jobBlock("build");
     const publishJob = jobBlock("publish");
-    const buildStep = testJob.indexOf("run: pnpm run build");
     const gateStep = testJob.search(/run: pnpm run test:release\b/);
-    expect(buildStep).toBeGreaterThanOrEqual(0);
-    expect(gateStep).toBeGreaterThan(buildStep);
+    expect(gateStep).toBeGreaterThanOrEqual(0);
+    expect(testJob).not.toContain("run: pnpm run build");
+    expect(testJob.indexOf("name: Archive the tested Linux build")).toBeGreaterThan(gateStep);
+    expect(buildJob).toContain("name: Restore the tested Linux build");
     expect(buildJob).toMatch(/needs:\s*(?:test|\[\s*test\s*\])\b/);
     expect(publishJob).toMatch(/needs:\s*(?:build|\[\s*build\s*\])\b/);
     const macGateRun = buildJob.indexOf("run: pnpm run test:release-macos");

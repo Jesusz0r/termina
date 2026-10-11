@@ -4,6 +4,7 @@ import { readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { TerminalRosterStore, loadRosterFile, type RosterTerminal } from "../../../electron/roster-store.ts";
+import { MAX_ROSTER_FILE_BYTES, type TerminalRosterEntry } from "../../../electron/terminal-roster.ts";
 import { syncParentDir } from "../../../shared/fsync.ts";
 
 /**
@@ -44,7 +45,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     open: async (...args: Parameters<typeof actual.open>) => {
       const [path, flags, mode] = args;
       probes.openArgs.push({ path: String(path), flags, mode });
-      if (probes.openError) throw probes.openError;
+      if (flags === "wx" && probes.openError) throw probes.openError;
       const handle = await actual.open(...args);
       const originalSync = handle.sync.bind(handle);
       handle.sync = async () => {
@@ -100,6 +101,43 @@ describe("TerminalRosterStore durable save", () => {
     filePath = join(root, "terminal-rosters", "session.json");
     return filePath;
   }
+
+  it("persists and loads a valid roster above 64 KiB with exact identities and resume fields", async () => {
+    const path = await preparePath();
+    const entries: TerminalRosterEntry[] = Array.from({ length: 160 }, (_, i) => i % 2
+      ? { id: `term-${i + 1}`, type: "shell", shell: "/bin/zsh", cwd: `/${"x".repeat(1000)}` }
+      : { id: `term-${i + 1}`, type: "agent", engine: "core", sessionId: `core-test-${i}`, model: "openai/gpt-5" });
+    const store = openStore();
+    store.save(path, [], entries);
+    await store.drain();
+    expect(statSync(path).size).toBeGreaterThan(64 * 1024);
+    expect(await loadRosterFile(path)).toEqual({ exists: true, entries });
+  });
+
+  it("refuses an oversized malformed on-disk file as present", async () => {
+    const path = await preparePath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, "x".repeat(MAX_ROSTER_FILE_BYTES + 1));
+    expect(await loadRosterFile(path)).toEqual({ exists: true, entries: [] });
+  });
+
+  it("reports oversized identities asynchronously and preserves the last durable roster", async () => {
+    const path = await preparePath();
+    const store = openStore();
+    store.save(path, [agent("term-1")], []);
+    await store.drain();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const entries = Array.from({ length: 17000 }, (_, i) => ({ id: `term-${i + 2}`, type: "shell" as const, cwd: `/${"x".repeat(1000)}` }));
+      expect(() => store.save(path, [], entries)).not.toThrow();
+      await store.drain();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("identities exceed"));
+      expect((await loadRosterFile(path)).entries.map((entry) => entry.id)).toEqual(["term-1"]);
+      expect(readdirSync(dirname(path))).toEqual(["session.json"]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 
   it("fsyncs the temp file, renames, then fsyncs the parent dir, in order", async () => {
     const path = await preparePath();

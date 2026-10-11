@@ -109,9 +109,15 @@ describe("Wave 1 sidecar rotation regressions", () => {
 
         await waitFor(() => received.length === 5, 15000, "rotation beside a stale partial stalled the drain");
         expect(received).toEqual([1, 2, 3, 4, 5]);
+        // Delivery finishes before the cursor's atomic publication.
+        const cursorPath = join(eventsDir, `.cursor-${id}.json`);
+        await waitFor(async () => {
+          const cursor = JSON.parse(await readFile(cursorPath, "utf8"));
+          return cursor.sequence === 5;
+        }, 5000, "the rotated stream cursor was not published");
         const names = await readdir(eventsDir);
         expect(names.filter((name) => name.startsWith(`.quarantine-${id}`))).toEqual([]);
-        const cursor = JSON.parse(await readFile(join(eventsDir, `.cursor-${id}.json`), "utf8"));
+        const cursor = JSON.parse(await readFile(cursorPath, "utf8"));
         expect(cursor.sequence).toBe(5);
       } finally {
         tailer.stop();

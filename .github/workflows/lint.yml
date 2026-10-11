@@ -2,49 +2,99 @@ name: lint
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   no-git-cli:
     runs-on: ubuntu-latest
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Includes merge parents without downloading the full history.
+          # An unavailable event base selects full coverage.
+          fetch-depth: 2
       - name: Forbid git CLI in app code
         run: sh scripts/no-git-cli.sh
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.2
+      - name: Select coverage from the actual checkout
+        id: scope
+        run: node --experimental-strip-types scripts/ci-scope.ts
 
   checks:
+    needs: no-git-cli
+    # A failed prerequisite must fail this required check, not skip it.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       # Matches release.yml's test job: the unit suite carries oversized
       # harness files, so give V8 a fixed ceiling instead of the runner default.
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
+      - name: Require the quick prerequisite
+        env:
+          PREREQUISITE: ${{ needs.no-git-cli.result }}
+        run: test "$PREREQUISITE" = success
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.23.2
-      # The unit suite needs the Rust core: tests/unit/electron/core-client-read-budget.test.ts
-      # defaults TERMINA_CORE_BIN to core/target/release/termina-core and spawns it
-      # (coreClient -> resolveCoreBin), so an unbuilt core fails that test with ENOENT.
-      # Same toolchain as release.yml.
-      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.2.0
-        with:
-          toolchain: 1.97.1
       # packageManager pins pnpm; corepack activates that exact version.
       - run: corepack enable
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-pnpm-
       - run: pnpm install --frozen-lockfile
       # Fail fast on types before paying for the Rust build.
       - name: Typecheck
         run: pnpm run typecheck
       - name: Typecheck tests
         run: pnpm run typecheck:tests
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.2.0
+        if: needs.no-git-cli.outputs.scope != 'content'
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.9.2
+        if: needs.no-git-cli.outputs.scope != 'content'
+        with:
+          workspaces: core -> target
+          shared-key: ubuntu-latest-${{ runner.arch }}
+          cache-bin: false
       # Canonical build entry (scripts/build-core.ts): compiles the core and
       # stages dist-electron. The Vite renderer build is skipped: the unit
       # suites import TypeScript directly and never read dist-renderer.
       - name: Build bundles and the Rust core
+        if: needs.no-git-cli.outputs.scope != 'content'
         run: node --experimental-strip-types scripts/build.ts
       - name: Unit tests
-        run: pnpm run test:unit
+        env:
+          SCOPE: ${{ needs.no-git-cli.outputs.scope }}
+        run: |
+          if [ "$SCOPE" = content ]; then
+            pnpm run test:content --reporter=default --reporter=json --outputFile=.ci-results/unit.json
+          else
+            pnpm run test:unit --reporter=default --reporter=json --outputFile=.ci-results/unit.json
+          fi
+      - name: Preserve per-file test timings
+        if: ${{ !cancelled() && (success() || failure()) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unit-results
+          path: .ci-results/unit.json
+          retention-days: 14

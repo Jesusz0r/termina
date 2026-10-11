@@ -1,6 +1,5 @@
 import {
   composeTerminalRoster,
-  MAX_TERMINAL_ROSTER,
   parseTerminalRoster,
 } from "../../electron/terminal-roster.js";
 
@@ -28,5 +27,5 @@ export default function run(log: (message: string) => void): void {
   const composed = composeTerminalRoster(live, unrestored);
   check("prefer live duplicate", composed.length === 2 && composed[0]?.type === "agent");
   const many = Array.from({ length: 20 }, (_, index) => ({ id: `term-${index + 1}`, type: "agent" as const }));
-  check("cap roster", composeTerminalRoster(many, []).length === MAX_TERMINAL_ROSTER);
+  check("retain all terminals", composeTerminalRoster(many, []).length === many.length);
 }

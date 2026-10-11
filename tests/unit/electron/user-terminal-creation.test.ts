@@ -86,6 +86,34 @@ describe("user terminal creation", () => {
     expect(project.worldlines.createIndependentSession).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps creating independent user agents past the experiment quota without replacing live sessions", async () => {
+    const { app, project, terminals } = fixture();
+    project.worldlines.createIndependentSession.mockImplementation(async () => {
+      const id = `isolated-${terminals.size}`;
+      terminals.set(id, { id, root: `/worlds/${id}/A`, persist: false, closed: false, pty: { hasExited: false } });
+      return { ok: true, terminalId: id };
+    });
+    const results = await Promise.all(Array.from({ length: 8 }, () => create.call(app, { projectId: project.id, type: "agent" })));
+    expect(new Set(results.map((r) => r.id)).size).toBe(8);
+    expect(terminals.size).toBe(8);
+    expect(app.createTerminal).toHaveBeenCalledTimes(1);
+    expect(project.worldlines.createIndependentSession).toHaveBeenCalledTimes(7);
+  });
+
+  it("creates requested shells beyond sixteen saved tabs without invoking agent isolation", async () => {
+    const { app, project, terminals } = fixture();
+    app.createTerminal.mockImplementation(async (cwd: string) => {
+      const id = `term-${terminals.size + 1}`;
+      const inst = { id, root: cwd, persist: true, closed: false, pty: { hasExited: false } };
+      terminals.set(id, inst);
+      return inst;
+    });
+    const results = await Promise.all(Array.from({ length: 24 }, () => create.call(app, { projectId: project.id, type: "shell" })));
+    expect(new Set(results.map((r) => r.id)).size).toBe(24);
+    expect(app.createTerminal).toHaveBeenCalledTimes(24);
+    expect(project.worldlines.createIndependentSession).not.toHaveBeenCalled();
+  });
+
   it("reuses the durable migration when its old roster row survives a crash", async () => {
     const { app, project } = fixture();
     project.worldlines.openMigratedSession.mockResolvedValue({ ok: true, terminalId: "isolated" });

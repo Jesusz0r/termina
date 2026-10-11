@@ -2,6 +2,13 @@
 
 Build, dev, and diagnostic entry points. Run with `node --experimental-strip-types --no-warnings scripts/<name>.ts`.
 
+`ci-scope.ts` owns conservative content/full CI coverage selection. It uses
+the GitHub event base and the actual checkout; unknown or mixed changes use
+full coverage. `package-release.sh` owns release packaging arguments and the
+single retry for named transient network failures. It disables publication.
+`pnpm run test:release` checks lint and types, builds, then runs unit, Rust,
+and portable native tests. It includes its own build prerequisite.
+
 - `build.ts` — bundles main/preload/agent-core with esbuild (runs before `vite build`; also regenerates the theme tokens — see below).
 - `dev.ts` — development launcher. `build-core.ts` — Rust core build. `prepare-resources.ts` — packaged-app resources.
 - `theme-tokens.ts` — parses the theme blocks out of `src/styles.css` into `src/theme-tokens.gen.ts`, the module the terminal and Monaco palettes import. Runs on every build; `tests/unit/scripts/theme-tokens.test.ts` fails when the checked-in output goes stale. Never hand-edit the `.gen.ts` file.

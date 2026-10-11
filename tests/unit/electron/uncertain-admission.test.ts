@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { mkdtemp, mkdir, lstat, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, mkdir, lstat, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MARKER, UNCERTAIN_COMPARISON_USAGE_LEDGER } from "../../../electron/worldlines/limits.ts";
@@ -124,6 +125,81 @@ describe("uncertain admission measurement (issue #192)", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it.each(["uncertain", "complete"] as const)("measures dependency and skill links without following targets in a %s retained area", async (status) => {
+    const { root, worldsRoot } = await setupWorlds();
+    try {
+      const { dir } = await seedRetained(worldsRoot, "cmp-2", 1);
+      if (status === "complete") {
+        // A session from another project survives the sweep but is not in this
+        // manager's safe set. A-support and profiles are deliberately absent.
+        const manifestPath = join(dir, "manifest.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+        Object.assign(manifest, { sourceRunId: null, status: "complete", uncertainSessionArtifacts: [],
+          session: { primaryRoot: join(root, "other-project"), baseStateId: "base", sourceGitDir: join(root, "other-project", ".git"), model: null, thinkingLevel: null } });
+        await writeFile(manifestPath, JSON.stringify(manifest));
+      }
+      const bins = join(dir, "A", "node_modules", ".bin");
+      const skills = join(dir, "template", ".agents", "skills");
+      await mkdir(bins, { recursive: true });
+      await mkdir(skills, { recursive: true });
+      const outside = join(root, "outside");
+      await mkdir(outside);
+      await writeFile(join(outside, "untouched.txt"), "outside contents");
+      const links = [join(bins, "tool"), join(skills, "linked-skill"), join(bins, "dangling"), join(skills, "cycle")];
+      await symlink("../package/tool.js", links[0]!);
+      await symlink(outside, links[1]!);
+      await symlink("missing", links[2]!);
+      await symlink(".", links[3]!);
+      const owner = uncertainComparisonAdmissionOwnerFor(await ensureBoundDirectory(worldsRoot, "worlds root"));
+      try {
+        const first = await owner.acquire(() => false);
+        expect(first.ok).toBe(true);
+        if (first.ok) first.lease.release();
+        await owner.drain();
+        const before = await ledgerEntry(worldsRoot);
+        expect(before.counted).toBe(true);
+        // Adding huge content outside the area does not change its measured
+        // size or proof: only the link itself is recovery evidence here.
+        await writeFile(join(outside, "large.bin"), Buffer.alloc(1024 * 1024));
+        const second = await owner.acquire(() => false);
+        expect(second.ok).toBe(true);
+        if (second.ok) second.lease.release();
+        await owner.drain();
+        expect(await ledgerEntry(worldsRoot)).toEqual(before);
+        await rm(links[0]!);
+        await symlink("../another/tool.js", links[0]!);
+        const third = await owner.acquire(() => false);
+        expect(third.ok).toBe(true);
+        if (third.ok) third.lease.release();
+        await owner.drain();
+        expect((await ledgerEntry(worldsRoot)).proof).not.toBe(before.proof);
+        expect(await readFile(join(outside, "untouched.txt"), "utf8")).toBe("outside contents");
+        for (const link of links) expect((await lstat(link)).isSymbolicLink()).toBe(true);
+      } finally { releaseUncertainComparisonAdmissionOwner(owner); }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it.skipIf(process.platform === "win32")("still refuses a special entry without deleting retained evidence", async () => {
+    const { root, worldsRoot } = await setupWorlds();
+    try {
+      const { dir, victim } = await seedRetained(worldsRoot, "cmp-special", 1);
+      const pipe = join(dir, "sub", "pipe");
+      execFileSync("mkfifo", [pipe]);
+      const manifest = await readFile(join(dir, "manifest.json"), "utf8");
+      const owner = uncertainComparisonAdmissionOwnerFor(await ensureBoundDirectory(worldsRoot, "worlds root"));
+      try {
+        const result = await owner.acquire(() => false);
+        // Release before asserting so a regression cannot leak the admission lease.
+        if (result.ok) result.lease.release();
+        await owner.drain();
+        expect(result).toMatchObject({ ok: false, error: expect.stringContaining("unsupported entry") });
+        expect((await lstat(pipe)).isFIFO()).toBe(true);
+        expect(await readFile(victim, "utf8")).toBe("old-content-1234");
+        expect(await readFile(join(dir, "manifest.json"), "utf8")).toBe(manifest);
+      } finally { releaseUncertainComparisonAdmissionOwner(owner); }
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("orders ledger entries by code unit, never by locale (issue #193)", async () => {
