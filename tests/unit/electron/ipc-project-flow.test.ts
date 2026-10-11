@@ -293,7 +293,7 @@ check("terminal close persists before process exit", main.includes("saveTerminal
 check("closing terminals cannot be rehydrated", main.includes("filter((t) => !t.closed)")
   && renderer.includes("closingPanes.set(instanceId, { generation: terminalGeneration })")
   && renderer.includes("instance.generation > fence.generation")
-  && renderer.includes("if (liveIds.has(id) || !pane.fromRoster) continue"));
+  && renderer.includes("if (liveIds.has(id)) continue"));
 
 check("project close and quit share the unsaved-buffer gate", main.includes("async confirmClose(projectId?: string)")
   && main.includes("await this.confirmUnsavedEditorBuffers(projectId)")

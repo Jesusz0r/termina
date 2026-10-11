@@ -1,8 +1,7 @@
 import { basename } from "node:path";
 import { createHash } from "node:crypto";
-import { planStartError } from "../plan-board.js";
 import type {
-  AgentActivityView, CandidateRecoverySummary, PlanTask, ProjectWorkSummary, TerminalWorkSummary,
+  AgentActivityView, AgentIntervention, CandidateRecoverySummary, PlanTask, ProjectWorkSummary, TerminalWorkSummary,
   VerifyInfo, WorkAreaSummary, WorkAttentionItem, WorkAttentionReason, WorkOverview, WorkSummaryAction, WorldlineSummary,
 } from "../../shared/types.js";
 
@@ -16,8 +15,6 @@ export interface WorkSummaryTerminalFacts {
   verify: VerifyInfo;
   trackedChanges: number;
   plan: readonly PlanTask[];
-  planCreationError: string | null;
-  planStartOwnerError: string | null;
   /** Live dispatcher provenance, never inferred from a task's persisted terminal id. */
   dispatchAssignment: { ownerId: string; taskText: string } | null;
 }
@@ -80,19 +77,14 @@ export function projectWorkSummary(
         worker,
         candidate,
         attention: taskAttention,
-        startError: planStartError(terminal.planStartOwnerError, terminal.plan, task),
-        nextAction: worker ? { kind: "terminal" as const, ...worker } : action("plan"),
+        nextAction: worker ? { kind: "terminal" as const, ...worker } : { ...action("plan"), taskText: task.text },
       };
     });
-    const nextAction = activity?.state === "blocked" ? action("terminal")
-      : attention.length > 0 ? action("evidence")
-      : tasks.some((task) => task.attention.length > 0) ? action("plan")
-      : terminal.trackedChanges > 0 ? action("changes") : action("terminal");
     return {
       terminalId: terminal.id, generation: terminal.generation, type: terminal.type,
       model: terminal.type === "agent" ? terminal.model : null,
       activity, workArea: area, verify, trackedChanges: terminal.trackedChanges,
-      tasks, attention, nextAction, planCreationError: terminal.planCreationError,
+      tasks, attention,
     };
   });
   return { projectId: project.id, name: basename(project.cwd) || project.cwd, root: project.cwd, terminals, candidateRecoveries };
@@ -108,6 +100,7 @@ const ATTENTION_PRIORITY: Record<WorkAttentionReason, number> = {
 /** Compose canonical project summaries. This adds no execution or attention state. */
 export function workOverview(summaries: readonly ProjectWorkSummary[]): WorkOverview {
   const items: WorkAttentionItem[] = [];
+  const interventions = new Map<string, AgentIntervention>();
   const projects = summaries.map((project) => {
     const start = items.length;
     // Attribute worker attention to its live, source-fenced Plan Board assignment.
@@ -123,9 +116,11 @@ export function workOverview(summaries: readonly ProjectWorkSummary[]): WorkOver
       const append = (reason: WorkAttentionReason, taskText: string | null, taskIdentity: unknown, detail: string | null,
         action: WorkSummaryAction, candidate?: WorkAttentionItem["candidate"]) => {
         // Opaque content identity, not a capability or registry token. Recompute to validate.
+        const intervention = reason === "blocked" ? terminal.activity?.intervention ?? null : null;
         const identity = [project.projectId, project.root, terminal.terminalId, terminal.generation,
-          terminal.workArea, taskIdentity, taskText, reason, action, candidate ?? null];
+          terminal.workArea, taskIdentity, taskText, reason, action, candidate ?? null, intervention];
         const id = `work-${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
+        if (intervention) interventions.set(id, intervention);
         items.push({ id, projectId: project.projectId, terminalId: terminal.terminalId,
           generation: terminal.generation, model: terminal.model, taskText, reason, detail,
           workArea: terminal.workArea, action, ...(candidate ? { candidate } : {}) });
@@ -156,7 +151,14 @@ export function workOverview(summaries: readonly ProjectWorkSummary[]): WorkOver
       working: project.terminals.filter((terminal) => terminal.activity?.state === "working").length,
       attentionCount: items.length - start };
   });
-  // Stable sort keeps original project, terminal, task and reason order within categories.
-  items.sort((a, b) => ATTENTION_PRIORITY[a.reason] - ATTENTION_PRIORITY[b.reason]);
+  // Human pickers come first, oldest first. Ties and other categories keep stable owner order.
+  items.sort((a, b) => {
+    const left = interventions.get(a.id);
+    const right = interventions.get(b.id);
+    if (left && right) return left.since - right.since;
+    if (left) return -1;
+    if (right) return 1;
+    return ATTENTION_PRIORITY[a.reason] - ATTENTION_PRIORITY[b.reason];
+  });
   return { projects, items };
 }

@@ -3,7 +3,6 @@
  * handlers and calls these before any fs/pty/snapshot work.
  */
 import { isRecord } from "../../shared/guards.js";
-import { parsePlanTaskCandidate } from "../plan-board.js";
 import { CHALLENGE_PROFILES, type ChallengeProfile, type RendererIpcCapability, type UnsavedConfirmResult } from "../../shared/types.js";
 
 export function isChallengeProfile(value: unknown): value is ChallengeProfile {
@@ -112,49 +111,6 @@ export function parseTerminalCreateOptions(opts: unknown):
       projectId,
     },
   };
-}
-
-export function parsePlanTaskCreateRequest(value: unknown): import("../../shared/types.js").PlanTaskCreateRequest | null {
-  if (!isRecord(value) || !isRecord(value.owner)) return null;
-  const owner = value.owner;
-  const target = parseTerminalTarget(owner.terminalId, owner.generation);
-  const bounded = (v: unknown, cap: number): v is string => typeof v === "string" && v.length > 0 && v.length <= cap;
-  if (!target || !bounded(owner.projectId, 64) || !bounded(owner.workspaceId, 128)
-    || !bounded(owner.root, 4096) || !bounded(value.projectRoot, 4096) || typeof value.text !== "string"
-    || value.text.length > 500) return null;
-  // Copy the renderer snapshot, never retain mutable unknown input across awaits.
-  return { owner: { projectId: owner.projectId, workspaceId: owner.workspaceId,
-    terminalId: target.id, generation: target.generation, root: owner.root },
-    projectRoot: value.projectRoot, text: value.text };
-}
-
-export function parsePlanTaskStartRequest(value: unknown): import("../../shared/types.js").PlanTaskStartRequest | null {
-  if (!isRecord(value) || !isRecord(value.task)) return null;
-  // Reuse the exact owner/source envelope validator; task text has no creation-only rules.
-  const envelope = parsePlanTaskCreateRequest({ ...value, text: "" });
-  if (!envelope) return null;
-  const task = value.task;
-  const bounded = (v: unknown, cap: number): v is string => typeof v === "string" && v.length > 0 && v.length <= cap;
-  const paths = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 5 && v.every((p) => bounded(p, 4096));
-  if (!bounded(task.text, 16_384) || !paths(task.paths)
-    || (task.state !== "pending" && task.state !== "active" && task.state !== "done")
-    || (task.model !== undefined && !bounded(task.model, 256))
-    || (task.workerId !== undefined && !bounded(task.workerId, 64))
-    || (task.claimed !== undefined && !paths(task.claimed))) return null;
-  const result = task.dispatchResult;
-  if (result !== undefined && (!isRecord(result) || !bounded(result.workerId, 64)
-    || typeof result.outcome !== "string" || !["completed", "incomplete", "failed", "interrupted"].includes(result.outcome))) return null;
-  const candidate = parsePlanTaskCandidate(task.candidate);
-  if (task.candidate !== undefined && !candidate) return null;
-  return { owner: envelope.owner, projectRoot: envelope.projectRoot, task: {
-    text: task.text, paths: [...task.paths], state: task.state,
-    ...(candidate ? { candidate } : {}),
-    ...(task.model !== undefined ? { model: task.model } : {}),
-    ...(task.workerId !== undefined ? { workerId: task.workerId } : {}),
-    ...(task.claimed !== undefined ? { claimed: [...task.claimed] } : {}),
-    ...(isRecord(result) ? { dispatchResult: { workerId: result.workerId as string,
-      outcome: result.outcome as import("../../shared/types.js").DispatchOutcome } } : {}),
-  } };
 }
 
 export type PtyAckPayload = {

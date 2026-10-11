@@ -1,9 +1,17 @@
-import type { WorkOverview } from "../../shared/types";
-import { projectCards, taskTarget, type OverviewTaskTarget } from "./project-overview";
+import type { PlanWorkSummary, ProjectWorkSummary, TerminalWorkSummary, WorkOverview } from "../../shared/types";
+import { presentBlockedLabel } from "../known-state";
+
+export interface WorkTaskTarget {
+  projectId: string;
+  root: string;
+  key: string;
+  /** Content identity, not permission to execute a task or control a terminal. */
+  scope: string;
+}
 
 export type WorkSearchTarget =
   | { kind: "project"; projectId: string; root: string }
-  | { kind: "task"; task: OverviewTaskTarget };
+  | { kind: "task"; task: WorkTaskTarget };
 
 export interface WorkSearchRow {
   target: WorkSearchTarget;
@@ -11,7 +19,43 @@ export interface WorkSearchRow {
   detail: string;
 }
 
+interface WorkTaskMatch {
+  owner: TerminalWorkSummary;
+  terminal: TerminalWorkSummary;
+  task: PlanWorkSummary;
+  target: WorkTaskTarget;
+}
+
 const MAX_RESULTS = 50;
+
+/** Plan owner and source identity are shared by search and its fresh revalidation. */
+function* projectTasks(project: ProjectWorkSummary): Generator<WorkTaskMatch> {
+  const live = new Map(project.terminals.map((terminal) => [terminal.terminalId, terminal]));
+  for (const owner of project.terminals) {
+    const occurrences = new Map<string, number>();
+    for (const task of owner.tasks) {
+      const occurrence = occurrences.get(task.task.text) ?? 0;
+      occurrences.set(task.task.text, occurrence + 1);
+      const assigned = task.worker ? live.get(task.worker.terminalId) : undefined;
+      const terminal = assigned && assigned.generation === task.worker?.generation ? assigned : owner;
+      yield { owner, terminal, task, target: {
+        projectId: project.projectId, root: project.root,
+        key: JSON.stringify([owner.terminalId, owner.generation, task.task.text, occurrence]),
+        scope: JSON.stringify([owner.workArea, terminal.terminalId, terminal.generation,
+          terminal.workArea, task.task.paths, task.worker, task.task.candidate, task.candidate]),
+      } };
+    }
+  }
+}
+
+export function findWorkTask(overview: WorkOverview, target: WorkTaskTarget): WorkTaskMatch | null {
+  const project = overview.projects.find((entry) => entry.projectId === target.projectId && entry.root === target.root);
+  if (!project) return null;
+  for (const match of projectTasks(project)) {
+    if (match.target.key === target.key && match.target.scope === target.scope) return match;
+  }
+  return null;
+}
 
 /** Search the canonical lightweight projection. No persistent index or execution state. */
 export function searchWork(overview: WorkOverview, query: string): { rows: WorkSearchRow[]; truncated: boolean } {
@@ -28,14 +72,18 @@ export function searchWork(overview: WorkOverview, query: string): { rows: WorkS
       label: project.name,
       detail: `Project · ${project.root}`,
     });
-    for (const card of projectCards(project)) {
-      if ("recovery" in card || !card.task || !matches(`${identity}\n${card.title}`)) continue;
+    for (const { owner, terminal, task, target } of projectTasks(project)) {
+      if (!matches(`${identity}\n${task.task.text}`)) continue;
+      const execution = task.worker && terminal !== owner
+        ? `${terminal.activity?.state === "blocked" ? presentBlockedLabel(terminal.activity.reason) : terminal.activity?.state ?? "Shell activity unknown"} · worker ${terminal.terminalId}`
+        : "No live worker assigned";
       rows.push({
-        target: { kind: "task", task: taskTarget(project, card) },
-        label: card.title,
-        detail: `Task · ${project.name} · ${project.root} · Plan owner ${card.owner.terminalId}`
-          + ` · ${card.state} · ${card.execution}`
-          + (card.terminal.workArea?.kind === "candidate" ? ` · Separate candidate tree ${card.terminal.workArea.root}` : ""),
+        target: { kind: "task", task: target },
+        label: task.task.text,
+        detail: `Task · ${project.name} · ${project.root} · Plan owner ${owner.terminalId}`
+          + ` · Marked ${task.task.state} · ${execution}`
+          + (task.task.dispatchResult ? ` · Previous attempt ${task.task.dispatchResult.outcome} (${task.task.dispatchResult.workerId})` : "")
+          + (terminal.workArea?.kind === "candidate" ? ` · Separate candidate tree ${terminal.workArea.root}` : ""),
       });
       if (rows.length > MAX_RESULTS) return { rows: rows.slice(0, MAX_RESULTS), truncated: true };
     }

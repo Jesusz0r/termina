@@ -23,6 +23,8 @@ const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
   "plan",
   "tool",
   "tool_end",
+  "intervention_requested",
+  "intervention_resolved",
   "subagent_spawn",
   "subagent_cancel",
 ]);
@@ -160,6 +162,16 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
     }
     case "tool_end":
       return { ...meta, t: "tool_end", toolCallId: optionalString(rec.toolCallId), isError: optionalBoolean(rec.isError), entryId: optionalStringOrNull(rec.entryId) };
+    case "intervention_requested": {
+      const requestId = interventionRequestId(rec.requestId);
+      const since = optionalSafeInteger(rec.since);
+      if (!requestId || rec.kind !== "permission" || since === undefined || since === 0) return null;
+      return { ...meta, t, requestId, kind: "permission", since };
+    }
+    case "intervention_resolved": {
+      const requestId = interventionRequestId(rec.requestId);
+      return requestId ? { ...meta, t, requestId } : null;
+    }
     case "subagent_spawn":
       return { ...meta, t: "subagent_spawn", runId: optionalString(rec.runId), taskFile: optionalString(rec.taskFile), userRequested: optionalBoolean(rec.userRequested) };
     case "subagent_cancel":
@@ -167,6 +179,10 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
   }
 }
 
+
+function interventionRequestId(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : undefined;
+}
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;

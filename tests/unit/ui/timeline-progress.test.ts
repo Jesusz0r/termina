@@ -166,7 +166,7 @@ describe("timeline activity prefix (issue #291)", () => {
       ok: 0,
       error: 0,
       open: 0,
-      activity: { state: "blocked", reason: "tool-error-loop" },
+      activity: { state: "blocked", reason: "tool-error-loop", intervention: null },
     });
     expect(h.prefix.hidden).toBe(false);
     expect(h.prefix.textContent).toBe("blocked: tool-error-loop");
@@ -180,7 +180,7 @@ describe("timeline activity prefix (issue #291)", () => {
       ok: 0,
       error: 3,
       open: 0,
-      activity: { state: "blocked", reason: "tool-error-loop" },
+      activity: { state: "blocked", reason: "tool-error-loop", intervention: null },
     });
     expect(h.dot(1).title).toContain("blocked: tool-error-loop");
   });
@@ -191,7 +191,7 @@ describe("timeline activity prefix (issue #291)", () => {
       ok: 0,
       error: 0,
       open: 0,
-      activity: { state: "idle", reason: null },
+      activity: { state: "idle", reason: null, intervention: null },
     });
     expect(h.prefix.hidden).toBe(true);
     expect(h.prefix.textContent).toBe("");
@@ -203,7 +203,7 @@ describe("timeline activity prefix (issue #291)", () => {
       ok: 0,
       error: 0,
       open: 0,
-      activity: { state: "blocked", reason: "evil-reason" as "stalled" },
+      activity: { state: "blocked", reason: "evil-reason" as "stalled", intervention: null },
     });
     expect(h.prefix.textContent).toBe("blocked");
     expect(h.prefix.title).toBe("blocked");
@@ -215,7 +215,7 @@ describe("timeline activity prefix (issue #291)", () => {
       ok: 0,
       error: 0,
       open: 0,
-      activity: { state: "blocked", reason: "lease-wait" },
+      activity: { state: "blocked", reason: "lease-wait", intervention: null },
     });
     expect(h.prefix.hidden).toBe(false);
     expect(h.prefix.textContent).toBe("blocked: waiting to write");
@@ -230,7 +230,7 @@ describe("timeline activity prefix (issue #291)", () => {
       ok: 1,
       error: 0,
       open: 0,
-      activity: { state: "blocked", reason: "sidecar-paused" },
+      activity: { state: "blocked", reason: "sidecar-paused", intervention: null },
     });
     expect(h.prefix.textContent).toContain("blocked: paused");
     expect(h.dot(1).title).toContain("blocked: paused");

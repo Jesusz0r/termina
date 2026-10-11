@@ -191,7 +191,7 @@ export class QuickOpen {
     }
   }
 
-  /** Accept live updates from the existing overview owner; never poll independently. */
+  /** Accept live updates from Attention's canonical work projection; never poll independently. */
   setWorkOverview(value: WorkOverview | null): void {
     this.workLoadSequence++;
     this.workOverview = value;

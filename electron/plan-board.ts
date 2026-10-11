@@ -120,22 +120,6 @@ export function planOwnerError(facts: PlanOwnerFacts): string | null {
   return null;
 }
 
-/** Admission is shared by the authoritative overview and the create handler. */
-export function planCreationError(facts: PlanOwnerFacts & { taskCount: number }): string | null {
-  return planOwnerError(facts) ?? planCapacityError(facts.taskCount);
-}
-
-/** Initial Start only: historical attempts must use the Plan Board's Retry. */
-export function planStartError(ownerError: string | null, plan: readonly PlanTask[], task: PlanTask): string | null {
-  if (ownerError) return ownerError;
-  const matches = plan.filter((entry) => entry.text === task.text);
-  if (matches.length !== 1 || matches[0] !== task) return "The task is not uniquely on the Plan Board.";
-  if (task.state !== "pending" || task.workerId !== undefined || task.dispatchResult !== undefined || task.candidate !== undefined) {
-    return "Only an initial pending task can be started here. Use the Plan Board for retries.";
-  }
-  return null;
-}
-
 /** Compare all execution-relevant fields, not merely the named row. */
 export function samePlanTaskSnapshot(task: PlanTask, snapshot: PlanTask): boolean {
   return task.text === snapshot.text && task.state === snapshot.state && task.model === snapshot.model
@@ -145,25 +129,6 @@ export function samePlanTaskSnapshot(task: PlanTask, snapshot: PlanTask): boolea
     && JSON.stringify(task.claimed) === JSON.stringify(snapshot.claimed)
     && task.dispatchResult?.workerId === snapshot.dispatchResult?.workerId
     && task.dispatchResult?.outcome === snapshot.dispatchResult?.outcome;
-}
-
-function planCapacityError(taskCount: number): string | null {
-  return taskCount >= MAX_PLAN_TASKS ? `The Plan Board is full (${MAX_PLAN_TASKS} tasks).` : null;
-}
-
-export function planTaskTextError(text: string, plan: readonly PlanTask[]): string | null {
-  if (!text.trim()) return "Enter a task.";
-  if (text.length > 500) return "Task text must be at most 500 characters.";
-  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(text)) return "Task text must be one line without control characters.";
-  if (/@(every|at)\b/i.test(text)) return "New tasks cannot include automatic schedule markers.";
-  if (plan.some((task) => task.text === text)) return "That task is already on the Plan Board.";
-  return planCapacityError(plan.length);
-}
-
-/** Derive paths/model with the same parser as agent-authored plans; never dispatch. */
-export async function createPendingPlanTask(text: string, cwd: string, canonicalize: CanonicalizePath): Promise<PlanTask> {
-  const model = parsePlanModelMarker(text);
-  return { text, paths: await planTaskPaths(text, cwd, canonicalize), state: "pending", ...(model ? { model } : {}) };
 }
 
 export function markPlanProgress(plan: PlanTask[], relPath: string): boolean {

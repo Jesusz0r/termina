@@ -199,9 +199,9 @@ export class FakeEl {
     return out;
   }
   get isConnected(): boolean {
-    let node: FakeEl | null = this;
-    while (node.parent) node = node.parent;
-    return node !== this || this.parent !== null;
+    let root: FakeEl = this;
+    while (root.parent) root = root.parent;
+    return root === this.document?.body || root === (globalThis.document?.body as unknown);
   }
 }
 
@@ -312,6 +312,7 @@ export function installFakeDom(): { document: FakeDocument; modalRoot: FakeEl; c
   const document = new FakeDocument();
   const modalRoot = document.createElement("div");
   modalRoot.id = "modal-root";
+  document.body.append(modalRoot);
   document.registerId("modal-root", modalRoot);
   const globals = globalThis as Record<string, unknown>;
   const prevDocument = globals.document;

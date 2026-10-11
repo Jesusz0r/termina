@@ -20,20 +20,6 @@ export interface ReviewTarget extends ProjectWorkspaceRef {
   root: string;
 }
 
-export interface PlanTaskCreateRequest {
-  owner: ReviewTarget;
-  projectRoot: string;
-  text: string;
-}
-export type PlanTaskCreateResult = { ok: true; task: PlanTask } | { ok: false; error: string };
-
-export interface PlanTaskStartRequest {
-  owner: ReviewTarget;
-  projectRoot: string;
-  task: PlanTask;
-}
-export interface PlanTaskStartResult { ok: boolean; error?: string; dispatched?: number }
-
 export type ReviewFilesResult = { ok: true; files: ModifiedFile[]; total: number } | { ok: false; error: string };
 export type ReviewDiffResult = {
   ok: true; path: string; relPath: string; status: ModifiedFile["status"];
@@ -109,12 +95,23 @@ const AGENT_ACTIVITY_REASONS = [
   "lease-wait",
   "sidecar-paused",
   "exited-mid-run",
+  "permission-required",
 ] as const;
 export type AgentActivityReason = (typeof AGENT_ACTIVITY_REASONS)[number];
+
+/** A currently displayed human permission picker, not inferred from output or idle. */
+export interface AgentIntervention {
+  requestId: string;
+  kind: "permission";
+  /** Producer epoch milliseconds when this picker became available to answer. */
+  since: number;
+}
 
 export interface AgentActivityView {
   state: AgentActivityState;
   reason: AgentActivityReason | null;
+  /** Exact pending picker, or null. Internal blocks and result review are not interventions. */
+  intervention: AgentIntervention | null;
 }
 
 export const DISPATCH_OUTCOMES = ["completed", "incomplete", "failed", "interrupted"] as const;
@@ -262,7 +259,7 @@ export type WorkAttentionReason =
 
 /** Navigation only. It never authorizes execution, review acceptance, or promotion. */
 export interface WorkSummaryAction {
-  kind: "terminal" | "plan" | "changes" | "evidence" | "verify";
+  kind: "terminal" | "plan" | "evidence";
   terminalId: string;
   generation: number;
   /** Reveal the exact existing Plan Board row, without dispatching it. */
@@ -278,8 +275,6 @@ export interface PlanWorkSummary {
   candidate: PlanCandidateSummary | null;
   attention: WorkAttentionReason[];
   nextAction: WorkSummaryAction;
-  /** Initial explicit Start admission; retry remains on the Plan Board. */
-  startError: string | null;
 }
 
 export interface TerminalWorkSummary {
@@ -293,10 +288,8 @@ export interface TerminalWorkSummary {
   verify: VerifyInfo | null;
   /** Cumulative tracked review paths, not Git dirtiness or unread changes. */
   trackedChanges: number;
-  planCreationError: string | null;
   tasks: PlanWorkSummary[];
   attention: WorkAttentionReason[];
-  nextAction: WorkSummaryAction;
 }
 
 /** Failed retained candidate context; never a fabricated terminal or Plan Board task. */
@@ -730,6 +723,8 @@ export interface FolderOpenedPayload {
   primaryWorkspaceId: string;
   /** Monotonic main-side project activation epoch. */
   activationGeneration: number;
+  /** Exact main-admitted terminal to display, or an empty project context. */
+  terminal: { id: string; generation: number } | null;
   /** True when the agent has no provider in auth.json or in the process environment. */
   needsLogin: boolean;
 }
@@ -864,10 +859,7 @@ export interface TerminaBridge {
   getTimelineProgress(terminalId: string, seq: number): Promise<TimelineProgress>;
   /** The current run's plan tasks (Plan Board). */
   getPlan(terminalId: string): Promise<PlanTask[]>;
-  createPlanTask(request: PlanTaskCreateRequest): Promise<PlanTaskCreateResult>;
-  startPlanTask(request: PlanTaskStartRequest): Promise<PlanTaskStartResult>;
   /** Factual project/task context without heavy history or renderer notification state. */
-  getProjectWorkSummary(projectId: string): Promise<ProjectWorkSummary | null>;
   getWorkOverview(): Promise<WorkOverview>;
   inspectWorkAttention(id: string): Promise<WorkAttentionInspectResult>;
   /** Inspect a live terminal generation's current verdict and bounded historical output. */
@@ -962,7 +954,7 @@ export interface TerminaBridge {
   projectOpen(): Promise<{ cwd: string } | { cancelled: true }>;
   /** Open a project by path (the test suites cannot drive the dialog). */
   projectOpenPath(cwd: string): Promise<{ cwd: string } | { cancelled: true }>;
-  projectActivate(projectId: string): Promise<ProjectActivateResult>;
+  projectActivate(projectId: string, intent: "entry" | "context"): Promise<ProjectActivateResult>;
   projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
   /** Persist project tab order. `ids` is every open project, in strip order. */
   reorderProjects(ids: string[]): Promise<{ ok: boolean }>;

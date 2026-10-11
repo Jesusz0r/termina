@@ -6,10 +6,10 @@ const project = { id: "proj-1", cwd: "/projects/same-name" };
 function terminal(overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummaryTerminalFacts {
   return {
     id: "term-1", generation: 3, type: "agent", model: "provider/model",
-    activity: { state: "idle", reason: null },
+    activity: { state: "idle", reason: null, intervention: null },
     workspace: { id: "ws-1", root: project.cwd, primary: true },
     verify: { state: "untested", command: null, summary: null },
-    trackedChanges: 0, plan: [], planCreationError: null, planStartOwnerError: null, dispatchAssignment: null, ...overrides,
+    trackedChanges: 0, plan: [], dispatchAssignment: null, ...overrides,
   };
 }
 function task(outcome?: DispatchOutcome): PlanTask {
@@ -23,7 +23,7 @@ describe("global factual attention", () => {
       projectWorkSummary(project, [terminal({ verify: { state: "fail", command: "test", summary: "2 failures" },
         plan: [task("incomplete"), { ...task(), text: "Missing worker", workerId: "gone" }] })]),
       projectWorkSummary({ id: "proj-2", cwd: "/other/same-name" }, [terminal({ id: "term-3", generation: 8,
-        activity: { state: "blocked", reason: "lease-wait" }, trackedChanges: 2 })]),
+        activity: { state: "blocked", reason: "lease-wait", intervention: null }, trackedChanges: 2 })]),
       projectWorkSummary({ id: "empty", cwd: "/empty" }, []),
     ];
     const overview = workOverview(summaries);
@@ -35,7 +35,7 @@ describe("global factual attention", () => {
     expect(overview.items.map((item) => item.reason)).toEqual(["worker-unavailable", "blocked", "task-incomplete", "verify-failed"]);
     expect(overview.items[0]).toMatchObject({ projectId: project.id, terminalId: "term-1", generation: 3,
       model: "provider/model", taskText: "Missing worker", detail: "Assigned worker gone is unavailable.",
-      action: { kind: "plan", terminalId: "term-1", generation: 3 } });
+      action: { kind: "plan", terminalId: "term-1", generation: 3, taskText: "Missing worker" } });
     expect(overview.items[1]).toMatchObject({ projectId: "proj-2", detail: "lease-wait", taskText: null });
     expect(overview.items[3]!.detail).toBe("test: 2 failures");
     expect(workOverview(summaries)).toEqual(overview);
@@ -45,8 +45,8 @@ describe("global factual attention", () => {
   it("uses only canonical attention and working truth, not tracked paths, shell state or notification flags", () => {
     const summaries = [projectWorkSummary(project, [
       terminal({ trackedChanges: 5 }),
-      terminal({ id: "worker", activity: { state: "working", reason: null } }),
-      terminal({ id: "shell", type: "shell", activity: { state: "blocked", reason: "stalled" }, verify: { state: "fail", command: "test", summary: "bad" } }),
+      terminal({ id: "worker", activity: { state: "working", reason: null, intervention: null } }),
+      terminal({ id: "shell", type: "shell", activity: { state: "blocked", reason: "stalled", intervention: null }, verify: { state: "fail", command: "test", summary: "bad" } }),
     ])];
     expect(workOverview(summaries)).toEqual({ projects: [{ ...summaries[0], working: 1, attentionCount: 0 }], items: [] });
   });
@@ -57,13 +57,13 @@ describe("global factual attention", () => {
     const summary = projectWorkSummary(project, [
       terminal({ plan: [pending, done] }),
       terminal({ id: "candidate", workspace: { id: "ws-candidate", root: "/worlds/candidate", primary: false, comparisonId: "cmp-1" } }),
-      terminal({ id: "shell", type: "shell", activity: { state: "working", reason: null } }),
+      terminal({ id: "shell", type: "shell", activity: { state: "working", reason: null, intervention: null } }),
     ]);
     const before = structuredClone(summary);
     const overview = workOverview([summary]);
     expect(overview.projects).toEqual([{ ...summary, working: 0, attentionCount: 1 }]);
     expect(overview.items).toEqual([expect.objectContaining({ reason: "pending-review", taskText: done.text,
-      action: { kind: "plan", terminalId: "term-1", generation: 3 } })]);
+      action: { kind: "plan", terminalId: "term-1", generation: 3, taskText: done.text } })]);
     expect(overview.projects[0]!.terminals).toBe(summary.terminals);
     expect(overview.projects[0]!.terminals[0]!.tasks.map(({ task }) => task)).toEqual([pending, done]);
     expect(overview.projects[0]!.terminals[1]!.workArea).toEqual({ workspaceId: "ws-candidate", root: "/worlds/candidate", kind: "candidate", comparisonId: "cmp-1" });
@@ -89,7 +89,7 @@ describe("global factual attention", () => {
   });
 
   it("attributes live worker attention to a single canonical task, never guesses among multiple assignments", () => {
-    const worker = terminal({ id: "worker", generation: 9, activity: { state: "blocked", reason: "stalled" },
+    const worker = terminal({ id: "worker", generation: 9, activity: { state: "blocked", reason: "stalled", intervention: null },
       verify: { state: "fail", command: "test", summary: "failed" },
       dispatchAssignment: { ownerId: "term-1", taskText: task().text } });
     const assigned = { ...task(), workerId: worker.id, state: "active" as const };
@@ -126,7 +126,7 @@ describe("factual project/task summary", () => {
     const area = candidate();
     const assigned: PlanTask = { ...task(), state: "active", workerId: "term-2", candidate: { comparisonId: area.comparisonId, label: area.label } };
     const owner = terminal({ plan: [assigned] });
-    const worker = terminal({ id: "term-2", generation: 9, activity: { state: "blocked", reason: "stalled" },
+    const worker = terminal({ id: "term-2", generation: 9, activity: { state: "blocked", reason: "stalled", intervention: null },
       workspace: { id: "ws-candidate", root: area.root, primary: false, comparisonId: area.comparisonId },
       dispatchAssignment: { ownerId: owner.id, taskText: assigned.text } });
     const summary = projectWorkSummary(project, [owner, worker], [], [area]);
@@ -181,13 +181,13 @@ describe("factual project/task summary", () => {
   it.each(["incomplete", "failed", "interrupted"] as const)("retains %s after the worker is gone and points to the owner's plan", (outcome) => {
     const summary = projectWorkSummary(project, [terminal({ plan: [task(outcome)] })]).terminals[0]!;
     expect(summary.tasks[0]).toMatchObject({ task: { dispatchResult: { workerId: "term-2", outcome } },
-      worker: null, attention: [`task-${outcome}`], nextAction: { kind: "plan", terminalId: "term-1", generation: 3 } });
-    expect(summary.nextAction.kind).toBe("plan");
+      worker: null, attention: [`task-${outcome}`], nextAction: { kind: "plan", terminalId: "term-1", generation: 3, taskText: "Fix hello.txt" } });
+    expect(summary.tasks[0]!.nextAction.kind).toBe("plan");
   });
 
   it("separates a live retry from the previous incomplete attempt", () => {
     const retry = { ...task("incomplete"), state: "active" as const, workerId: "term-3" };
-    const summary = projectWorkSummary(project, [terminal({ plan: [retry] }), terminal({ id: "term-3", generation: 6, activity: { state: "working", reason: null },
+    const summary = projectWorkSummary(project, [terminal({ plan: [retry] }), terminal({ id: "term-3", generation: 6, activity: { state: "working", reason: null, intervention: null },
       dispatchAssignment: { ownerId: "term-1", taskText: retry.text } })]);
     expect(summary.terminals[0]!.tasks[0]).toMatchObject({ worker: { terminalId: "term-3", generation: 6 },
       attention: [], task: { dispatchResult: { outcome: "incomplete" } }, nextAction: { kind: "terminal", terminalId: "term-3", generation: 6 } });
@@ -212,7 +212,7 @@ describe("factual project/task summary", () => {
     expect(summary.trackedChanges).toBe(2);
     expect(summary.attention).toEqual([]);
     expect(summary.tasks[0]!.attention).toEqual(["pending-review"]);
-    expect(summary.nextAction.kind).toBe("plan");
+    expect(summary.tasks[0]!.nextAction.kind).toBe("plan");
     expect(summary).not.toHaveProperty("reviewed");
     expect(summary).not.toHaveProperty("accepted");
   });
@@ -221,10 +221,12 @@ describe("factual project/task summary", () => {
     const verify: VerifyInfo = { state: "stale", command: "npm run test", summary: "outdated", staleReason: "Source changed",
       source: { workspaceId: "ws-1", root: project.cwd, tree: "a".repeat(40), generation: 1, revision: 2, observationEpoch: 3 },
       result: { state: "pass", exitCode: 0, startedAt: 10, finishedAt: 20 } };
-    const summary = projectWorkSummary(project, [terminal({ verify })]).terminals[0]!;
-    expect(summary.verify).toEqual(verify);
-    expect(summary.attention).toEqual(["verify-stale"]);
-    expect(summary.nextAction.kind).toBe("evidence");
+    const summary = projectWorkSummary(project, [terminal({ verify })]);
+    const owner = summary.terminals[0]!;
+    expect(owner.verify).toEqual(verify);
+    expect(owner.attention).toEqual(["verify-stale"]);
+    expect(workOverview([summary]).items[0]?.action)
+      .toEqual({ kind: "evidence", terminalId: owner.terminalId, generation: owner.generation });
   });
 
   it.each(["fail", "timeout", "cancelled"] as const)("keeps %s attention independent of unseen notifications", (state) => {
@@ -235,12 +237,14 @@ describe("factual project/task summary", () => {
   });
 
   it("does not conflate blocked execution, evidence and tracked review paths", () => {
-    const summary = projectWorkSummary(project, [terminal({ activity: { state: "blocked", reason: "lease-wait" }, trackedChanges: 4,
-      verify: { state: "pass", command: "test", summary: "green" } })]).terminals[0]!;
-    expect(summary.attention).toEqual(["blocked"]);
-    expect(summary.activity?.reason).toBe("lease-wait");
-    expect(summary.verify?.state).toBe("pass");
-    expect(summary.nextAction.kind).toBe("terminal");
+    const summary = projectWorkSummary(project, [terminal({ activity: { state: "blocked", reason: "lease-wait", intervention: null }, trackedChanges: 4,
+      verify: { state: "pass", command: "test", summary: "green" } })]);
+    const owner = summary.terminals[0]!;
+    expect(owner.attention).toEqual(["blocked"]);
+    expect(owner.activity?.reason).toBe("lease-wait");
+    expect(owner.verify?.state).toBe("pass");
+    expect(workOverview([summary]).items[0]?.action)
+      .toEqual({ kind: "terminal", terminalId: owner.terminalId, generation: owner.generation });
   });
 
   it("describes the assigned candidate root and unknown shell execution truthfully", () => {

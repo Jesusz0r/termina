@@ -81,6 +81,7 @@ const PASS_THROUGH: AllowedPassThrough[] = [
   { file: "src/main.ts", method: "pasteTerminal", reason: "pty-view try/catch" },
   { file: "src/main.ts", method: "dropTerminalFiles", reason: "pty-view try/catch" },
   { file: "src/main.ts", method: "detectTest", reason: "worldline-project-state catch" },
+  { file: "src/main.ts", method: "getVerifyReport", reason: "check-details show try/catch" },
   { file: "src/main.ts", method: "projectActivate", reason: "awaited by activateProjectContext; catching activateProject callers" },
   { file: "src/main/preferences.ts", method: "getPreferences", reason: "loadPreferencesWithRetry try/catch" },
   { file: "src/editor.ts", method: "openFile", reason: "throws to catching callers" },
@@ -141,6 +142,10 @@ describe("renderer IPC rejection handling (refs #217 item 1)", () => {
     expect(ptyView).toContain("const result = await this.pasteFromHost();");
     expect(ptyView).toContain("const result = await this.dropFromHost(files);");
 
+    const checkDetails = readFileSync(new URL("../../../src/main/check-details.ts", import.meta.url), "utf8");
+    expect(checkDetails).toMatch(/try \{\s*const text = await bindings\.getVerifyReport\(terminal\.terminalId, terminal\.generation\);/);
+    expect(checkDetails).toContain('report.textContent = "Could not load check details. Try again or open the terminal."');
+
     const projectState = readFileSync(new URL("../../../src/worldline-project-state.ts", import.meta.url), "utf8");
     expect(projectState).toContain("void bindings.detectTest(pane.instanceId).then((detected) => {");
 
@@ -156,13 +161,13 @@ describe("renderer IPC rejection handling (refs #217 item 1)", () => {
     const activation = readFileSync(new URL("../../../src/main/project-activation.ts", import.meta.url), "utf8");
     expect(activation).toContain("const result = await bindings.request(projectId);");
     expect(renderer).toContain("return activateProjectContext(projectId, {");
-    expect(renderer).toMatch(/onActivate: \(projectId\) => \{\s*void activateProject\(projectId\)\.catch\(\(err\) => \{/);
-    expect(renderer).toContain("onFilterProject: (projectId) => attentionView.filterProject(projectId),");
-    expect(renderer).toMatch(/void activateProject\(targetProject\)\.then\([\s\S]*?\)\.catch\(/);
-    expect(renderer).toContain("await activateProject(owner.projectId)");
+    expect(renderer).toMatch(/onActivate: \(projectId\) => \{\s*void enterProject\(projectId\)\.catch\(\(err\) => \{/);
+    expect(renderer).toContain('return activateProject(projectId, "entry");');
+    expect(renderer).toMatch(/void activateProject\(targetProject, "context"\)\.then\([\s\S]*?\)\.catch\(/);
+    expect(renderer).toContain('await activateProject(owner.projectId, "context")');
     expect(renderer).toContain("await openFileSmartInner(path, preview, requestedOwner, line, column);");
-    expect(renderer).toContain("void activateProject(next).catch((err) => {");
-    expect(renderer).toContain("void activateProject(id).catch((err) => {");
+    expect(renderer).toContain('void enterProject(next).catch((err) => {');
+    expect(renderer).toContain('void enterProject(id).catch((err) => {');
     expect(renderer).toContain("void ensureProjectEditor(view).openFile(p.path, { preview: true, owner }).catch((err) => {");
     expect(renderer).toContain("void ensureProjectEditor(view).openFile(target.path, { preview: true, owner }).catch((err) => {");
     expect(renderer).toContain("await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });");

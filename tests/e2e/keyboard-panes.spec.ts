@@ -13,6 +13,7 @@ import type { Page } from "@playwright/test";
 
 /** Panel id per tab, to prove selection follows focus. */
 const PANEL_ID: Record<string, string> = {
+  checks: "checks-panel",
   timeline: "timeline-strip",
   plan: "plan-panel",
   worldlines: "worldline-panel",
@@ -39,17 +40,25 @@ test.describe("keyboard panes", () => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const bar = page.locator("#activity-tabbar");
     await expect(bar).toBeVisible();
-    // Roving tabindex: the bar is one stop, not four.
+    // Tools start closed; the bar remains one keyboard stop.
     await expect(bar.locator(".activity-tab[tabindex='0']")).toHaveCount(1);
+    await expect(bar.locator(".activity-tab[aria-selected='true']")).toHaveCount(0);
+    await expect(page.locator("#timeline-strip")).toBeHidden();
+    await page.locator("#activity-tab-timeline").focus();
+    await page.keyboard.press("Enter");
     await expect(page.locator("#activity-tab-timeline")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#timeline-strip")).toBeVisible();
 
     const visible = await bar
       .locator(".activity-tab:visible")
       .evaluateAll((els) => els.map((el) => el.getAttribute("data-tab") ?? ""));
     const tab = (name: string) => page.locator(`#activity-tab-${name}`);
 
+    // Home starts at the first visible tool, including Checks.
+    await page.keyboard.press("Home");
+    await expect(tab(visible[0])).toBeFocused();
+    await expect(page.locator(`#${PANEL_ID[visible[0]]}`)).toBeVisible();
     // Arrows move along the visible tabs and the panel follows the focus.
-    await tab("timeline").focus();
     await page.keyboard.press("ArrowRight");
     await expect(tab(visible[1])).toBeFocused();
     await expect(tab(visible[1])).toHaveAttribute("aria-selected", "true");
@@ -69,6 +78,9 @@ test.describe("keyboard panes", () => {
 
   test("timeline dots are one toolbar stop with arrow selection", async ({ page }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    await page.locator("#activity-tab-timeline").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#timeline-strip")).toBeVisible();
     await seedDots(page, 3);
     const dots = page.locator("#timeline-dots .timeline-dot");
     await expect(dots).toHaveCount(3);
@@ -110,6 +122,9 @@ test.describe("keyboard panes", () => {
 
   test("empty, single, and capped timeline strips stay one tab stop", async ({ page }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    await page.locator("#activity-tab-timeline").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#timeline-strip")).toBeVisible();
     const dots = page.locator("#timeline-dots .timeline-dot");
 
     await seedDots(page, 0);

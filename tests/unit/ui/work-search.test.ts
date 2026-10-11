@@ -1,15 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QuickOpen } from "../../../src/quick-open.ts";
-import { searchWork, type WorkSearchTarget } from "../../../src/main/work-search.ts";
-import { findOverviewTask } from "../../../src/main/project-overview.ts";
+import { findWorkTask, searchWork, type WorkSearchTarget } from "../../../src/main/work-search.ts";
 import { projectWorkSummary, workOverview, type WorkSummaryTerminalFacts } from "../../../electron/main/work-summary.ts";
 import type { WorkOverview } from "../../../shared/types.ts";
 import { installFakeDom, type FakeEl } from "./fake-dom.ts";
 
 function facts(id: string, root: string, overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummaryTerminalFacts {
-  return { id, generation: 3, type: "agent", model: "provider/model", activity: { state: "idle", reason: null },
+  return { id, generation: 3, type: "agent", model: "provider/model", activity: { state: "idle", reason: null, intervention: null },
     workspace: { id: `ws-${root}`, root, primary: true }, verify: { state: "untested", command: null, summary: null },
-    dispatchAssignment: null, trackedChanges: 0, plan: [{ text: "Repair <parser> & tokens", paths: ["parser.ts"], state: "pending" }], planCreationError: null, planStartOwnerError: null, ...overrides };
+    dispatchAssignment: null, trackedChanges: 0, plan: [{ text: "Repair <parser> & tokens", paths: ["parser.ts"], state: "pending" }], ...overrides };
 }
 function overview(): WorkOverview {
   return workOverview([
@@ -71,9 +70,9 @@ describe("canonical work search", () => {
     const row = searchWork(value, "repair").rows[0]!;
     if (row.target.kind !== "task") throw new Error("Expected task result");
     const target = row.target.task;
-    expect(findOverviewTask(value, target)?.owner.terminalId).toBe("owner-1");
+    expect(findWorkTask(value, target)?.owner.terminalId).toBe("owner-1");
     value.projects[0]!.terminals[0]!.model = "provider/new-model";
-    expect(findOverviewTask(value, target)).not.toBeNull();
+    expect(findWorkTask(value, target)).not.toBeNull();
     for (const change of [
       (next: WorkOverview) => { next.projects[0]!.root = "/replacement"; },
       (next: WorkOverview) => { next.projects[0]!.terminals[0]!.generation++; },
@@ -82,7 +81,7 @@ describe("canonical work search", () => {
       (next: WorkOverview) => { next.projects[0]!.terminals.shift(); },
     ]) {
       const next = structuredClone(value); change(next);
-      expect(findOverviewTask(next, target)).toBeNull();
+      expect(findWorkTask(next, target)).toBeNull();
     }
   });
 
@@ -97,9 +96,9 @@ describe("canonical work search", () => {
     const row = searchWork(value, "Worker task").rows[0]!;
     expect(row.detail).toContain("Separate candidate tree /separate/source");
     if (row.target.kind !== "task") throw new Error("Expected task result");
-    expect(findOverviewTask(value, row.target.task)?.terminal.terminalId).toBe("worker");
+    expect(findWorkTask(value, row.target.task)?.terminal.terminalId).toBe("worker");
     value.projects[0]!.terminals[1]!.generation++;
-    expect(findOverviewTask(value, row.target.task)).toBeNull();
+    expect(findWorkTask(value, row.target.task)).toBeNull();
   });
 });
 
@@ -241,7 +240,7 @@ describe("Command Palette work integration", () => {
     const h = mount(); await flush();
     const value = overview();
     value.projects[0]!.terminals[0]!.tasks = Array.from({ length: 80 }, (_, index) => ({
-      task: { text: `Saved task ${index}`, paths: [], state: "pending" }, worker: null, candidate: null, attention: [], startError: null,
+      task: { text: `Saved task ${index}`, paths: [], state: "pending" }, worker: null, candidate: null, attention: [],
       nextAction: { kind: "plan", terminalId: "owner-1", generation: 3 },
     }));
     qo.setWorkOverview(value); h.search("Saved");

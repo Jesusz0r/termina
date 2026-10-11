@@ -137,26 +137,6 @@ export class WorldlinesView {
     this.quiet = quiet;
   }
 
-  /** Reveal an existing candidate or its recovery controls without opening or applying it. */
-  revealCandidate(comparisonId: string, label: "A" | "B", mode: "inspect" | "open" | "discard"): boolean {
-    const pair = this.pairs.get(comparisonId);
-    if (mode === "inspect") {
-      const card = pair?.cards.get(label)?.el;
-      if (!card) return false;
-      card.tabIndex = -1;
-      card.scrollIntoView({ block: "nearest" });
-      card.focus();
-      return true;
-    }
-    const control = mode === "open" ? pair?.cards.get(label)?.el.querySelector<HTMLButtonElement>(".cand-open")
-      : pair?.block.querySelector<HTMLButtonElement>(".cmp-discard");
-    if (!control || control.disabled) return false;
-    if (mode === "discard") control.parentElement!.hidden = false;
-    control.scrollIntoView({ block: "nearest" });
-    control.focus();
-    return true;
-  }
-
   /** The candidate label owning a path, or null. */
   labelOfPath(path: string): "A" | "B" | null {
     for (const [root, label] of this.byRoot) {

@@ -12,7 +12,10 @@ pub(crate) use dirs::{
     op_promotion_bound_list_entries, op_promotion_bound_open_directory,
     op_promotion_bound_prepare_directory,
 };
-pub(crate) use read::{op_promotion_bound_read_file, op_promotion_bound_read_journal};
+pub(crate) use read::{
+    op_promotion_bound_inspect_private_file, op_promotion_bound_read_file,
+    op_promotion_bound_read_journal,
+};
 pub(crate) use rename::{
     promotion_cleanup_same_namespace_identity, promotion_rename_exchange,
     promotion_rename_unsupported, promotion_transition_result,

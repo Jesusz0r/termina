@@ -102,44 +102,6 @@ afterAll(() => {
 });
 
 describe("candidate preparation and retry", () => {
-  it("inspects a settled terminal-less candidate by focusing its existing card without opening or applying", () => {
-    const panel = makePanel();
-    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
-    const onOpen = vi.fn();
-    view.bind({ onOpenTerminal: onOpen });
-    view.upsert({ ...summary("B"), terminalId: null, state: "settled" });
-    const card = panel.querySelector(".cand-b")!;
-    expect(view.revealCandidate("cmp-1", "B", "inspect")).toBe(true);
-    expect(fake.document.activeElement).toBe(card);
-    expect(card.lastScrollIntoView).toEqual({ block: "nearest" });
-    expect(onOpen).not.toHaveBeenCalled();
-  });
-  it("reveals the exact retained candidate Open control without creating or running anything", () => {
-    const panel = makePanel();
-    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
-    view.upsert({ ...summary("A"), state: "error" });
-    view.upsert(summary("B"));
-    const open = panel.querySelector(".cand-a")!.querySelector(".cand-open")!;
-    expect(view.revealCandidate("cmp-1", "A", "open")).toBe(true);
-    expect(fake.document.activeElement === open).toBe(true);
-    expect(open.lastScrollIntoView).toEqual({ block: "nearest" });
-    expect(view.revealCandidate("missing", "A", "open")).toBe(false);
-    view.upsert({ ...summary("A"), state: "creating", version: 2 });
-    expect(view.revealCandidate("cmp-1", "A", "open")).toBe(false);
-  });
-
-  it("reveals existing discard disclosure and focuses it without discarding", () => {
-    const panel = makePanel();
-    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
-    view.upsert({ ...summary("A"), state: "error" });
-    const discard = panel.querySelector(".cmp-discard")!;
-    expect(discard.parentElement!.hidden).toBe(true);
-    expect(view.revealCandidate("cmp-1", "A", "discard")).toBe(true);
-    expect(discard.parentElement!.hidden).toBe(false);
-    expect(fake.document.activeElement).toBe(discard);
-    expect(view.size).toBe(1);
-  });
-
   it("explains result-based pairs as result and retry while rendering both real candidates", () => {
     const panel = makePanel();
     const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);

@@ -1,18 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { activityFor, activityView, emptyActivityInput, type AgentActivityInput } from "../../../electron/agent-activity.ts";
+import { activityFor, activityView, activityKey, activityToolTarget, applyActivityEvent, emptyActivityInput, type AgentActivityInput } from "../../../electron/agent-activity.ts";
 import { parseTerminalTarget } from "../../../electron/main/ipc-validate.ts";
-import { planCreationError, planOwnerError, planStartError } from "../../../electron/plan-board.ts";
 import { projectWorkSummary, workOverview } from "../../../electron/main/work-summary.ts";
+import { chooseProjectTerminal } from "../../../electron/main/project-entry.ts";
 import { formatVerifyContext, invalidateVerify } from "../../../electron/main/verify-source.ts";
-import type { FolderOpenedPayload, PlanTask, ProjectWorkSummary, VerifyInfo, WorkAttentionInspectResult, WorkOverview, WorldlineSummary } from "../../../shared/types.ts";
+import type { FolderOpenedPayload, PlanTask, ProjectActivateResult, ProjectWorkSummary, VerifyInfo, WorkAttentionInspectResult, WorkOverview, WorldlineSummary } from "../../../shared/types.ts";
 
 // Run the actual main methods with in-memory owners, without importing Electron,
 // instantiating an app/provider, or reading session files from the host.
 const sourceFile = ts.createSourceFile("main.ts", readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-const methodNames = ["planOwnerFacts", "planCreationError", "workSummary", "workOverview", "inspectWorkAttention", "verifyReport", "projectOfTerminal", "workspaceOfTerminal", "registerIpc",
-  "activateProject", "displayedWorkspace", "sendFolderOpened", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration"];
+const methodNames = ["workSummary", "workOverview", "inspectWorkAttention", "verifyReport", "projectOfTerminal", "workspaceOfTerminal", "registerIpc",
+  "activateProject", "displayedWorkspace", "sendFolderOpened", "projectNavigationTerminal", "selectedTerminal", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration", "foldSidecarActivity", "foldActivity"];
 const methods = new Map<string, ts.MethodDeclaration>();
 function visit(node: ts.Node): void {
   if (ts.isMethodDeclaration(node) && methodNames.includes(node.name.getText(sourceFile))) {
@@ -76,6 +76,10 @@ interface MainHarness {
   projectSelectionAction: number;
   projectActivationGeneration: number;
   send: ReturnType<typeof vi.fn>;
+  lastActivityKey: Map<string, string>;
+  sendInstances: ReturnType<typeof vi.fn>;
+  sendTimelinePrefix: ReturnType<typeof vi.fn>;
+  foldSidecarActivity(inst: Terminal, event: import("../../../electron/sidecar.ts").SidecarEvent): void;
   persistOpenProjects: ReturnType<typeof vi.fn>;
 }
 
@@ -86,8 +90,8 @@ function fixture() {
     id: "project-1", cwd: primary.root, terminalIds: new Set(),
     workspaces: new Map([[primary.id, primary], [candidate.id, candidate]]), activationGeneration: 0,
   };
-  const main = new Function("activityFor", "activityView", "emptyActivityInput", "parseTerminalTarget", "projectWorkSummary", "workOverview", "formatVerifyContext", "planCreationError", "planOwnerError", compiled)(
-    activityFor, activityView, emptyActivityInput, parseTerminalTarget, projectWorkSummary, workOverview, formatVerifyContext, planCreationError, planOwnerError,
+  const main = new Function("activityFor", "activityView", "emptyActivityInput", "parseTerminalTarget", "projectWorkSummary", "workOverview", "formatVerifyContext", "activityKey", "activityToolTarget", "applyActivityEvent", "chooseProjectTerminal", compiled)(
+    activityFor, activityView, emptyActivityInput, parseTerminalTarget, projectWorkSummary, workOverview, formatVerifyContext, activityKey, activityToolTarget, applyActivityEvent, chooseProjectTerminal,
   ) as MainHarness;
   Object.assign(main, {
     projects: new Map([[project.id, project]]), runtime: new Map(), activityInputs: new Map(), dispatchRuns: new Map(),
@@ -96,7 +100,7 @@ function fixture() {
     activeProjectId: null, projectSelectionAction: 0, projectSelectionActionSeq: 0, projectActivationGeneration: 0,
     primaryWorkspace: (project: Project) => [...project.workspaces.values()].find((workspace) => workspace.primary),
     captureRendererSendTarget: () => null, agentNeedsLogin: async () => false,
-    send: vi.fn(), persistOpenProjects: vi.fn(),
+    send: vi.fn(), persistOpenProjects: vi.fn(), lastActivityKey: new Map(), sendInstances: vi.fn(), sendTimelinePrefix: vi.fn(),
   });
   function add(id: string, overrides: Partial<Terminal> = {}): Terminal {
     const terminal: Terminal = {
@@ -122,6 +126,39 @@ function historicalPass(): VerifyInfo {
 }
 
 describe("main project work-summary orchestration", () => {
+  it("wires the producer's exact intervention to roster, timeline and overview without aging on refresh", () => {
+    const { main, project, add } = fixture();
+    const owner = add("term-1");
+    const intervention = { requestId: "approval-1", kind: "permission" as const, since: 1000 };
+    const event = { bridgeId: "bridge", seq: 1, t: "intervention_requested" as const, ...intervention };
+    main.foldSidecarActivity(owner, event);
+    expect(main.workSummary(project.id)!.terminals[0]!.activity).toEqual({
+      state: "blocked", reason: "permission-required", intervention,
+    });
+    expect(main.sendInstances).toHaveBeenCalledOnce(); expect(main.sendTimelinePrefix).toHaveBeenCalledOnce();
+    main.foldSidecarActivity(owner, { ...event, seq: 2, since: 9000 });
+    expect(main.sendInstances).toHaveBeenCalledOnce();
+    expect(main.workOverview().projects[0]!.terminals[0]!.activity!.intervention).toEqual(intervention);
+    const before = main.workOverview().items[0]!.id;
+    main.foldSidecarActivity(owner, { ...event, seq: 3, requestId: "approval-2", since: 2000 });
+    expect(main.sendInstances).toHaveBeenCalledTimes(2);
+    expect(main.workOverview().items[0]!.id).not.toBe(before);
+    main.foldSidecarActivity(owner, { bridgeId: "bridge", seq: 4, t: "intervention_resolved", requestId: "approval-1" });
+    expect(main.sendInstances).toHaveBeenCalledTimes(2);
+    main.foldSidecarActivity(owner, { bridgeId: "bridge", seq: 5, t: "intervention_resolved", requestId: "approval-2" });
+    expect(main.sendInstances).toHaveBeenCalledTimes(3);
+    expect(main.workSummary(project.id)!.terminals[0]!.activity!.intervention).toBeNull();
+    expect(main.workOverview().items).toEqual([]);
+  });
+
+  it.each(["closed", "exited", "shell"])("does not publish an actionable picker on a %s terminal", (state) => {
+    const { main, add } = fixture();
+    const owner = add("term-1", { closed: state === "closed", pty: { hasExited: state === "exited" }, type: state === "shell" ? "shell" : "agent" });
+    main.foldSidecarActivity(owner, { bridgeId: "bridge", seq: 1, t: "intervention_requested", requestId: "approval-1", kind: "permission", since: 1000 });
+    expect(main.sendInstances).not.toHaveBeenCalled();
+    expect(main.activityInputs.has(owner.id)).toBe(false);
+  });
+
   it("projects canonical retained candidate recovery even without a terminal", () => {
     const { main, project } = fixture();
     const recovery = { comparisonId: "cmp-failed", label: "B" as const, root: "/worlds/failed", version: 2,
@@ -161,8 +198,7 @@ describe("main project work-summary orchestration", () => {
     expect(summary.terminals.map((terminal) => terminal.terminalId)).toEqual(["term-1", "term-2"]);
     expect(summary.terminals[0]).toMatchObject({
       generation: 7, model: "test-model", trackedChanges: 2,
-      activity: { state: "blocked", reason: "sidecar-paused" }, attention: ["blocked"],
-      nextAction: { kind: "terminal", terminalId: "term-1", generation: 7 },
+      activity: { state: "blocked", reason: "sidecar-paused", intervention: null }, attention: ["blocked"],
     });
     expect(summary.terminals[1]).toMatchObject({ type: "shell", activity: null, verify: null, model: null, attention: [] });
   });
@@ -198,8 +234,7 @@ describe("main project work-summary orchestration", () => {
     main.dispatchRuns.set("term-worker", { ownerId: owner.id, taskText: "Assigned to term-worker" });
     let tasks = main.workSummary(project.id)!.terminals[0]!.tasks;
     expect(tasks[0]).toEqual({ task: finished, worker: null, candidate: null, attention: ["pending-review"],
-      startError: planStartError(null, owner.plan, finished),
-      nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation } });
+      nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation, taskText: finished.text } });
     expect(tasks[1]).toMatchObject({ worker: null, attention: ["task-incomplete"], task: { dispatchResult: { outcome: "incomplete" } } });
     expect(tasks[2]).toMatchObject({ worker: { terminalId: "term-worker", generation: 9 }, attention: [], nextAction: { kind: "terminal", terminalId: "term-worker", generation: 9 } });
     for (const task of tasks.slice(3)) expect(task).toMatchObject({ worker: null, attention: ["worker-unavailable"], nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation } });
@@ -208,6 +243,38 @@ describe("main project work-summary orchestration", () => {
     tasks = main.workSummary(project.id)!.terminals[0]!.tasks;
     expect(tasks[2]).toMatchObject({ worker: null, attention: ["worker-unavailable"], task: { workerId: "term-worker", dispatchResult: { workerId: "term-gone", outcome: "failed" } } });
     expect(tasks[0]!.task.dispatchResult).toEqual(finished.dispatchResult);
+  });
+});
+
+describe("main project activation IPC intent", () => {
+  function handler(main: MainHarness) {
+    let invoke: ts.CallExpression | undefined;
+    function find(node: ts.Node): void {
+      if (ts.isCallExpression(node) && node.expression.getText(sourceFile) === "ipcMain.handle"
+        && ts.isStringLiteral(node.arguments[0]!) && node.arguments[0].text === "project:activate") invoke = node;
+      ts.forEachChild(node, find);
+    }
+    find(methods.get("registerIpc")!);
+    if (!invoke) throw new Error("project activation IPC is missing");
+    let callback!: (event: unknown, id: unknown, intent: unknown) => Promise<ProjectActivateResult>;
+    const code = ts.transpileModule(invoke.getText(sourceFile), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    new Function("ipcMain", code).call(main, { handle: (_channel: string, registered: typeof callback) => { callback = registered; } });
+    return callback;
+  }
+
+  it.each([undefined, null, "unknown", {}, []])("refuses missing or invalid intent %j without admitting a terminal", async (intent) => {
+    const { main, project, add } = fixture(); add("term-1"); const before = main.activeProjectId;
+    const auth = vi.spyOn(main, "agentNeedsLogin");
+    expect(await handler(main)({}, project.id, intent)).toEqual({ ok: false });
+    expect(main.activeProjectId).toBe(before); expect(main.send).not.toHaveBeenCalled(); expect(auth).not.toHaveBeenCalled();
+  });
+
+  it.each(["entry", "context"] as const)("admits a typed exact terminal for %s and refuses a missing project", async (intent) => {
+    const { main, project, add } = fixture(); const owner = add("term-1"); const activate = handler(main);
+    expect(await activate({}, "missing", intent)).toEqual({ ok: false });
+    expect(main.send).not.toHaveBeenCalled();
+    expect(await activate({}, project.id, intent)).toMatchObject({ ok: true,
+      folder: { projectId: project.id, terminal: { id: owner.id, generation: owner.generation } } });
   });
 });
 
@@ -239,6 +306,18 @@ describe("main global attention and validated inspection", () => {
     expect(main.workOverview().projects[1]).toMatchObject({ projectId: second.id, working: 1, attentionCount: 0 });
   });
 
+  it("returns the exact owner and task for native Plan Board focus after Attention activation", async () => {
+    const { main, add } = fixture();
+    const failed: PlanTask = { text: "Exact saved task", paths: ["hello.txt"], state: "pending",
+      dispatchResult: { workerId: "gone", outcome: "failed" } };
+    add("other-owner", { plan: [structuredClone(failed)] });
+    const owner = add("exact-owner", { plan: [{ ...failed, text: "Earlier task" }, failed] });
+    const item = main.workOverview().items.find((item) => item.terminalId === owner.id && item.taskText === failed.text)!;
+    expect(await main.inspectWorkAttention(item.id)).toMatchObject({ ok: true,
+      action: { kind: "plan", terminalId: owner.id, generation: owner.generation, taskText: failed.text } });
+    expect(owner.plan).toEqual([{ ...failed, text: "Earlier task" }, failed]);
+  });
+
   it("reads all canonical tasks and source areas without mutation or heavy runtime payloads", () => {
     const { main, project, primary, candidate, add } = fixture();
     const pending: PlanTask = { text: "Pending task", paths: ["pending.ts"], state: "pending" };
@@ -253,7 +332,7 @@ describe("main global attention and validated inspection", () => {
     const overview = main.workOverview();
     expect(overview.projects).toEqual([{ ...single, working: 0, attentionCount: 1 }]);
     expect(overview.items).toEqual([expect.objectContaining({ reason: "pending-review", taskText: done.text,
-      action: { kind: "plan", terminalId: owner.id, generation: owner.generation } })]);
+      action: { kind: "plan", terminalId: owner.id, generation: owner.generation, taskText: done.text } })]);
     expect(overview.projects[0]!.terminals[0]!.tasks.map(({ task }) => task)).toEqual([pending, done]);
     expect(overview.projects[0]!.terminals[1]!.workArea).toEqual({ workspaceId: candidate.id, root: candidate.root, kind: "candidate", comparisonId: candidate.comparisonId });
     expect(overview.projects[0]!.terminals[2]).toMatchObject({ type: "shell", activity: null, verify: null, model: null });
@@ -301,7 +380,7 @@ describe("main global attention and validated inspection", () => {
     const result = await main.inspectWorkAttention(item.id);
     expect(result).toEqual({ ok: true, folder: { cwd: project.cwd, projectId: project.id,
       workspaceId: "ws-primary", activationGeneration: 1, needsLogin: false,
-      projectRoot: project.cwd, primaryWorkspaceId: "ws-primary" }, action: item.action });
+      terminal: { id: owner.id, generation: owner.generation }, projectRoot: project.cwd, primaryWorkspaceId: "ws-primary" }, action: item.action });
     expect(main.send).toHaveBeenCalledWith("folder:opened", expect.objectContaining({ activationGeneration: 1 }), null);
     expect(main.activeProjectId).toBe(project.id);
     expect(main.workOverview().items).toContainEqual(item);
@@ -409,7 +488,8 @@ describe("main generation-fenced Verify report", () => {
     expect(report).toContain("**Elapsed:** 1250 ms");
     expect(report).toContain(`**Tree:** ${"a".repeat(40)}`);
     expect(report).toContain("historical execution output");
-    expect(main.workSummary(project.id)!.terminals[0]).toMatchObject({ verify: owner.verify, attention: ["verify-stale"], nextAction: { kind: "evidence", terminalId: owner.id, generation: 7 } });
+    expect(main.workSummary(project.id)!.terminals[0]).toMatchObject({ verify: owner.verify, attention: ["verify-stale"] });
+    expect(main.workOverview().items[0]?.action).toEqual({ kind: "evidence", terminalId: owner.id, generation: 7 });
   });
 
   it("does not substitute the latest generation when a terminal id is recycled", () => {
@@ -450,7 +530,7 @@ describe("main generation-fenced Verify report", () => {
   });
 });
 
-it("registers both summary readers through the capability-gated IPC facade and forwards exact preload targets", () => {
+it("registers the canonical overview and inspection through the capability-gated IPC facade and forwards exact preload targets", () => {
   const registrar = methods.get("registerIpc")!.getText(sourceFile);
   expect(registrar).toContain("this.handleIpc(channel, listener)");
   expect(registrar).toContain('ipcMain.handle("work:overview"');
@@ -459,13 +539,12 @@ it("registers both summary readers through the capability-gated IPC facade and f
   expect(registrar).toContain("return this.inspectWorkAttention(id)");
   expect(registrar).not.toContain('electronIpcMain.handle("work:overview"');
   expect(registrar).not.toContain('electronIpcMain.handle("work:inspect"');
-  expect(registrar).toContain('ipcMain.handle("project:work-summary"');
-  expect(registrar).toContain("return this.workSummary(projectId)");
+  expect(registrar).not.toContain('ipcMain.handle("project:work-summary"');
   expect(registrar).toContain('ipcMain.handle("verify:report", (_e, id: unknown, generation: unknown) => this.verifyReport(id, generation))');
-  expect(registrar).not.toContain('electronIpcMain.handle("project:work-summary"');
   expect(registrar).not.toContain('electronIpcMain.handle("verify:report"');
   const preload = readFileSync(new URL("../../../electron/preload.ts", import.meta.url), "utf8");
-  expect(preload).toContain('getProjectWorkSummary: (projectId) => ipcRenderer.invoke("project:work-summary", projectId)');
+  expect(preload).toContain('getWorkOverview: () => ipcRenderer.invoke("work:overview")');
+  expect(preload).not.toContain("getProjectWorkSummary");
   expect(preload).toContain('getVerifyReport: (terminalId, generation) => ipcRenderer.invoke("verify:report", terminalId, generation)');
   expect(preload).toContain("electronIpcRenderer.invoke(channel, ...args, rendererCapability)");
 });

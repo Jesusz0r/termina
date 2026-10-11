@@ -33,6 +33,7 @@ export const KNOWN_ACTIVITY_REASONS = [
   "lease-wait",
   "sidecar-paused",
   "exited-mid-run",
+  "permission-required",
 ] as const;
 
 /**
@@ -45,6 +46,7 @@ const ACTIVITY_REASON_PHRASE = {
   "lease-wait": "waiting to write",
   "sidecar-paused": "paused",
   "exited-mid-run": "exited-mid-run",
+  "permission-required": "waiting for permission",
 } as const satisfies Record<(typeof KNOWN_ACTIVITY_REASONS)[number], string | null>;
 
 /** Status bar, tab tooltip, and timeline share this blocked sentence. */

@@ -36,6 +36,7 @@ import {
   includeEncryptedReasoning,
   type EffortLevel,
 } from "./models/capabilities.ts";
+import { ApprovalPicker } from "./main/approval.ts";
 import { gpt56ReasoningContext, gpt5TextVerbosity } from "./models/families/openai.ts";
 import { catalogKey, createRateCatalog } from "./main/rate-catalog.ts";
 import { modelLeaf } from "./models/families/identity.ts";
@@ -1276,18 +1277,15 @@ export async function fetchUrl(
 
 /** Bash approval policy for this terminal process. `/clear`/`/new` rotate the conversation, not this policy. */
 let permissionMode: PermissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
-let approvalResolve: ((line: string) => void) | null = null;
+const approvalPicker = new ApprovalPicker(() => surface, (event) => sidecar.logEvent({ ...event }));
+let approvalGeneration = 0;
 let approvalQueue = Promise.resolve();
 const protectedTaskApprovals = new Set<string>();
 
 /** Resolve an in-flight permission prompt before tearing down its surface. */
-function cancelPendingApproval(line = "/approve deny"): boolean {
-  const resolve = approvalResolve;
-  if (!resolve) return false;
-  approvalResolve = null;
-  surface?.clearChoices();
-  resolve(line);
-  return true;
+function cancelPendingApproval(): boolean {
+  approvalGeneration++;
+  return approvalPicker.cancel();
 }
 
 /** Approve bash in the TUI, where the command and its context already live. */
@@ -1322,16 +1320,11 @@ async function confirmBashNow(command: string): Promise<boolean> {
   if (!shouldAskPermission(permissionMode, command)) return true;
   if (activeSubagent && !surface?.active()) return requestParentApproval("bash", command);
   if (!surface?.active()) return false;
-  surface.setChoices(`Approve bash? ${command.slice(0, 160)}`, [
+  const line = await approvalPicker.ask(`Approve bash? ${command.slice(0, 160)}`, [
     { name: "Deny", hint: "reject this command", submit: "/approve deny" },
     { name: "Approve once", hint: "run this command", submit: "/approve once" },
     { name: "Always approve", hint: "run bash without asking this terminal", submit: "/approve always" },
   ]);
-  const line = await new Promise<string>((resolve) => {
-    approvalResolve = resolve;
-  });
-  if (approvalResolve) approvalResolve = null;
-  surface?.clearChoices();
   if (line === "/approve always") {
     permissionMode = "always";
     surface?.setStatus({ permissions: permissionMode });
@@ -1342,6 +1335,7 @@ async function confirmBashNow(command: string): Promise<boolean> {
 }
 
 async function queueApproval(confirm: () => Promise<boolean>): Promise<boolean> {
+  const generation = approvalGeneration;
   const previous = approvalQueue;
   let release!: () => void;
   approvalQueue = new Promise<void>((resolve) => {
@@ -1349,6 +1343,7 @@ async function queueApproval(confirm: () => Promise<boolean>): Promise<boolean> 
   });
   await previous;
   try {
+    if (generation !== approvalGeneration) return false;
     return await confirm();
   } finally {
     release();
@@ -1527,79 +1522,51 @@ function pollSubagentApprovals(): void {
     if (pendingSubagentApprovals.has(key)) continue;
     const run = subagentRegistry.get(runId);
     const req = readSubagentApprovalRequest(join(eventsDir, name));
-    const fresh = req.ok && Date.now() - req.file.createdAt < timeout;
-    if (!isLiveSubagentRun(run) || !fresh) {
+    const childTid = subagentChildTid(terminalId, runId);
+    // One result owner handles every exit, including a canceled queue slot and
+    // picker failures. Freshness/liveness are checked again before any ack.
+    const finish = (ok: boolean): void => {
       try {
-        rmSync(join(eventsDir, name));
-      } catch {
-        /* Dead letter stays for the startup sweep. */
+        if (childTid && req.ok && Date.now() - req.file.createdAt < timeout &&
+            isLiveSubagentRun(subagentRegistry.get(runId))) {
+          writeSubagentAckFile(eventsDir, childTid, reqId, { ok });
+        }
+      } finally {
+        try {
+          rmSync(join(eventsDir, name));
+        } catch {
+          /* Dead letter stays for the startup sweep. */
+        }
+        pendingSubagentApprovals.delete(key);
       }
+    };
+    const fresh = req.ok && Date.now() - req.file.createdAt < timeout;
+    if (!isLiveSubagentRun(run) || !fresh || !childTid) {
+      finish(false);
       continue;
     }
-    const childTid = subagentChildTid(terminalId, runId);
-    if (!childTid) continue;
     pendingSubagentApprovals.add(key);
     if (!surface?.active()) {
-      writeSubagentAckFile(eventsDir, childTid, reqId, { ok: false });
-      try {
-        rmSync(join(eventsDir, name));
-      } catch {
-        /* Dead letter stays for the startup sweep. */
-      }
-      pendingSubagentApprovals.delete(key);
+      finish(false);
       continue;
     }
     const kind = req.file.kind;
     const text = req.file.text;
     const createdAt = req.file.createdAt;
     void queueApproval(async () => {
-      // Re-check freshness: a request queued behind other pickers may have
-      // outlived the child's wait. Asking about a dead request wastes
-      // attention and writes an orphan ack.
-      if (Date.now() - createdAt >= timeout) {
-        try {
-          rmSync(join(eventsDir, name));
-        } catch {
-          /* Dead letter stays for the startup sweep. */
-        }
-        pendingSubagentApprovals.delete(key);
-        return false;
-      }
-      // Re-check liveness too: the run may have settled while queued. A
-      // picker for a dead run would write an orphan ack for a child that is
-      // no longer waiting.
-      const live = subagentRegistry.get(runId);
-      if (!isLiveSubagentRun(live)) {
-        try {
-          rmSync(join(eventsDir, name));
-        } catch {
-          /* Dead letter stays for the startup sweep. */
-        }
-        pendingSubagentApprovals.delete(key);
-        return false;
-      }
+      // Queued requests can expire or lose their child before display.
+      if (Date.now() - createdAt >= timeout ||
+          !isLiveSubagentRun(subagentRegistry.get(runId)) ||
+          interrupted || !surface?.active()) return false;
       const question = kind === "bash"
         ? `Subagent ${runId} asks to run bash: ${text.slice(0, 160)}`
         : `Subagent ${runId} asks to edit protected file: ${text.slice(0, 160)}`;
-      surface!.setChoices(question, [
+      const line = await approvalPicker.ask(question, [
         { name: "Deny", hint: "reject this request", submit: "/approve deny" },
         { name: "Approve once", hint: "allow this once", submit: "/approve once" },
-      ]);
-      const line = await new Promise<string>((resolve) => {
-        approvalResolve = resolve;
-      });
-      if (approvalResolve) approvalResolve = null;
-      surface?.clearChoices();
-      const ok = line === "/approve once";
-      writeSubagentAckFile(eventsDir, childTid, reqId, { ok });
-      try {
-        rmSync(join(eventsDir, name));
-      } catch {
-        /* Dead letter stays for the startup sweep. */
-      }
-      pendingSubagentApprovals.delete(key);
-      return ok;
-    });
+      ], timeout - (Date.now() - createdAt));
+      return line === "/approve once";
+    }).then(finish, () => finish(false));
   }
 }
 
@@ -1686,15 +1653,10 @@ async function confirmProtectedMutationNow(inputPath: string | undefined): Promi
   const label = relative(canonicalCwd, target) || target;
   if (activeSubagent && !surface?.active()) return requestParentApproval("protected", label);
   if (!surface?.active()) return false;
-  surface.setChoices(`Approve protected file edit? ${label}`, [
+  const line = await approvalPicker.ask(`Approve protected file edit? ${label}`, [
     { name: "Deny", hint: "leave this file unchanged", submit: "/approve deny" },
     { name: "Approve", hint: "allow edits to this file for this task", submit: "/approve protected" },
   ]);
-  const line = await new Promise<string>((resolve) => {
-    approvalResolve = resolve;
-  });
-  if (approvalResolve) approvalResolve = null;
-  surface?.clearChoices();
   if (line !== "/approve protected") return false;
   protectedTaskApprovals.add(target);
   return true;
@@ -5158,7 +5120,7 @@ export function shutdownAgentCore(options: ShutdownOptions = {}): Promise<Shutdo
     interrupted = true;
     currentAbort?.abort();
     cancelLogin();
-    cancelPendingApproval("/approve deny");
+    cancelPendingApproval();
     mcpGeneration++;
     mcpBusy = false;
     stopInteractiveResources();
@@ -5836,11 +5798,9 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
     resolve(line);
     return;
   }
-  if (approvalResolve) {
+  if (approvalPicker.pending) {
     if (isApprovalAnswer(line)) {
-      const resolve = approvalResolve;
-      approvalResolve = null;
-      resolve(line);
+      approvalPicker.answer(line);
       return;
     }
     // Typed input during a picker queues as typed-ahead instead of denying.
@@ -5850,9 +5810,8 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
       showPrompt();
       return;
     }
-    // Slash and bang lines fall through to the normal dispatch below, which
-    // answers with (engine busy) while the run holds the engine. The picker
-    // stays pending either way.
+    // Slash and bang lines fall through to normal dispatch. /clear and /new
+    // cancel the picker; other commands retain their existing busy handling.
   }
   if (line === "/help") {
     printSlashHelp();
@@ -5917,6 +5876,7 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
     return;
   }
   if (line === "/clear" || line === "/new") {
+    cancelPendingApproval();
     if (engineBusy()) {
       out("(engine busy)\n");
       showPrompt();
@@ -6144,17 +6104,12 @@ async function main(): Promise<void> {
         try {
           dispatchLine(line);
         } catch (err) {
+          cancelPendingApproval();
           out(`\nengine error: ${(err as Error).message}\n`);
         }
       },
       onInterrupt: () => {
-        if (approvalResolve) {
-          const resolve = approvalResolve;
-          approvalResolve = null;
-          surface?.clearChoices();
-          resolve("/approve deny");
-          return;
-        }
+        if (cancelPendingApproval()) return;
         if (running) {
           interrupted = true;
           currentAbort?.abort();

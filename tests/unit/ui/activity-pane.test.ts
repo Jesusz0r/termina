@@ -78,6 +78,35 @@ describe("existing Plan Board contextual retry", () => {
     expect(h.dispatchRun).not.toHaveBeenCalled();
   });
 
+  it("preserves the exact focused task action across a live plan refresh without executing it", () => {
+    const h = harness();
+    view.focusTask(h.pane, h.task.text);
+    h.pane.plan = [{ ...h.task, state: "active", workerId: "term-retry" }];
+    view.renderPlan(h.pane);
+    expect(dom.document.activeElement).toBe(h.action());
+    expect(h.action().textContent).toBe("Show worker");
+    expect(h.dispatchRun).not.toHaveBeenCalled();
+    expect(h.onShowWorker).not.toHaveBeenCalled();
+    h.action().click();
+    expect(h.onShowWorker).toHaveBeenCalledExactlyOnceWith("term-retry");
+  });
+
+  it("preserves a focused model selector when the same owner's plan refreshes", () => {
+    const h = harness(); view.renderPlan(h.pane);
+    h.nodes.planList!.querySelector(".plan-model")!.focus();
+    view.renderPlan(h.pane);
+    expect(dom.document.activeElement).toBe(h.nodes.planList!.querySelector(".plan-model"));
+    expect(h.dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("does not steal focus back after the user leaves a selected task", () => {
+    const h = harness(); view.focusTask(h.pane, h.task.text);
+    const outside = dom.document.createElement("button"); dom.document.body.append(outside); outside.focus();
+    view.renderPlan(h.pane);
+    expect(dom.document.activeElement).toBe(outside);
+    expect(h.dispatchRun).not.toHaveBeenCalled();
+  });
+
   it("does not resurrect a pending focus after switching context during plan load", async () => {
     const h = harness(false);
     view.focusTask(h.pane, h.task.text);

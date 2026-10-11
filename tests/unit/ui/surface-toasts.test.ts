@@ -129,7 +129,7 @@ describe("dispatch success toasts", () => {
   it("does not flash dispatched info toasts after the plan row shows the worker", () => {
     const rowDispatch = methodBody(activityPane, 'li.addEventListener("click", (e) => {');
     const bulkDispatch = methodBody(activityPane, "const onDispatch = ");
-    const plan = methodBody(activityPane, "function renderPlan(pane: TPane, announce = true): void {");
+    const plan = methodBody(activityPane, "function renderPlan(pane: TPane): void {");
     // The durable surface: the row renders the worker and claimed files.
     expect(plan).toContain("plan-meta");
     expect(plan).toContain("task.workerId");

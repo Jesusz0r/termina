@@ -1545,7 +1545,7 @@ export class WorldlineManager {
     }
     if (!info.isFile() || info.size > maxBytes) return;
     try {
-      await copyBoundPrivateFile(sourcePath, destination, name);
+      await copyBoundPrivateFile(sourcePath, destination, name, maxBytes);
     } catch (error) {
       throw new Error(`could not copy ${name} into candidate ${label}: ${errorDetail(error)}`);
     }

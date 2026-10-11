@@ -4,16 +4,16 @@
  * Owns bound root ensure/probe/materialize and provenance. Split from
  * promotion-recovery.ts (issue #38).
  */
-import { boundPromotionCopyFile, boundPromotionCreateDirectory, boundPromotionEnsureDirectory, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, type PromotionFsIdentity } from "../../worldline-git.js";
+import { boundPromotionCopyFile, boundPromotionCreateDirectory, boundPromotionEnsureDirectory, boundPromotionInspectPrivateFile, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, type PromotionFsIdentity } from "../../worldline-git.js";
 import { promotionIdentityOf, refreshBoundPromotionDirectory } from "../bindings.js";
 import { errorCode } from "../../../shared/guards.js";
-import { MAX_AGENT_RESOURCE_BYTES, MAX_PROMOTION_SCAN_DEPTH, MAX_PROMOTION_SCAN_WORK_BYTES } from "../limits.js";
+import { MAX_PROMOTION_SCAN_DEPTH, MAX_PROMOTION_SCAN_WORK_BYTES } from "../limits.js";
 import { type BoundPromotionDirectory, type ComparisonState, type PromotionDirectoryPlan, type PromotionRootProvenance } from "../types.js";
 import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { lstat as lstatPath, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { sha256Hex, splitPromotionComponents } from "./primitives.js";
+import { splitPromotionComponents } from "./primitives.js";
 
 
 const PROMOTION_ROOT_PROVENANCE_VERSION = 1;
@@ -248,9 +248,13 @@ export async function copyBoundPrivateFile(
   sourcePath: string,
   destination: BoundPromotionDirectory,
   name: string,
+  maxBytes: number,
 ): Promise<void> {
   const sourceInfo = await lstatPath(sourcePath, { bigint: true });
-  if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) throw new Error("private resource is not a regular file");
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("private resource byte budget must be positive");
+  if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink() || sourceInfo.size > BigInt(maxBytes)) {
+    throw new Error(`${name} is not a bounded regular file`);
+  }
   const sourceParentPath = dirname(sourcePath);
   const sourceParentInfo = await lstatPath(sourceParentPath, { bigint: true });
   if (!sourceParentInfo.isDirectory() || sourceParentInfo.isSymbolicLink()) throw new Error("private resource parent is not a real directory");
@@ -258,28 +262,21 @@ export async function copyBoundPrivateFile(
     path: sourceParentPath,
     expectedIdentity: { dev: String(sourceParentInfo.dev), ino: String(sourceParentInfo.ino) },
   });
-  const source = await boundPromotionReadFile({
+  const source = await boundPromotionInspectPrivateFile({
     root: sourceParentPath,
     rootIdentity: sourceParent,
     components: [basename(sourcePath)],
     parentIdentity: sourceParent,
-    maxBytes: MAX_AGENT_RESOURCE_BYTES,
+    expectedIdentity: { dev: String(sourceInfo.dev), ino: String(sourceInfo.ino) },
+    maxBytes,
   });
-  if (source.content.byteLength !== Number(sourceInfo.size)) throw new Error("private resource changed while reading");
+  if (source.state.type !== "file" || source.state.size !== String(sourceInfo.size)) throw new Error("private resource changed while reading");
   await boundPromotionCopyFile({
     sourceRoot: sourceParentPath,
     sourceRootIdentity: sourceParent,
     sourceComponents: [basename(sourcePath)],
     sourceParentIdentity: sourceParent,
-    expectedSource: {
-      identity: source.identity,
-      state: {
-        type: "file",
-        mode: Number(sourceInfo.mode & 0o777n),
-        size: String(source.content.byteLength),
-        sha256: sha256Hex(source.content),
-      },
-    },
+    expectedSource: source,
     destinationRoot: destination.path,
     destinationRootIdentity: promotionIdentityOf(destination),
     destinationComponents: [name],

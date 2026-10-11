@@ -1,4 +1,4 @@
-//! Promotion-bound reads: journals and files.
+//! Promotion-bound reads and private-file inspection.
 use std::ffi::CString;
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -6,14 +6,17 @@ use std::os::fd::AsRawFd;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use crate::PROMOTION_JOURNAL_MAX_BYTES;
+use crate::copy::promotion_leaf_result;
 use crate::promote_fs::{
-    open_promotion_bound_root, open_promotion_parent, promotion_component,
-    promotion_components_for, promotion_directory_identity_matches, promotion_identity_from_value,
+    PromotionIdentity, PromotionObservedLeaf, PromotionObservedState, open_promotion_bound_root,
+    open_promotion_parent, promotion_component, promotion_components_for,
+    promotion_directory_identity_matches, promotion_identity_from_value, promotion_sha256_hex,
     promotion_test_pause, stat_promotion_journal_file,
 };
 use crate::retained::promotion_read_private_bounded_opened;
+use crate::store::FileIdentity;
 use crate::util::{open_at, stat_at};
+use crate::{BUDGET_MAX_FILE_BYTES, PROMOTION_JOURNAL_MAX_BYTES};
 
 pub(crate) fn op_promotion_bound_read_journal(req: &Value) -> Result<Value, String> {
     let (root, _root_identity, _capability) = open_promotion_bound_root(
@@ -95,6 +98,56 @@ pub(crate) fn op_promotion_bound_read_journal(req: &Value) -> Result<Value, Stri
 /// the descriptor and pathname before and after the bounded read so a
 /// pathname replacement cannot supply or alter the provenance bytes.
 pub(crate) fn op_promotion_bound_read_file(req: &Value) -> Result<Value, String> {
+    let max_bytes = req
+        .get("maxBytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(PROMOTION_JOURNAL_MAX_BYTES);
+    if max_bytes == 0 || max_bytes > PROMOTION_JOURNAL_MAX_BYTES {
+        return Err("promotion read file maxBytes exceeds the 16 MiB budget".to_string());
+    }
+    let (identity, bytes) = read_bound_private_file(req, max_bytes, "promotion read file")?;
+    Ok(json!({
+        "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "byteLength": bytes.len(),
+        "identity": {
+            "dev": identity.dev.to_string(),
+            "ino": identity.ino.to_string(),
+        },
+    }))
+}
+
+/// Capture the exact source proof needed by the bound copy, keeping private
+/// bytes and hashing in Core. Resource budgets cannot exceed the copy's own
+/// native file budget; the small provenance/journal read limit is unchanged.
+pub(crate) fn op_promotion_bound_inspect_private_file(req: &Value) -> Result<Value, String> {
+    req.get("expectedIdentity")
+        .ok_or("missing expectedIdentity")?;
+    let max_bytes = req
+        .get("maxBytes")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or("private resource maxBytes must be positive")?
+        .min(BUDGET_MAX_FILE_BYTES);
+    let (identity, bytes) = read_bound_private_file(req, max_bytes, "private resource")?;
+    let leaf = PromotionObservedLeaf {
+        identity: PromotionIdentity {
+            dev: identity.dev,
+            ino: identity.ino,
+        },
+        state: PromotionObservedState::File {
+            mode: identity.mode & 0o777,
+            size: identity.len,
+            sha256: promotion_sha256_hex(&bytes),
+        },
+    };
+    Ok(json!({ "result": { "leaf": promotion_leaf_result(&leaf) } }))
+}
+
+fn read_bound_private_file(
+    req: &Value,
+    max_bytes: u64,
+    field: &str,
+) -> Result<(FileIdentity, Vec<u8>), String> {
     let (root, _root_identity, _capability) =
         open_promotion_bound_root(req, "root", "rootIdentity", "rootCapability")?;
     let components = promotion_components_for(req, "components")?;
@@ -110,37 +163,18 @@ pub(crate) fn op_promotion_bound_read_file(req: &Value) -> Result<Value, String>
         .get("expectedIdentity")
         .map(|value| promotion_identity_from_value(value, "expectedIdentity"))
         .transpose()?;
-    let max_bytes = req
-        .get("maxBytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(PROMOTION_JOURNAL_MAX_BYTES);
-    if max_bytes == 0 || max_bytes > PROMOTION_JOURNAL_MAX_BYTES {
-        return Err("promotion read file maxBytes exceeds the 16 MiB budget".to_string());
-    }
     let file = open_at(
         parent.as_raw_fd(),
         leaf,
         libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
     )
-    .map_err(|error| format!("open promotion read file failed: {error}"))?;
-    let (identity, bytes) = promotion_read_private_bounded_opened(
-        &parent,
-        leaf,
-        file,
-        max_bytes as usize,
-        "promotion read file",
-    )?;
+    .map_err(|error| format!("open {field} failed: {error}"))?;
+    let (identity, bytes) =
+        promotion_read_private_bounded_opened(&parent, leaf, file, max_bytes as usize, field)?;
     if let Some(expected) = expected {
         if identity.dev != expected.dev || identity.ino != expected.ino {
-            return Err("promotion read file identity mismatch".to_string());
+            return Err(format!("{field} identity mismatch"));
         }
     }
-    Ok(json!({
-        "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
-        "byteLength": bytes.len(),
-        "identity": {
-            "dev": identity.dev.to_string(),
-            "ino": identity.ino.to_string(),
-        },
-    }))
+    Ok((identity, bytes))
 }

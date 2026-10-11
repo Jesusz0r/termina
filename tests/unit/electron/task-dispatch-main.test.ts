@@ -4,11 +4,10 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
   dispatchWorkerModel, MAX_DISPATCH_WORKERS, pickDispatchTasks, planOwnerError,
-  planStartError, samePlanTaskSnapshot, parsePlanTaskCandidate,
+  samePlanTaskSnapshot, parsePlanTaskCandidate,
   markPlanProgress, finalizePlanTasks, reattachDispatchAssignments, settleDispatchTask,
 } from "../../../electron/plan-board.ts";
-import { parsePlanTaskStartRequest } from "../../../electron/main/ipc-validate.ts";
-import type { PlanTask, PlanTaskStartRequest, PlanTaskStartResult } from "../../../shared/types.ts";
+import type { PlanTask } from "../../../shared/types.ts";
 
 // Exercise production main methods without importing Electron or starting the app.
 const source = ts.createSourceFile("main.ts", readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
@@ -19,7 +18,7 @@ function loadMethods(names: string[], dependencies: Record<string, unknown>) {
     ts.forEachChild(node, visit);
   }
   visit(source);
-  if (methods.length !== names.length) throw new Error("Missing main plan start method");
+  if (methods.length !== names.length) throw new Error("Missing main task dispatch method");
   const compiled = ts.transpile(`class Main { ${methods.join("\n")} } return new Main();`, { target: ts.ScriptTarget.ES2022 });
   return new Function(...Object.keys(dependencies), compiled)(...Object.values(dependencies));
 }
@@ -33,13 +32,13 @@ function fixture() {
   const other: PlanTask = { text: "Fix other.ts", paths: ["other.ts"], state: "pending" };
   const inst = { id: "term-1", generation: 2, projectId: project.id, workspaceId: workspace.id, cwd: workspace.root,
     model: "provider/owner-model", thinkingLevel: "high", type: "agent", persist: true, busy: false, closed: false, pty: { hasExited: false, write: vi.fn() }, plan: [task, other] };
-  const main = loadMethods(["startPlanTask", "planOwnerFacts", "dispatchRun", "dispatchPreparedRun",
+  const main = loadMethods(["planOwnerFacts", "dispatchRun", "dispatchPreparedRun",
     "dispatchSharedPreparedRun", "ownerDispatchCount", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching"], {
-    parsePlanTaskStartRequest, planOwnerError, planStartError, samePlanTaskSnapshot,
+    planOwnerError, samePlanTaskSnapshot,
     pickDispatchTasks, MAX_DISPATCH_WORKERS, dispatchWorkerModel,
     dispatchViewerId: (id: string) => `dispatch:${id}`,
     isPtyRendererSendTargetCurrent: (a: unknown, b: unknown) => a === b,
-  }) as { startPlanTask(value: unknown): Promise<PlanTaskStartResult>; dispatchRun(id: string, text?: string): Promise<PlanTaskStartResult> };
+  }) as { dispatchRun(id: string, text?: string): Promise<{ ok: boolean; error?: string; dispatched?: number }> };
   const hooks: Partial<Record<Stage, () => void | Promise<void>>> = {};
   const stage = async (name: Stage) => { await hooks[name]?.(); };
   let target: object | null = {};
@@ -62,7 +61,7 @@ function fixture() {
     writeDispatchStartupControl: vi.fn(async () => { await stage("control"); }),
     clearMailbox: vi.fn(), removeDispatchStartupControl: vi.fn(async () => {}),
     createTerminal: vi.fn(async (_cwd, opts) => {
-      opts.spawnGuard();
+      opts.spawnGuard?.();
       const worker = { ...inst, id: opts.id, generation: 5, persist: false, plan: [], pty: { hasExited: false, write: vi.fn() } };
       runtime.set(worker.id, worker);
       await stage("create-return");
@@ -89,9 +88,7 @@ function fixture() {
   Object.assign(project, { worldlines: { createIndependentSession } });
   Object.assign(state, { createIndependentSession });
   Object.assign(main, state);
-  const request: PlanTaskStartRequest = { owner: { projectId: project.id, workspaceId: workspace.id,
-    root: workspace.root, terminalId: inst.id, generation: inst.generation }, projectRoot: project.cwd, task: structuredClone(task) };
-  return { main, state, project, workspace, inst, task, other, request, hooks, runtime, createIndependentSession, nativeIndependentSpawn,
+  return { main, state, project, workspace, inst, task, other, hooks, runtime, createIndependentSession, nativeIndependentSpawn,
     replaceRenderer: () => { target = {}; } };
 }
 
@@ -132,113 +129,7 @@ function mutate(f: ReturnType<typeof fixture>, change: string) {
     default: throw new Error(`Unknown mutation ${change}`);
   }
 }
-const changes = ["workspace-generation", "project-generation", "canonical-root", "root", "project-root", "terminal-generation",
-  "workspace-id", "terminal-project", "project-membership", "workspace-membership", "busy", "closed", "exited", "changing", "closing",
-  "disposed", "renderer", "plan-replaced", "task-replaced", "paths", "model", "state", "assignment", "claimed", "outcome", "duplicate",
-  "worker-owner", "shell-owner", "transient-owner", "candidate-owner"];
 
-describe("main explicit Start task", () => {
-  it("starts one isolated background task with inherited thinking and no shared-source launch", async () => {
-    const f = fixture();
-    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
-    expect(f.createIndependentSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      model: "provider/task-model", thinkingLevel: "high", initialTask: f.task.text,
-    }));
-    expect(f.state.createTerminal).not.toHaveBeenCalled();
-    expect(f.state.dispatchPathKeysInFlight).not.toHaveBeenCalled();
-    expect(f.state.activeProjectId).toBe("different-project");
-    expect(f.inst.pty.write).not.toHaveBeenCalled();
-    expect(f.task).toMatchObject({ state: "active", workerId: "term-10", claimed: [] });
-    expect(f.other.state).toBe("pending");
-    expect(f.state.dispatchRuns.get("term-10")).toEqual({ ownerId: f.inst.id, taskText: f.task.text });
-  });
-  it("accepts pathless named tasks on a full board and inherits the owner model", async () => {
-    const f = fixture(); delete f.task.model; delete f.request.task.model;
-    f.task.paths = []; f.request.task.paths = [];
-    f.inst.plan.push(...Array.from({ length: 18 }, (_, i): PlanTask => ({ text: `Task ${i}`, paths: [], state: "pending" })));
-    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
-    expect(f.createIndependentSession).toHaveBeenCalledWith(expect.objectContaining({ model: "provider/owner-model" }));
-  });
-  it.each(changes)("fences %s after preparation awaits", async (change) => {
-    const f = fixture(); f.hooks.path = () => mutate(f, change);
-    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-    expect(f.state.createTerminal).not.toHaveBeenCalled();
-    expect(f.state.dispatchRuns.size).toBe(0);
-    expect(f.state.dispatchPreparations.size).toBe(0);
-  });
-  it.each(["claims", "lease", "flush", "briefing", "control", "create-return"] as const)("cleans failed admission at %s", async (stage) => {
-    const f = fixture(); f.hooks[stage] = () => { f.task.paths.push("changed.ts"); };
-    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-    expect(f.task.workerId).toBeUndefined(); expect(f.task.state).toBe("pending");
-    expect(f.state.dispatchRuns.size).toBe(0); expect(f.state.dispatchWorkers.size).toBe(0);
-    expect(f.state.createTerminal).not.toHaveBeenCalled();
-  });
-  it("installs metadata before execution and permits exact fast settlement", async () => {
-    const f = fixture(); f.hooks["create-return"] = () => {
-      expect(f.state.dispatchRuns.get("term-10")).toEqual({ ownerId: f.inst.id, taskText: f.task.text });
-      expect(f.task.workerId).toBe("term-10");
-      delete f.task.workerId; delete f.task.claimed; f.task.state = "done";
-      f.task.dispatchResult = { workerId: "term-10", outcome: "completed" };
-    };
-    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
-    expect(f.task.state).toBe("done");
-  });
-  it.each(["sandbox unavailable", "worldline budget exhausted", "capture unavailable"])("does not fall back after %s", async (error) => {
-    const f = fixture(); f.createIndependentSession.mockResolvedValueOnce({ ok: false, error });
-    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: false, error });
-    expect(f.state.createTerminal).not.toHaveBeenCalled(); expect(f.task.state).toBe("pending");
-  });
-  it.each(["initial-first", "dispatch-first"])("serializes starts and ordinary dispatch (%s)", async (order) => {
-    const f = fixture(); let release!: () => void;
-    f.hooks.path = () => new Promise<void>((resolve) => { release = resolve; });
-    const first = order === "initial-first" ? f.main.startPlanTask(f.request) : f.main.dispatchRun(f.inst.id, f.task.text);
-    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false, error: expect.stringContaining("preparing") });
-    expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toMatchObject({ ok: false, error: expect.stringContaining("preparing") });
-    release(); expect(await first).toEqual({ ok: true, dispatched: 1 });
-    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-  });
-  it("keeps named Retry in a fresh independent candidate and preserves old area on budget refusal", async () => {
-    const f = fixture();
-    Object.assign(f.task, { candidate: { comparisonId: "cmp-old", label: "A" }, dispatchResult: { workerId: "old", outcome: "incomplete" } });
-    f.createIndependentSession.mockResolvedValueOnce({ ok: false, error: "budget exhausted" });
-    expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toEqual({ ok: false, error: "budget exhausted" });
-    expect(f.task.candidate).toEqual({ comparisonId: "cmp-old", label: "A" });
-    expect(f.state.createTerminal).not.toHaveBeenCalled();
-    expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toEqual({ ok: true, dispatched: 1 });
-    expect(f.task.candidate).toEqual({ comparisonId: "cmp-1", label: "A" });
-    expect(f.task.dispatchResult).toBeUndefined();
-    expect(f.state.createTerminal).not.toHaveBeenCalled();
-  });
-  it("batch Dispatch keeps candidate rows isolated while ordinary rows use existing shared execution", async () => {
-    const f = fixture(); f.task.candidate = { comparisonId: "cmp-old", label: "A" };
-    expect(await f.main.dispatchRun(f.inst.id)).toEqual({ ok: true, dispatched: 2 });
-    expect(f.createIndependentSession).toHaveBeenCalledOnce();
-    expect(f.state.createTerminal).toHaveBeenCalledOnce();
-    expect(f.task.candidate).toEqual({ comparisonId: "cmp-1", label: "A" });
-    expect(f.other.workerId).toBeDefined();
-  });
-  it("initial Start ignores shared path claims and another source owner's dispatch", async () => {
-    const f = fixture();
-    f.state.dispatchRuns.set("shared-worker", { ownerId: "other-owner", taskText: f.task.text });
-    f.state.dispatchPathKeysInFlight.mockResolvedValueOnce(new Set(["/actual/root/file.ts"]));
-    expect(await f.main.startPlanTask(f.request)).toEqual({ ok: true, dispatched: 1 });
-    expect(f.state.dispatchPathKeysInFlight).not.toHaveBeenCalled();
-  });
-  it("enforces owner worker limits even for isolated starts", async () => {
-    const f = fixture();
-    for (let i = 0; i < MAX_DISPATCH_WORKERS; i++) f.state.dispatchRuns.set(`worker-${i}`, { ownerId: f.inst.id, taskText: `other-${i}` });
-    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-    expect(f.createIndependentSession).not.toHaveBeenCalled();
-  });
-  it("keeps busy-owner interruption exclusive to ordinary dispatch", async () => {
-    const f = fixture(); f.inst.busy = true;
-    expect(await f.main.startPlanTask(f.request)).toMatchObject({ ok: false });
-    expect(f.inst.pty.write).not.toHaveBeenCalled();
-    expect(await f.main.dispatchRun(f.inst.id, f.task.text)).toEqual({ ok: true, dispatched: 1 });
-    expect(f.inst.pty.write).toHaveBeenCalledExactlyOnceWith("\x03");
-  });
-});
 
 describe("createTerminal strict internal spawn fence", () => {
   it.each(["session-directory", "session-reclaim", "session-file"])("fences %s during asynchronous agent preparation", async (stage) => {

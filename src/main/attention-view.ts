@@ -1,206 +1,52 @@
-import type { AgentActivityView, PlanTask, PlanTaskCreateRequest, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../shared/types";
+import type { AgentActivityView, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../shared/types";
 import { presentBlockedLabel } from "../known-state";
-import { ACTION_LABELS, ATTENTION_LABELS } from "./work-summary";
-import { createProjectOverview, findOverviewTask, projectCards, taskTarget } from "./project-overview";
+import { ACTION_LABELS, ATTENTION_LABELS } from "./work-labels";
+import { findWorkTask } from "./work-search";
 import type { WorkSearchTarget } from "./work-search";
-
-import type { CandidateNavigationTarget } from "./candidate-navigation";
 
 const PAGE_SIZE = 50;
 
 /** Global read-only projection. Visiting a reason does not acknowledge or resolve it. */
 export function createAttentionView(bindings: {
   element: HTMLElement;
-  toggle: HTMLButtonElement;
-  overviewToggle: HTMLButtonElement;
-  workspace: readonly HTMLElement[];
+  heading: HTMLElement;
   bridge: TerminaBridge;
   onOverview(overview: WorkOverview | null): void;
-  onViewChange(overviewOpen: boolean): void;
-  onProjectFilterChange(projectId: string | null): void;
   onInspect(result: Extract<WorkAttentionInspectResult, { ok: true }>, isCurrent: () => boolean): Promise<boolean>;
   onNavigate(projectId: string, action: WorkSummaryAction | null, isCurrent: () => boolean): Promise<boolean>;
   onReveal(projectId: string, action: WorkSummaryAction | null): void;
-  onNewProject(): void;
-  onFocusTerminal: Parameters<typeof createProjectOverview>[0]["onFocusTerminal"];
-  onTerminalControl: Parameters<typeof createProjectOverview>[0]["onTerminalControl"];
-  onCandidateNavigate(target: CandidateNavigationTarget, isCurrent: () => boolean): Promise<boolean>;
-  onRevealCandidate(target: CandidateNavigationTarget): void;
 }): {
-  open(opener?: HTMLElement, mode?: "attention" | "overview"): void;
-  filterProject(projectId: string): void;
+  focus(): void;
   revealWork(target: WorkSearchTarget, isCurrent: () => boolean): Promise<boolean>;
-  close(restoreFocus?: boolean): void;
+  cancelNavigation(): void;
   dispose(): void;
 } {
-  const { element, toggle, overviewToggle, bridge } = bindings;
-  const title = element.querySelector<HTMLElement>("#work-view-title")!;
-  const projectContent = element.querySelector<HTMLElement>("#project-overview")!;
-  const attentionHeading = element.querySelector<HTMLElement>("#overview-attention-heading")!;
-  const workspaceInert = new Map<HTMLElement, boolean>();
-  const projectOverview = createProjectOverview({
-    element: projectContent,
-    onNavigate: (projectId, action) => { void inspectProject(projectId, action); },
-    getVerifyReport: (id, generation) => bridge.getVerifyReport(id, generation),
-    getReviewFiles: (target, offset) => bridge.getReviewFiles(target, offset),
-    getReviewDiff: (target, path) => bridge.getReviewDiff(target, path),
-    createPlanTask: (request) => bridge.createPlanTask(request),
-    startPlanTask: async (request) => {
-      try { return await bridge.startPlanTask(request); }
-      finally { refresh(); }
-    },
-    onTaskCreated: (request, task) => { void revealCreatedTask(request, task); },
-    onSelectionChange: () => { inspectSequence++; renderSelection(); },
-    onProjectFilterChange: bindings.onProjectFilterChange,
-    onFocusTerminal: bindings.onFocusTerminal,
-    onTerminalControl: bindings.onTerminalControl,
-    onCandidateRecovery: (projectId, recovery) => { void navigateCandidate({ projectId, candidate: recovery, mode: recovery.recovery }); },
-    onCandidateInspect: (task) => { void navigateCandidate({ projectId: task.projectId, task, mode: "inspect" }); },
-    onFocusChange: (focused) => {
-      element.classList.toggle("task-focus", focused);
-      title.textContent = focused ? "Focused work" : mode === "overview" ? "All projects" : "Attention across all projects";
-    },
-    onNewProject: bindings.onNewProject,
-  });
+  const { element, heading, bridge } = bindings;
   const list = element.querySelector<HTMLElement>("#attention-list")!;
   const status = element.querySelector<HTMLElement>("#attention-status")!;
   const message = element.querySelector<HTMLElement>("#attention-message")!;
-  const closeButton = element.querySelector<HTMLButtonElement>("#btn-close-attention")!;
   const refreshButton = element.querySelector<HTMLButtonElement>("#btn-refresh-attention")!;
   const moreButton = element.querySelector<HTMLButtonElement>("#btn-more-attention")!;
-  const count = toggle.querySelector<HTMLElement>(".attention-count")!;
+  const count = heading.querySelector<HTMLElement>(".attention-count")!;
   const rows = new Map<string, { element: HTMLLIElement; title: HTMLElement; context: HTMLElement; area: HTMLElement; detail: HTMLElement; button: HTMLButtonElement; item: WorkAttentionItem }>();
   const activity = new Map<string, AgentActivityView>();
   const models = new Map<string, string | null>();
   let overview: WorkOverview | null = null;
   let unavailable = false;
-  let opener: HTMLElement = toggle;
   let limit = PAGE_SIZE;
   let loadSequence = 0;
   let inspectSequence = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
-  let mode: "attention" | "overview" = "attention";
 
-  function renderSelection(): void {
-    const selectedId = mode === "overview" ? projectOverview.getSelectedAttentionId() : null;
-    for (const [id, row] of rows) {
-      const selected = id === selectedId;
-      row.element.classList.toggle("is-selected", selected);
-      if (mode === "overview") {
-        row.button.setAttribute("aria-pressed", String(selected));
-        row.button.setAttribute("aria-expanded", String(selected));
-      } else {
-        row.button.removeAttribute("aria-pressed");
-        row.button.removeAttribute("aria-expanded");
-      }
-    }
-  }
-
-  function restoreWorkspace(): void {
-    for (const [node, inert] of workspaceInert) node.inert = inert;
-    workspaceInert.clear();
-  }
-
-  function close(restoreFocus = true, preserveSelection = false): void {
+  function cancelNavigation(): void {
     inspectSequence++;
-    if (preserveSelection) projectOverview.leaveFocus();
-    else projectOverview.clearSelection();
-    element.hidden = true;
-    toggle.setAttribute("aria-expanded", "false");
-    overviewToggle.setAttribute("aria-expanded", "false");
-    restoreWorkspace();
-    bindings.onViewChange(false);
-    if (restoreFocus) (opener.isConnected ? opener : toggle).focus();
-  }
-
-  async function revealCreatedTask(request: PlanTaskCreateRequest, task: PlanTask): Promise<void> {
-    if (disposed || element.hidden) return;
-    const sequence = ++inspectSequence;
-    const revision = loadSequence;
-    try {
-      const value = await bridge.getWorkOverview();
-      if (disposed || element.hidden || sequence !== inspectSequence || revision !== loadSequence) return;
-      const project = value.projects.find((entry) => entry.projectId === request.owner.projectId && entry.root === request.projectRoot);
-      const card = project && projectCards(project).find((entry) => !("recovery" in entry)
-        && entry.owner.terminalId === request.owner.terminalId && entry.owner.generation === request.owner.generation
-        && entry.owner.workArea?.workspaceId === request.owner.workspaceId && entry.owner.workArea.root === request.owner.root
-        && entry.task?.task.text === task.text);
-      receiveOverview(value);
-      render();
-      if (project && card && !("recovery" in card)) projectOverview.selectTask(taskTarget(project, card));
-      else message.textContent = "Task was added, but its owner changed or closed. Refresh to inspect current work.";
-    } catch {
-      if (!disposed && !element.hidden && sequence === inspectSequence) {
-        message.textContent = "Task was added. Refresh to load its current Plan Board.";
-      }
-    }
-  }
-
-  async function navigateCandidate(target: CandidateNavigationTarget): Promise<void> {
-    if (disposed || element.hidden) return;
-    const sequence = ++inspectSequence;
-    const isCurrent = (): boolean => !disposed && !element.hidden && sequence === inspectSequence;
-    try {
-      const navigated = await bindings.onCandidateNavigate(target, isCurrent);
-      if (!isCurrent()) return;
-      if (!navigated) { message.textContent = "Candidate recovery unavailable or changed. Refresh to inspect current work."; refresh(); return; }
-      close(false, true);
-      bindings.onRevealCandidate(target);
-    } catch {
-      if (isCurrent()) { message.textContent = "Candidate recovery unavailable. Refresh and try again."; refresh(); }
-    }
-  }
-
-  async function inspectProject(projectId: string, action: WorkSummaryAction | null): Promise<void> {
-    const sequence = ++inspectSequence;
-    const isCurrent = (): boolean => !disposed && !element.hidden && sequence === inspectSequence;
-    message.textContent = "Opening project context…";
-    try {
-      const opened = await bindings.onNavigate(projectId, action, isCurrent);
-      if (!isCurrent()) return;
-      if (opened) {
-        close(false, !!action?.taskText || action?.kind === "verify");
-        bindings.onReveal(projectId, action);
-      } else {
-        message.textContent = "The target changed or closed. Refresh work and choose its current owner.";
-        refresh();
-      }
-    } catch {
-      if (isCurrent()) {
-        message.textContent = "Could not open this work. Refresh and try again.";
-        refresh();
-      }
-    }
-  }
-
-  async function selectAttention(id: string, opener: HTMLButtonElement): Promise<void> {
-    const sequence = ++inspectSequence;
-    const revision = loadSequence;
-    const isCurrent = (): boolean => !disposed && !element.hidden && mode === "overview" && sequence === inspectSequence;
-    message.textContent = "Loading current attention details…";
-    let value: WorkOverview;
-    try {
-      // Inspecting facts must not use inspectWorkAttention: that IPC activates its workspace.
-      value = await bridge.getWorkOverview();
-    } catch {
-      if (!isCurrent() || revision !== loadSequence) return;
-      overviewUnavailable();
-      message.textContent = "Attention details unavailable. Refresh to load current work.";
-      return;
-    }
-    if (!isCurrent() || revision !== loadSequence) return;
-    loadSequence++;
-    if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
-    receiveOverview(value);
-    render();
-    message.textContent = projectOverview.selectAttention(id, opener) ? ""
-      : "This attention changed or closed, or its task is unavailable. Select its current work.";
+    message.textContent = "";
   }
 
   async function inspect(id: string): Promise<void> {
     const sequence = ++inspectSequence;
-    const isCurrent = (): boolean => !disposed && !element.hidden && sequence === inspectSequence;
+    const isCurrent = (): boolean => !disposed && sequence === inspectSequence;
     message.textContent = "Opening the current owner…";
     try {
       const result = await bridge.inspectWorkAttention(id);
@@ -213,7 +59,7 @@ export function createAttentionView(bindings: {
       const opened = await bindings.onInspect(result, isCurrent);
       if (!isCurrent()) return;
       if (opened) {
-        close(false);
+        cancelNavigation();
         bindings.onReveal(result.folder.projectId, result.action);
       } else message.textContent = "The target changed or closed. Refresh attention and choose its current owner.";
     } catch {
@@ -226,8 +72,6 @@ export function createAttentionView(bindings: {
 
   function render(): void {
     if (!overview) return;
-    if (mode === "overview") projectOverview.render(overview);
-    attentionHeading.textContent = `Needs your attention · ${overview.items.length}`;
     const projects = new Map(overview.projects.map((project) => [project.projectId, project]));
     const visible = overview.items.slice(0, limit);
     const seen = new Set(visible.map((item) => item.id));
@@ -237,7 +81,7 @@ export function createAttentionView(bindings: {
       const focused = row.element.contains(document.activeElement);
       row.element.remove();
       rows.delete(id);
-      if (focused && !element.hidden) refreshButton.focus();
+      if (focused) refreshButton.focus();
     }
     visible.forEach((item, index) => {
       let row = rows.get(item.id);
@@ -261,10 +105,7 @@ export function createAttentionView(bindings: {
         button.className = "attention-inspect";
         button.setAttribute("aria-describedby", `${context.id} ${area.id} ${detail.id}`);
         const entry = { element: node, title, context, area, detail, button, item };
-        button.addEventListener("click", () => {
-          if (mode === "overview") void selectAttention(entry.item.id, button);
-          else void inspect(entry.item.id);
-        });
+        button.addEventListener("click", () => { void inspect(entry.item.id); });
         node.append(title, context, area, detail, button);
         row = entry;
         rows.set(item.id, row);
@@ -279,9 +120,7 @@ export function createAttentionView(bindings: {
         : item.workArea ? `${item.workArea.kind === "project" ? "Shared project files" : "Separate candidate tree"} · ${item.workArea.root}` : "Assigned work area unavailable";
       row.detail.textContent = item.reason === "blocked" ? presentBlockedLabel(item.detail) : item.detail ?? "";
       row.detail.hidden = !row.detail.textContent;
-      row.button.textContent = mode === "overview" ? "Inspect details" : ACTION_LABELS[item.action.kind];
-      if (mode === "overview") row.button.setAttribute("aria-controls", "project-work-inspector");
-      else row.button.removeAttribute("aria-controls");
+      row.button.textContent = ACTION_LABELS[item.action.kind];
       const position = list.children[index];
       if (position !== row.element) {
         const focused = row.element.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
@@ -289,7 +128,6 @@ export function createAttentionView(bindings: {
         focused?.focus({ preventScroll: true });
       }
     });
-    renderSelection();
     moreButton.hidden = overview.items.length <= limit;
     moreButton.textContent = `Show more (${Math.max(0, overview.items.length - limit)} remaining)`;
     status.textContent = unavailable ? "Attention unavailable. Previous rows may be outdated. Refresh to load current facts."
@@ -301,15 +139,15 @@ export function createAttentionView(bindings: {
     overview = value;
     unavailable = false;
     count.textContent = String(value.items.length);
-    toggle.setAttribute("aria-label", `Attention across all projects: ${value.items.length} recorded items`);
+    heading.setAttribute("aria-label", `Attention across all projects: ${value.items.length} recorded items`);
     bindings.onOverview(value);
+    render();
   }
 
   function overviewUnavailable(): void {
     unavailable = true;
-    projectOverview.setUnavailable();
     count.textContent = "?";
-    toggle.setAttribute("aria-label", "Attention across all projects: unavailable");
+    heading.setAttribute("aria-label", "Attention across all projects: unavailable");
     bindings.onOverview(null);
     status.textContent = "Attention unavailable. Previous rows may be outdated. Refresh to load current facts.";
   }
@@ -326,22 +164,26 @@ export function createAttentionView(bindings: {
       if (!value.projects.some((project) => project.projectId === target.projectId && project.root === target.root)) return false;
       const opened = await bindings.onNavigate(target.projectId, null, isCurrent);
       if (!opened || !isCurrent()) return false;
-      close(false);
+      cancelNavigation();
       bindings.onReveal(target.projectId, null);
       return true;
     }
-    if (!findOverviewTask(value, target.task)) return false;
-    const activated = await bindings.onNavigate(target.task.projectId, null, isCurrent);
+    const selected = findWorkTask(value, target.task);
+    if (!selected) return false;
+    const action: WorkSummaryAction = { kind: "plan", terminalId: selected.owner.terminalId,
+      generation: selected.owner.generation, taskText: selected.task.task.text };
+    const activated = await bindings.onNavigate(target.task.projectId, action, isCurrent);
     if (!activated || !isCurrent()) return false;
     // Activation is asynchronous: do not select an owner/source replaced during it.
     const activatedRevision = loadSequence;
     const current = await bridge.getWorkOverview();
-    if (!isCurrent() || activatedRevision !== loadSequence || !findOverviewTask(current, target.task)) return false;
+    if (!isCurrent() || activatedRevision !== loadSequence || !findWorkTask(current, target.task)) return false;
     loadSequence++;
     if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
     receiveOverview(current);
-    open(overviewToggle, "overview");
-    return projectOverview.selectTask(target.task);
+    cancelNavigation();
+    bindings.onReveal(target.task.projectId, action);
+    return true;
   }
 
   async function load(): Promise<void> {
@@ -351,7 +193,6 @@ export function createAttentionView(bindings: {
       const value = await bridge.getWorkOverview();
       if (disposed || sequence !== loadSequence) return;
       receiveOverview(value);
-      if (!element.hidden) render();
     } catch {
       if (disposed || sequence !== loadSequence) return;
       overviewUnavailable();
@@ -364,43 +205,11 @@ export function createAttentionView(bindings: {
     if (timer === undefined) timer = setTimeout(() => { void load(); }, 150);
   }
 
-  function open(source: HTMLElement = toggle, nextMode: "attention" | "overview" = "attention"): void {
+  function focus(): void {
     if (disposed) return;
-    inspectSequence++;
-    if (!element.hidden && mode === "overview" && nextMode === "overview") {
-      opener = source;
-      projectOverview.setProjectFilter(null);
-      message.textContent = "";
-      refresh();
-      return;
-    }
-    if (mode !== nextMode) projectOverview.clearSelection();
-    else projectOverview.leaveFocus();
-    restoreWorkspace();
-    mode = nextMode;
-    opener = source;
-    element.hidden = false;
-    element.classList.toggle("work-overview", mode === "overview");
-    element.setAttribute("aria-label", mode === "overview" ? "All projects" : "Attention across all projects");
-    title.textContent = mode === "overview" ? "All projects" : "Attention across all projects";
-    closeButton.setAttribute("aria-label", mode === "overview" ? "Return to workspace" : "Close attention");
-    projectContent.hidden = mode !== "overview";
-    attentionHeading.hidden = mode !== "overview";
-    toggle.setAttribute("aria-expanded", String(mode === "attention"));
-    overviewToggle.setAttribute("aria-expanded", String(mode === "overview"));
-    if (mode === "overview") {
-      projectOverview.setProjectFilter(null);
-      for (const node of bindings.workspace) { workspaceInert.set(node, node.inert); node.inert = true; }
-    }
-    bindings.onViewChange(mode === "overview");
-    if (overview) render();
-    else status.textContent = unavailable ? "Attention unavailable. Refresh to load current facts." : "Loading attention across all projects…";
-    closeButton.focus();
-    refresh();
+    cancelNavigation();
+    (list.querySelector<HTMLButtonElement>(".attention-inspect") ?? refreshButton).focus();
   }
-
-  const onToggle = (): void => { if (element.hidden || mode !== "attention") open(); else close(); };
-  const onClose = (): void => close();
   const onRefresh = (): void => { message.textContent = ""; refresh(); };
   const onMore = (): void => {
     const nextId = overview?.items[limit]?.id;
@@ -410,20 +219,16 @@ export function createAttentionView(bindings: {
     (nextId ? rows.get(nextId)?.button ?? refreshButton : refreshButton).focus();
   };
   const onKey = (event: KeyboardEvent): void => {
-    if (event.key !== "Escape" || event.defaultPrevented || (event.target as HTMLElement)?.closest(".focus-task-terminal")) return;
+    if (event.key !== "Escape" || event.defaultPrevented) return;
     event.preventDefault();
     event.stopPropagation();
-    close();
+    cancelNavigation();
   };
-  toggle.addEventListener("click", onToggle);
-  closeButton.addEventListener("click", onClose);
   refreshButton.addEventListener("click", onRefresh);
   moreButton.addEventListener("click", onMore);
   element.addEventListener("keydown", onKey);
   const unsubs = [
     bridge.onInstances((roster) => {
-      projectOverview.invalidateEvidence();
-      projectOverview.invalidateChangesForInstances(roster);
       activity.clear(); models.clear();
       for (const terminal of roster) {
         if (terminal.activity) activity.set(terminal.id, terminal.activity);
@@ -431,14 +236,14 @@ export function createAttentionView(bindings: {
       }
       refresh();
     }),
-    bridge.onPlanUpdate(({ instanceId }) => { projectOverview.invalidateEvidence(instanceId); projectOverview.invalidateChanges(instanceId); projectOverview.invalidateStart(instanceId); refresh(); }),
-    bridge.onModifiedList(({ instanceId }) => { projectOverview.invalidateEvidence(instanceId); projectOverview.invalidateChanges(instanceId); refresh(); }),
-    bridge.onFileChanged((owner) => { projectOverview.invalidateChanges(undefined, owner); }),
-    bridge.onFileDeleted((owner) => { projectOverview.invalidateChanges(undefined, owner); }),
-    bridge.onVerifyState(({ terminalId }) => { projectOverview.invalidateEvidence(terminalId); refresh(); }),
-    bridge.onTimelineClear(({ terminalId }) => { projectOverview.invalidateEvidence(terminalId); projectOverview.invalidateChanges(terminalId); refresh(); }),
+    bridge.onPlanUpdate(refresh),
+    bridge.onModifiedList(refresh),
+    bridge.onFileChanged(refresh),
+    bridge.onFileDeleted(refresh),
+    bridge.onVerifyState(refresh),
+    bridge.onTimelineClear(refresh),
     bridge.onFolderOpened(refresh),
-    bridge.onProjectClosed(() => { projectOverview.invalidateEvidence(); projectOverview.invalidateChanges(); projectOverview.invalidateStart(); refresh(); }),
+    bridge.onProjectClosed(refresh),
     bridge.onAgentStatus(({ terminalId, model }) => {
       if (models.has(terminalId) && models.get(terminalId) === model) return;
       models.set(terminalId, model);
@@ -447,32 +252,23 @@ export function createAttentionView(bindings: {
     bridge.onTimelinePrefix(({ terminalId, activity: next }) => {
       if (!next) return;
       const previous = activity.get(terminalId);
-      if (previous?.state === next.state && previous.reason === next.reason) return;
+      if (previous?.state === next.state && previous.reason === next.reason
+        && previous.intervention?.requestId === next.intervention?.requestId
+        && previous.intervention?.since === next.intervention?.since) return;
       activity.set(terminalId, next);
       refresh();
     }),
   ];
   void load();
   return {
-    open,
-    filterProject: (projectId) => {
-      if (disposed || element.hidden || mode !== "overview") return;
-      if (!projectOverview.setProjectFilter(projectId)) {
-        message.textContent = "This project is unavailable or changed. Refresh Overview and choose its current project.";
-        refresh();
-      } else message.textContent = "";
-    },
+    focus,
     revealWork,
-    close,
+    cancelNavigation,
     dispose: () => {
       if (disposed) return;
       disposed = true;
       inspectSequence++; loadSequence++;
       if (timer !== undefined) clearTimeout(timer);
-      restoreWorkspace();
-      projectOverview.dispose();
-      toggle.removeEventListener("click", onToggle);
-      closeButton.removeEventListener("click", onClose);
       refreshButton.removeEventListener("click", onRefresh);
       moreButton.removeEventListener("click", onMore);
       element.removeEventListener("keydown", onKey);

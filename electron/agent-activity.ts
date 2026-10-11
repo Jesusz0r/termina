@@ -3,10 +3,10 @@
  *
  * One owner. Main folds live signals into AgentActivityInput and calls
  * activityFor(); the renderer only displays the view. Never infer from PTY
- * output bytes. Producer `blocked` events are out of scope.
+ * output bytes. Human intervention comes only from explicit picker events.
  */
 import { STALL_FAILURE_TURNS } from "../agent-core/stall.ts";
-import type { AgentActivityReason, AgentActivityState, AgentActivityView } from "../shared/types.ts";
+import type { AgentActivityReason, AgentActivityState, AgentActivityView, AgentIntervention } from "../shared/types.ts";
 
 /** Consecutive same-target `tool_end.isError` before `blocked: tool-error-loop`. */
 export const TOOL_ERROR_LOOP_STREAK = STALL_FAILURE_TURNS;
@@ -23,6 +23,8 @@ export type ActivitySignal =
   | { t: "agent_settled"; seq: number; at: number; error: string | null }
   | { t: "tool"; seq: number; at: number; target: string }
   | { t: "tool_end"; seq: number; at: number; target: string; isError: boolean }
+  | ({ t: "intervention_requested"; seq: number; at: number } & AgentIntervention)
+  | { t: "intervention_resolved"; seq: number; at: number; requestId: string }
   | { t: "sidecar_hold"; seq: number; at: number; held: boolean }
   | { t: "pty_exit"; seq: number; at: number };
 
@@ -37,6 +39,7 @@ export interface AgentActivityInput {
   promptInFlight: boolean;
   preflightInFlight: boolean;
   preflightTimedOut: boolean;
+  intervention: AgentIntervention | null;
   sidecarHeld: boolean;
   ptyExitedMidRun: boolean;
   lastSeq: number;
@@ -46,6 +49,7 @@ export interface AgentActivityInput {
 interface AgentActivity {
   state: AgentActivityState;
   reason: AgentActivityReason | null;
+  intervention: AgentIntervention | null;
   sinceSeq: number;
   updatedAt: number;
 }
@@ -62,6 +66,7 @@ export function emptyActivityInput(): AgentActivityInput {
     promptInFlight: false,
     preflightInFlight: false,
     preflightTimedOut: false,
+    intervention: null,
     sidecarHeld: false,
     ptyExitedMidRun: false,
     lastSeq: 0,
@@ -70,11 +75,11 @@ export function emptyActivityInput(): AgentActivityInput {
 }
 
 export function activityView(activity: AgentActivity): AgentActivityView {
-  return { state: activity.state, reason: activity.reason };
+  return { state: activity.state, reason: activity.reason, intervention: activity.intervention };
 }
 
 export function activityKey(view: AgentActivityView): string {
-  return `${view.state}:${view.reason ?? ""}`;
+  return `${view.state}:${view.reason ?? ""}:${view.intervention?.requestId ?? ""}:${view.intervention?.since ?? ""}`;
 }
 
 /** True when settle-time stall-tracker stop is on `agent_settled.error`. */
@@ -164,10 +169,19 @@ export function applyActivityEvent(input: AgentActivityInput, event: ActivitySig
       }
       break;
     }
+    case "intervention_requested":
+      if (next.intervention?.requestId !== event.requestId) {
+        next.intervention = { requestId: event.requestId, kind: event.kind, since: event.since };
+      }
+      break;
+    case "intervention_resolved":
+      if (next.intervention?.requestId === event.requestId) next.intervention = null;
+      break;
     case "sidecar_hold":
       next.sidecarHeld = event.held;
       break;
     case "pty_exit":
+      next.intervention = null;
       if (next.lastBoundary === "agent_start" || next.preflightInFlight || next.preflightTimedOut) {
         next.ptyExitedMidRun = true;
       }
@@ -179,26 +193,31 @@ export function applyActivityEvent(input: AgentActivityInput, event: ActivitySig
   return next;
 }
 
-/** A live run or admission, distinct from a blocked but already settled run. */
+/** Live work, admission or a human picker; not a historical settled blocker. */
 export function hasLiveAgentWork(input: AgentActivityInput): boolean {
   return !input.ptyExitedMidRun && (
     input.lastBoundary === "agent_start"
     || input.openToolIds.length > 0
     || input.promptInFlight
     || input.preflightInFlight
+    || input.intervention !== null
   );
 }
 
 export function activityFor(input: AgentActivityInput): AgentActivity {
-  const since = (seq: number, at: number): Pick<AgentActivity, "sinceSeq" | "updatedAt"> => ({
+  const since = (seq: number, at: number): Pick<AgentActivity, "sinceSeq" | "updatedAt" | "intervention"> => ({
     sinceSeq: seq,
     updatedAt: at,
+    intervention: input.intervention,
   });
   if (input.sidecarHeld) {
     return { state: "blocked", reason: "sidecar-paused", ...since(input.lastSeq, input.lastAt) };
   }
   if (input.ptyExitedMidRun) {
     return { state: "blocked", reason: "exited-mid-run", ...since(input.lastSeq, input.lastAt) };
+  }
+  if (input.intervention) {
+    return { state: "blocked", reason: "permission-required", ...since(input.lastSeq, input.intervention.since) };
   }
   if (input.preflightTimedOut) {
     return { state: "blocked", reason: "lease-wait", ...since(input.lastSeq, input.lastAt) };

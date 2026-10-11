@@ -4,7 +4,7 @@ import { activateProjectContext } from "../../../src/main/project-activation";
 
 const folder: FolderOpenedPayload = {
   projectId: "project-B", workspaceId: "primary-B", cwd: "/projects/B", projectRoot: "/projects/B", primaryWorkspaceId: "primary-B",
-  activationGeneration: 2, needsLogin: false,
+  activationGeneration: 2, terminal: null, needsLogin: false,
 };
 
 function bindings(result: ProjectActivateResult = { ok: true, folder }) {

@@ -83,7 +83,7 @@ describe("plan board model chip", () => {
       getRecentModels: () => [{ provider: "xai", model: "grok-4" }],
       getLiveModels: () => ["google/gemini-3.7-flash"],
     });
-    activity.renderPlan(pane, false);
+    activity.renderPlan(pane);
     return { pane, activity };
   }
 

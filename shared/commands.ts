@@ -34,7 +34,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "copy", label: "Copy", category: "Edit", description: "Copy from the focused surface", defaultShortcut: "CmdOrCtrl+C", scope: "renderer" },
   { command: "paste", label: "Paste", category: "Edit", description: "Paste into the focused surface", defaultShortcut: "CmdOrCtrl+V", scope: "renderer" },
   { command: "select-all", label: "Select all", category: "Edit", description: "Select all in the focused surface", defaultShortcut: "CmdOrCtrl+A", scope: "renderer" },
-  { command: "new-terminal", label: "New terminal", category: "Terminal", description: "Open a shell or agent terminal", defaultShortcut: "CmdOrCtrl+T", scope: "renderer" },
+  { command: "new-terminal", label: "New agent", category: "Terminal", description: "Create an agent in the current project", defaultShortcut: "CmdOrCtrl+T", scope: "renderer" },
   { command: "close-terminal", label: "Close terminal", category: "Terminal", description: "Close the active terminal", defaultShortcut: "CmdOrCtrl+Shift+W", scope: "main" },
   { command: "abort-terminal", label: "Abort terminal", category: "Terminal", description: "Send an interrupt to the active terminal", defaultShortcut: "CmdOrCtrl+.", scope: "main" },
   { command: "toggle-thinking", label: "Toggle Thinking", category: "Terminal", description: "Show or hide provider thinking in core terminals", defaultShortcut: "CmdOrCtrl+Shift+H", scope: "renderer" },

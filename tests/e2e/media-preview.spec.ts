@@ -194,6 +194,9 @@ test("binary image rewrites refresh the preview and recover from damaged content
 
 test("PDF exposes native navigation and zoom controls", async ({ page, electronApp }) => {
   await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+  // At fit width both fixture pages can fit in a tall viewport. Keep this
+  // navigation fixture short enough that changing pages must actually scroll.
+  await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1200, 600));
   await page.locator('#explorer-tree .explorer-row[data-path$="/pages.pdf"]').click();
   await expect(page.locator('.editor-preview iframe[title="pages.pdf"]')).toBeVisible();
   await expect.poll(() => electronApp.evaluate(({ webContents }) => webContents.getAllWebContents().flatMap((wc) => wc.mainFrame.framesInSubtree.map((f) => f.url)).join("\n"))).toContain("chrome-extension://");
@@ -204,12 +207,22 @@ test("PDF exposes native navigation and zoom controls", async ({ page, electronA
   await expect.poll(() => inViewer(`!document.querySelector('pdf-viewer').shadowRoot.querySelector('#toolbar').hidden`)).toBe(true);
   const toolbar = `document.querySelector('pdf-viewer').shadowRoot.querySelector('#toolbar').shadowRoot`;
   const zoomInput = `${toolbar}.querySelector('input[aria-label="Zoom level"]')`;
+  const viewportZoom = `document.querySelector('pdf-viewer').viewport.getZoom()`;
+  await expect.poll(() => inViewer(`document.querySelector('pdf-viewer').shadowRoot.querySelector('#toolbar').loadProgress`)).toBe(100);
+  // Fit zoom need not be a preset, so zoom in/out cannot promise a round trip.
+  // Start from actual size and verify the viewport, not only the input's text.
+  await inViewer(`(() => { const input = ${zoomInput}; input.value = '100'; input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await expect.poll(() => inViewer(viewportZoom)).toBe(1);
+  await expect.poll(() => inViewer(`${zoomInput}.value`)).toBe("100%");
   const zoomBefore = await inViewer(`${zoomInput}.value`);
   await inViewer(`${toolbar}.querySelector('[aria-label="Zoom in"]').click()`);
+  await expect.poll(() => inViewer(viewportZoom)).toBeGreaterThan(1);
   await expect.poll(() => inViewer(`${zoomInput}.value`)).not.toBe(zoomBefore);
   await inViewer(`${toolbar}.querySelector('[aria-label="Zoom out"]').click()`);
+  await expect.poll(() => inViewer(viewportZoom)).toBe(1);
   await expect.poll(() => inViewer(`${zoomInput}.value`)).toBe(zoomBefore);
   await inViewer(`${toolbar}.querySelector('#fit').click()`);
+  await expect.poll(() => inViewer(`document.querySelector('pdf-viewer').viewport.documentHasScrollbars().vertical`)).toBe(true);
   const pageSelector = `${toolbar}.querySelector('viewer-page-selector').shadowRoot`;
   await expect.poll(() => inViewer(`${pageSelector}.querySelector('#pagelength').textContent.trim()`)).toBe("2");
   await inViewer(`(() => { const input = ${pageSelector}.querySelector('input'); input.value = '2'; input.dispatchEvent(new Event('change', { bubbles: true })); })()`);

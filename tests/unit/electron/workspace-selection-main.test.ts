@@ -6,6 +6,8 @@ import { isAbsolute, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import ts from "typescript";
 import { parseTerminalTarget } from "../../../electron/main/ipc-validate.ts";
+import { chooseProjectTerminal } from "../../../electron/main/project-entry.ts";
+import { emptyActivityInput, type AgentActivityInput } from "../../../electron/agent-activity.ts";
 import { isPtyRendererSendTargetCurrent, type PtyRendererSendTarget } from "../../../electron/pty-egress.ts";
 import type { FolderOpenedPayload, ProjectActivateResult, ProjectWorkspaceRef, ExplorerEntry, ContentHit } from "../../../shared/types.ts";
 import { ProjectPathIndex, SearchGenerations, searchProjectFiles } from "../../../electron/quick-open.ts";
@@ -14,7 +16,7 @@ import { validateGrepPattern } from "../../../shared/grep-pattern.ts";
 
 // Exercise production orchestration without importing Electron or touching host sessions.
 const source = ts.createSourceFile("main.ts", readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-const names = ["selectTerminal", "selectedTerminal", "activateProject", "displayedWorkspace", "sendFolderOpened", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration", "projectWorkspace", "explorerWorkspace", "explorerWorkspaceIsLive", "mutateExplorer", "listDir", "searchProjectFiles", "searchProjectContent"];
+const names = ["selectTerminal", "selectedTerminal", "activateProject", "displayedWorkspace", "sendFolderOpened", "projectNavigationTerminal", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration", "projectWorkspace", "explorerWorkspace", "explorerWorkspaceIsLive", "mutateExplorer", "listDir", "searchProjectFiles", "searchProjectContent"];
 const methods = new Map<string, string>();
 function visit(node: ts.Node): void {
   if (ts.isMethodDeclaration(node) && names.includes(node.name.getText(source))) methods.set(node.name.getText(source), node.getText(source));
@@ -24,15 +26,16 @@ visit(source);
 if (methods.size !== names.length) throw new Error("workspace-selection main methods are missing");
 const compiled = ts.transpile(`class Main { ${[...methods.values()].join("\n")} } return new Main();`, { target: ts.ScriptTarget.ES2022 });
 interface Workspace { id: string; root: string; primary: boolean; writerId?: string | null }
-interface Terminal { id: string; generation: number; projectId: string; workspaceId: string; closed: boolean }
-interface Project { id: string; cwd: string; activationGeneration: number; workspaces: Map<string, Workspace> }
+interface Terminal { id: string; generation: number; projectId: string; workspaceId: string; closed: boolean; type: "agent" | "shell"; pty: { hasExited: boolean } }
+interface Project { id: string; cwd: string; activationGeneration: number; workspaces: Map<string, Workspace>; lastTerminal?: { id: string; generation: number } }
 interface Harness {
   projects: Map<string, Project>; runtime: Map<string, Terminal>; workspaceOwners: Map<string, string>;
   switchingProjects: Set<string>; projectClosePromises: Map<string, Promise<unknown>>;
   activeProjectId: string; disposed: boolean; projectActivationGeneration: number;
   selectTerminal(id: unknown, generation: unknown): Promise<ProjectActivateResult>;
   selectedTerminal(): Terminal | null;
-  activateProject(id: string): Promise<FolderOpenedPayload | null>;
+  activityInputs: Map<string, AgentActivityInput>;
+  activateProject(id: string, target?: PtyRendererSendTarget | null, action?: number, workspace?: string, selection?: { id: string; generation: number }, intent?: "entry" | "context"): Promise<FolderOpenedPayload | null>;
   agentNeedsLogin(): Promise<boolean>; captureRendererSendTarget(): PtyRendererSendTarget | null;
   send: ReturnType<typeof vi.fn>; persistOpenProjects: ReturnType<typeof vi.fn>;
   listDir(owner: unknown, path: string): Promise<{ entries: ExplorerEntry[]; error?: string }>;
@@ -49,10 +52,10 @@ function fixture() {
   const primary: Workspace = { id: "primary", root: "/source", primary: true };
   const candidate: Workspace = { id: "candidate", root: "/worlds/cmp-1/A", primary: false };
   const project: Project = { id: "project", cwd: primary.root, activationGeneration: 0, workspaces: new Map([[primary.id, primary], [candidate.id, candidate]]) };
-  const worker: Terminal = { id: "term-worker", generation: 7, projectId: project.id, workspaceId: candidate.id, closed: false };
+  const worker: Terminal = { id: "term-worker", generation: 7, projectId: project.id, workspaceId: candidate.id, closed: false, type: "agent", pty: { hasExited: false } };
   const owner: Terminal = { ...worker, id: "term-owner", workspaceId: primary.id };
   const bindings = {
-    parseTerminalTarget, isPtyRendererSendTargetCurrent, randomUUID, readdir,
+    parseTerminalTarget, isPtyRendererSendTargetCurrent, chooseProjectTerminal, randomUUID, readdir,
     fsRealpath: realpath, relative, isAbsolute, join, IGNORED_SEGMENTS: new Set(), MAX_EXPLORER_ENTRIES: 1000,
     searchProjectFiles, validateGrepPattern,
     searchProjectContent: (root: string, pattern: string, options: Parameters<typeof searchProjectContent>[2]) =>
@@ -61,7 +64,7 @@ function fixture() {
   const main = new Function(...Object.keys(bindings), compiled)(...Object.values(bindings)) as Harness;
   let target: PtyRendererSendTarget | null = renderer();
   Object.assign(main, {
-    projects: new Map([[project.id, project]]), runtime: new Map([[worker.id, worker], [owner.id, owner]]),
+    projects: new Map([[project.id, project]]), runtime: new Map([[worker.id, worker], [owner.id, owner]]), activityInputs: new Map(),
     workspaceOwners: new Map([[primary.id, project.id], [candidate.id, project.id]]),
     switchingProjects: new Set(), projectClosePromises: new Map(), disposed: false,
     activeProjectId: project.id, projectSelectionAction: 0, projectSelectionActionSeq: 0, projectActivationGeneration: 0,
@@ -95,7 +98,7 @@ describe("main canonical workspace selection", () => {
     releases[0]!(false);
     const result = await first;
     expect(await second).toEqual(result);
-    expect(result).toEqual({ ok: true, folder: { cwd: candidate.root, projectRoot: primary.root, primaryWorkspaceId: primary.id, projectId: project.id, workspaceId: candidate.id, activationGeneration: 1, needsLogin: false } });
+    expect(result).toEqual({ ok: true, folder: { cwd: candidate.root, projectRoot: primary.root, primaryWorkspaceId: primary.id, projectId: project.id, workspaceId: candidate.id, activationGeneration: 1, terminal: { id: worker.id, generation: worker.generation }, needsLogin: false } });
     expect(main.selectedTerminal()).toBe(worker);
     expect(project.cwd).toBe(primary.root);
     expect(primary.primary).toBe(true);
@@ -174,6 +177,102 @@ describe("main canonical workspace selection", () => {
     expect(await selection).toEqual({ ok: false });
     expect(main.send).not.toHaveBeenCalled();
     if (kind === "renderer-replaced" || kind === "closed" || kind === "recycled") expect(main.selectedTerminal()).toBeNull();
+  });
+});
+
+function intervention(main: Harness, terminal: Terminal, since: number): void {
+  main.activityInputs.set(terminal.id, { ...emptyActivityInput(),
+    intervention: { requestId: `approval-${terminal.id}`, kind: "permission", since } });
+}
+const enter = (main: Harness, project: Project) => main.activateProject(project.id, undefined, undefined, undefined, undefined, "entry");
+
+describe("main terminal-first project entry", () => {
+  it("selects the oldest real permission across workspaces, but explicit tabs still open exactly their target", async () => {
+    const { main, project, owner, worker, candidate, primary } = fixture();
+    await main.selectTerminal(owner.id, owner.generation);
+    intervention(main, owner, 2000); intervention(main, worker, 1000);
+    expect(await enter(main, project)).toMatchObject({ cwd: candidate.root, workspaceId: candidate.id,
+      terminal: { id: worker.id, generation: worker.generation } });
+    expect(main.selectedTerminal()).toBe(worker);
+    expect((await main.selectTerminal(owner.id, owner.generation))).toMatchObject({ ok: true,
+      folder: { workspaceId: primary.id, terminal: { id: owner.id, generation: owner.generation } } });
+    expect(main.selectedTerminal()).toBe(owner);
+  });
+
+  it("restores the remembered terminal rather than any non-human blocked state", async () => {
+    const { main, project, owner, worker } = fixture();
+    await main.selectTerminal(owner.id, owner.generation);
+    main.activityInputs.set(worker.id, { ...emptyActivityInput(), lastBoundary: "agent_start", errorStreak: 3, errorStreakTarget: "failed-tool" });
+    expect((await enter(main, project))?.terminal?.id).toBe(owner.id);
+    expect(main.selectedTerminal()).toBe(owner);
+  });
+
+  it("uses current permissions after auth, not a resolved permission observed when entry started", async () => {
+    const { main, project, owner, worker } = fixture();
+    await main.selectTerminal(owner.id, owner.generation);
+    intervention(main, worker, 1000);
+    const releases = pendingAuth(main);
+    const pending = enter(main, project);
+    main.activityInputs.get(worker.id)!.intervention = null;
+    releases[0]!(false);
+    expect((await pending)?.terminal?.id).toBe(owner.id);
+  });
+
+  it("includes a newly requested permission before admission but never changes selection just for a notification", async () => {
+    const { main, project, owner, worker } = fixture();
+    await main.selectTerminal(owner.id, owner.generation);
+    const before = main.send.mock.calls.length;
+    intervention(main, worker, 1000);
+    expect(main.selectedTerminal()).toBe(owner);
+    expect(main.send.mock.calls).toHaveLength(before);
+    const releases = pendingAuth(main); const pending = enter(main, project);
+    intervention(main, owner, 500);
+    releases[0]!(false);
+    expect((await pending)?.terminal?.id).toBe(owner.id);
+  });
+
+  it.each(["closed", "exited", "missing workspace", "foreign project", "shell"] as const)("does not prioritize an unavailable %s permission", async (reason) => {
+    const { main, project, owner, worker, candidate } = fixture();
+    await main.selectTerminal(owner.id, owner.generation);
+    intervention(main, worker, 1000);
+    if (reason === "closed") worker.closed = true;
+    if (reason === "exited") worker.pty = { hasExited: true };
+    if (reason === "missing workspace") project.workspaces.delete(candidate.id);
+    if (reason === "foreign project") worker.projectId = "another";
+    if (reason === "shell") worker.type = "shell";
+    expect((await enter(main, project))?.terminal?.id).toBe(owner.id);
+  });
+
+  it("breaks equal ages by stable terminal order, not recency", async () => {
+    const { main, project, owner, worker } = fixture();
+    await main.selectTerminal(owner.id, owner.generation);
+    intervention(main, owner, 1000); intervention(main, worker, 1000);
+    expect((await enter(main, project))?.terminal?.id).toBe(worker.id);
+  });
+
+  it("falls back from a recycled remembered generation to the first available terminal", async () => {
+    const { main, project, owner, worker } = fixture();
+    await main.selectTerminal(owner.id, owner.generation);
+    main.runtime.set(owner.id, { ...owner, generation: 8 });
+    expect((await enter(main, project))?.terminal?.id).toBe(worker.id);
+  });
+
+  it("publishes an empty project without creating a terminal", async () => {
+    const { main, project, primary } = fixture(); main.runtime.clear();
+    expect(await enter(main, project)).toMatchObject({ workspaceId: primary.id, terminal: null });
+    expect(main.selectedTerminal()).toBeNull();
+    expect(main.runtime.size).toBe(0);
+  });
+
+  it("does not let a late entry override a newer explicit terminal selection", async () => {
+    const { main, project, owner, worker } = fixture();
+    intervention(main, worker, 1000);
+    const releases = pendingAuth(main);
+    const old = enter(main, project);
+    const newer = main.selectTerminal(owner.id, owner.generation);
+    releases[1]!(false); expect((await newer).ok).toBe(true);
+    releases[0]!(false); expect(await old).toBeNull();
+    expect(main.selectedTerminal()).toBe(owner); expect(main.send).toHaveBeenCalledOnce();
   });
 });
 

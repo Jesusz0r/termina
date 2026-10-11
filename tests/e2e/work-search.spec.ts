@@ -1,13 +1,10 @@
 import { test, expect } from "./fixtures.ts";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { writeFile, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { Page } from "@playwright/test";
 import type { PlanTask } from "../../shared/types.ts";
 import type { editor } from "monaco-editor";
-import { sanitizeSessionDir } from "../../electron/main/project-workspace.ts";
-import { rosterFilePath } from "../../electron/roster-store.ts";
+import { savedPlanProject } from "./saved-plan-project.ts";
 
 const chord = process.platform === "darwin" ? "Meta+k" : "Control+k";
 const taskText = "Synthetic saved task: Repair <parser> & tokens";
@@ -25,21 +22,7 @@ async function activeProject(page: Page) {
 }
 
 async function seedProject(page: Page, projectRoot: string, runRoot: string, index: number, owners = 1) {
-  const parent = join(runRoot, `jump-${index}-<saved>&`);
-  await mkdir(parent);
-  const root = join(parent, basename(projectRoot));
-  execFileSync("git", ["clone", "-q", "--no-hardlinks", projectRoot, root]);
-  const instances = await page.evaluate(() => window.termina.getInstances());
-  const next = Math.max(0, ...instances.map((instance) => Number(instance.id.slice(5)))) + 1;
-  // Synthetic saved tasks, not executed workers. The real roster parser and
-  // canonical project open path supply all overview data and identities.
-  const boards = Array.from({ length: owners }, (_, owner) => ({
-    id: `term-${next + owner}`, type: "agent", engine: "core", plan: [savedTask()],
-  }));
-  await writeFile(rosterFilePath(join(runRoot, "user-data"), sanitizeSessionDir(realpathSync(root))), JSON.stringify({ terminals: boards }));
-  expect(await page.evaluate((root) => window.termina.projectOpenPath(root), root)).toMatchObject({ cwd: root });
-  await expect.poll(() => page.evaluate(async (ids) => Promise.all(ids.map((id) => window.termina.getPlan(id))), boards.map((board) => board.id))).toEqual(boards.map((board) => board.plan));
-  return { project: await activeProject(page), owners: boards.map((board) => board.id) };
+  return savedPlanProject(page, projectRoot, runRoot, index, Array.from({ length: owners }, () => [savedTask()]));
 }
 
 async function palette(page: Page, query: string) {
@@ -99,19 +82,19 @@ test("keyboard task search distinguishes same-name background projects and prese
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
   await expect(modal).toBeHidden();
-  const inspector = page.locator("#project-work-inspector");
   await expect(page.locator("#attention-view")).toBeVisible();
-  await expect(inspector.locator(".overview-inspector-title")).toHaveText(taskText);
-  await expect(inspector).toContainText(first.project.cwd);
-  await expect(inspector).toContainText(first.owners[0]!);
-  await expect(inspector.getByRole("button", { name: "Focus task", exact: true })).toBeDisabled();
+  await expect(page.locator("#project-work-inspector, #project-details")).toHaveCount(0);
+  await expect.poll(() => page.evaluate((id) => (window as unknown as {
+    __panes: Map<string, { tabEl: HTMLElement }>;
+  }).__panes.get(id)?.tabEl.classList.contains("active"), first.owners[0]!)).toBe(true);
+  const task = page.locator("#plan-list .plan-task").filter({ hasText: taskText });
+  await expect(task.locator(".plan-text")).toHaveText(taskText);
+  await expect(task.locator(".plan-task-action")).toBeFocused();
+  // Task results activate the exact existing Plan Board owner, never execute it.
   expect((await activeProject(page)).id).toBe(first.project.id);
   expect(await terminalIdentities(page)).toEqual(identities);
   expect(await page.evaluate(async (ids) => Promise.all(ids.map((id) => window.termina.getPlan(id))), [...first.owners, ...second.owners])).toEqual(plans);
   expect(await readFile(join(second.project.cwd, "greeting.ts"), "utf8")).toBe(originalSource);
-  await page.keyboard.press("Escape");
-  await page.keyboard.press("Escape");
-  await expect(page.locator("#attention-view")).toBeHidden();
   await page.locator(`#project-tabs .project-tab[data-project-id="${second.project.id}"] .project-select`).click();
   await expect.poll(() => activeProject(page).then((project) => project.id)).toBe(second.project.id);
   await expect.poll(() => page.evaluate(() => (window as unknown as EditorWindow).__editorMgr.editor.getModel()?.getValue())).toBe(draft);
@@ -135,7 +118,7 @@ test("project result activates the canonical project, rail, editor and terminal 
   await expect(modal).toBeHidden();
   await expect.poll(() => activeProject(page).then((project) => project.id)).toBe(first.project.id);
   await expect(page.locator(`#project-tabs .project-tab[data-project-id="${first.project.id}"] .project-select`)).toHaveAttribute("aria-current", "page");
-  await expect(page.locator("#attention-view")).toBeHidden();
+  await expect(page.locator("#attention-view")).toBeVisible();
   await page.locator("#explorer-tree .explorer-row").filter({ hasText: "greeting.ts" }).dblclick();
   await expect.poll(() => page.evaluate(() => (window as unknown as EditorWindow).__editorMgr.editor.getModel()?.getValue())).toBe("// first project source\n");
   const overview = await page.evaluate(() => window.termina.getWorkOverview());
@@ -144,7 +127,7 @@ test("project result activates the canonical project, rail, editor and terminal 
   expect(await terminalIdentities(page)).toEqual(identities);
 });
 
-test("duplicate task text selects the exact plan owner and existing commands still execute", async ({ page, projectRoot, runRoot }) => {
+test("duplicate task text selects the exact plan owner without executing tasks or fetching evidence; existing commands still execute", async ({ page, electronApp, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const target = await seedProject(page, projectRoot, runRoot, 1, 2);
   const background = await seedProject(page, projectRoot, runRoot, 2);
@@ -153,21 +136,53 @@ test("duplicate task text selects the exact plan owner and existing commands sti
   await expect(modal.locator(".search-hit")).toHaveCount(3);
   const exact = modal.locator(".search-hit").filter({ hasText: target.project.cwd }).filter({ hasText: target.owners[1]! });
   await expect(exact).toHaveCount(1);
-  await exact.click();
-  await expect(page.locator(".overview-inspector-title")).toHaveText(taskText);
-  await expect(page.locator("#project-work-inspector")).toContainText(target.project.cwd);
-  await expect(page.locator("#project-work-inspector")).toContainText(target.owners[1]!);
-  expect((await activeProject(page)).id).toBe(target.project.id);
-  await page.locator("#project-work-inspector").getByRole("button", { name: "Open plan", exact: true }).click();
-  expect((await activeProject(page)).id).toBe(target.project.id);
-  await expect(page.locator("#plan-list .plan-task")).toHaveCount(1);
-  await expect(page.locator("#plan-list")).toContainText(taskText);
-  const command = await palette(page, "Quick open");
-  await expect(command.locator(".search-hit .search-text")).toHaveText("Quick open");
-  await page.keyboard.press("Enter");
-  await expect(command.locator(".modal-title")).toHaveText("Quick Open");
-  await expect(command.locator(".search-input")).toBeFocused();
-  await page.keyboard.press("Escape");
+  const identities = await terminalIdentities(page);
+  const plans = await page.evaluate(async (ids) => Promise.all(ids.map((id) => window.termina.getPlan(id))), target.owners);
+  await electronApp.evaluate(({ ipcMain }) => {
+    type Invoke = (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown;
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, Invoke> })._invokeHandlers;
+    const channels = ["dispatch:run", "verify:run", "verify:report", "review:baseline", "worldline:details", "worldline:file", "worldline:base-file"];
+    const originals = new Map(channels.map((channel) => {
+      const handler = handlers.get(channel);
+      if (!handler) throw new Error(`Missing canonical handler: ${channel}`);
+      return [channel, handler] as const;
+    }));
+    const probe = { calls: [] as string[], restore: () => {
+      for (const [channel, handler] of originals) handlers.set(channel, handler);
+    } };
+    for (const [channel, handler] of originals) handlers.set(channel, (event, ...args) => {
+      probe.calls.push(channel);
+      return handler(event, ...args);
+    });
+    (globalThis as SearchProbeGlobal).__workSearchProbe = probe;
+  });
+  try {
+    await exact.click();
+    await expect(page.locator("#attention-view")).toBeVisible();
+    await expect(page.locator("#project-work-inspector, #project-details")).toHaveCount(0);
+    await expect.poll(() => page.evaluate((id) => (window as unknown as {
+      __panes: Map<string, { tabEl: HTMLElement }>;
+    }).__panes.get(id)?.tabEl.classList.contains("active"), target.owners[1]!)).toBe(true);
+    await expect(page.locator("#plan-list .plan-task-action")).toBeFocused();
+    expect((await activeProject(page)).id).toBe(target.project.id);
+    await expect(page.locator("#plan-list .plan-task")).toHaveCount(1);
+    await expect(page.locator("#plan-list")).toContainText(taskText);
+    expect(await terminalIdentities(page)).toEqual(identities);
+    expect(await page.evaluate(async (ids) => Promise.all(ids.map((id) => window.termina.getPlan(id))), target.owners)).toEqual(plans);
+    expect(await electronApp.evaluate(() => (globalThis as SearchProbeGlobal).__workSearchProbe?.calls)).toEqual([]);
+    const command = await palette(page, "Quick open");
+    await expect(command.locator(".search-hit .search-text")).toHaveText("Quick open");
+    await page.keyboard.press("Enter");
+    await expect(command.locator(".modal-title")).toHaveText("Quick Open");
+    await expect(command.locator(".search-input")).toBeFocused();
+    await page.keyboard.press("Escape");
+  } finally {
+    await electronApp.evaluate(() => {
+      const state = globalThis as SearchProbeGlobal;
+      state.__workSearchProbe?.restore();
+      delete state.__workSearchProbe;
+    });
+  }
 });
 
 test("compact native 200 percent zoom supports keyboard cancellation without activation", async ({ page, electronApp, projectRoot, runRoot }) => {
@@ -180,7 +195,7 @@ test("compact native 200 percent zoom supports keyboard cancellation without act
     win.setSize(1000, 720);
     win.webContents.setZoomFactor(2);
   });
-  const opener = page.locator("#btn-all-projects");
+  const opener = page.locator("#btn-refresh-attention");
   await opener.focus();
   const modal = await palette(page, "repair");
   await expect(modal.locator(".search-hit")).toHaveCount(1);
@@ -198,6 +213,7 @@ test("compact native 200 percent zoom supports keyboard cancellation without act
 
 interface OverviewGate { waiting: boolean; release(): void; restore(): void }
 type GateGlobal = typeof globalThis & { __workSearchGate?: OverviewGate };
+type SearchProbeGlobal = typeof globalThis & { __workSearchProbe?: { calls: string[]; restore(): void } };
 
 test("a closed pending task is refused after a held genuine overview response", async ({ page, electronApp, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
@@ -213,23 +229,24 @@ test("a closed pending task is refused after a held genuine overview response", 
     if (!original) throw new Error("Missing canonical work:overview handler");
     let release!: () => void;
     const ready = new Promise<void>((resolve) => { release = resolve; });
-    let held = false;
     const gate: OverviewGate = {
       waiting: false, release,
       restore: () => { release(); handlers.set("work:overview", original); delete (globalThis as GateGlobal).__workSearchGate; },
     };
     handlers.set("work:overview", async (event, ...args) => {
-      const hold = !held;
-      if (hold) held = true;
-      // Preserve the genuine guarded result and root ownership; delay delivery only.
+      // Preserve genuine guarded results and root ownership; delay delivery only.
+      // Hold every response so the persistent section's own refresh cannot
+      // consume a one-shot gate intended for pending search navigation.
       const result = await original(event, ...args);
-      if (hold) { gate.waiting = true; await ready; }
+      gate.waiting = true;
+      await ready;
       return result;
     });
     (globalThis as GateGlobal).__workSearchGate = gate;
   });
   try {
     await modal.locator(".search-hit").filter({ hasText: target.project.cwd }).click();
+    await expect(modal.locator(".search-status")).toContainText("Opening work");
     await expect.poll(() => electronApp.evaluate(() => (globalThis as GateGlobal).__workSearchGate?.waiting)).toBe(true);
     // Invoke the existing close button while the modal owns pointer input. No
     // fabricated overview data, direct state changes, or weakened IPC checks.
@@ -242,7 +259,8 @@ test("a closed pending task is refused after a held genuine overview response", 
     await electronApp.evaluate(() => (globalThis as GateGlobal).__workSearchGate?.release());
     await expect(modal).toBeVisible();
     await expect(modal.locator(".search-status")).toContainText(/changed|closed|unavailable/i);
-    await expect(page.locator("#project-work-inspector")).toBeHidden();
+    await expect(page.locator("#project-work-inspector, #project-details")).toHaveCount(0);
+    await expect(page.locator("#attention-view")).toBeVisible();
     expect((await activeProject(page)).id).toBe(current.project.id);
     expect(await terminalIdentities(page)).toEqual(identities.filter((terminal) => !target.owners.includes(terminal.id)));
     await modal.locator(".search-input").fill("test-project");

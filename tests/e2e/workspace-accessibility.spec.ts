@@ -102,29 +102,26 @@ for (const theme of THEME_IDS) {
         window.webContents.setZoomFactor(2);
       });
       await page.emulateMedia({ reducedMotion: "reduce" });
-      const opener = page.locator("#btn-all-projects");
-      await opener.focus();
-      await page.keyboard.press("Enter");
-      const region = page.getByRole("region", { name: "Attention across all projects", exact: true });
-      await expect(page.getByRole("button", { name: "Close attention", exact: true })).toBeFocused();
+      const region = page.locator("#project-bar #attention-view");
+      await expect(region).toBeVisible();
+      await expect(region.locator("#attention-heading")).toContainText("Attention");
       await expect(region.locator(".attention-inspect")).toHaveCount(2);
       const inspection = region.locator(`.attention-item[data-project-id="${projectA.id}"] .attention-inspect`);
       await expect(inspection).toHaveAccessibleDescription(new RegExp(projectA.cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
       await expect(inspection).toHaveAccessibleDescription(/Shared project files/);
-      // Opening can initially render the cached failed-check row. Its identity
-      // legitimately changes when the current stale projection arrives, moving
-      // focus to Refresh. Traverse the current item, not that obsolete control.
+      // Wait for the current stale projection before traversing its controls.
       await expect(inspection.locator("..").locator("h3")).toHaveText("Verify is outdated");
       const focusInspection = async () => {
-        await page.keyboard.press("Tab");
-        await expect(region.getByRole("button", { name: "Refresh", exact: true })).toBeFocused();
+        const refresh = region.getByRole("button", { name: "Refresh", exact: true });
+        await refresh.focus();
+        await expect(refresh).toBeFocused();
         await page.keyboard.press("Tab");
         await expect(region.locator(".attention-inspect").first()).toBeFocused();
         if (!(await inspection.evaluate((element) => element === document.activeElement))) await page.keyboard.press("Tab");
         await expect(inspection).toBeFocused();
       };
       await focusInspection();
-      const samples = await visibleColors(page, "#attention-view h2, #attention-view h3, #attention-view p:not(:empty), #attention-view button, #project-tabs .project-path, #project-tabs .project-counts, #btn-all-projects");
+      const samples = await visibleColors(page, "#attention-view h2, #attention-view h3, #attention-view p:not(:empty), #attention-view button, #project-tabs .project-path, #project-tabs .project-counts, #btn-new-project");
       for (const sample of samples) expect(contrastRatio(sample.foreground, sample.background), JSON.stringify(sample)).toBeGreaterThanOrEqual(4.5);
       await expect(inspection).toHaveCSS("outline-style", "solid");
       const geometry = await region.evaluate((element) => {
@@ -138,15 +135,14 @@ for (const theme of THEME_IDS) {
       expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
       expect(geometry.animations).toBe(0);
       await page.keyboard.press("Escape");
-      await expect(opener).toBeFocused();
+      await expect(region).toBeVisible();
+      await expect(inspection).toBeFocused();
       await page.keyboard.press("Enter");
-      await focusInspection();
-      await page.keyboard.press("Enter");
-      await expect(region).toBeHidden();
+      await expect(region).toBeVisible();
       await expect.poll(() => page.evaluate(() => window.termina.projectList().then((projects) => projects.find((project) => project.active)?.id))).toBe(projectA.id);
-      await expect(page.locator(".work-summary-report")).toContainText("**Status:** ⚠️ OUTDATED");
-      await expect(page.locator(".work-summary-report")).toContainText("Historical execution");
-      await expect(page.locator(".work-summary-report")).toContainText("exit code 7");
+      await expect(page.locator(".checks-report")).toContainText("**Status:** ⚠️ OUTDATED");
+      await expect(page.locator(".checks-report")).toContainText("Historical execution");
+      await expect(page.locator(".checks-report")).toContainText("exit code 7");
       await expect(page.getByRole("textbox", { name: "Terminal input", exact: true })).toHaveCount(1);
       expect(await readVerifyStages(projectRoot)).toHaveLength(1);
       expect(await readVerifyStages(rootB)).toHaveLength(1);
