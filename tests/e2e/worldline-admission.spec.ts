@@ -215,6 +215,19 @@ test.describe("Candidate admission through the real sandbox", () => {
     expect(candidates).toHaveLength(2);
     expect(candidates.every((c) => c.role === "session" && c.sourceRunId === null && c.state === "ready")).toBe(true);
     expect(new Set(candidates.map((c) => c.root)).size).toBe(2);
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(960, 800));
+    await expect(page.locator(".terminal-tab:visible")).toHaveCount(3);
+    for (const id of [owner.id, ...created.map((result) => result.id!)]) {
+      await page.evaluate((id) => {
+        const panes = (window as unknown as { __panes: Map<string, { tabEl: HTMLElement }> }).__panes;
+        panes.get(id)!.tabEl.click();
+      }, id);
+      await expect.poll(() => page.locator(".terminal-tab.active").evaluate((tab) => {
+        const box = tab.getBoundingClientRect();
+        const bounds = tab.parentElement!.getBoundingClientRect();
+        return box.left >= bounds.left - 1 && box.right <= bounds.right + 1;
+      })).toBe(true);
+    }
     await page.evaluate((id) => window.termina.writeTerminal(id, "keep-primary-working-e2e\r"), owner.id);
     await expect.poll(() => primaryResponse !== null).toBe(true);
     for (let index = 0; index < candidates.length; index++) {

@@ -25,6 +25,7 @@ for (const kind of ["project", "terminal"] as const) {
     await tabs.evaluateAll((elements) => elements.forEach((el, i) => el.setAttribute("data-reorder-test", String(i))));
     const order = () => tabs.evaluateAll((elements) => elements.map((el) => el.getAttribute("data-reorder-test")));
     await expect(tabs.first()).toHaveCSS("cursor", "default");
+    await tabs.first().scrollIntoViewIfNeeded();
     const first = (await tabs.first().boundingBox())!;
     const last = (await tabs.last().boundingBox())!;
     const vertical = kind === "project";

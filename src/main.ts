@@ -1140,7 +1140,10 @@ function showPane(pane: Pane): void {
   // double SIGWINCH is the tab-switch flicker/size jump.
   pane.view.focus();
   requestAnimationFrame(() => {
-    if (activeId === instanceId) pane.view.fit();
+    if (activeId === instanceId) {
+      pane.tabEl.scrollIntoView({ block: "nearest", inline: "nearest" });
+      pane.view.fit();
+    }
   });
   renderChrome();
   timelinePane.renderTimeline();
