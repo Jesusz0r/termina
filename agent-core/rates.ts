@@ -53,7 +53,6 @@ export const STORAGE_RATE_UNITS = [
 ] as const;
 
 export type RateField = (typeof RATE_FIELDS)[number];
-export type TokenRateField = (typeof TOKEN_RATE_FIELDS)[number];
 export type CacheWriteTtlClass = (typeof CACHE_WRITE_TTL_CLASSES)[number];
 export type ReasoningBillingRelation = (typeof REASONING_BILLING_RELATIONS)[number];
 export type TokenRateUnit = (typeof TOKEN_RATE_UNITS)[number];
