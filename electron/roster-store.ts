@@ -40,6 +40,8 @@ export interface RosterTerminal {
 /** Live reads into main-owned state, evaluated at call time. */
 export interface TerminalRosterHost {
   usableModel(model: string | null | undefined): string | null;
+  /** A failed save keeps the previous file. The host tells the user. */
+  rosterSaveFailed?(message: string): void;
 }
 
 /** Roster file for a project session key (see sanitizeSessionDir in main). */
@@ -159,7 +161,9 @@ export class TerminalRosterStore {
       }
     });
     const settled = commit.catch((err) => {
-      console.warn(`[main] could not save terminal roster: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      console.warn(`[main] could not save terminal roster: ${message}`);
+      this.host.rosterSaveFailed?.(message);
     });
     this.commits.set(path, settled);
     void settled.then(() => {

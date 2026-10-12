@@ -530,6 +530,23 @@ let rendererLoadGenerationSeq = 0;
 
 class TerminaApp {
   private win: BrowserWindow | null = null;
+  private rosterSaveNotice: Promise<void> | null = null;
+
+  private noteRosterSaveFailure(message: string): void {
+    if (this.rosterSaveNotice || this.disposed) return;
+    const payload: MessageBoxOptions = {
+      type: "warning",
+      message: "The terminal list could not be saved",
+      detail: `${message}\n\nOpen terminals stay in this session. A restart restores the last saved list.`,
+    };
+    const win = this.win;
+    this.rosterSaveNotice = (win ? dialog.showMessageBox(win, payload) : dialog.showMessageBox(payload))
+      .then(() => undefined, () => undefined)
+      .finally(() => {
+        this.rosterSaveNotice = null;
+      });
+  }
+
   private runtime = new TerminalRuntime({
     sendChunk: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) =>
       this.sendPtyChunk(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data),
@@ -546,7 +563,10 @@ class TerminaApp {
     },
   }, {
     eventsDir: process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-sidecars"),
-    rosterHost: { usableModel: (model) => this.usableAgentModel(model) },
+    rosterHost: {
+      usableModel: (model) => this.usableAgentModel(model),
+      rosterSaveFailed: (message) => this.noteRosterSaveFailure(message),
+    },
   });
   /** Exit owner snapshot taken while the instance is still mapped. */
   private readonly ptyExitOwners = new WeakMap<AgentTerminalInstance, { exitOwner: ProjectState | null; persistOwner: ProjectState | null }>();

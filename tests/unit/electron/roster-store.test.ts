@@ -123,7 +123,11 @@ describe("TerminalRosterStore durable save", () => {
 
   it("reports oversized identities asynchronously and preserves the last durable roster", async () => {
     const path = await preparePath();
-    const store = openStore();
+    const failed: string[] = [];
+    const store = new TerminalRosterStore({
+      usableModel: (model) => model ?? null,
+      rosterSaveFailed: (message) => { failed.push(message); },
+    });
     store.save(path, [agent("term-1")], []);
     await store.drain();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -132,6 +136,8 @@ describe("TerminalRosterStore durable save", () => {
       expect(() => store.save(path, [], entries)).not.toThrow();
       await store.drain();
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("identities exceed"));
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toContain("identities exceed");
       expect((await loadRosterFile(path)).entries.map((entry) => entry.id)).toEqual(["term-1"]);
       expect(readdirSync(dirname(path))).toEqual(["session.json"]);
     } finally {
