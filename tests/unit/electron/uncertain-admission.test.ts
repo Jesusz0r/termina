@@ -208,6 +208,43 @@ describe("uncertain admission measurement (issue #192)", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it("counts a safe id when its manifest is a symlink", async () => {
+    const { root, worldsRoot } = await setupWorlds();
+    try {
+      const name = "cmp-manifest-link";
+      const { dir } = await seedRetained(worldsRoot, name, 1);
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+      manifest.status = "complete";
+      manifest.uncertainSessionArtifacts = [];
+      const safeCopy = join(root, "safe-manifest.json");
+      await writeFile(safeCopy, JSON.stringify(manifest));
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      const owner = uncertainComparisonAdmissionOwnerFor(await ensureBoundDirectory(worldsRoot, "worlds root"));
+      const unregister = owner.register(() => [name]);
+      try {
+        const safe = await owner.acquire(() => false);
+        expect(safe.ok).toBe(true);
+        if (safe.ok) safe.lease.release();
+        await owner.drain();
+        expect((await ledgerEntry(worldsRoot)).counted).toBe(false);
+
+        await rm(manifestPath);
+        await symlink(safeCopy, manifestPath);
+        const linked = await owner.acquire(() => false);
+        expect(linked.ok).toBe(true);
+        if (linked.ok) linked.lease.release();
+        await owner.drain();
+        const entry = await ledgerEntry(worldsRoot);
+        expect(entry.counted).toBe(true);
+        expect(entry.bytes).toBeGreaterThan(0);
+      } finally {
+        unregister();
+        releaseUncertainComparisonAdmissionOwner(owner);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it.skipIf(process.platform === "win32")("still refuses a special entry without deleting retained evidence", async () => {
     const { root, worldsRoot } = await setupWorlds();
     try {

@@ -46,17 +46,26 @@ import type {
 
 const { lstat: lstatPath, opendir, readFile } = diskFs;
 
+const COMPARISON_MANIFEST_MAX_BYTES = 1024 * 1024;
+
 function readComparisonManifest(dir: string): Promise<ComparisonManifest | null> {
-  return readFile(join(dir, "manifest.json"), "utf8").then(
-    (text) => {
-      try {
-        return parseComparisonManifest(JSON.parse(text));
-      } catch {
-        return null;
-      }
-    },
-    () => null,
-  );
+  const path = join(dir, "manifest.json");
+  return lstatPath(path, { bigint: true }).then((info) => {
+    // A symlink must not stand in for a safe manifest. readFile would follow it
+    // and a small complete target would drop the whole tree from the byte budget.
+    if (!info.isFile() || info.isSymbolicLink() || info.size <= 0n || info.size > BigInt(COMPARISON_MANIFEST_MAX_BYTES)) return null;
+    return readFile(path, "utf8").then(
+      (text) => {
+        if (Buffer.byteLength(text, "utf8") > COMPARISON_MANIFEST_MAX_BYTES) return null;
+        try {
+          return parseComparisonManifest(JSON.parse(text));
+        } catch {
+          return null;
+        }
+      },
+      () => null,
+    );
+  }, () => null);
 }
 
 
