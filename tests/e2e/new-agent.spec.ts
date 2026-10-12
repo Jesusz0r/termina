@@ -123,10 +123,12 @@ for (const zoom of [1, 2]) {
   });
 }
 
-test("direct creation reports the real area budget refusal without fallback or an error terminal", async ({ page, electronApp }) => {
+test("direct creation admits a fourth independent session without replacing existing terminals or starting a run", async ({ page, electronApp, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const project = (await page.evaluate(() => window.termina.projectList())).find((entry) => entry.active)!;
+  const source = readFileSync(join(projectRoot, "hello.txt"), "utf8");
   let instances = await page.evaluate(() => window.termina.getInstances());
+  const ownerId = instances[0]!.id;
   for (let index = 0; index < 3; index++) {
     if (index < 2) await page.getByRole("button", { name: "New agent", exact: true }).click();
     else await electronApp.evaluate(({ Menu, BrowserWindow }) => {
@@ -140,10 +142,19 @@ test("direct creation reports the real area budget refusal without fallback or a
   }
   const identities = instances.map(({ id, generation, cwd, type }) => ({ id, generation, cwd, type }));
   await page.getByRole("button", { name: "New agent", exact: true }).click();
-  await expect(page.locator(".toast-warning")).toContainText(/budget|limit/i);
+  const fourth = await newSession(page, project.id, instances.map((entry) => entry.id));
   await expect(page.getByRole("button", { name: "New agent", exact: true })).toBeEnabled();
-  expect((await page.evaluate(() => window.termina.getInstances())).map(({ id, generation, cwd, type }) => ({ id, generation, cwd, type }))).toEqual(identities);
+  const retained = (await page.evaluate(() => window.termina.getInstances())).filter((entry) => entry.id !== fourth.created.id);
+  expect(retained.map(({ id, generation, cwd, type }) => ({ id, generation, cwd, type }))).toEqual(identities);
+  await expect(page.locator(".toast-warning")).toHaveCount(0);
   await expect(page.locator(".terminal-menu")).toHaveCount(0);
-  await expect(page.locator(".terminal-tab")).toHaveCount(instances.length);
-  expect((await page.evaluate((id) => window.termina.getWorldlines(id), project.id)).filter((entry) => entry.role === "session")).toHaveLength(3);
+  await expect(page.locator(".terminal-tab")).toHaveCount(instances.length + 1);
+  const sessions = (await page.evaluate((id) => window.termina.getWorldlines(id), project.id)).filter((entry) => entry.role === "session");
+  expect(sessions).toHaveLength(4);
+  const roots = sessions.map((entry) => realpathSync(entry.root));
+  expect(new Set(roots).size).toBe(4);
+  expect(roots).not.toContain(realpathSync(project.cwd));
+  for (const session of sessions) expect(session).toMatchObject({ state: "ready", error: null });
+  expect(readFileSync(join(projectRoot, "hello.txt"), "utf8")).toBe(source);
+  expect(records(join(runRoot, "events", `${ownerId}.jsonl`)).some((record) => record?.t === "agent_start")).toBe(false);
 });
