@@ -67,6 +67,7 @@ export type TerminalCreateRequest = {
   type?: "agent" | "shell";
   shell?: string;
   engine?: "core";
+  cli?: "codex";
   fromTerminalId?: string;
   projectId?: string;
 };
@@ -77,12 +78,16 @@ export function parseTerminalCreateOptions(opts: unknown):
   | { ok: false; error: string } {
   if (opts === undefined) return { ok: true, value: {} };
   if (typeof opts !== "object" || opts === null) return { ok: false, error: "invalid terminal options" };
-  const rec = opts as { type?: unknown; shell?: unknown; engine?: unknown; fromTerminalId?: unknown; projectId?: unknown };
+  const rec = opts as { type?: unknown; shell?: unknown; engine?: unknown; cli?: unknown; fromTerminalId?: unknown; projectId?: unknown };
   if (rec.type !== undefined && rec.type !== "agent" && rec.type !== "shell") {
     return { ok: false, error: "invalid terminal type" };
   }
   if (rec.engine !== undefined && rec.engine !== "core") {
     return { ok: false, error: "invalid agent engine" };
+  }
+  if (rec.cli !== undefined && rec.cli !== "codex") return { ok: false, error: "invalid terminal cli" };
+  if (rec.cli === "codex" && (rec.engine !== undefined || rec.shell !== undefined || (rec.type !== undefined && rec.type !== "shell"))) {
+    return { ok: false, error: "invalid terminal cli" };
   }
   if (rec.shell !== undefined && typeof rec.shell !== "string") return { ok: false, error: "invalid shell" };
   let fromTerminalId: string | undefined;
@@ -107,6 +112,7 @@ export function parseTerminalCreateOptions(opts: unknown):
       type: rec.type,
       shell: rec.shell,
       engine: rec.engine,
+      ...(rec.cli === "codex" ? { cli: "codex" as const } : {}),
       fromTerminalId,
       projectId,
     },

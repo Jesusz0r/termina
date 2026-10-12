@@ -83,5 +83,11 @@ describe("IPC request-shape checks", () => {
     expect(parseTerminalCreateOptions("bad")).toEqual({ ok: false, error: "invalid terminal options" });
     expect(parseTerminalCreateOptions({ type: "pty" })).toEqual({ ok: false, error: "invalid terminal type" });
     expect(parseTerminalCreateOptions({ engine: "other" })).toEqual({ ok: false, error: "invalid agent engine" });
+    expect(parseTerminalCreateOptions({ cli: "codex" })).toEqual({
+      ok: true,
+      value: { type: undefined, shell: undefined, engine: undefined, cli: "codex", fromTerminalId: undefined, projectId: undefined },
+    });
+    expect(parseTerminalCreateOptions({ cli: "gemini" })).toEqual({ ok: false, error: "invalid terminal cli" });
+    expect(parseTerminalCreateOptions({ cli: "codex", engine: "core" })).toEqual({ ok: false, error: "invalid terminal cli" });
   });
 });

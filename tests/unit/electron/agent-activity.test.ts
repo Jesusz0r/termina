@@ -177,3 +177,38 @@ describe("agent activity reducer (issue #291)", () => {
     expect(activityView(activityFor(released))).toEqual({ state: "working", reason: null, intervention: null });
   });
 });
+
+describe("external CLI activity", () => {
+  it("treats a tool as work and a later stop as an unconfirmed idle", () => {
+    const working = fold([
+      { t: "external_turn", ...at(1) },
+      { t: "external_tool", ...at(2), target: "call-1" },
+    ]);
+    expect(activityView(activityFor(working))).toEqual({ state: "working", reason: null, intervention: null });
+    const stopped = fold([{ t: "external_stop", ...at(3) }], working);
+    expect(activityView(activityFor(stopped))).toEqual({ state: "idle", reason: "outcome-unknown", intervention: null });
+  });
+
+  it("keeps a permission wait across Stop and does not let a subagent stop settle the parent", () => {
+    const waiting = fold([
+      { t: "external_turn", ...at(1) },
+      { t: "intervention_requested", ...at(2), requestId: "codex:Bash", kind: "permission", since: 2000 },
+      { t: "external_stop", ...at(3) },
+      { t: "external_subagent_stop", ...at(4) },
+    ]);
+    expect(activityView(activityFor(waiting)).state).toBe("blocked");
+    expect(activityView(activityFor(waiting)).reason).toBe("permission-required");
+    const cleared = fold([
+      { t: "intervention_resolved", ...at(5), requestId: "codex:Bash" },
+      { t: "external_tool_end", ...at(6), target: "call-1", isError: false },
+      { t: "external_stop", ...at(7) },
+    ], waiting);
+    expect(activityView(activityFor(cleared))).toEqual({ state: "idle", reason: "outcome-unknown", intervention: null });
+  });
+
+  it("does not treat a stop with no observed turn as success or as work", () => {
+    const stopped = fold([{ t: "external_stop", ...at(1) }]);
+    expect(activityView(activityFor(stopped))).toEqual({ state: "idle", reason: null, intervention: null });
+    expect(hasLiveAgentWork(stopped)).toBe(false);
+  });
+});

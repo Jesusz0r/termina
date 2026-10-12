@@ -90,6 +90,7 @@ const AGENT_ACTIVITY_REASONS = [
   "sidecar-paused",
   "exited-mid-run",
   "permission-required",
+  "outcome-unknown",
 ] as const;
 export type AgentActivityReason = (typeof AGENT_ACTIVITY_REASONS)[number];
 
@@ -812,7 +813,7 @@ export interface TerminaBridge {
   onUpdateState(cb: (state: AppUpdateState) => void): () => void;
 
   // terminals (agent = core TUI, shell = a real shell like zsh)
-  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "core"; fromTerminalId?: string; projectId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
+  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "core"; cli?: "codex"; fromTerminalId?: string; projectId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
   getShells(): Promise<{ name: string; path: string }[]>;
   /** Complete the renderer-side pane hydration fence for this PTY generation. */
   readyTerminal(id: string, generation: number): void;

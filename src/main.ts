@@ -1029,7 +1029,7 @@ function activatePaneWhenReady(instanceId: string): void {
 /** Paint a tab status dot from activity plus optional unseen-verify flags. */
 function applyTabActivity(
   el: HTMLElement,
-  presented: { blocked: boolean; working: boolean; blockedLabel: string },
+  presented: { blocked: boolean; working: boolean; blockedLabel: string; idleLabel: string },
   verify: { fail: boolean; timeout: boolean },
 ): void {
   const working = presented.working && !presented.blocked;
@@ -1042,6 +1042,7 @@ function applyTabActivity(
   else if (verify.timeout) el.title = "unseen verify timeout";
   else if (presented.blocked) el.title = presented.blockedLabel;
   else if (working) el.title = "agent working";
+  else if (presented.idleLabel !== "idle") el.title = presented.idleLabel;
   else el.title = "idle";
 }
 
@@ -1314,7 +1315,7 @@ function updatePaneTab(pane: Pane): void {
     ? `dispatch worker — ${pane.dispatchTask ?? "plan task"}`
     : `${pane.cwd ?? "?"}${
         pane.type === "shell" && pane.shellName
-          ? ` · ${pane.shellName} shell`
+          ? ` · ${pane.shellName}${pane.shellName === "Codex" ? "" : " shell"}`
           : " · core agent"
       }`;
   const presented = presentActivity(pane);
@@ -1340,12 +1341,13 @@ function updatePaneTab(pane: Pane): void {
           paneProjectId: pane.projectId,
           activeProjectId,
           activePane: activeId === pane.instanceId,
-          tuiFocused: isCoreTerminalFocused(),
+          tuiFocused: isCoreTerminalFocused() || (pane.shellName === "Codex" && isTerminalTextFocused(pane)),
         }),
         windowFocused: document.hasFocus(),
+        announceIdle: presented.idleLabel === "idle",
       },
     );
-    if (sounded && pane.type === "agent") announceActivityCue(pane, sounded);
+    if (sounded && (pane.type === "agent" || pane.shellName === "Codex")) announceActivityCue(pane, sounded);
   }
 }
 
@@ -1371,14 +1373,16 @@ function renderChrome(): void {
   activityPane.renderModified(pane);
 }
 
-function presentActivity(pane: Pane): { blocked: boolean; working: boolean; blockedLabel: string } {
+function presentActivity(pane: Pane): { blocked: boolean; working: boolean; blockedLabel: string; idleLabel: string } {
   const state = asKnownState(pane.activity?.state, KNOWN_ACTIVITY_STATES);
+  const outcomeUnknown = state === "idle" && pane.activity?.reason === "outcome-unknown";
   return {
     blocked: state === "blocked",
     // Explicit idle/working/blocked win. `busy` is only a fallback when
     // activity is missing or hostile so a settle fold cannot flash "working".
     working: state === "working" || (state === "unknown" && pane.busy),
     blockedLabel: presentBlockedLabel(pane.activity?.reason),
+    idleLabel: outcomeUnknown ? "idle · turn end unconfirmed" : "idle",
   };
 }
 
@@ -1388,8 +1392,8 @@ function renderStatus(pane: Pane): void {
   statusState.textContent = presented.blocked
     ? `● ${presented.blockedLabel}`
     : presented.working
-      ? "● agent working"
-      : "idle";
+      ? (pane.shellName === "Codex" ? "● Codex working" : "● agent working")
+      : presented.idleLabel;
   statusState.classList.toggle("busy", presented.working);
   statusState.classList.toggle("blocked", presented.blocked);
   statusCwd.textContent = pane.cwd ?? "";
@@ -1605,6 +1609,21 @@ async function openFileSmartInner(
 
 // ---------------------------------------------------------------- panels ----
 
+async function createCodexTerminal(): Promise<{ ok: boolean; error?: string }> {
+  const projectId = activeProjectId;
+  const projectGeneration = activeProjectGeneration;
+  if (!projectId) return { ok: false, error: "Open a project first." };
+  try {
+    const result = await window.termina.createTerminal({ type: "shell", cli: "codex", projectId });
+    if (result.ok && result.id && activeProjectId === projectId && activeProjectGeneration === projectGeneration) {
+      activatePaneWhenReady(result.id);
+    }
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Could not create terminal." };
+  }
+}
+
 async function createProjectTerminal(type: "agent" | "shell", shell?: string): Promise<{ ok: boolean; error?: string }> {
   const projectId = activeProjectId;
   const projectGeneration = activeProjectGeneration;
@@ -1636,6 +1655,7 @@ const terminalMenu = createTerminalMenu({
   anchor: document.getElementById("btn-terminal-menu") as HTMLButtonElement,
   onCreateAgent: () => createProjectTerminal("agent"),
   onOpenShell: (shell) => createProjectTerminal("shell", shell),
+  onOpenCodex: () => createCodexTerminal(),
   onError: (message) => toast(message, "warning"),
 });
 window.addEventListener("unload", () => terminalMenu.dispose(), { once: true });
@@ -1906,6 +1926,12 @@ function normalizeShortcut(value: string): string {
 }
 
 /** True when a live core TUI owns keyboard focus: its textarea is the focused element of the active core pane. Shells and exited panes keep menu behavior. */
+function isTerminalTextFocused(pane: Pane | undefined): boolean {
+  if (!pane || pane.error || pane.exited) return false;
+  const textarea = pane.view.getTerminal().textarea;
+  return !!textarea && document.activeElement === textarea;
+}
+
 function isCoreTerminalFocused(): boolean {
   const pane = activeId ? panes.get(activeId) : undefined;
   if (!pane || pane.error || pane.exited || pane.engine !== "core") return false;

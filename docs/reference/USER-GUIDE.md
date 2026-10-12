@@ -151,7 +151,14 @@ project source, another agent opens in a
 separate sandboxed work area. Creation does not submit a prompt or apply changes.
 
 Use the adjacent `▾` (**Open shell menu**) to choose a detected shell
-(`zsh`, `bash`, …). The menu supports arrow keys, Home/End and Enter;
+(`zsh`, `bash`, …) or **Codex**, the original Codex TUI when `codex` is on
+`PATH`. Codex keeps its own login and conversation. Termina does not fork,
+promote, or restore that session. Activity (working, waiting for permission,
+or an unconfirmed stop) appears after you trust Termina's observational hook
+in Codex with `/hooks`. A prompt alone does not count as started work, and a
+Stop hook does not mean the task succeeded. File changes still come from the
+project watcher. Gemini CLI, Grok, and Claude Code are not in this menu.
+The menu supports arrow keys, Home/End and Enter;
 Escape cancels and returns focus to its button. Shell tabs show the shell name
 as a badge. A refused creation shows the actual error and permits an explicit
 retry; it never falls back to a shell or shared-source agent.

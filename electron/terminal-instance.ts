@@ -31,6 +31,9 @@ export class AgentTerminalInstance {
   type: "agent" | "shell";
   /** The engine for an agent terminal. Shells leave this unset. */
   engine?: "core";
+  /** Original external CLI in this PTY. Not a core engine and not a worldline. */
+  externalCli?: "codex";
+  externalActivitySeq = 0;
   /** Persist this tab in the project roster (user terminals, not dispatch or candidates). */
   persist = true;
   /** Harness session id for resume. */

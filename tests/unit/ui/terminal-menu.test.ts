@@ -17,16 +17,17 @@ function harness() {
   vi.stubGlobal("window", Object.assign(events, { innerWidth: 1000, innerHeight: 720, termina: { getShells } }));
   const onCreateAgent = vi.fn<() => Promise<{ ok: boolean; error?: string }>>().mockResolvedValue({ ok: true });
   const onOpenShell = vi.fn<(path: string) => Promise<{ ok: boolean; error?: string }>>().mockResolvedValue({ ok: true });
+  const onOpenCodex = vi.fn<() => Promise<{ ok: boolean; error?: string }>>().mockResolvedValue({ ok: true });
   const onError = vi.fn();
   view = createTerminalMenu({ agentButton: agent as unknown as HTMLButtonElement, anchor: anchor as unknown as HTMLButtonElement,
-    onCreateAgent, onOpenShell, onError });
+    onCreateAgent, onOpenShell, onOpenCodex, onError });
   const key = (value: string) => {
     const event = Object.assign(new Event("keydown", { cancelable: true }), { key: value });
     events.dispatchEvent(event);
     return event;
   };
   const open = async () => { anchor.click(); await Promise.resolve(); await Promise.resolve(); };
-  return { agent, anchor, getShells, onCreateAgent, onOpenShell, onError, events, key, open };
+  return { agent, anchor, getShells, onCreateAgent, onOpenShell, onOpenCodex, onError, events, key, open };
 }
 
 describe("direct agent creation and shell menu", () => {
@@ -58,16 +59,25 @@ describe("direct agent creation and shell menu", () => {
     expect(h.onOpenShell).not.toHaveBeenCalled(); expect(h.agent.disabled).toBe(false);
   });
 
-  it("offers only shells with native menu roles and keyboard selection", async () => {
+  it("opens Codex from the menu without treating it as a detected shell", async () => {
+    const h = harness(); await h.open();
+    (dom.document.body.querySelector(".terminal-menu-item") as HTMLElement).click();
+    await Promise.resolve();
+    expect(h.onOpenCodex).toHaveBeenCalledOnce();
+    expect(h.onOpenShell).not.toHaveBeenCalled();
+  });
+
+  it("offers Codex and detected shells with native menu roles and keyboard selection", async () => {
     const h = harness(); await h.open();
     const menu = dom.document.body.querySelector("#terminal-shell-menu")!;
     const items = menu.querySelectorAll(".terminal-menu-item");
-    expect(menu.getAttribute("role")).toBe("menu"); expect(items).toHaveLength(2);
+    expect(menu.getAttribute("role")).toBe("menu"); expect(items).toHaveLength(3);
+    expect(items[0]!.querySelector(".terminal-menu-name")!.textContent).toBe("Codex");
     expect(items.every((item) => item.tagName === "BUTTON" && item.getAttribute("role") === "menuitem")).toBe(true);
     expect(dom.document.activeElement).toBe(items[0]); expect(h.anchor.getAttribute("aria-expanded")).toBe("true");
-    h.key("End"); expect(dom.document.activeElement).toBe(items[1]);
+    h.key("End"); expect(dom.document.activeElement).toBe(items[2]);
     h.key("Home"); expect(dom.document.activeElement).toBe(items[0]);
-    h.key("ArrowUp"); expect(dom.document.activeElement).toBe(items[1]);
+    h.key("ArrowUp"); expect(dom.document.activeElement).toBe(items[2]);
     expect(h.key("Enter").defaultPrevented).toBe(true); await Promise.resolve();
     expect(h.onOpenShell).toHaveBeenCalledExactlyOnceWith("/bin/bash"); expect(h.onCreateAgent).not.toHaveBeenCalled();
     expect(view.isOpen()).toBe(false); expect(h.anchor.getAttribute("aria-expanded")).toBe("false");
@@ -96,10 +106,11 @@ describe("direct agent creation and shell menu", () => {
   it("retries failed or empty listings on the next open without creating anything", async () => {
     const h = harness(); h.getShells.mockRejectedValueOnce(new Error("listing unavailable"));
     await h.open();
-    expect(dom.document.body.querySelector("#terminal-shell-menu")!.children[0]!.textContent).toContain("No shells available");
+    const emptyMenu = [...dom.document.body.querySelector("#terminal-shell-menu")!.children];
+    expect(emptyMenu.some((child) => (child.textContent ?? "").includes("No shells available"))).toBe(true);
     view.close(); h.getShells.mockResolvedValueOnce([]); await h.open(); view.close(); await h.open();
     expect(h.getShells).toHaveBeenCalledTimes(3);
-    expect(dom.document.body.querySelectorAll(".terminal-menu-item")).toHaveLength(2);
+    expect(dom.document.body.querySelectorAll(".terminal-menu-item")).toHaveLength(3);
     expect(h.onCreateAgent).not.toHaveBeenCalled(); expect(h.onOpenShell).not.toHaveBeenCalled();
   });
 

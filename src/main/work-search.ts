@@ -75,7 +75,7 @@ export function searchWork(overview: WorkOverview, query: string): { rows: WorkS
     for (const { owner, terminal, task, target } of projectTasks(project)) {
       if (!matches(`${identity}\n${task.task.text}`)) continue;
       const execution = task.worker && terminal !== owner
-        ? `${terminal.activity?.state === "blocked" ? presentBlockedLabel(terminal.activity.reason) : terminal.activity?.state ?? "Shell activity unknown"} · worker ${terminal.terminalId}`
+        ? `${terminal.activity?.reason === "outcome-unknown" ? "idle · turn end unconfirmed" : terminal.activity?.state === "blocked" ? presentBlockedLabel(terminal.activity.reason) : terminal.activity?.state ?? "Shell activity unknown"} · worker ${terminal.terminalId}`
         : "No live worker assigned";
       rows.push({
         target: { kind: "task", task: target },

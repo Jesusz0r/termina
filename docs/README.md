@@ -23,6 +23,7 @@ Dated findings and exploratory designs, not guarantees of current behavior.
 
 - [`reference/WORKSPACE-EXPERIENCE-AUDIT.md`](reference/WORKSPACE-EXPERIENCE-AUDIT.md) — product, UI/UX, and developer-experience audit with evidence and validation limits
 - [`reference/TOOL-AVAILABILITY-AUDIT.md`](reference/TOOL-AVAILABILITY-AUDIT.md) — dated audit of tool selection, execution authorization, and proposed improvements
+- [`reference/EXTERNAL-AGENT-CLI-EVENTS.md`](reference/EXTERNAL-AGENT-CLI-EVENTS.md) — external CLI event comparison; Codex TUI plus observational hooks is started, and Gemini, Grok, and Claude Code remain future work
 - [`mockups/workspace/README.md`](mockups/workspace/README.md) — interactive, simulated attention-first workspace study
 
 ## Plans

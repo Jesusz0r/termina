@@ -14,6 +14,8 @@ export interface ActivityCueContext {
   viewing: boolean;
   /** False when the app window is in the background. Defaults to focused. */
   windowFocused?: boolean;
+  /** False when idle is an unconfirmed external stop, so it does not chime as a clean settle. */
+  announceIdle?: boolean;
 }
 
 /** First paint is silent. Working stays visual. Idle/blocked chime unless
@@ -24,6 +26,7 @@ export function activityCueShouldSound(
   context: ActivityCueContext = { viewing: false },
 ): next is "idle" | "blocked" {
   if (previous === undefined || previous === next) return false;
+  if (next === "idle" && context.announceIdle === false) return false;
   if (next !== "idle" && next !== "blocked") return false;
   if (context.viewing && (context.windowFocused ?? true)) return false;
   return true;

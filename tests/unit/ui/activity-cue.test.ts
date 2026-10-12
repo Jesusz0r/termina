@@ -84,6 +84,14 @@ describe("noteActivityCue", () => {
     expect(noteActivityCue("t1", "idle", { viewing: false, play })).toBeNull();
     expect(heard).toEqual([]);
   });
+
+  it("does not chime an unconfirmed external stop", () => {
+    const heard: string[] = [];
+    const play = (kind: "idle" | "blocked") => heard.push(kind);
+    noteActivityCue("t-codex", "working", { viewing: false, play });
+    expect(noteActivityCue("t-codex", "idle", { viewing: false, announceIdle: false, play })).toBeNull();
+    expect(heard).toEqual([]);
+  });
 });
 
 describe("activityCueCopy", () => {

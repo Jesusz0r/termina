@@ -6,6 +6,7 @@ interface TerminalMenuBindings {
   anchor: HTMLButtonElement;
   onCreateAgent(): Promise<CreateResult>;
   onOpenShell(path: string): Promise<CreateResult>;
+  onOpenCodex(): Promise<CreateResult>;
   onError(message: string): void;
 }
 
@@ -120,6 +121,7 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
       items.push({ row, run });
     };
 
+    addItem("Codex", "original Codex TUI; trust its hook for activity", () => { void create(() => bindings.onOpenCodex()); });
     for (const shell of shells) {
       addItem(shell.name, `interactive ${shell.name} shell`, () => { void create(() => bindings.onOpenShell(shell.path)); });
     }

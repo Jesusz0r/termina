@@ -11,7 +11,7 @@ import type { AgentActivityReason, AgentActivityState, AgentActivityView, AgentI
 /** Consecutive same-target `tool_end.isError` before `blocked: tool-error-loop`. */
 export const TOOL_ERROR_LOOP_STREAK = STALL_FAILURE_TURNS;
 
-type ActivityBoundary = "none" | "agent_start" | "agent_settled";
+type ActivityBoundary = "none" | "agent_start" | "agent_settled" | "external_turn" | "external_stop";
 
 export type ActivitySignal =
   | { t: "preflight_request"; seq: number; at: number }
@@ -26,7 +26,12 @@ export type ActivitySignal =
   | ({ t: "intervention_requested"; seq: number; at: number } & AgentIntervention)
   | { t: "intervention_resolved"; seq: number; at: number; requestId: string }
   | { t: "sidecar_hold"; seq: number; at: number; held: boolean }
-  | { t: "pty_exit"; seq: number; at: number };
+  | { t: "pty_exit"; seq: number; at: number }
+  | { t: "external_turn"; seq: number; at: number }
+  | { t: "external_stop"; seq: number; at: number }
+  | { t: "external_tool"; seq: number; at: number; target: string }
+  | { t: "external_tool_end"; seq: number; at: number; target: string; isError: boolean }
+  | { t: "external_subagent_stop"; seq: number; at: number };
 
 export interface AgentActivityInput {
   lastBoundary: ActivityBoundary;
@@ -182,12 +187,43 @@ export function applyActivityEvent(input: AgentActivityInput, event: ActivitySig
       break;
     case "pty_exit":
       next.intervention = null;
-      if (next.lastBoundary === "agent_start" || next.preflightInFlight || next.preflightTimedOut) {
+      if (
+        next.lastBoundary === "agent_start"
+        || next.lastBoundary === "external_turn"
+        || next.preflightInFlight
+        || next.preflightTimedOut
+      ) {
         next.ptyExitedMidRun = true;
       }
       next.preflightInFlight = false;
       next.promptInFlight = false;
       next.openToolIds = [];
+      break;
+    case "external_turn":
+      if (next.lastBoundary !== "external_turn") resetRun(next, "external_turn", null);
+      break;
+    case "external_tool":
+      if (next.lastBoundary !== "external_turn") resetRun(next, "external_turn", null);
+      if (countableToolTarget(event.target) && !next.openToolIds.includes(event.target)) {
+        next.openToolIds.push(event.target);
+      }
+      break;
+    case "external_tool_end":
+      // The tool already finished. The hook did not grant the permission;
+      // the observed wait is over.
+      next.intervention = null;
+      if (countableToolTarget(event.target)) {
+        next.openToolIds = next.openToolIds.filter((id) => id !== event.target);
+      }
+      break;
+    case "external_stop":
+      // Stop can precede another hook's continuation. It settles only an
+      // external turn that is not waiting on the user, and the outcome stays unknown.
+      if (next.intervention === null && next.lastBoundary === "external_turn") {
+        resetRun(next, "external_stop", null);
+      }
+      break;
+    case "external_subagent_stop":
       break;
   }
   return next;
@@ -197,6 +233,7 @@ export function applyActivityEvent(input: AgentActivityInput, event: ActivitySig
 export function hasLiveAgentWork(input: AgentActivityInput): boolean {
   return !input.ptyExitedMidRun && (
     input.lastBoundary === "agent_start"
+    || input.lastBoundary === "external_turn"
     || input.openToolIds.length > 0
     || input.promptInFlight
     || input.preflightInFlight
@@ -234,6 +271,9 @@ export function activityFor(input: AgentActivityInput): AgentActivity {
   }
   if (hasLiveAgentWork(input)) {
     return { state: "working", reason: null, ...since(input.lastSeq || input.lastBoundarySeq, input.lastAt || input.lastBoundaryAt) };
+  }
+  if (input.lastBoundary === "external_stop") {
+    return { state: "idle", reason: "outcome-unknown", ...since(input.lastBoundarySeq, input.lastBoundaryAt) };
   }
   return { state: "idle", reason: null, ...since(input.lastBoundarySeq, input.lastBoundaryAt) };
 }
