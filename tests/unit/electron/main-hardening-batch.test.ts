@@ -253,7 +253,7 @@ describe("main hardening batch (refs #219)", () => {
     ) => Promise<{ ok: boolean; failed: string[] }>;
     const sent: Array<{ requestId: string }> = [];
     const app = {
-      projectOfWorkspace: () => ({ project: { id: "proj-1" }, workspace: { id: "ws-1" } }),
+      projectOfWorkspace: () => ({ id: "proj-1", workspaces: new Map([["ws-1", { id: "ws-1", primary: true }]]) }),
       flushWaiters: new Map(),
       send: (_channel: string, payload: { requestId: string }) => {
         sent.push(payload);

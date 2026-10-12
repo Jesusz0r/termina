@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 
 /**
  * Source-level probes for dispatch auto-verify: a worker that settles with
- * its task done triggers one background verify for an idle owner, and the
- * finish path reports the verdict to the owner's mailbox exactly once.
+ * its task done triggers one background verify for an idle source owner or
+ * its independent worker. Shared-source verdicts reach the owner's mailbox once.
  * Electron e2e covers the visible verify flow; this probe covers the
  * no-loop, no-interference wiring without a live display server.
  */
@@ -19,8 +19,8 @@ describe("Dispatch Auto-Verify Invariants", () => {
     }
 
     // Settle path offers auto-verify only for completed tasks.
-    check("settle offers auto-verify on task completion",
-      main.includes("this.maybeAutoVerify(ownerInst, task?.state === \"done\" ? task.text : null)"));
+    check("settle verifies completed tasks on the actual source or independent workspace",
+      main.includes("this.maybeAutoVerify(inst.workspaceId === ownerInst.workspaceId ? ownerInst : inst, task?.state === \"done\" ? task.text : null)"));
     // Guards: idle owner only, no duplicate or overlapping verify.
     check("auto-verify requires an idle open owner",
       main.includes("if (!taskText || owner.busy || owner.closed) return;"));

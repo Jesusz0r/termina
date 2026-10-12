@@ -36,13 +36,15 @@ import htmlWorker from "monaco-editor/language/html/html.worker?worker";
 import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
+import { createTerminalEmpty } from "./main/terminal-empty";
 import { createTerminalMenu } from "./main/terminal-menu";
 import { activateProjectContext } from "./main/project-activation";
 import { resolveFileNavigation } from "./main/file-navigation";
+import { canonicalizePath } from "../shared/canonical-path";
 import { createTimelinePane } from "./main/timeline-pane";
 import { createRunForkFeedback } from "./main/run-fork-feedback";
 import { createActivityPane } from "./main/activity-pane";
-import { createWorkSummary } from "./main/work-summary";
+import { createChecksPanel } from "./main/checks-panel";
 import { createAttentionView } from "./main/attention-view";
 import { createProjectRail } from "./main/project-rail";
 import { createPreferences, applyEditorPreferences, applyReviewPreferences } from "./main/preferences";
@@ -88,7 +90,7 @@ import {
 } from "./activity-cue";
 import { attachTabReorder } from "./main/tab-reorder";
 import { CHALLENGE_PROFILES, isTuiOwnedShortcut, pathBasename } from "../shared/types";
-import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, UnsavedConfirmResult, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary, WorkSummaryAction } from "../shared/types";
+import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, UnsavedConfirmResult, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary, WorkSummaryAction, TerminalCloseResult } from "../shared/types";
 
 type EditorManagerInstance = import("./editor").EditorManager;
 type ReviewViewInstance = import("./review").ReviewView;
@@ -109,6 +111,8 @@ interface ProjectView {
   id: string;
   cwd: string;
   workspaceId: string;
+  /** Selected work area, separate from the project's primary identity. */
+  workspace: { id: string; root: string };
   editorMgr: EditorManagerInstance | null;
   editorEl: HTMLElement;
   tabsEl: HTMLElement;
@@ -162,9 +166,9 @@ const projectTabsEl = document.getElementById("project-tabs")!;
 const btnNewProject = document.getElementById("btn-new-project") as HTMLButtonElement;
 const projectRail = createProjectRail({
   list: projectTabsEl,
-  allProjects: document.getElementById("btn-all-projects") as HTMLButtonElement,
+  newProject: btnNewProject,
   onActivate: (projectId) => {
-    void activateProject(projectId).catch((err) => {
+    void enterProject(projectId).catch((err) => {
       toast(`could not switch projects: ${(err as Error).message}`, "warning");
     });
   },
@@ -174,7 +178,6 @@ const projectRail = createProjectRail({
       else if (!res.cancelled) toast(res.error ?? "could not close the project", "warning");
     }).catch((err) => toast(`could not close the project: ${(err as Error).message}`, "warning"));
   },
-  onAllProjects: (opener) => attentionView.open(opener),
   onReorder: (ids) => { void persistProjectOrder(ids); },
 });
 let projectOrderRequest = 0;
@@ -222,6 +225,7 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
     id: project.id,
     cwd: project.cwd,
     workspaceId: project.workspaceId,
+    workspace: { id: project.workspaceId, root: project.cwd },
     editorMgr: null,
     editorEl,
     tabsEl,
@@ -243,10 +247,10 @@ function ensureProjectEditor(view: ProjectView): EditorManagerInstance {
     toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
   };
   applySharedEditorHooks(editorMgr, view.id);
-  editorMgr.projectRootProvider = () => view.cwd;
+  editorMgr.projectRootProvider = () => view.workspace.root;
   editorMgr.ownerProvider = () => {
     const current = projectViews.get(view.id);
-    return current?.workspaceId ? { projectId: current.id, workspaceId: current.workspaceId } : null;
+    return current ? { projectId: current.id, workspaceId: current.workspace.id } : null;
   };
   applyEditorPreferences(editorMgr, prefs.current);
   view.editorMgr = editorMgr;
@@ -285,7 +289,6 @@ function removeProjectView(projectId: string): void {
   const projectIds = [...projectViews.keys()];
   const closingIndex = projectIds.indexOf(projectId);
   projectViews.delete(projectId);
-  lastActivePane.delete(projectId);
   pendingToolTargets.delete(projectId);
   if (activeProjectId === projectId) {
     activeProjectId = null;
@@ -317,9 +320,15 @@ function placeEditorToggle(projectId: string | null): void {
   projectViews.get(projectId)?.editorEl.querySelector(".pane-chrome")?.appendChild(button);
 }
 
-function activateProject(projectId: string): Promise<boolean> {
+function enterProject(projectId: string): Promise<boolean> {
+  attentionView.cancelNavigation();
+  layout.revealTerminal();
+  return activateProject(projectId, "entry");
+}
+
+function activateProject(projectId: string, intent: "entry" | "context"): Promise<boolean> {
   return activateProjectContext(projectId, {
-    request: (id) => window.termina.projectActivate(id),
+    request: (id) => window.termina.projectActivate(id, intent),
     prepareRenderer: ensureEditorModule,
     applyFolder: applyFolderOpened,
     hasProject: (id) => projectViews.has(id),
@@ -332,10 +341,10 @@ function activateProject(projectId: string): Promise<boolean> {
 function setActiveProject(projectId: string | null): void {
   const view = projectId ? projectViews.get(projectId) : undefined;
   const nextId = view ? projectId : null;
-  // Search results are project-relative. A switch under an open modal would
-  // open the old hit in the new tree.
+  // Only file and content results are project-relative. Global work navigation
+  // must remain current while its own project activation completes.
   if (nextId !== activeProjectId) {
-    quickOpen.close();
+    quickOpen.onProjectChange();
     sessionSearch.close();
   }
   activeProjectId = nextId;
@@ -378,7 +387,7 @@ function drainPendingToolTargets(projectId: string | null): void {
   const view = projectViews.get(projectId);
   if (!view) return;
   for (const target of queued) {
-    if (view.workspaceId !== target.workspaceId) continue;
+    if (view.workspace.id !== target.workspaceId) continue;
     const owner: ProjectWorkspaceRef = { projectId, workspaceId: target.workspaceId };
     void ensureProjectEditor(view).openFile(target.path, { preview: true, owner }).catch((err) => {
       toast(`could not open ${pathBasename(target.path)}: ${(err as Error).message}`, "error");
@@ -398,24 +407,15 @@ function syncPaneVisibility(): void {
   }
 }
 
-/** Activate a terminal that belongs to the active project, then fit it. */
+/** Display only the main-admitted target, including when folder and roster arrive out of order. */
 function activateProjectPane(): void {
-  const current = activeId ? panes.get(activeId) : undefined;
-  if (current && current.projectId === activeProjectId) {
-    activatePane(current.instanceId);
-    return;
-  }
-  // Restore the terminal that was active when this project was last in front.
-  const rememberedId = activeProjectId ? lastActivePane.get(activeProjectId) : undefined;
-  const remembered = rememberedId ? panes.get(rememberedId) : undefined;
-  if (remembered && remembered.projectId === activeProjectId) {
-    activatePane(remembered.instanceId);
-    return;
-  }
-  const next = [...panes.values()].find((p) => p.projectId === activeProjectId);
-  if (next) activatePane(next.instanceId);
+  const pane = projectTerminalTarget ? panes.get(projectTerminalTarget.id) : undefined;
+  const view = activeProjectId ? projectViews.get(activeProjectId) : undefined;
+  if (pane && pane.projectId === activeProjectId && pane.generation === projectTerminalTarget!.generation
+    && pane.workspaceId === view?.workspace.id) showPane(pane);
   else {
     activeId = null;
+    syncPaneVisibility();
     renderChrome();
   }
 }
@@ -529,7 +529,7 @@ const timelinePane = createTimelinePane({
   getPaneById: (id) => panes.get(id),
   getActiveProject: () => ({ id: activeProjectId, generation: activeProjectGeneration }),
   getEditor: () => activeEditor(),
-  onContent: (has, count) => activityTabs.syncContent("timeline", has, count),
+  onContent: (has, count) => activityTabs.setContent("timeline", has, count),
   onAgentSettled: (pane) => {
     pane.runs = null;
     loadRuns(pane);
@@ -557,14 +557,8 @@ const activityPane = createActivityPane({
   getActivePaneId: () => activeId,
   getPaneById: (id) => panes.get(id),
   getAllPanes: () => panes.values(),
-  onPlanContent: (has, count, announce) => {
-    if (announce) activityTabs.setHasContent("plan", has, count);
-    else activityTabs.syncContent("plan", has, count);
-  },
-  onModifiedContent: (has, count, announce) => {
-    if (announce) activityTabs.setHasContent("modified", has, count);
-    else activityTabs.syncContent("modified", has, count);
-  },
+  onPlanContent: (has, count) => activityTabs.setContent("plan", has, count),
+  onModifiedContent: (has, count) => activityTabs.setContent("modified", has, count),
   onReviewChanged: (pane) => renderHandoff(pane),
   onModifiedListChanged: (pane) => {
     if (pane.projectId === activeProjectId) syncExplorerChanged();
@@ -591,13 +585,16 @@ const activityPane = createActivityPane({
 const worldlinesView = new WorldlinesView(document.getElementById("worldline-panel")!);
 const activityTabs = new ActivityTabs({
   bar: document.getElementById("activity-tabbar")!,
+  closeButton: document.getElementById("btn-close-activity") as HTMLButtonElement,
   panels: {
+    checks: document.getElementById("checks-panel")!,
     timeline: document.getElementById("timeline-strip")!,
     plan: planPanel,
     worldlines: document.getElementById("worldline-panel")!,
     modified: modifiedPanel,
   },
   counts: {
+    checks: null,
     timeline: null,
     plan: planCount,
     worldlines: document.getElementById("worldline-count"),
@@ -605,43 +602,62 @@ const activityTabs = new ActivityTabs({
   },
   storage: localStorage,
 });
-const workSummaryView = createWorkSummary({
-  element: document.getElementById("work-summary") as HTMLDetailsElement,
-  bridge: window.termina,
+const checksPanel = createChecksPanel({
+  element: document.getElementById("checks-panel")!,
+  getVerifyReport: (id, generation) => window.termina.getVerifyReport(id, generation),
   getContext: () => {
     const pane = activeId ? panes.get(activeId) : undefined;
-    return pane && activeProjectId && pane.projectId === activeProjectId ? {
-      projectId: activeProjectId, activationGeneration: activeProjectGeneration,
-      terminalId: pane.instanceId, generation: pane.generation,
+    return pane && activeProjectId && pane.projectId === activeProjectId && pane.type === "agent" && !pane.error && pane.cwd ? {
+      target: { projectId: activeProjectId, workspaceId: pane.workspaceId, root: pane.cwd,
+        terminalId: pane.instanceId, generation: pane.generation },
+      activationGeneration: activeProjectGeneration, verify: pane.verify,
     } : null;
   },
-  onNavigate: (action, projectId) => { void navigateWorkAction(action, projectId); },
 });
 
 async function navigateWorkAction(action: WorkSummaryAction, projectId: string): Promise<boolean> {
   const pane = panes.get(action.terminalId);
   if (activeProjectId !== projectId || pane?.projectId !== projectId || pane.generation !== action.generation) return false;
   layout.revealTerminal();
-  if (activeId !== pane.instanceId) activatePane(pane.instanceId);
+  // Renderer tab selection is immediate, but canonical workspace selection is asynchronous.
+  if (!await activatePane(pane.instanceId)) return false;
+  if (activeProjectId !== projectId || activeId !== pane.instanceId || panes.get(pane.instanceId) !== pane
+    || pane.generation !== action.generation) return false;
   if (action.kind === "plan") {
     activityTabs.select("plan");
     planPanel.classList.remove("collapsed");
-    document.getElementById("activity-tab-plan")?.focus();
-  } else if (action.kind === "changes") {
-    layout.setModifiedVisible(true);
-    activityTabs.select("modified");
-    modifiedPanel.classList.remove("collapsed");
-    document.getElementById("activity-tab-modified")?.focus();
-  } else if (action.kind === "evidence") return workSummaryView.showCheck();
-  else pane.view.focus();
+  } else if (action.kind === "evidence") {
+    activityTabs.select("checks");
+    return checksPanel.showCheck();
+  }
+  focusWorkContext(projectId, action);
   return true;
+}
+
+// Focus the canonical project context after Attention or work-search navigation.
+function focusWorkContext(projectId: string, action: WorkSummaryAction | null): void {
+  if (activeProjectId !== projectId) return;
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (action && (pane?.instanceId !== action.terminalId || pane.generation !== action.generation)) return;
+  if (action?.kind === "plan") {
+    if (action.taskText && pane) activityPane.focusTask(pane, action.taskText);
+    else document.getElementById("activity-tab-plan")?.focus();
+  } else if (action?.kind === "evidence") checksPanel.focus();
+  else pane?.view.focus();
 }
 
 const attentionView = createAttentionView({
   element: document.getElementById("attention-view")!,
-  toggle: document.getElementById("btn-attention") as HTMLButtonElement,
+  heading: document.getElementById("attention-heading")!,
   bridge: window.termina,
-  onOverview: (overview) => projectRail.setOverview(overview),
+  onOverview: (overview) => { projectRail.setOverview(overview); quickOpen.setWorkOverview(overview); },
+  onNavigate: async (projectId, action, isCurrent) => {
+    if (!isCurrent() || !await activateProject(projectId, action ? "context" : "entry") || !isCurrent()) return false;
+    if (action) return navigateWorkAction(action, projectId);
+    layout.revealTerminal();
+    return true;
+  },
+  onReveal: focusWorkContext,
   onInspect: async (result, isCurrent) => {
     if (!isCurrent()) return false;
     const activated = await activateProjectContext(result.folder.projectId, {
@@ -657,7 +673,7 @@ const attentionView = createAttentionView({
     return navigateWorkAction(result.action, result.folder.projectId);
   },
 });
-window.addEventListener("unload", () => { workSummaryView.dispose(); attentionView.dispose(); projectRail.dispose(); }, { once: true });
+window.addEventListener("unload", () => { checksPanel.dispose(); attentionView.dispose(); projectRail.dispose(); terminalEmpty.dispose(); }, { once: true });
 let worldlineHydrationEpoch = 0;
 let worldlineHydrationTombstones: Set<string> | null = null;
 
@@ -686,7 +702,7 @@ function hydrateWorldlines(projectId: string | null): void {
   const finish = (): void => {
     if (epoch !== worldlineHydrationEpoch) return;
     worldlinesView.setQuiet(false);
-    activityTabs.syncContent("worldlines", worldlinesView.size > 0, worldlinesView.size);
+    activityTabs.setContent("worldlines", worldlinesView.size > 0, worldlinesView.size);
   };
   if (!projectId) {
     clearWorldlineProjectUi(panes.values(), worldlineProjectEffects());
@@ -739,7 +755,7 @@ worldlinesView.bind({
   onContent: (has, count) => {
     // Hydration replays stay quiet in the view and sync once at the end,
     // so every report that reaches here is a live arrival worth announcing.
-    activityTabs.setHasContent("worldlines", has, count);
+    activityTabs.setContent("worldlines", has, count);
   },
 });
 const btnForkRun = document.getElementById("btn-fork-run") as HTMLButtonElement;
@@ -804,7 +820,6 @@ interface Pane {
   recorderState: RecorderState;
   recorderDetail: string | null;
   /** True when this pane was created from the authoritative roster. */
-  fromRoster: boolean;
   plan: PlanTask[];
   planLoaded: boolean;
   planLoadAttempts: number;
@@ -825,8 +840,8 @@ interface Pane {
 }
 
 const panes = new Map<string, Pane>();
-/** Last active terminal per project. Returning to a project restores it. */
-const lastActivePane = new Map<string, string>();
+/** Main owns project-entry priority and per-project recency. Renderer only waits for this target. */
+let projectTerminalTarget: FolderOpenedPayload["terminal"] = null;
 /** Agent auto-opens that arrived while their project was in the background.
  *  Drained as replaceable preview tabs when the project becomes active
  *  again, so a long run never pins a tab per file it touched. */
@@ -938,7 +953,7 @@ function createPaneShell(instanceId: string): Pane {
     statusEl,
     cwd: null,
     busy: false,
-    activity: { state: "idle", reason: null },
+    activity: { state: "idle", reason: null, intervention: null },
     type: "agent",
     engine: "core",
     shellName: undefined,
@@ -958,7 +973,6 @@ function createPaneShell(instanceId: string): Pane {
     timelinePrefix: null,
     recorderState: "paused",
     recorderDetail: null,
-    fromRoster: true,
     plan: [],
     planLoaded: false,
     planLoadAttempts: 0,
@@ -989,20 +1003,6 @@ function createPaneShell(instanceId: string): Pane {
     showContextMenu(items, event.clientX, event.clientY);
   });
   return pane;
-}
-
-/** A terminal tab that shows a message instead of a live pty (agent failed to start). */
-let errorSeq = 0;
-function createErrorPane(message: string): void {
-  const id = `term-error-${++errorSeq}`;
-  const pane = createPaneShell(id);
-  pane.fromRoster = false;
-  pane.error = true;
-  pane.nameEl.textContent = "error";
-  pane.tabEl.title = "terminal failed to start";
-  pane.statusEl.style.display = "none";
-  pane.view.write(`\r\n\x1b[1;31m✗ ${message.split("\n").join("\r\n  ")}${"\r\n"}\x1b[0m\r\n`);
-  activatePane(id);
 }
 
 function applyTypeBadge(pane: Pane): void {
@@ -1057,10 +1057,9 @@ function revealActivityPane(instanceId: string): void {
   const pane = panes.get(instanceId);
   if (!pane) return;
   layout.revealTerminal();
-  if (pane.projectId) lastActivePane.set(pane.projectId, instanceId);
   if (pane.projectId && pane.projectId !== activeProjectId) {
     const targetProject = pane.projectId;
-    void activateProject(targetProject).then((activated) => {
+    void activateProject(targetProject, "context").then((activated) => {
       if (!activated || activeProjectId !== targetProject) return;
       if (panes.has(instanceId)) activatePane(instanceId);
     }).catch((err) => {
@@ -1095,20 +1094,37 @@ function announceActivityCue(pane: Pane, kind: "idle" | "blocked"): void {
   );
 }
 
-function activatePane(instanceId: string): void {
+function activatePane(instanceId: string): Promise<boolean> {
   const pane = panes.get(instanceId);
-  if (!pane) return;
+  if (!pane) return Promise.resolve(false);
   removeSplash();
   activeId = instanceId;
-  void window.termina.selectTerminal(instanceId, pane.generation).catch((err) => {
+  const generation = pane.generation;
+  const selected = window.termina.selectTerminal(instanceId, generation).then(async (result) => {
+    if (!result.ok) return false;
+    await ensureEditorModule();
+    if (activeId !== instanceId || panes.get(instanceId) !== pane || pane.generation !== generation) return false;
+    applyFolderOpened(result.folder);
+    const view = pane.projectId ? projectViews.get(pane.projectId) : undefined;
+    return activeId === instanceId && (!view || view.workspace.id === pane.workspaceId);
+  }).catch((err) => {
     toast(`could not select the terminal: ${(err as Error).message}`, "warning");
+    return false;
   });
-  // Viewing clears the unseen-failure nudge.
+  showPane(pane);
+  return selected;
+}
+
+/** Paint an admitted or explicitly selected pane without another privileged selection. */
+function showPane(pane: Pane): void {
+  removeSplash();
+  const instanceId = pane.instanceId;
+  activeId = instanceId;
+  // Viewing clears the unseen-failure nudge, including automatic project entry.
   if (pane.verifyAttention) {
     pane.verifyAttention = false;
     updatePaneTab(pane);
   }
-  if (pane.projectId) lastActivePane.set(pane.projectId, instanceId);
   // Scope to this project: background projects keep their own active tab so
   // returning to them shows a pane instead of a blank frame (flicker).
   for (const p of panes.values()) {
@@ -1244,30 +1260,27 @@ function disposePane(pane: Pane): void {
   if (panes.get(pane.instanceId) !== pane) return;
   panes.delete(pane.instanceId);
   forgetPaneActivityCue(pane.instanceId);
-  for (const [projectId, activeInstanceId] of lastActivePane) {
-    if (activeInstanceId === pane.instanceId) lastActivePane.delete(projectId);
-  }
   pane.view.dispose();
   pane.container.remove();
   pane.tabEl.remove();
 }
 
-async function closePane(instanceId: string): Promise<void> {
+async function closePane(instanceId: string): Promise<TerminalCloseResult> {
   const pane = panes.get(instanceId);
-  if (!pane || pendingTerminalCloses.has(pane)) return;
+  if (!pane || pendingTerminalCloses.has(pane)) return { ok: false, error: "The terminal is unavailable or already closing." };
   const terminalGeneration = pane.generation;
   pendingTerminalCloses.add(pane);
   try {
     const result = await window.termina.closeTerminal(instanceId, terminalGeneration);
     if (!result?.ok) {
       if (result?.error) toast(`could not close the terminal: ${result.error}`, "warning");
-      return;
+      return result;
     }
     // A roster push can prune this pane before the reply. Never remove a new life.
     const currentPane = panes.get(instanceId);
-    if ((currentPane && currentPane !== pane) || pane.generation !== terminalGeneration) return;
+    if ((currentPane && currentPane !== pane) || pane.generation !== terminalGeneration) return result;
     closingPanes.set(instanceId, { generation: terminalGeneration });
-    if (!currentPane) return;
+    if (!currentPane) return result;
     disposePane(pane);
     syncExplorerChanged();
     if (activeId === instanceId) {
@@ -1282,8 +1295,11 @@ async function closePane(instanceId: string): Promise<void> {
         renderChrome();
       }
     }
+    return result;
   } catch (err) {
-    toast(`could not close the terminal: ${(err as Error).message}`, "warning");
+    const error = `could not close the terminal: ${(err as Error).message}`;
+    toast(error, "warning");
+    return { ok: false, error };
   } finally {
     pendingTerminalCloses.delete(pane);
   }
@@ -1331,8 +1347,9 @@ function updatePaneTab(pane: Pane): void {
 }
 
 function renderChrome(): void {
-  workSummaryView.syncContext();
+  checksPanel.syncContext();
   const pane = activeId ? panes.get(activeId) : undefined;
+  terminalEmpty.sync(!!activeProjectId && !pane);
   if (!pane) {
     statusState.textContent = "no terminal";
     statusCwd.textContent = "";
@@ -1347,8 +1364,8 @@ function renderChrome(): void {
     return;
   }
   renderStatus(pane);
-  activityPane.renderPlan(pane, false);
-  activityPane.renderModified(pane, false);
+  activityPane.renderPlan(pane);
+  activityPane.renderModified(pane);
 }
 
 function presentActivity(pane: Pane): { blocked: boolean; working: boolean; blockedLabel: string } {
@@ -1556,15 +1573,15 @@ async function openFileSmartInner(
 ): Promise<void> {
   if (reviewView?.isVisible) reviewView.hide();
   const requestedView = activeProjectId ? projectViews.get(activeProjectId) : null;
-  const target = resolveFileNavigation(path, projectViews, requestedOwner ?? (requestedView?.workspaceId
-    ? { projectId: requestedView.id, workspaceId: requestedView.workspaceId }
+  const target = resolveFileNavigation(path, projectViews, requestedOwner ?? (requestedView
+    ? { projectId: requestedView.id, workspaceId: requestedView.workspace.id }
     : null));
   if (!target) {
     toast(`could not open ${pathBasename(path)}: file owner is unavailable`, "error");
     return;
   }
   const { path: abs, owner } = target;
-  if (activeProjectId !== owner.projectId && !(await activateProject(owner.projectId))) return;
+  if (activeProjectId !== owner.projectId && !(await activateProject(owner.projectId, "context"))) return;
   // Activation or close may supersede this request during the IPC round trip.
   const view = projectViews.get(owner.projectId);
   if (!view || activeProjectId !== owner.projectId) return;
@@ -1573,8 +1590,10 @@ async function openFileSmartInner(
   layout.revealEditor();
   try {
     await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });
+    // Navigation and editor keys use canonical paths; the project may retain a macOS alias.
     // A successful open is the recency signal, whatever path led here.
-    const rel = abs.startsWith(`${view.cwd}/`) ? abs.slice(view.cwd.length + 1) : null;
+    const root = canonicalizePath(view.cwd);
+    const rel = abs.startsWith(`${root}/`) ? abs.slice(root.length + 1) : null;
     if (rel) void window.termina.recordRecentFile(owner.projectId, rel).catch(() => undefined);
   } catch (err) {
     toast(`could not open ${pathBasename(abs)}: ${(err as Error).message}`, "error");
@@ -1583,17 +1602,40 @@ async function openFileSmartInner(
 
 // ---------------------------------------------------------------- panels ----
 
-const terminalMenu = createTerminalMenu({
-  anchor: btnNewTerminal,
-  getActivePane: () => (activeId ? panes.get(activeId) : undefined),
-  hasPane: (instanceId) => panes.has(instanceId),
-  getActiveProjectId: () => activeProjectId,
-  activatePane,
-  createErrorPane,
-  refocusActivePane: () => {
-    if (activeId && panes.has(activeId)) panes.get(activeId)?.view.focus();
-  },
+async function createProjectTerminal(type: "agent" | "shell", shell?: string): Promise<{ ok: boolean; error?: string }> {
+  const projectId = activeProjectId;
+  const projectGeneration = activeProjectGeneration;
+  if (!projectId) return { ok: false, error: "Open a project first." };
+  const source = activeId ? panes.get(activeId) : undefined;
+  const fromTerminalId = type === "agent" && source?.projectId === projectId && !source.error && !source.exited
+    ? source.instanceId : undefined;
+  try {
+    const result = await window.termina.createTerminal({ type, projectId,
+      ...(shell ? { shell } : {}), ...(fromTerminalId ? { fromTerminalId } : {}),
+    });
+    if (result.ok && result.id && activeProjectId === projectId && activeProjectGeneration === projectGeneration) {
+      activatePaneWhenReady(result.id);
+    }
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Could not create terminal." };
+  }
+}
+
+const terminalEmpty = createTerminalEmpty({
+  element: document.getElementById("terminal-empty")!,
+  onCreateAgent: () => createProjectTerminal("agent"),
+  onOpenShell: () => createProjectTerminal("shell"),
 });
+
+const terminalMenu = createTerminalMenu({
+  agentButton: btnNewTerminal,
+  anchor: document.getElementById("btn-terminal-menu") as HTMLButtonElement,
+  onCreateAgent: () => createProjectTerminal("agent"),
+  onOpenShell: (shell) => createProjectTerminal("shell", shell),
+  onError: (message) => toast(message, "warning"),
+});
+window.addEventListener("unload", () => terminalMenu.dispose(), { once: true });
 window.termina.onProjectClosed(({ projectId, activationGeneration }) => {
   if (Number.isSafeInteger(activationGeneration) && activationGeneration > latestProjectActivationGeneration) {
     latestProjectActivationGeneration = activationGeneration;
@@ -1601,7 +1643,7 @@ window.termina.onProjectClosed(({ projectId, activationGeneration }) => {
   removeProjectView(projectId);
   if (projectViews.size === 0) {
     projectCwd = null;
-    explorer.setProject(null, null);
+    explorer.setProject(null, null, null, false);
     getBaseEditor().setProjectOpen(false);
   }
 });
@@ -1757,7 +1799,9 @@ commands.register("select-all", () => runMenuEdit("select-all"));
 
 // Terminal commands
 commands.register("new-terminal", () => {
-  terminalMenu.toggle();
+  layout.revealTerminal();
+  attentionView.cancelNavigation();
+  void terminalMenu.createAgent();
 });
 commands.register("next-terminal", () => cycleTerminals(1));
 commands.register("previous-terminal", () => cycleTerminals(-1));
@@ -1819,7 +1863,7 @@ function cycleProjects(delta: 1 | -1): void {
   const index = activeProjectId ? ids.indexOf(activeProjectId) : -1;
   const next = ids[(index + delta + ids.length) % ids.length];
   if (next) {
-    void activateProject(next).catch((err) => {
+    void enterProject(next).catch((err) => {
       toast(`could not switch projects: ${(err as Error).message}`, "warning");
     });
   }
@@ -1828,7 +1872,7 @@ function cycleProjects(delta: 1 | -1): void {
 function activateProjectByIndex(index: number): void {
   const id = orderedProjectIds()[index];
   if (id) {
-    void activateProject(id).catch((err) => {
+    void enterProject(id).catch((err) => {
       toast(`could not switch projects: ${(err as Error).message}`, "warning");
     });
   }
@@ -1940,7 +1984,7 @@ commands.register("toggle-explorer", () => layout.toggleExplorer());
 commands.register("toggle-terminal", () => layout.requestMinimize("terminal"));
 commands.register("toggle-editor", () => layout.requestMinimize("editor"));
 commands.register("toggle-modified", () => layout.toggleModified());
-commands.register("attention", () => attentionView.open(document.activeElement instanceof HTMLElement ? document.activeElement : undefined));
+commands.register("attention", () => attentionView.focus());
 commands.register("session-search", () => sessionSearch.open());
 quickOpen.bind({
   // An explicit modal pick is a direct gesture: take editor focus so the
@@ -1954,6 +1998,7 @@ quickOpen.bind({
   onContentResults: (pattern, hits, truncated, error) => explorer.showContentResults(pattern, hits, truncated, error),
   contentGeneration: () => explorer.contentGeneration(),
   onExecuteCommand: (command) => commands.execute(command),
+  onOpenWork: (target, isCurrent) => attentionView.revealWork(target, isCurrent),
   getShortcut: (command) => prefs.current.shortcuts[command] ?? "",
 });
 commands.register("quick-open", () => quickOpen.open("files"));
@@ -2072,8 +2117,8 @@ window.termina.onPtyExit(({ id, generation, windowGeneration, rendererGeneration
   renderAcceptedPtyRecords(pane, result.records, id, generation, windowGeneration, rendererGeneration);
 });
 
-/** Lock the editor while a busy agent is bound to the project's primary
- *  workspace. Candidate trees have their own workspaceId from main. */
+/** Lock the editor while a busy agent owns the displayed workspace.
+ *  Source and candidate trees keep separate workspace IDs and write leases. */
 function updateEditorLock(): void {
   if (!editorModule) return;
   const view = activeProjectId ? projectViews.get(activeProjectId) : undefined;
@@ -2082,7 +2127,7 @@ function updateEditorLock(): void {
     return;
   }
   const locked = [...panes.values()].some(
-    (p) => p.busy && p.type === "agent" && !p.error && p.projectId === activeProjectId && p.workspaceId === view.workspaceId,
+    (p) => p.busy && p.type === "agent" && !p.error && p.projectId === activeProjectId && p.workspaceId === view.workspace.id,
   );
   activeEditor().setLocked(locked);
 }
@@ -2247,6 +2292,7 @@ window.termina.onVerifyState(({ terminalId, verify }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
   pane.verify = verify;
+  if (activeId === terminalId) checksPanel.syncContext();
   // Nudge only for failures the user hasn't seen: a fail/timeout that lands
   // while another pane is in front dots this tab until first view.
   if (verify.state === "fail" || verify.state === "timeout") {
@@ -2260,7 +2306,7 @@ window.termina.onVerifyState(({ terminalId, verify }) => {
 
 window.termina.onToolTarget((p) => {
   const view = projectViews.get(p.projectId);
-  if (!view || view.workspaceId !== p.workspaceId) return;
+  if (!view || view.workspace.id !== p.workspaceId) return;
   if (!prefs.current.autoOpenAgentFiles) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
   // Boot race: before the editor chunk resolves, active-project targets queue
@@ -2289,7 +2335,7 @@ let changeEpochSeq = 0;
 const changeKey = (owner: ProjectWorkspaceRef, path: string): string => `${owner.projectId}\u0000${owner.workspaceId}\u0000${path}`;
 
 function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: EditorManagerInstance): void {
-  if (!editor.hasFile(path)) return;
+  if (!editor.hasFile(path, owner)) return;
   const key = changeKey(owner, path);
   const at = lastChangePush.get(key)?.at;
   const epoch = ++changeEpochSeq;
@@ -2302,7 +2348,7 @@ function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: Edit
       fetchLargeChange(path, owner, editor);
       return;
     }
-    if (projectViews.get(owner.projectId)?.editorMgr !== editor || !editor.hasFile(path)) return;
+    if (projectViews.get(owner.projectId)?.editorMgr !== editor || !editor.hasFile(path, owner)) return;
     if (!res.ok) {
       toast(`could not refresh ${pathBasename(path)}: ${res.error}`, "warning");
       return;
@@ -2318,7 +2364,7 @@ function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: Edit
 
 window.termina.onFileChanged((p) => {
   const view = projectViews.get(p.projectId);
-  if (!view || view.workspaceId !== p.workspaceId) return;
+  if (!view) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
   const key = changeKey(owner, p.path);
   const at = Date.now();
@@ -2328,14 +2374,14 @@ window.termina.onFileChanged((p) => {
   activityPane.dropStaleAcceptMarks(p.path);
   if (p.content !== undefined && !previewKind(p.path)) {
     largeChangeEpoch.delete(key);
-    if (view.editorMgr) view.editorMgr.updateContent(p.path, p.content, p.changedLines);
+    if (view.editorMgr?.hasFile(p.path, owner)) view.editorMgr.updateContent(p.path, p.content, p.changedLines);
   } else {
     // Media (including text-based SVG) needs a new preview URL, not a model
     // update. Omitted text bytes use the same fetch. A newer change bumps the
     // epoch so a hung read cannot block the next push.
     if (view.editorMgr) fetchLargeChange(p.path, owner, view.editorMgr);
   }
-  if (activeProjectId !== p.projectId) return;
+  if (activeProjectId !== p.projectId || view.workspace.id !== p.workspaceId) return;
   explorer.handleDiskChange(p.path);
   // The open review stays in sync with the agent's writes.
   if (reviewView?.isVisible && reviewView.matchesPath(p.path) && reviewView.matchesOwner(owner)) void reviewView.refreshCurrent(p.content);
@@ -2343,23 +2389,22 @@ window.termina.onFileChanged((p) => {
 
 window.termina.onFileDeleted((p) => {
   const view = projectViews.get(p.projectId);
-  if (!view || view.workspaceId !== p.workspaceId) return;
+  if (!view) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
   const key = changeKey(owner, p.path);
   lastChangePush.delete(key);
   largeChangeEpoch.delete(key);
-  view.editorMgr?.closeIfOpen(p.path);
+  if (view.editorMgr?.hasFile(p.path, owner)) view.editorMgr.closeIfOpen(p.path);
   activityPane.dropStaleAcceptMarks(p.path);
-  if (activeProjectId !== p.projectId) return;
+  if (activeProjectId !== p.projectId || view.workspace.id !== p.workspaceId) return;
   explorer.handleDiskChange(p.path);
 });
 
 /**
  * The explorer marks agent-changed files. Main owns the modified list, so the
  * dot is derived from the same pushes that drive the Modified panel and can
- * never disagree with it. Only panes in the project's primary workspace count:
- * a worldline candidate has its own tree, so its relative paths would mark
- * files the project tree never changed.
+ * never disagree with it. Only panes in the displayed workspace count:
+ * source and candidate relative paths must not mark each other's files.
  */
 function syncExplorerChanged(): void {
   const view = activeProjectId ? projectViews.get(activeProjectId) : undefined;
@@ -2367,7 +2412,7 @@ function syncExplorerChanged(): void {
     explorer.setModifiedFiles([]);
     return;
   }
-  explorer.setModifiedFiles(projectChangedPaths(panes.values(), activeProjectId, view.workspaceId));
+  explorer.setModifiedFiles(projectChangedPaths(panes.values(), activeProjectId, view.workspace.id));
 }
 
 window.termina.onFolderOpened((e) => {
@@ -2395,17 +2440,20 @@ function applyFolderOpened(e: FolderOpenedPayload): void {
   const projectId = e.projectId;
   let view = projectViews.get(projectId);
   if (!view) {
-    view = createProjectView({ id: projectId, cwd: e.cwd, workspaceId: e.workspaceId, needsLogin: e.needsLogin });
+    view = createProjectView({ id: projectId, cwd: e.projectRoot, workspaceId: e.primaryWorkspaceId, needsLogin: e.needsLogin });
   } else {
-    view.cwd = e.cwd;
-    view.workspaceId = e.workspaceId;
+    view.cwd = e.projectRoot;
+    view.workspaceId = e.primaryWorkspaceId;
     view.needsLogin = e.needsLogin === true;
     view.editorMgr?.setProjectOpen(true, e.needsLogin);
   }
+  if (view.workspace.id !== e.workspaceId || view.workspace.root !== e.cwd) quickOpen.onProjectChange();
+  view.workspace = { id: e.workspaceId, root: e.cwd };
+  projectTerminalTarget = e.terminal;
   projectRail.upsert(view);
   baseEditorInstance?.setProjectOpen(true);
   setActiveProject(view.id);
-  explorer.setProject(projectId, e.cwd);
+  explorer.setProject(projectId, e.cwd, e.workspaceId, e.workspaceId !== e.primaryWorkspaceId);
   // setProject clears change marks (they are project-relative), and it runs
   // after setActiveProject, so the marks must be re-pushed here.
   syncExplorerChanged();
@@ -2483,7 +2531,7 @@ window.termina.onInstances((list: InstanceSummary[]) => {
 
   let prunedPane = false;
   for (const [id, pane] of [...panes.entries()]) {
-    if (liveIds.has(id) || !pane.fromRoster) continue;
+    if (liveIds.has(id)) continue;
     disposePane(pane);
     prunedPane = true;
     if (activeId === id) activeId = null;
@@ -2562,7 +2610,7 @@ async function boot(attempt = 0): Promise<void> {
     const bootView = activeProjectId ? projectViews.get(activeProjectId) : undefined;
     if (bootView) {
       projectCwd = bootView.cwd;
-      explorer.setProject(bootView.id, bootView.cwd);
+      explorer.setProject(bootView.id, bootView.workspace.root, bootView.workspace.id, bootView.workspace.id !== bootView.workspaceId);
     }
 
     const instances = await window.termina.getInstances();
@@ -2583,7 +2631,6 @@ async function boot(attempt = 0): Promise<void> {
     // setActiveProject ran before the instance list arrived, so the panes had
     // no modified state yet. Recompute now that each pane carries its list.
     syncExplorerChanged();
-    activateProjectPane();
     updateEditorLock();
     // Hydrate every pane only after all terminal shells and their project
     // bindings have been constructed for this renderer document.
@@ -2601,8 +2648,9 @@ async function boot(attempt = 0): Promise<void> {
     const bootProjectId = activeProjectId ?? instances[0]?.projectId;
     if (bootProjectId && projectViews.has(bootProjectId) && bootProjectId !== activeProjectId) {
       setActiveProject(bootProjectId);
-      activateProjectPane();
     }
+    if (bootProjectId && projectViews.has(bootProjectId)) await enterProject(bootProjectId);
+    else activateProjectPane();
     // Worldlines: rebuild the panel from the live list (push events keep it
     // current after this). Project-tree test detect follows hydration so
     // unlabeled pane clears do not wipe the one cache.

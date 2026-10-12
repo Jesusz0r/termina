@@ -14,6 +14,12 @@ export interface ProjectWorkspaceRef {
   workspaceId: string;
 }
 
+export interface ReviewTarget extends ProjectWorkspaceRef {
+  terminalId: string;
+  generation: number;
+  root: string;
+}
+
 /** Main-issued capability bound to one renderer document and its main frame. */
 export interface RendererIpcCapability {
   windowGeneration: number;
@@ -83,12 +89,23 @@ const AGENT_ACTIVITY_REASONS = [
   "lease-wait",
   "sidecar-paused",
   "exited-mid-run",
+  "permission-required",
 ] as const;
 export type AgentActivityReason = (typeof AGENT_ACTIVITY_REASONS)[number];
+
+/** A currently displayed human permission picker, not inferred from output or idle. */
+export interface AgentIntervention {
+  requestId: string;
+  kind: "permission";
+  /** Producer epoch milliseconds when this picker became available to answer. */
+  since: number;
+}
 
 export interface AgentActivityView {
   state: AgentActivityState;
   reason: AgentActivityReason | null;
+  /** Exact pending picker, or null. Internal blocks and result review are not interventions. */
+  intervention: AgentIntervention | null;
 }
 
 export const DISPATCH_OUTCOMES = ["completed", "incomplete", "failed", "interrupted"] as const;
@@ -98,7 +115,7 @@ export type DispatchOutcome = (typeof DISPATCH_OUTCOMES)[number];
 export interface PlanTask {
   /** The task line text. */
   text: string;
-  /** File paths mentioned in the task (relative to the project). */
+  /** File paths mentioned in the task (relative to its work area). */
   paths: string[];
   state: "pending" | "active" | "done";
   /** Dispatch worker terminal id when this task is assigned. */
@@ -107,9 +124,13 @@ export interface PlanTask {
   claimed?: string[];
   /** Last finished attempt; separate from a currently running assignment. */
   dispatchResult?: { workerId: string; outcome: DispatchOutcome };
+  /** Current/last independent attempt. Retained across settlement and restart; retries stay independent. */
+  candidate?: { comparisonId: string; label: "A" | "B" };
   /** Worker model from an `@model provider/id` marker. Omit to inherit the owner tab. */
   model?: string;
 }
+
+export type PlanCandidateSummary = Pick<WorldlineSummary, "comparisonId" | "label" | "root" | "version" | "state" | "error" | "headStateId">;
 
 export interface PlanPayload {
   instanceId: string;
@@ -227,13 +248,16 @@ export type WorkAttentionReason =
   | "task-incomplete"
   | "task-failed"
   | "task-interrupted"
-  | "worker-unavailable";
+  | "worker-unavailable"
+  | "pending-review";
 
 /** Navigation only. It never authorizes execution, review acceptance, or promotion. */
 export interface WorkSummaryAction {
-  kind: "terminal" | "plan" | "changes" | "evidence";
+  kind: "terminal" | "plan" | "evidence";
   terminalId: string;
   generation: number;
+  /** Reveal the exact existing Plan Board row, without dispatching it. */
+  taskText?: string;
 }
 
 export interface PlanWorkSummary {
@@ -241,6 +265,8 @@ export interface PlanWorkSummary {
   task: PlanTask;
   /** Live assignment only; dispatchResult remains historical when this is null. */
   worker: { terminalId: string; generation: number } | null;
+  /** Resolved current/last independent area, including after its worker closes. */
+  candidate: PlanCandidateSummary | null;
   attention: WorkAttentionReason[];
   nextAction: WorkSummaryAction;
 }
@@ -258,7 +284,17 @@ export interface TerminalWorkSummary {
   trackedChanges: number;
   tasks: PlanWorkSummary[];
   attention: WorkAttentionReason[];
-  nextAction: WorkSummaryAction;
+}
+
+/** Failed retained candidate context; never a fabricated terminal or Plan Board task. */
+export interface CandidateRecoverySummary {
+  comparisonId: string;
+  label: "A" | "B";
+  root: string;
+  version: number;
+  error: string | null;
+  /** Comparison-level teardown failures cannot be reopened. */
+  recovery: "open" | "discard";
 }
 
 /** Small, on-demand projection of one project's canonical owners. No terminal buffers or diffs. */
@@ -266,6 +302,7 @@ export interface ProjectWorkSummary {
   projectId: string;
   name: string;
   root: string;
+  candidateRecoveries: CandidateRecoverySummary[];
   terminals: TerminalWorkSummary[];
 }
 
@@ -279,12 +316,15 @@ export interface WorkAttentionItem {
   taskText: string | null;
   reason: WorkAttentionReason;
   detail: string | null;
+  /** Owner context used for navigation, not the retained candidate's mutation authority. */
   workArea: WorkAreaSummary | null;
+  /** Exact independent result being inspected, including after its worker closes. */
+  candidate?: PlanCandidateSummary;
   action: WorkSummaryAction;
 }
 
 export interface WorkOverview {
-  projects: Array<{ projectId: string; name: string; root: string; working: number; attentionCount: number }>;
+  projects: Array<ProjectWorkSummary & { working: number; attentionCount: number }>;
   items: WorkAttentionItem[];
 }
 
@@ -669,11 +709,16 @@ export interface WorldlineDetails {
 }
 
 export interface FolderOpenedPayload {
+  /** Displayed workspace root; the project identity remains projectRoot. */
   cwd: string;
   projectId: string;
   workspaceId: string;
+  projectRoot: string;
+  primaryWorkspaceId: string;
   /** Monotonic main-side project activation epoch. */
   activationGeneration: number;
+  /** Exact main-admitted terminal to display, or an empty project context. */
+  terminal: { id: string; generation: number } | null;
   /** True when the agent has no provider in auth.json or in the process environment. */
   needsLogin: boolean;
 }
@@ -729,8 +774,8 @@ export interface UnsavedConfirmResult {
 }
 
 export type EditorFileResult =
-  | { ok: true; path: string; content: string; recoveredDraft?: string; deleted?: boolean; recoveryDiskError?: string; recoverySaveBlocked?: boolean; changedLines?: number[] }
-  | { ok: true; path: string; preview: "image" | "pdf"; version: number }
+  | { ok: true; path: string; readOnly: boolean; content: string; recoveredDraft?: string; deleted?: boolean; recoveryDiskError?: string; recoverySaveBlocked?: boolean; changedLines?: number[] }
+  | { ok: true; path: string; readOnly: boolean; preview: "image" | "pdf"; version: number }
   | { ok: false; path: string; error: string };
 
 export interface TerminaBridge {
@@ -774,7 +819,7 @@ export interface TerminaBridge {
   /** Retire one PTY sequence after xterm has consumed it. */
   acknowledgePtyData(payload: Pick<PtyDataPayload, "id" | "generation" | "windowGeneration" | "rendererGeneration" | "sequence">): void;
   /** Report the selected pane for native actions; main validates ownership and generation. */
-  selectTerminal(id: string, generation: number): Promise<{ ok: boolean }>;
+  selectTerminal(id: string, generation: number): Promise<ProjectActivateResult>;
   closeTerminal(id: string, generation: number): Promise<TerminalCloseResult>;
   writeTerminal(id: string, data: string): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
@@ -807,7 +852,6 @@ export interface TerminaBridge {
   /** The current run's plan tasks (Plan Board). */
   getPlan(terminalId: string): Promise<PlanTask[]>;
   /** Factual project/task context without heavy history or renderer notification state. */
-  getProjectWorkSummary(projectId: string): Promise<ProjectWorkSummary | null>;
   getWorkOverview(): Promise<WorkOverview>;
   inspectWorkAttention(id: string): Promise<WorkAttentionInspectResult>;
   /** Inspect a live terminal generation's current verdict and bounded historical output. */
@@ -900,7 +944,7 @@ export interface TerminaBridge {
   projectOpen(): Promise<{ cwd: string } | { cancelled: true }>;
   /** Open a project by path (the test suites cannot drive the dialog). */
   projectOpenPath(cwd: string): Promise<{ cwd: string } | { cancelled: true }>;
-  projectActivate(projectId: string): Promise<ProjectActivateResult>;
+  projectActivate(projectId: string, intent: "entry" | "context"): Promise<ProjectActivateResult>;
   projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
   /** Persist project tab order. `ids` is every open project, in strip order. */
   reorderProjects(ids: string[]): Promise<{ ok: boolean }>;
@@ -920,13 +964,13 @@ export interface TerminaBridge {
   saveFile(path: string, content: string, owner: ProjectWorkspaceRef, restore?: boolean): Promise<{ ok: boolean; error?: string }>;
 
   // file explorer
-  listDir(projectId: string, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }>;
-  createEntry(projectId: string, relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
-  renameEntry(projectId: string, relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
-  deleteEntry(projectId: string, relPath: string): Promise<{ ok: boolean; error?: string }>;
+  listDir(owner: ProjectWorkspaceRef, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }>;
+  createEntry(owner: ProjectWorkspaceRef, relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
+  renameEntry(owner: ProjectWorkspaceRef, relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
+  deleteEntry(owner: ProjectWorkspaceRef, relPath: string): Promise<{ ok: boolean; error?: string }>;
   /** Explorer clipboard paste: copy (or move, for a cut entry) srcRel under
    *  the target directory. Collisions get a " copy" / " copy N" suffix. */
-  pasteEntry(projectId: string, targetDirRel: string, srcRel: string, move: boolean): Promise<{ ok: boolean; error?: string; name?: string }>;
+  pasteEntry(owner: ProjectWorkspaceRef, targetDirRel: string, srcRel: string, move: boolean): Promise<{ ok: boolean; error?: string; name?: string }>;
   getUpdateState(): Promise<AppUpdateState>;
   checkUpdate(): Promise<AppUpdateState>;
   installUpdate(): Promise<{ ok: boolean; error?: string }>;

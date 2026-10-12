@@ -15,6 +15,9 @@ export interface IndependentSessionOptions {
   model: string | null;
   thinkingLevel: string | null;
   sourceSessionFile?: string;
+  initialTask?: string;
+  assertCurrent?: () => void;
+  beforeSpawn?: (terminalId: string, candidate: { comparisonId: string; label: "A" | "B" }) => void;
 }
 
 export interface IndependentSessionHost {
@@ -38,9 +41,12 @@ export interface IndependentSessionHost {
 export async function createIndependentSession(host: IndependentSessionHost, opts: IndependentSessionOptions): Promise<{
   ok: boolean; terminalId?: string; error?: string;
 }> {
+  opts.assertCurrent?.();
   const check = await host.deps.preflight();
+  opts.assertCurrent?.();
   if (!check.ok) return { ok: false, error: check.reasons.join("; ") };
   const store = await host.deps.getStore();
+  opts.assertCurrent?.();
   if (!store || store.sourceRoot !== host.deps.primaryRoot) return { ok: false, error: "the source repository is unavailable" };
   const admission = await host.acquireAdmission();
   if (!admission.ok) return admission;
@@ -48,27 +54,38 @@ export async function createIndependentSession(host: IndependentSessionHost, opt
   let requester: string | null = null;
   let workspaceId: string | null = null;
   try {
+    opts.assertCurrent?.();
     const workspace = await host.deps.workspaceAt(host.deps.primaryRoot);
+    opts.assertCurrent?.();
     if (!workspace) throw new Error("the source folder is no longer open");
     workspaceId = workspace.id;
     requester = `session:${randomUUID()}`;
     const lease = await host.deps.acquireWriteLease(workspaceId, requester, 5000);
+    opts.assertCurrent?.();
     if (!lease.ok) throw new Error(lease.error ?? "the source workspace is busy");
-    if (!(await host.deps.flushDirtyModels(requester, workspaceId)).ok) throw new Error("unsaved source changes could not be captured");
+    // Capture the persisted source under its write lease. An independent Start
+    // must not force-save the user's dirty models or change their source files.
     const trustHashes = await host.deps.trustHashes();
+    opts.assertCurrent?.();
     const state = await host.deps.capturePrimary();
+    opts.assertCurrent?.();
     if (!state) throw new Error("the source snapshot is unavailable");
     cmp = await host.construct({
       sourceRunId: null, sourceGitDir: store.sourceGitDir, baseStateId: state,
-      ...opts, expectedCandidates: 1, candidates: [{ label: "A", role: "session" }], admissionLease: admission.lease,
+      model: opts.model, thinkingLevel: opts.thinkingLevel, sourceSessionFile: opts.sourceSessionFile,
+      expectedCandidates: 1, candidates: [{ label: "A", role: "session" }], admissionLease: admission.lease,
     });
+    opts.assertCurrent?.();
     host.ensureLive(cmp);
     // The manifest distinguishes a user-owned session from disposable experiments.
     await host.buildTemplate(cmp, store, state);
+    opts.assertCurrent?.();
     host.ensureLive(cmp);
     await host.clone(cmp);
+    opts.assertCurrent?.();
     host.ensureLive(cmp);
     await host.support(cmp);
+    opts.assertCurrent?.();
     host.ensureLive(cmp);
     const candidate = cmp.candidates.get("A")!;
     candidate.headStateId = state;
@@ -77,13 +94,17 @@ export async function createIndependentSession(host: IndependentSessionHost, opt
       await host.forkSession(cmp, opts.sourceSessionFile, candidate.sessionFile);
     }
     await host.resources(cmp);
+    opts.assertCurrent?.();
     host.ensureLive(cmp);
     const source = await admitWorldlineForkSource(host.deps, trustHashes);
     if (!source.ok) throw new Error(source.error);
+    opts.assertCurrent?.();
     host.ensureLive(cmp);
     host.deps.releaseWriteLease(workspaceId, requester);
     requester = null;
+    opts.assertCurrent?.();
     await host.start(cmp, state);
+    opts.assertCurrent?.();
     if (cmp.manifestWriteFailed) throw new Error("the new session could not be durably recorded");
     cmp.phase = "running";
     return { ok: true, terminalId: candidate.terminalId ?? undefined };

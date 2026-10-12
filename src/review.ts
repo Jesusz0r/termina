@@ -2,23 +2,20 @@
  * Change Review: shows a Monaco diff (pre-run baseline vs current) for a file
  * the agent touched, with Revert / Accept / Open actions.
  */
-import * as monaco from "monaco-editor";
 import { stickyToast, toast } from "./components/modals";
-import { languageForPath } from "./editor-language";
+import { ReadOnlyReviewDiff } from "./review-diff";
 import { applyMonacoTheme } from "./editor";
-import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
+import { pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
 
 export class ReviewView {
   private container: HTMLElement;
-  private diffEl: HTMLElement;
-  private diffEditor: monaco.editor.IStandaloneDiffEditor;
+  private diff: ReadOnlyReviewDiff;
   private nameEl: HTMLElement;
   private terminalId: string | null = null;
   private path: string | null = null;
   private owner: ProjectWorkspaceRef | null = null;
   private baseline: string | null | undefined = null;
-  private originalModel: monaco.editor.ITextModel | null = null;
-  private modifiedModel: monaco.editor.ITextModel | null = null;
+  private currentText: string | undefined;
   private onOpenFile: (path: string, owner: ProjectWorkspaceRef) => void = () => {};
   private onAccepted: (path: string) => void = () => {};
   private onReverted: (path: string) => void = () => {};
@@ -41,19 +38,9 @@ export class ReviewView {
 
   constructor() {
     this.container = document.getElementById("review-container") as HTMLElement;
-    this.diffEl = document.getElementById("review-diff") as HTMLElement;
     this.nameEl = document.getElementById("review-filename") as HTMLElement;
 
-    this.diffEditor = monaco.editor.createDiffEditor(this.diffEl, {
-      theme: "vs-dark",
-      fontSize: 13,
-      fontFamily: cssFontFamily(""),
-      automaticLayout: true,
-      readOnly: true,
-      renderSideBySide: true,
-      minimap: { enabled: false },
-      scrollBeyondLastLine: false,
-    });
+    this.diff = new ReadOnlyReviewDiff(document.getElementById("review-diff") as HTMLElement, "review-view");
 
     document.getElementById("review-back")!.addEventListener("click", () => this.hide());
     document.getElementById("review-open")!.addEventListener("click", () => {
@@ -93,15 +80,15 @@ export class ReviewView {
   }
 
   setFontSize(size: number): void {
-    this.diffEditor.updateOptions({ fontSize: size });
+    this.diff.setFontSize(size);
   }
 
   setFontFamily(family: string): void {
-    this.diffEditor.updateOptions({ fontFamily: cssFontFamily(family) });
+    this.diff.setFontFamily(family);
   }
 
   setWordWrap(enabled: boolean): void {
-    this.diffEditor.updateOptions({ wordWrap: enabled ? "on" : "off" });
+    this.diff.setWordWrap(enabled);
   }
 
   get isVisible(): boolean {
@@ -252,18 +239,12 @@ export class ReviewView {
 
   /** Build the diff models from two texts. */
   private setDiff(originalText: string, modifiedText: string): void {
-    const path = this.path ?? "";
-    this.originalModel?.dispose();
-    this.modifiedModel?.dispose();
-    const lang = languageForPath(path);
-    this.originalModel = monaco.editor.createModel(originalText, lang, monaco.Uri.parse(`file:///review/original/${encodeURIComponent(path)}`));
-    this.modifiedModel = monaco.editor.createModel(modifiedText, lang, monaco.Uri.parse(`file:///review/modified/${encodeURIComponent(path)}`));
-    this.diffEditor.setModel({ original: this.originalModel, modified: this.modifiedModel });
-    // Test seam: the e2e suites assert on the diff sides. Content is small
-    // (review files) and lives only while the modal is open.
+    this.diff.setDiff(this.path ?? "", originalText, modifiedText);
+    this.currentText = modifiedText;
+    // Existing e2e seam stays owned by ReviewView, not the reusable renderer.
     (window as unknown as Record<string, unknown>).__reviewDebug = {
-      original: this.originalModel.getValue(),
-      modified: this.modifiedModel.getValue(),
+      original: originalText,
+      modified: modifiedText,
     };
   }
 
@@ -328,7 +309,7 @@ export class ReviewView {
           if (!current.ok) {
             toast(`could not refresh review: ${current.error}`, "error");
           } else if ("content" in current) {
-            this.modifiedModel?.setValue(current.content);
+            this.setDiff(this.baseline ?? "", current.content);
             (document.getElementById("review-open") as HTMLButtonElement).disabled = false;
           }
         }
@@ -344,7 +325,7 @@ export class ReviewView {
     if (!this.terminalId || !this.path) return;
     const targetPath = this.path;
     const targetOwner = this.owner;
-    const preRevertContent = this.modifiedModel?.getValue();
+    const preRevertContent = this.currentText;
     let res;
     try {
       res = await window.termina.reviewRevert(this.terminalId, targetPath);
@@ -400,11 +381,8 @@ export class ReviewView {
     this.refreshVersion++;
     this.setVisible(false);
     this.coverEditors(false);
-    this.diffEditor.setModel(null);
-    this.originalModel?.dispose();
-    this.modifiedModel?.dispose();
-    this.originalModel = null;
-    this.modifiedModel = null;
+    this.diff.clear();
+    this.currentText = undefined;
     this.path = null;
     this.owner = null;
     this.terminalId = null;
@@ -424,8 +402,6 @@ export class ReviewView {
 
   dispose(): void {
     document.removeEventListener("keydown", this.onKeydown);
-    this.originalModel?.dispose();
-    this.modifiedModel?.dispose();
-    this.diffEditor.dispose();
+    this.diff.dispose();
   }
 }

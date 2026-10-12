@@ -130,11 +130,12 @@ for (const writer of ["editor save", "shell command"] as const) {
     expect(stale.result).toEqual(previous.result);
     const item = (await page.evaluate(() => window.termina.getWorkOverview())).items.find((entry) => entry.projectId === project.id && entry.reason === "verify-stale")!;
     expect(item).toMatchObject({ terminalId: "term-1", action: { kind: "evidence", terminalId: "term-1" } });
-    await page.locator("#btn-attention").click();
+    await expect(page.locator("#project-bar #attention-view")).toBeVisible();
+    await expect(page.locator("#attention-heading")).toContainText("Attention");
     await page.locator(`#attention-list .attention-item[data-id="${item.id}"] .attention-inspect`).click();
-    await expect(page.locator(".work-summary-report")).toContainText("**Status:** ⚠️ OUTDATED");
-    await expect(page.locator(".work-summary-report")).toContainText("**Historical execution:** ✅ PASSED (exit code 0)");
-    await expect(page.locator(".work-summary-report")).not.toContainText("**Status:** ✅ PASSED");
+    await expect(page.locator(".checks-report")).toContainText("**Status:** ⚠️ OUTDATED");
+    await expect(page.locator(".checks-report")).toContainText("**Historical execution:** ✅ PASSED (exit code 0)");
+    await expect(page.locator(".checks-report")).not.toContainText("**Status:** ✅ PASSED");
     expect(await readVerifyStages(projectRoot)).toHaveLength(4);
     expect(await page.evaluate(() => window.termina.runVerify("term-1"))).toEqual({ ok: true });
     await expect.poll(async () => (await verifyInfo(page, "term-1"))?.state).toBe("pass");

@@ -139,6 +139,29 @@ export async function boundPromotionReadFile(options: {
 }
 
 
+/** Inspect a private resource for native copying without returning its bytes. */
+export async function boundPromotionInspectPrivateFile(options: {
+  root: string;
+  rootIdentity: PromotionFsIdentity;
+  components: string[];
+  parentIdentity: PromotionFsIdentity;
+  expectedIdentity: PromotionFsIdentity;
+  maxBytes: number;
+}): Promise<BoundPromotionExpectedLeaf> {
+  const result = decodePromotionResponse(await coreClient.request({
+    op: "promotion-bound-inspect-private-file",
+    root: options.root,
+    rootIdentity: promotionIdentityPayload(options.rootIdentity),
+    ...(options.rootIdentity.capability ? { rootCapability: options.rootIdentity.capability } : {}),
+    components: options.components,
+    parentIdentity: promotionIdentityPayload(options.parentIdentity),
+    expectedIdentity: promotionIdentityPayload(options.expectedIdentity),
+    maxBytes: options.maxBytes,
+  }));
+  return decodePromotionLeaf(result.leaf, "bound private resource");
+}
+
+
 /** Execute one preservation-first, descriptor-relative promotion transition. */
 export async function boundPromotionTransition(options: BoundPromotionTransitionRequest): Promise<BoundPromotionTransitionResult> {
   const transition = options.transition;

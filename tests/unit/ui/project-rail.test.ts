@@ -11,19 +11,18 @@ afterEach(() => { rail?.dispose(); dom.cleanup(); });
 
 function harness() {
   const list = dom.document.createElement("div");
-  const allProjects = dom.document.createElement("button");
-  dom.document.body.append(list, allProjects);
+  const newProject = dom.document.createElement("button");
+  dom.document.body.append(list, newProject);
   const onActivate = vi.fn();
   const onClose = vi.fn();
-  const onAllProjects = vi.fn();
   const onReorder = vi.fn();
   rail = createProjectRail({
     list: list as unknown as HTMLElement,
-    allProjects: allProjects as unknown as HTMLButtonElement,
-    onActivate, onClose, onAllProjects, onReorder,
+    newProject: newProject as unknown as HTMLButtonElement,
+    onActivate, onClose, onReorder,
   });
   const add = (id: string, cwd = `/projects/${id}`) => rail.upsert({ id, cwd }) as unknown as FakeEl;
-  return { list, allProjects, onActivate, onClose, onAllProjects, onReorder, add };
+  return { list, newProject, onActivate, onClose, onReorder, add };
 }
 
 function control(row: FakeEl, selector = ".project-select"): FakeEl {
@@ -33,16 +32,16 @@ function control(row: FakeEl, selector = ".project-select"): FakeEl {
 }
 
 function overview(projectId: string, working: number, attentionCount: number): WorkOverview {
-  return { projects: [{ projectId, name: projectId, root: `/projects/${projectId}`, working, attentionCount }], items: [] };
+  return { projects: [{ projectId, name: projectId, root: `/projects/${projectId}`, terminals: [], candidateRecoveries: [], working, attentionCount }], items: [] };
 }
 
 function terminal(id: string, overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummaryTerminalFacts {
   return {
     id, generation: 1, type: "agent", model: "provider/model",
-    activity: { state: "idle", reason: null },
+    activity: { state: "idle", reason: null, intervention: null },
     workspace: { id: "ws-1", root: "/projects/p1", primary: true },
     verify: { state: "untested", command: null, summary: null },
-    trackedChanges: 0, plan: [], ...overrides,
+    dispatchAssignment: null, trackedChanges: 0, plan: [], ...overrides,
   };
 }
 
@@ -63,6 +62,22 @@ describe("persistent project rail", () => {
       expect(control(row, ".tab-close").getAttribute("aria-describedby")).toBe(description.id);
     }
     expect(control(first, ".project-path").id).not.toBe(control(second, ".project-path").id);
+  });
+
+  it("opens the exact workspace by project ID", () => {
+    const h = harness();
+    const first = h.add("p1", "/first/same-name");
+    const second = h.add("p2", "/second/same-name");
+    rail.setActive("p2");
+    expect(control(first).getAttribute("aria-pressed")).toBeNull();
+    expect(control(first).getAttribute("aria-label")).toBe("Open project same-name");
+    control(second, ".project-path").click();
+    expect(h.onActivate).toHaveBeenCalledExactlyOnceWith("p2");
+    control(first, ".tab-close").click();
+    expect(h.onClose).toHaveBeenCalledExactlyOnceWith("p1");
+    expect(second.classList.contains("active")).toBe(true);
+    control(first).click();
+    expect(h.onActivate).toHaveBeenLastCalledWith("p1");
   });
 
   it("uses separate native select and close buttons, forwarding only the exact clicked ID", () => {
@@ -88,16 +103,14 @@ describe("persistent project rail", () => {
     first.click();
     expect(h.onActivate).toHaveBeenCalledTimes(1);
     expect(h.onClose).toHaveBeenCalledTimes(1);
-    h.allProjects.click();
-    expect(h.onAllProjects).toHaveBeenCalledExactlyOnceWith(h.allProjects);
   });
 
   it("renders canonical working and unresolved attention, independent of inspected notification flags", () => {
     const h = harness();
     const row = h.add("p1");
     const facts = [
-      { ...terminal("working", { activity: { state: "working", reason: null } }), verifyAttention: false },
-      { ...terminal("blocked", { activity: { state: "blocked", reason: "lease-wait" } }), verifyAttention: false },
+      { ...terminal("working", { activity: { state: "working", reason: null, intervention: null } }), verifyAttention: false },
+      { ...terminal("blocked", { activity: { state: "blocked", reason: "lease-wait", intervention: null } }), verifyAttention: false },
       { ...terminal("checked", { verify: { state: "fail", command: "test", summary: "failed" } }), verifyAttention: false },
       { ...terminal("idle", { trackedChanges: 8 }), verifyAttention: true },
     ];
@@ -245,11 +258,11 @@ describe("persistent project rail", () => {
     const h = harness();
     h.add("p1");
     h.add("p2");
-    h.allProjects.focus();
-    const refocus = vi.spyOn(h.allProjects, "focus");
+    h.newProject.focus();
+    const refocus = vi.spyOn(h.newProject, "focus");
     rail.setOrder(["p2", "p1"]);
     expect(rail.orderedIds()).toEqual(["p2", "p1"]);
-    expect(dom.document.activeElement).toBe(h.allProjects);
+    expect(dom.document.activeElement).toBe(h.newProject);
     expect(refocus).not.toHaveBeenCalled();
     expect(h.onActivate).not.toHaveBeenCalled();
     expect(h.onReorder).not.toHaveBeenCalled();
@@ -305,7 +318,7 @@ describe("persistent project rail", () => {
     expect(h.onActivate).not.toHaveBeenCalled();
   });
 
-  it("closing the focused row restores a surviving control, then All projects when empty", () => {
+  it("closing the focused row restores a surviving control, then New project when empty", () => {
     const h = harness();
     const first = h.add("p1");
     const second = h.add("p2");
@@ -316,7 +329,7 @@ describe("persistent project rail", () => {
     expect(rail.orderedIds()).toEqual(["p2"]);
     expect(dom.document.activeElement).toBe(control(second));
     rail.remove("p2");
-    expect(dom.document.activeElement).toBe(h.allProjects);
+    expect(dom.document.activeElement).toBe(h.newProject);
     expect(h.onActivate).not.toHaveBeenCalled();
   });
 
@@ -327,32 +340,29 @@ describe("persistent project rail", () => {
     control(first).focus();
     rail.remove("p2");
     expect(dom.document.activeElement).toBe(control(first));
-    h.allProjects.focus();
+    h.newProject.focus();
     rail.remove("p1");
-    expect(dom.document.activeElement).toBe(h.allProjects);
+    expect(dom.document.activeElement).toBe(h.newProject);
     rail.remove("missing");
     expect(h.onActivate).not.toHaveBeenCalled();
   });
 
-  it("disposes list and All projects listeners and stops callbacks", () => {
+  it("disposes list listeners and stops callbacks", () => {
     const h = harness();
     const first = h.add("p1");
     h.add("p2");
     expect(h.list.listeners.get("click")).toHaveLength(1);
     expect(h.list.listeners.get("keydown")).toHaveLength(1);
-    expect(h.allProjects.listeners.get("click")).toHaveLength(1);
     rail.dispose();
     rail.dispose();
     expect(h.list.listeners.get("click")).toHaveLength(0);
     expect(h.list.listeners.get("keydown")).toHaveLength(0);
-    expect(h.allProjects.listeners.get("click")).toHaveLength(0);
     control(first).click();
     control(first, ".tab-close").click();
     control(first).dispatch("keydown", { key: "ArrowDown", altKey: true });
-    h.allProjects.click();
+    h.newProject.click();
     expect(h.onActivate).not.toHaveBeenCalled();
     expect(h.onClose).not.toHaveBeenCalled();
     expect(h.onReorder).not.toHaveBeenCalled();
-    expect(h.onAllProjects).not.toHaveBeenCalled();
   });
 });

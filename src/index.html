@@ -67,26 +67,18 @@
     <div id="app">
       <main id="main">
         <aside id="project-bar" aria-label="Project navigation">
+          <section id="attention-view" aria-labelledby="attention-heading">
+            <h2 id="attention-heading" class="project-rail-heading">Attention <span class="attention-count">…</span></h2>
+            <p id="attention-status">Loading attention…</p>
+            <p id="attention-message" role="status"></p>
+            <button type="button" id="btn-refresh-attention">Refresh</button>
+            <ul id="attention-list"></ul>
+            <button type="button" id="btn-more-attention" hidden>Show more</button>
+          </section>
           <div class="project-rail-heading">Projects</div>
-          <button type="button" id="btn-all-projects" aria-controls="attention-view">All projects</button>
-          <button type="button" id="btn-attention" aria-controls="attention-view" aria-expanded="false">Attention <span class="attention-count">…</span></button>
           <nav id="project-tabs" aria-label="Open projects"></nav>
           <button type="button" id="btn-new-project" title="Open a project folder" aria-label="New project">＋<span class="newtab-label">New project</span></button>
         </aside>
-        <section id="attention-view" role="region" aria-label="Attention across all projects" hidden>
-          <div class="attention-header">
-            <h2>Attention across all projects</h2>
-            <button type="button" id="btn-close-attention" aria-label="Close attention">×</button>
-          </div>
-          <p class="attention-explainer">Blockers and unavailable workers first, then failed or interrupted attempts, then check issues. Inspecting does not resolve an item.</p>
-          <div class="attention-toolbar">
-            <p id="attention-status">Loading attention…</p>
-            <button type="button" id="btn-refresh-attention">Refresh</button>
-          </div>
-          <p id="attention-message" role="status"></p>
-          <ul id="attention-list"></ul>
-          <button type="button" id="btn-more-attention" hidden>Show more</button>
-        </section>
         <div id="explorer">
           <div class="explorer-header">
             <svg class="header-logo brand-mark" viewBox="0 0 1024 1024" aria-hidden="true" focusable="false"><line x1="180" y1="636" x2="650" y2="636" stroke="currentColor" stroke-opacity="0.35" stroke-width="56" stroke-linecap="round"/><circle cx="250" cy="636" r="54" fill="currentColor"/><circle cx="410" cy="636" r="54" fill="currentColor"/><circle cx="568" cy="636" r="70" fill="currentColor"/><path d="M568 636Q612 566 692 506" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round"/><circle cx="800" cy="420" r="62" fill="none" stroke="currentColor" stroke-width="50"/></svg>
@@ -115,21 +107,41 @@
           <section id="left-pane">
             <div id="terminal-tabs">
               <div id="terminal-tabs-list"></div>
-              <button type="button" id="btn-new-terminal" title="New terminal (Cmd+T / Ctrl+T)" aria-label="New terminal">＋<span class="newtab-label">New terminal</span></button>
+              <button type="button" id="btn-new-terminal" title="New agent (Cmd+T / Ctrl+T)" aria-label="New agent">＋<span class="newtab-label">New agent</span></button>
+              <button type="button" id="btn-terminal-menu" title="Open shell" aria-label="Open shell menu" aria-haspopup="menu" aria-controls="terminal-shell-menu" aria-expanded="false">▾</button>
               <button type="button" id="btn-min-terminal" class="pane-toggle" title="Minimize terminal" aria-label="Minimize terminal">–</button>
             </div>
-            <details id="work-summary" hidden>
-              <summary><span class="work-summary-heading">Project work</span></summary>
-              <div class="work-summary-content" hidden></div>
-            </details>
-            <div id="terminal-container"></div>
-            <div id="activity-tabbar" role="tablist" aria-label="Activity panels">
-              <button type="button" class="activity-tab" id="activity-tab-timeline" data-tab="timeline" role="tab" aria-controls="timeline-strip">Timeline <span class="activity-count" data-count="timeline"></span></button>
-              <button type="button" class="activity-tab" id="activity-tab-plan" data-tab="plan" role="tab" aria-controls="plan-panel">Plan <span class="activity-count" data-count="plan"></span></button>
-              <button type="button" class="activity-tab" id="activity-tab-worldlines" data-tab="worldlines" role="tab" aria-controls="worldline-panel">Worldlines <span class="activity-count" data-count="worldlines"></span></button>
-              <button type="button" class="activity-tab" id="activity-tab-modified" data-tab="modified" role="tab" aria-controls="modified-panel">Modified <span class="activity-count" data-count="modified"></span></button>
+            <div id="terminal-container">
+              <section id="terminal-empty" class="terminal-empty" aria-label="Start a terminal" hidden>
+                <h3>No terminal open</h3>
+                <p>Create an agent or open a shell in this project.</p>
+                <div class="terminal-empty-actions">
+                  <button id="btn-empty-create-agent" type="button">Create agent</button>
+                  <button id="btn-empty-open-shell" type="button">Open shell</button>
+                </div>
+                <p id="terminal-empty-status" role="status" aria-live="polite" aria-atomic="true"></p>
+              </section>
             </div>
-            <div id="timeline-strip" class="tab-active" role="tabpanel" aria-labelledby="activity-tab-timeline">
+            <div id="terminal-tools">
+              <div id="activity-tabbar" role="tablist" aria-label="Activity panels">
+                <button type="button" class="activity-tab" id="activity-tab-checks" data-tab="checks" role="tab" aria-controls="checks-panel">Checks</button>
+                <button type="button" class="activity-tab" id="activity-tab-timeline" data-tab="timeline" role="tab" aria-controls="timeline-strip">Timeline <span class="activity-count" data-count="timeline"></span></button>
+                <button type="button" class="activity-tab" id="activity-tab-plan" data-tab="plan" role="tab" aria-controls="plan-panel">Plan <span class="activity-count" data-count="plan"></span></button>
+                <button type="button" class="activity-tab" id="activity-tab-worldlines" data-tab="worldlines" role="tab" aria-controls="worldline-panel">Worldlines <span class="activity-count" data-count="worldlines"></span></button>
+                <button type="button" class="activity-tab" id="activity-tab-modified" data-tab="modified" role="tab" aria-controls="modified-panel">Modified <span class="activity-count" data-count="modified"></span></button>
+              </div>
+              <button id="btn-close-activity" type="button" title="Close terminal tools" aria-label="Close terminal tools" hidden>Close</button>
+            </div>
+            <section id="checks-panel" role="tabpanel" aria-labelledby="activity-tab-checks">
+              <div class="panel-header">
+                <span class="activity-panel-title">Checks</span>
+                <button type="button" class="checks-details">Check details</button>
+              </div>
+              <p class="checks-context"></p>
+              <pre class="checks-report" tabindex="0" aria-label="Check execution details" hidden></pre>
+              <p class="checks-foot muted">Inspecting does not run or cancel tests. A historical pass does not certify current files or complete a review.</p>
+            </section>
+            <div id="timeline-strip" role="tabpanel" aria-labelledby="activity-tab-timeline">
               <div class="timeline-header">
                 <span class="activity-panel-title">Timeline</span>
                 <span id="timeline-count" class="muted"></span>

@@ -6,6 +6,8 @@
  */
 
 
+import type { AgentIntervention } from "../../shared/types.js";
+
 export const MAX_SIDECAR_BYTES = 8 * 1024 * 1024;
 
 /** A complete JSONL record may span bounded tail reads, but never grows
@@ -117,6 +119,8 @@ export type SidecarEvent =
       entryId?: string | null;
     })
   | (SidecarMeta & { t: "tool_end"; toolCallId?: string; isError?: boolean; entryId?: string | null })
+  | (SidecarMeta & AgentIntervention & { t: "intervention_requested" })
+  | (SidecarMeta & { t: "intervention_resolved"; requestId: string })
   | (SidecarMeta & { t: "subagent_spawn"; runId?: string; taskFile?: string; userRequested?: boolean })
   | (SidecarMeta & { t: "subagent_cancel"; runId?: string });
 

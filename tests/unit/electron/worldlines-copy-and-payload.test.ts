@@ -3,6 +3,8 @@ import { afterAll, beforeEach, describe, it, expect, vi } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MAX_AGENT_RESOURCE_BYTES } from "../../../electron/worldlines/limits.ts";
+import { MAX_MCP_JSON_BYTES } from "../../../agent-core/mcp.ts";
 
 const copyMocks = vi.hoisted(() => ({
   copyBoundPrivateFile: vi.fn(async () => {}),
@@ -215,6 +217,28 @@ describe("candidate resource copy (issue #247)", () => {
         join(root, ".termina", "agent", "auth.json"),
         expect.objectContaining({ path: expect.stringContaining(".termina/agent") }),
         "auth.json",
+        MAX_AGENT_RESOURCE_BYTES,
+      );
+    } finally {
+      await ready.catch(() => {});
+      await manager.dispose().catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the MCP-specific byte budget to the bound copier", async () => {
+    const { manager, root, ready } = await makeManager();
+    try {
+      const agentDir = join(root, ".termina", "agent");
+      await mkdir(agentDir, { recursive: true });
+      await writeFile(join(agentDir, "mcp.json"), '{"mcpServers":{}}\n', { mode: 0o600 });
+      await (manager as unknown as { copyCoreResources: (c: ComparisonState) => Promise<void> })
+        .copyCoreResources(comparisonWithHome(root));
+      expect(copyMocks.copyBoundPrivateFile).toHaveBeenCalledExactlyOnceWith(
+        join(agentDir, "mcp.json"),
+        expect.objectContaining({ path: expect.stringContaining(".termina/agent") }),
+        "mcp.json",
+        MAX_MCP_JSON_BYTES,
       );
     } finally {
       await ready.catch(() => {});

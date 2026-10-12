@@ -15,7 +15,11 @@ const compiled = ts.transpile(`class TerminaApp { ${method.getText(source)} } re
 function fixture() {
   return Object.assign(new Function(compiled)(), {
     verifyRuns: new Map(), dispatchRuns: new Map(),
-    runtime: new Map([["term-owner", { id: "term-owner", workspaceId: "ws-1" }]]),
+    runtime: new Map([
+      ["term-owner", { id: "term-owner", workspaceId: "ws-1" }],
+      ["term-worker", { id: "term-worker", workspaceId: "ws-1" }],
+      ["term-other", { id: "term-other", workspaceId: "ws-1" }],
+    ]),
   });
 }
 
@@ -30,6 +34,16 @@ describe("recorded run overlap", () => {
     main.dispatchRuns.set("term-other", { ownerId: "term-owner" });
     expect(main.overlapInWorkspace("ws-1", "term-worker")).toBe(true);
     expect(main.overlapInWorkspace("ws-2", "term-worker")).toBe(false);
+  });
+  it("isolated workers overlap only their actual candidate workspace, not their primary owner", () => {
+    const main = fixture();
+    main.runtime.set("term-other", { id: "term-other", workspaceId: "candidate" });
+    main.dispatchRuns.set("term-other", { ownerId: "term-owner" });
+    expect(main.overlapInWorkspace("ws-1", "term-worker")).toBe(false);
+    expect(main.overlapInWorkspace("candidate", "term-owner")).toBe(true);
+    main.runtime.delete("term-other");
+    expect(main.overlapInWorkspace("ws-1", "term-worker")).toBe(false);
+    expect(main.overlapInWorkspace("candidate", "term-owner")).toBe(false);
   });
   it("preserves every active Verify overlap, even when the same terminal owns its separate command", () => {
     const main = fixture();

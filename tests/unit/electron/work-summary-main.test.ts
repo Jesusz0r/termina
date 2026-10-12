@@ -1,17 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { activityFor, activityView, emptyActivityInput, type AgentActivityInput } from "../../../electron/agent-activity.ts";
+import { activityFor, activityView, activityKey, activityToolTarget, applyActivityEvent, emptyActivityInput, type AgentActivityInput } from "../../../electron/agent-activity.ts";
 import { parseTerminalTarget } from "../../../electron/main/ipc-validate.ts";
 import { projectWorkSummary, workOverview } from "../../../electron/main/work-summary.ts";
+import { chooseProjectTerminal } from "../../../electron/main/project-entry.ts";
 import { formatVerifyContext, invalidateVerify } from "../../../electron/main/verify-source.ts";
-import type { FolderOpenedPayload, PlanTask, ProjectWorkSummary, VerifyInfo, WorkAttentionInspectResult, WorkOverview } from "../../../shared/types.ts";
+import type { FolderOpenedPayload, PlanTask, ProjectActivateResult, ProjectWorkSummary, VerifyInfo, WorkAttentionInspectResult, WorkOverview, WorldlineSummary } from "../../../shared/types.ts";
 
 // Run the actual main methods with in-memory owners, without importing Electron,
 // instantiating an app/provider, or reading session files from the host.
 const sourceFile = ts.createSourceFile("main.ts", readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
 const methodNames = ["workSummary", "workOverview", "inspectWorkAttention", "verifyReport", "projectOfTerminal", "workspaceOfTerminal", "registerIpc",
-  "activateProject", "sendFolderOpened", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration"];
+  "activateProject", "displayedWorkspace", "sendFolderOpened", "projectNavigationTerminal", "selectedTerminal", "projectIsSwitching", "beginProjectSelectionAction", "nextProjectActivationGeneration", "foldSidecarActivity", "foldActivity"];
 const methods = new Map<string, ts.MethodDeclaration>();
 function visit(node: ts.Node): void {
   if (ts.isMethodDeclaration(node) && methodNames.includes(node.name.getText(sourceFile))) {
@@ -30,6 +31,7 @@ interface Workspace {
   root: string;
   primary: boolean;
   comparisonId?: string;
+  terminalIds: Set<string>;
 }
 interface Terminal {
   id: string;
@@ -39,6 +41,9 @@ interface Terminal {
   cwd: string;
   type: "agent" | "shell";
   closed: boolean;
+  busy: boolean;
+  persist: boolean;
+  pty: { hasExited: boolean };
   model: string | null;
   modified: Map<string, object>;
   plan: PlanTask[];
@@ -51,11 +56,13 @@ interface Project {
   terminalIds: Set<string>;
   workspaces: Map<string, Workspace>;
   activationGeneration: number;
+  worldlines?: { recoverySummaries(): ProjectWorkSummary["candidateRecoveries"]; list(): WorldlineSummary[] };
 }
 interface MainHarness {
   projects: Map<string, Project>;
   runtime: Map<string, Terminal>;
   activityInputs: Map<string, AgentActivityInput>;
+  dispatchRuns: Map<string, { ownerId: string; taskText: string }>;
   workSummary(projectId: unknown): ProjectWorkSummary | null;
   workOverview(): WorkOverview;
   inspectWorkAttention(id: unknown): Promise<WorkAttentionInspectResult>;
@@ -69,36 +76,42 @@ interface MainHarness {
   projectSelectionAction: number;
   projectActivationGeneration: number;
   send: ReturnType<typeof vi.fn>;
+  lastActivityKey: Map<string, string>;
+  sendInstances: ReturnType<typeof vi.fn>;
+  sendTimelinePrefix: ReturnType<typeof vi.fn>;
+  foldSidecarActivity(inst: Terminal, event: import("../../../electron/sidecar.ts").SidecarEvent): void;
   persistOpenProjects: ReturnType<typeof vi.fn>;
 }
 
 function fixture() {
-  const primary: Workspace = { id: "ws-primary", root: "/projects/active", primary: true };
-  const candidate: Workspace = { id: "ws-candidate", root: "/worlds/candidate-A", primary: false, comparisonId: "comparison-1" };
+  const primary: Workspace = { id: "ws-primary", root: "/projects/active", primary: true, terminalIds: new Set() };
+  const candidate: Workspace = { id: "ws-candidate", root: "/worlds/candidate-A", primary: false, comparisonId: "comparison-1", terminalIds: new Set() };
   const project: Project = {
     id: "project-1", cwd: primary.root, terminalIds: new Set(),
     workspaces: new Map([[primary.id, primary], [candidate.id, candidate]]), activationGeneration: 0,
   };
-  const main = new Function("activityFor", "activityView", "emptyActivityInput", "parseTerminalTarget", "projectWorkSummary", "workOverview", "formatVerifyContext", compiled)(
-    activityFor, activityView, emptyActivityInput, parseTerminalTarget, projectWorkSummary, workOverview, formatVerifyContext,
+  const main = new Function("activityFor", "activityView", "emptyActivityInput", "parseTerminalTarget", "projectWorkSummary", "workOverview", "formatVerifyContext", "activityKey", "activityToolTarget", "applyActivityEvent", "chooseProjectTerminal", compiled)(
+    activityFor, activityView, emptyActivityInput, parseTerminalTarget, projectWorkSummary, workOverview, formatVerifyContext, activityKey, activityToolTarget, applyActivityEvent, chooseProjectTerminal,
   ) as MainHarness;
   Object.assign(main, {
-    projects: new Map([[project.id, project]]), runtime: new Map(), activityInputs: new Map(),
+    projects: new Map([[project.id, project]]), runtime: new Map(), activityInputs: new Map(), dispatchRuns: new Map(),
     switchingProjects: new Set(), projectClosePromises: new Map(), disposed: false,
+    terminalCloseRequests: new WeakMap(), dispatchWorkers: new Map(),
     activeProjectId: null, projectSelectionAction: 0, projectSelectionActionSeq: 0, projectActivationGeneration: 0,
     primaryWorkspace: (project: Project) => [...project.workspaces.values()].find((workspace) => workspace.primary),
     captureRendererSendTarget: () => null, agentNeedsLogin: async () => false,
-    send: vi.fn(), persistOpenProjects: vi.fn(),
+    send: vi.fn(), persistOpenProjects: vi.fn(), lastActivityKey: new Map(), sendInstances: vi.fn(), sendTimelinePrefix: vi.fn(),
   });
   function add(id: string, overrides: Partial<Terminal> = {}): Terminal {
     const terminal: Terminal = {
       id, generation: 7, projectId: project.id, workspaceId: primary.id, cwd: primary.root,
-      type: "agent", closed: false, model: "test-model", modified: new Map(), plan: [],
+      type: "agent", closed: false, busy: false, persist: true, pty: { hasExited: false }, model: "test-model", modified: new Map(), plan: [],
       verify: { state: "untested", command: null, summary: null }, verifyOutput: null,
       ...overrides,
     };
     main.runtime.set(id, terminal);
     project.terminalIds.add(id);
+    project.workspaces.get(terminal.workspaceId)?.terminalIds.add(id);
     return terminal;
   }
   return { main, project, primary, candidate, add };
@@ -113,6 +126,49 @@ function historicalPass(): VerifyInfo {
 }
 
 describe("main project work-summary orchestration", () => {
+  it("wires the producer's exact intervention to roster, timeline and overview without aging on refresh", () => {
+    const { main, project, add } = fixture();
+    const owner = add("term-1");
+    const intervention = { requestId: "approval-1", kind: "permission" as const, since: 1000 };
+    const event = { bridgeId: "bridge", seq: 1, t: "intervention_requested" as const, ...intervention };
+    main.foldSidecarActivity(owner, event);
+    expect(main.workSummary(project.id)!.terminals[0]!.activity).toEqual({
+      state: "blocked", reason: "permission-required", intervention,
+    });
+    expect(main.sendInstances).toHaveBeenCalledOnce(); expect(main.sendTimelinePrefix).toHaveBeenCalledOnce();
+    main.foldSidecarActivity(owner, { ...event, seq: 2, since: 9000 });
+    expect(main.sendInstances).toHaveBeenCalledOnce();
+    expect(main.workOverview().projects[0]!.terminals[0]!.activity!.intervention).toEqual(intervention);
+    const before = main.workOverview().items[0]!.id;
+    main.foldSidecarActivity(owner, { ...event, seq: 3, requestId: "approval-2", since: 2000 });
+    expect(main.sendInstances).toHaveBeenCalledTimes(2);
+    expect(main.workOverview().items[0]!.id).not.toBe(before);
+    main.foldSidecarActivity(owner, { bridgeId: "bridge", seq: 4, t: "intervention_resolved", requestId: "approval-1" });
+    expect(main.sendInstances).toHaveBeenCalledTimes(2);
+    main.foldSidecarActivity(owner, { bridgeId: "bridge", seq: 5, t: "intervention_resolved", requestId: "approval-2" });
+    expect(main.sendInstances).toHaveBeenCalledTimes(3);
+    expect(main.workSummary(project.id)!.terminals[0]!.activity!.intervention).toBeNull();
+    expect(main.workOverview().items).toEqual([]);
+  });
+
+  it.each(["closed", "exited", "shell"])("does not publish an actionable picker on a %s terminal", (state) => {
+    const { main, add } = fixture();
+    const owner = add("term-1", { closed: state === "closed", pty: { hasExited: state === "exited" }, type: state === "shell" ? "shell" : "agent" });
+    main.foldSidecarActivity(owner, { bridgeId: "bridge", seq: 1, t: "intervention_requested", requestId: "approval-1", kind: "permission", since: 1000 });
+    expect(main.sendInstances).not.toHaveBeenCalled();
+    expect(main.activityInputs.has(owner.id)).toBe(false);
+  });
+
+  it("projects canonical retained candidate recovery even without a terminal", () => {
+    const { main, project } = fixture();
+    const recovery = { comparisonId: "cmp-failed", label: "B" as const, root: "/worlds/failed", version: 2,
+      error: "Session did not start", recovery: "open" as const };
+    project.worldlines = { recoverySummaries: vi.fn(() => [recovery]), list: () => [] };
+    expect(main.workSummary(project.id)).toMatchObject({ terminals: [], candidateRecoveries: [recovery] });
+    expect(project.worldlines.recoverySummaries).toHaveBeenCalledOnce();
+    expect(main.runtime.size).toBe(0);
+  });
+
   it.each([undefined, null, 1, {}, [], "", "missing-project", "p".repeat(65)])("rejects invalid or missing project %j", (projectId) => {
     const { main, add } = fixture();
     add("term-1");
@@ -121,7 +177,7 @@ describe("main project work-summary orchestration", () => {
 
   it("returns an empty summary for an existing project with no live terminals", () => {
     const { main, project } = fixture();
-    expect(main.workSummary(project.id)).toEqual({ projectId: project.id, name: "active", root: project.cwd, terminals: [] });
+    expect(main.workSummary(project.id)).toEqual({ projectId: project.id, name: "active", root: project.cwd, terminals: [], candidateRecoveries: [] });
   });
 
   it("includes only live terminals in the requested project's authoritative roster", () => {
@@ -142,8 +198,7 @@ describe("main project work-summary orchestration", () => {
     expect(summary.terminals.map((terminal) => terminal.terminalId)).toEqual(["term-1", "term-2"]);
     expect(summary.terminals[0]).toMatchObject({
       generation: 7, model: "test-model", trackedChanges: 2,
-      activity: { state: "blocked", reason: "sidecar-paused" }, attention: ["blocked"],
-      nextAction: { kind: "terminal", terminalId: "term-1", generation: 7 },
+      activity: { state: "blocked", reason: "sidecar-paused", intervention: null }, attention: ["blocked"],
     });
     expect(summary.terminals[1]).toMatchObject({ type: "shell", activity: null, verify: null, model: null, attention: [] });
   });
@@ -176,8 +231,10 @@ describe("main project work-summary orchestration", () => {
         dispatchResult: { workerId: "term-gone", outcome: "failed" },
       })),
     ];
+    main.dispatchRuns.set("term-worker", { ownerId: owner.id, taskText: "Assigned to term-worker" });
     let tasks = main.workSummary(project.id)!.terminals[0]!.tasks;
-    expect(tasks[0]).toEqual({ task: finished, worker: null, attention: [], nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation } });
+    expect(tasks[0]).toEqual({ task: finished, worker: null, candidate: null, attention: ["pending-review"],
+      nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation, taskText: finished.text } });
     expect(tasks[1]).toMatchObject({ worker: null, attention: ["task-incomplete"], task: { dispatchResult: { outcome: "incomplete" } } });
     expect(tasks[2]).toMatchObject({ worker: { terminalId: "term-worker", generation: 9 }, attention: [], nextAction: { kind: "terminal", terminalId: "term-worker", generation: 9 } });
     for (const task of tasks.slice(3)) expect(task).toMatchObject({ worker: null, attention: ["worker-unavailable"], nextAction: { kind: "plan", terminalId: owner.id, generation: owner.generation } });
@@ -186,6 +243,38 @@ describe("main project work-summary orchestration", () => {
     tasks = main.workSummary(project.id)!.terminals[0]!.tasks;
     expect(tasks[2]).toMatchObject({ worker: null, attention: ["worker-unavailable"], task: { workerId: "term-worker", dispatchResult: { workerId: "term-gone", outcome: "failed" } } });
     expect(tasks[0]!.task.dispatchResult).toEqual(finished.dispatchResult);
+  });
+});
+
+describe("main project activation IPC intent", () => {
+  function handler(main: MainHarness) {
+    let invoke: ts.CallExpression | undefined;
+    function find(node: ts.Node): void {
+      if (ts.isCallExpression(node) && node.expression.getText(sourceFile) === "ipcMain.handle"
+        && ts.isStringLiteral(node.arguments[0]!) && node.arguments[0].text === "project:activate") invoke = node;
+      ts.forEachChild(node, find);
+    }
+    find(methods.get("registerIpc")!);
+    if (!invoke) throw new Error("project activation IPC is missing");
+    let callback!: (event: unknown, id: unknown, intent: unknown) => Promise<ProjectActivateResult>;
+    const code = ts.transpileModule(invoke.getText(sourceFile), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    new Function("ipcMain", code).call(main, { handle: (_channel: string, registered: typeof callback) => { callback = registered; } });
+    return callback;
+  }
+
+  it.each([undefined, null, "unknown", {}, []])("refuses missing or invalid intent %j without admitting a terminal", async (intent) => {
+    const { main, project, add } = fixture(); add("term-1"); const before = main.activeProjectId;
+    const auth = vi.spyOn(main, "agentNeedsLogin");
+    expect(await handler(main)({}, project.id, intent)).toEqual({ ok: false });
+    expect(main.activeProjectId).toBe(before); expect(main.send).not.toHaveBeenCalled(); expect(auth).not.toHaveBeenCalled();
+  });
+
+  it.each(["entry", "context"] as const)("admits a typed exact terminal for %s and refuses a missing project", async (intent) => {
+    const { main, project, add } = fixture(); const owner = add("term-1"); const activate = handler(main);
+    expect(await activate({}, "missing", intent)).toEqual({ ok: false });
+    expect(main.send).not.toHaveBeenCalled();
+    expect(await activate({}, project.id, intent)).toMatchObject({ ok: true,
+      folder: { projectId: project.id, terminal: { id: owner.id, generation: owner.generation } } });
   });
 });
 
@@ -217,12 +306,81 @@ describe("main global attention and validated inspection", () => {
     expect(main.workOverview().projects[1]).toMatchObject({ projectId: second.id, working: 1, attentionCount: 0 });
   });
 
+  it("returns the exact owner and task for native Plan Board focus after Attention activation", async () => {
+    const { main, add } = fixture();
+    const failed: PlanTask = { text: "Exact saved task", paths: ["hello.txt"], state: "pending",
+      dispatchResult: { workerId: "gone", outcome: "failed" } };
+    add("other-owner", { plan: [structuredClone(failed)] });
+    const owner = add("exact-owner", { plan: [{ ...failed, text: "Earlier task" }, failed] });
+    const item = main.workOverview().items.find((item) => item.terminalId === owner.id && item.taskText === failed.text)!;
+    expect(await main.inspectWorkAttention(item.id)).toMatchObject({ ok: true,
+      action: { kind: "plan", terminalId: owner.id, generation: owner.generation, taskText: failed.text } });
+    expect(owner.plan).toEqual([{ ...failed, text: "Earlier task" }, failed]);
+  });
+
+  it("reads all canonical tasks and source areas without mutation or heavy runtime payloads", () => {
+    const { main, project, primary, candidate, add } = fixture();
+    const pending: PlanTask = { text: "Pending task", paths: ["pending.ts"], state: "pending" };
+    const done: PlanTask = { text: "Done task", paths: ["done.ts"], state: "done", dispatchResult: { workerId: "gone", outcome: "completed" } };
+    const owner = add("term-owner", { plan: [pending, done], modified: new Map([["private.ts", { diff: "large private diff" }]]), verifyOutput: "large verification output" });
+    Object.assign(owner, { buffer: "large terminal buffer", diff: "large source diff" });
+    add("term-candidate", { workspaceId: candidate.id, cwd: primary.root });
+    add("term-shell", { type: "shell", workspaceId: candidate.id });
+    main.activityInputs.set("term-shell", { ...emptyActivityInput(), lastBoundary: "agent_start" });
+    const before = structuredClone({ runtime: main.runtime, activity: main.activityInputs, project });
+    const single = main.workSummary(project.id)!;
+    const overview = main.workOverview();
+    expect(overview.projects).toEqual([{ ...single, working: 0, attentionCount: 1 }]);
+    expect(overview.items).toEqual([expect.objectContaining({ reason: "pending-review", taskText: done.text,
+      action: { kind: "plan", terminalId: owner.id, generation: owner.generation, taskText: done.text } })]);
+    expect(overview.projects[0]!.terminals[0]!.tasks.map(({ task }) => task)).toEqual([pending, done]);
+    expect(overview.projects[0]!.terminals[1]!.workArea).toEqual({ workspaceId: candidate.id, root: candidate.root, kind: "candidate", comparisonId: candidate.comparisonId });
+    expect(overview.projects[0]!.terminals[2]).toMatchObject({ type: "shell", activity: null, verify: null, model: null });
+    for (const terminal of overview.projects[0]!.terminals) {
+      for (const key of ["buffer", "diff", "modified", "verifyOutput"]) expect(terminal).not.toHaveProperty(key);
+    }
+    expect(JSON.stringify(overview)).not.toContain("large");
+    expect(JSON.stringify(overview)).not.toContain("private.ts");
+    expect(main.workOverview()).toEqual(overview);
+    expect({ runtime: main.runtime, activity: main.activityInputs, project }).toEqual(before);
+    expect(main.send).not.toHaveBeenCalled();
+    expect(main.persistOpenProjects).not.toHaveBeenCalled();
+  });
+
+  it("revalidates pending-review navigation against the exact retained capture and lifecycle", async () => {
+    const { main, project, add } = fixture();
+    const result: PlanTask = { text: "Review retained result", paths: ["done.ts"], state: "done",
+      dispatchResult: { workerId: "gone", outcome: "completed" }, candidate: { comparisonId: "cmp-result", label: "A" } };
+    add("term-owner", { plan: [result] });
+    const area: WorldlineSummary = { id: "cmp-result-A", comparisonId: "cmp-result", label: "A", role: "session",
+      root: "/worlds/result", version: 2, state: "settled", error: null, headStateId: "captured-result",
+      comparisonBaseStateId: "base", promotionBaseStateId: "base", sourceRunId: null, terminalId: null,
+      sessionFile: null, model: "test-model", thinkingLevel: null, createdAt: 1 };
+    project.worldlines = { recoverySummaries: () => [], list: () => [area] };
+    const item = main.workOverview().items[0]!;
+    expect(item.reason).toBe("pending-review");
+    expect((await main.inspectWorkAttention(item.id)).ok).toBe(true);
+    expect(main.workOverview().items).toContainEqual(item);
+    area.headStateId = "replacement-capture";
+    expect((await main.inspectWorkAttention(item.id)).ok).toBe(false);
+    const current = main.workOverview().items[0]!;
+    let release!: (value: boolean) => void;
+    main.agentNeedsLogin = () => new Promise((resolve) => { release = resolve; });
+    const inspection = main.inspectWorkAttention(current.id);
+    area.state = "promoted";
+    release(false);
+    expect((await inspection).ok).toBe(false);
+    expect(main.workOverview().items).toEqual([]);
+    expect(result.dispatchResult?.outcome).toBe("completed");
+  });
+
   it("uses actual activation, returns exact navigation, and never resolves recorded attention", async () => {
     const { main, project, owner, item } = attentionFixture();
     const before = structuredClone(owner.plan);
     const result = await main.inspectWorkAttention(item.id);
     expect(result).toEqual({ ok: true, folder: { cwd: project.cwd, projectId: project.id,
-      workspaceId: "ws-primary", activationGeneration: 1, needsLogin: false }, action: item.action });
+      workspaceId: "ws-primary", activationGeneration: 1, needsLogin: false,
+      terminal: { id: owner.id, generation: owner.generation }, projectRoot: project.cwd, primaryWorkspaceId: "ws-primary" }, action: item.action });
     expect(main.send).toHaveBeenCalledWith("folder:opened", expect.objectContaining({ activationGeneration: 1 }), null);
     expect(main.activeProjectId).toBe(project.id);
     expect(main.workOverview().items).toContainEqual(item);
@@ -330,7 +488,8 @@ describe("main generation-fenced Verify report", () => {
     expect(report).toContain("**Elapsed:** 1250 ms");
     expect(report).toContain(`**Tree:** ${"a".repeat(40)}`);
     expect(report).toContain("historical execution output");
-    expect(main.workSummary(project.id)!.terminals[0]).toMatchObject({ verify: owner.verify, attention: ["verify-stale"], nextAction: { kind: "evidence", terminalId: owner.id, generation: 7 } });
+    expect(main.workSummary(project.id)!.terminals[0]).toMatchObject({ verify: owner.verify, attention: ["verify-stale"] });
+    expect(main.workOverview().items[0]?.action).toEqual({ kind: "evidence", terminalId: owner.id, generation: 7 });
   });
 
   it("does not substitute the latest generation when a terminal id is recycled", () => {
@@ -371,7 +530,7 @@ describe("main generation-fenced Verify report", () => {
   });
 });
 
-it("registers both summary readers through the capability-gated IPC facade and forwards exact preload targets", () => {
+it("registers the canonical overview and inspection through the capability-gated IPC facade and forwards exact preload targets", () => {
   const registrar = methods.get("registerIpc")!.getText(sourceFile);
   expect(registrar).toContain("this.handleIpc(channel, listener)");
   expect(registrar).toContain('ipcMain.handle("work:overview"');
@@ -380,13 +539,12 @@ it("registers both summary readers through the capability-gated IPC facade and f
   expect(registrar).toContain("return this.inspectWorkAttention(id)");
   expect(registrar).not.toContain('electronIpcMain.handle("work:overview"');
   expect(registrar).not.toContain('electronIpcMain.handle("work:inspect"');
-  expect(registrar).toContain('ipcMain.handle("project:work-summary"');
-  expect(registrar).toContain("return this.workSummary(projectId)");
+  expect(registrar).not.toContain('ipcMain.handle("project:work-summary"');
   expect(registrar).toContain('ipcMain.handle("verify:report", (_e, id: unknown, generation: unknown) => this.verifyReport(id, generation))');
-  expect(registrar).not.toContain('electronIpcMain.handle("project:work-summary"');
   expect(registrar).not.toContain('electronIpcMain.handle("verify:report"');
   const preload = readFileSync(new URL("../../../electron/preload.ts", import.meta.url), "utf8");
-  expect(preload).toContain('getProjectWorkSummary: (projectId) => ipcRenderer.invoke("project:work-summary", projectId)');
+  expect(preload).toContain('getWorkOverview: () => ipcRenderer.invoke("work:overview")');
+  expect(preload).not.toContain("getProjectWorkSummary");
   expect(preload).toContain('getVerifyReport: (terminalId, generation) => ipcRenderer.invoke("verify:report", terminalId, generation)');
   expect(preload).toContain("electronIpcRenderer.invoke(channel, ...args, rendererCapability)");
 });

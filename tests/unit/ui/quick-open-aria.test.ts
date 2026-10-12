@@ -27,6 +27,7 @@ function mountPalette(): { input: FakeEl; results: FakeEl } {
     onOpenContentHit: () => {},
     onContentResults: () => {},
     onExecuteCommand: () => {},
+    onOpenWork: async () => false,
     getShortcut: () => "",
   });
   qo.open("actions");
@@ -77,6 +78,7 @@ describe("Quick Open combobox ARIA (refs #304)", () => {
       onOpenContentHit: () => {},
       onContentResults: () => {},
       onExecuteCommand: () => {},
+      onOpenWork: async () => false,
       getShortcut: () => "",
     });
     qo.open("content");

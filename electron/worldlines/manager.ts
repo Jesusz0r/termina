@@ -46,6 +46,7 @@ import type {
   SessionForkCallOptions,
 } from "../session-fork.js";
 import type {
+  CandidateRecoverySummary,
   ChallengeProfile,
   DependencyChange,
   EvidenceRecord,
@@ -225,6 +226,7 @@ export interface WorldlineDeps {
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
     /** Install candidate routing before the PTY is allowed to spawn. */
     beforeSpawn?: (terminalId: string) => void;
+    spawnGuard?: () => void;
     /** Cancel the spawn/read lifecycle when comparison teardown wins. */
     signal?: AbortSignal;
   }): Promise<{ terminalId: string; pid: number }>;
@@ -462,6 +464,29 @@ export class WorldlineManager {
     for (const cmp of this.comparisons.values()) {
       for (const cand of cmp.candidates.values()) {
         out.push(this.summaryOf(cmp, cand));
+      }
+    }
+    return out;
+  }
+
+  /** Terminal-less retained failures only; closed admission never permits reopening. */
+  recoverySummaries(): CandidateRecoverySummary[] {
+    if (this.readyError) return [];
+    const out: CandidateRecoverySummary[] = [];
+    for (const cmp of this.comparisons.values()) {
+      if (cmp.phase === "creating") continue;
+      const live = this.comparisonIsLive(cmp);
+      for (const cand of cmp.candidates.values()) {
+        if (cand.state !== "error" || cand.terminalId !== null || cand.pid !== null || cand.startupAttemptId) continue;
+        if (live && !cand.sessionFile) continue;
+        out.push({
+          comparisonId: cmp.id,
+          label: cand.label,
+          root: cand.dir,
+          version: cand.version,
+          error: cand.error,
+          recovery: live ? "open" : "discard",
+        });
       }
     }
     return out;
@@ -1514,7 +1539,7 @@ export class WorldlineManager {
     }
     if (!info.isFile() || info.size > maxBytes) return;
     try {
-      await copyBoundPrivateFile(sourcePath, destination, name);
+      await copyBoundPrivateFile(sourcePath, destination, name, maxBytes);
     } catch (error) {
       throw new Error(`could not copy ${name} into candidate ${label}: ${errorDetail(error)}`);
     }
@@ -2628,6 +2653,7 @@ export class WorldlineManager {
 
   async createIndependentSession(opts: IndependentSessionOptions): Promise<{ ok: boolean; terminalId?: string; error?: string }> {
     await this.ready;
+    opts.assertCurrent?.();
     return createIndependentSession({
       deps: this.deps,
       acquireAdmission: () => this.acquireUncertainComparisonAdmission(),
@@ -2643,8 +2669,15 @@ export class WorldlineManager {
       },
       start: async (cmp, state) => {
         const cand = cmp.candidates.get("A")!;
-        await this.writeControl(cand, { opId: randomUUID(), action: "none" });
-        await this.launch.launchCandidate(cmp, cand, state);
+        opts.assertCurrent?.();
+        await this.writeControl(cand, opts.initialTask === undefined
+          ? { opId: randomUUID(), action: "none" }
+          : { opId: randomUUID(), action: "structured", content: [{ type: "text", text: opts.initialTask }] });
+        opts.assertCurrent?.();
+        await this.launch.launchCandidate(cmp, cand, state, {
+          assertCurrent: opts.assertCurrent,
+          beforeSpawn: (id) => opts.beforeSpawn?.(id, { comparisonId: cmp.id, label: cand.label }),
+        });
       },
       teardown: (id, error) => this.teardown(id, "error", error),
     }, opts);

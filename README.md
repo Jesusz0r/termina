@@ -41,7 +41,8 @@ New to Termina? Read **[`docs/reference/USER-GUIDE.md`](docs/reference/USER-GUID
 | Feature | What it does |
 |---|---|
 | Empty first launch | fresh launches start with no folder until you pick one; later launches restore saved projects; the empty editor tells you to `/login` and `/models` when pi has no provider |
-| Project rail & attention | up to 12 projects in a persistent rail, with distinct paths and factual work/attention counts; inspect blockers, failed attempts, and failed or outdated checks across all projects without resolving them by viewing — agents keep running when you switch |
+| Project rail & attention | up to 12 projects in a persistent rail, with direct workspace navigation, distinct paths and factual work/attention counts; an always-visible Attention section above Projects shows the total current item count and recorded issues across projects without resolving them by viewing — agents keep running when you switch |
+| Command palette | `Cmd/Ctrl+K` searches commands, open projects and existing tasks; project results open the real workspace, and task results open the exact owner's Plan Board without starting work |
 | File explorer | full tree with create / rename / delete, a VS Code-style context menu, cut / copy / paste, path actions, and Mine marks for files you own |
 | Editor tabs | VS Code-style preview tabs, drag reorder, middle-click close, tab context menus, unsaved-edit dots, save all |
 | Live editor | the file watcher pushes every disk change into open Monaco models; files the agent touches auto-open mid-run; word wrap and minimap toggle per preference |

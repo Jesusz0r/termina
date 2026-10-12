@@ -4,6 +4,25 @@ import { test, expect } from "./fixtures.ts";
 
 type TerminalPanes = Map<string, { view: { getTerminal(): import("@xterm/xterm").Terminal } }>;
 
+async function expectFileOwnerTerminal(
+  page: import("@playwright/test").Page,
+  projectId: string,
+  terminal: { id: string; generation: number } | null,
+): Promise<void> {
+  await expect.poll(() => page.evaluate((projectId) => {
+    const panes = (window as unknown as {
+      __panes: Map<string, { projectId: string; generation: number; tabEl: HTMLElement }>;
+    }).__panes;
+    return [...panes.entries()].filter(([, pane]) => pane.projectId === projectId && pane.tabEl.classList.contains("active"))
+      .map(([id, pane]) => ({ id, generation: pane.generation }));
+  }, projectId)).toEqual(terminal ? [terminal] : []);
+  if (terminal) await expect(page.locator("#terminal-empty")).toBeHidden();
+  else {
+    await expect(page.locator("#terminal-empty")).toBeVisible();
+    await expect(page.locator(".terminal-tab.active:visible")).toHaveCount(0);
+  }
+}
+
 async function terminalPoint(page: import("@playwright/test").Page, id: string, needle: string) {
   return page.evaluate(({ id, needle }) => {
     const term = (window as unknown as { __panes: TerminalPanes }).__panes.get(id)!.view.getTerminal();
@@ -74,8 +93,11 @@ for (const nested of [false, true]) {
     const terminalB = instances.find((instance) => instance.projectId === projectB.id)!;
     expect(terminalA).toBeTruthy();
     expect(terminalB).toBeTruthy();
+    // Nested sources overlap the first agent's tree, so their agent owns an isolated workspace.
+    expect((await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), projectB.id))?.terminals
+      .find((terminal) => terminal.terminalId === terminalB.id)?.workArea?.kind).toBe(nested ? "candidate" : "project");
 
-    await page.evaluate((id) => window.termina.projectActivate(id), projectA.id);
+    await page.evaluate((id) => window.termina.projectActivate(id, "entry"), projectA.id);
     await expect(page.locator(".project-tab.active .tab-name")).toHaveText("test-project");
     await expect(page.locator("#explorer-tree").getByText("hello.txt", { exact: true })).toBeVisible();
     await followTerminalFileLink(page, terminalA.id, join(projectB.cwd, "linked-only.txt"));
@@ -85,10 +107,7 @@ for (const nested of [false, true]) {
     await expect(page.locator("#explorer-tree").getByText("linked-only.txt", { exact: true })).toBeVisible();
     await expect(page.locator("#explorer-tree").getByText("hello.txt", { exact: true })).toHaveCount(0);
     await expect(page.locator(`.project-editor[data-project="${projectB.id}"] .editor-tab`)).toContainText("linked-only.txt");
-    await expect.poll(() => page.evaluate((id) => {
-      const panes = (window as unknown as { __panes: Map<string, { tabEl: HTMLElement }> }).__panes;
-      return panes.get(id)?.tabEl.classList.contains("active") ?? false;
-    }, terminalB.id)).toBe(true);
+    await expectFileOwnerTerminal(page, projectB.id, nested ? null : { id: terminalB.id, generation: terminalB.generation });
 
     const results = await page.evaluate(() => window.termina.searchFiles("linked-only"));
     expect(results.entries.some((entry) => entry.relPath === "linked-only.txt")).toBe(true);
@@ -146,7 +165,7 @@ test("a delayed activation reply cannot restore an older owner across main, rail
     expect((await page.evaluate(() => window.termina.searchFiles("newer-only"))).entries).toEqual(expect.arrayContaining([
       expect.objectContaining({ relPath: "newer-only.txt" }),
     ]));
-    expect((await page.evaluate((id) => window.termina.getProjectWorkSummary(id), projectB.id))?.root).toBe(projectB.cwd);
+    expect((await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), projectB.id))?.root).toBe(projectB.cwd);
     expect(realpathSync(projectA.cwd)).toBe(realpathSync(projectRoot));
   } finally {
     await electronApp.evaluate(() => {
@@ -170,6 +189,8 @@ for (const nested of [false, true]) {
       await page.evaluate((cwd) => window.termina.projectOpenPath(cwd), rootB);
       const projectB = (await page.evaluate(() => window.termina.projectList())).find((project) => project.active)!;
       const terminalB = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.projectId === projectB.id)!;
+      expect((await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), projectB.id))?.terminals
+        .find((terminal) => terminal.terminalId === terminalB.id)?.workArea?.kind).toBe(nested ? "candidate" : "project");
       await page.locator(`#project-tabs .project-tab[data-project-id="${projectA.id}"] .project-select`).click();
       const shell = await page.evaluate((projectId) => window.termina.createTerminal({ type: "shell", shell: "/bin/bash", projectId }), projectA.id);
       expect(shell).toMatchObject({ ok: true });
@@ -231,9 +252,9 @@ for (const nested of [false, true]) {
         const editor = (window as unknown as { __editorMgr: { editor: import("monaco-editor").editor.IStandaloneCodeEditor } }).__editorMgr.editor;
         return { content: editor.getModel()?.getValue(), position: editor.getPosition() };
       })).toMatchObject({ content: "first line\nsecond line\nthird line\n", position: { lineNumber: 2, column: 3 } });
-      await expect.poll(() => page.evaluate((id) => (window as unknown as { __panes: Map<string, { tabEl: HTMLElement }> }).__panes.get(id)?.tabEl.classList.contains("active"), terminalB.id)).toBe(true);
+      await expectFileOwnerTerminal(page, projectB.id, nested ? null : { id: terminalB.id, generation: terminalB.generation });
       expect((await page.evaluate(() => window.termina.searchFiles("linked-only"))).entries).toEqual(expect.arrayContaining([expect.objectContaining({ relPath: "linked-only.txt" })]));
-      expect((await page.evaluate((id) => window.termina.getProjectWorkSummary(id), projectB.id))?.root).toBe(projectB.cwd);
+      expect((await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), projectB.id))?.root).toBe(projectB.cwd);
       expect((await page.evaluate(() => window.termina.getInstances())).some((instance) => instance.id === id)).toBe(true);
     });
   }

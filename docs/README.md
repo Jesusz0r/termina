@@ -28,5 +28,6 @@ Dated findings and exploratory designs, not guarantees of current behavior.
 
 Not current behavior.
 
-- [`plans/attention-first-workspace.md`](plans/attention-first-workspace.md) — proposed multi-project and multi-agent experience, workflows, safety boundaries, and rollout priorities
+- [`plans/attention-first-workspace.md`](plans/attention-first-workspace.md) — historical proposal and staged implementation record; the All projects overview and its inspector/composer were subsequently removed, while Attention remains a persistent section above Projects in the rail alongside direct workspace navigation
+- [`plans/terminal-first-workspace.md`](plans/terminal-first-workspace.md) — dated interaction audit and local implementation history, including the later removal of the global overview; historical findings and checks are not current UI guarantees
 - [`plans/computer-use.md`](plans/computer-use.md) — proposed Termina-owned browser tool. Not implemented.

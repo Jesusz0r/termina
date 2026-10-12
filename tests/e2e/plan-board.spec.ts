@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures.ts";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { Page } from "@playwright/test";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Terminal } from "@xterm/xterm";
 import { parseSidecarRecord } from "../../electron/sidecar.ts";
@@ -32,12 +32,22 @@ async function activeInstanceId(page: Page): Promise<string> {
   });
 }
 
-async function waitForReady(runRoot: string, id: string): Promise<void> {
-  const sidecar = join(runRoot, "events", `${id}.jsonl`);
+async function waitForReady(sidecar: string): Promise<void> {
   await expect.poll(() => existsSync(sidecar) && readFileSync(sidecar, "utf8").split("\n").some((line) => {
     const record = parseSidecarRecord(line);
     return record?.t === "session_ready" && record.ok === true;
   }), { timeout: 15_000 }).toBe(true);
+}
+
+async function readyIndependentSession(page: Page, projectId: string, id: string) {
+  const candidate = (await page.evaluate((projectId) => window.termina.getWorldlines(projectId), projectId))
+    .find((worldline) => worldline.terminalId === id)!;
+  expect(candidate).toMatchObject({ role: "session", state: "ready", sourceRunId: null });
+  const instance = (await page.evaluate(() => window.termina.getInstances())).find((entry) => entry.id === id);
+  expect(instance).toMatchObject({ projectId, cwd: candidate.root, type: "agent" });
+  const sidecar = join(dirname(candidate.root), `${candidate.label}-support`, "events", `${id}.jsonl`);
+  await waitForReady(sidecar);
+  return { candidate, sidecar };
 }
 
 async function terminalText(page: Page, id: string): Promise<string> {
@@ -57,6 +67,7 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
   let catalogAvailable = true;
   let expireWorkerCredential = false;
   let workerBashCommand = "";
+  let independentWritePath = "";
   let holdWorkerAfterRead = false;
   let holdWorkerAfterWrite = false;
   let workerResponse: ServerResponse | null = null;
@@ -66,7 +77,7 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
   async function startOwnerPlan(page: Page, id: string, plan: string, runRoot: string): Promise<void> {
     ownerPlan = plan;
     // session_ready follows raw input initialization; CR is then a submit key.
-    await waitForReady(runRoot, id);
+    await waitForReady(join(runRoot, "events", `${id}.jsonl`));
     await page.evaluate(({ id, prompt }) => window.termina.writeTerminal(id, prompt), { id, prompt: OWNER_PROMPT });
     try {
       await expect.poll(() => ownerResponse !== null, { timeout: 15_000 }).toBe(true);
@@ -112,6 +123,12 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
             complete(response, "Running the bounded dispatch command.", { id: "worker-running-bash", name: "bash", args: { command: workerBashCommand } });
           } else if (!isOwner && expireWorkerCredential && workerCredentials.length === 1) {
             complete(response, "Reading source before the fixture credential is revoked.", { id: "worker-before-auth-rejection", name: "read_file", args: { path: "hello.txt" } });
+          } else if (!isOwner && independentWritePath && workerCredentials.length === 1) {
+            complete(response, "Writing only in the isolated session's source tree.", {
+              id: "independent-source-write", name: "write_file", args: { path: independentWritePath, content: "isolated source output\n" },
+            });
+          } else if (!isOwner && independentWritePath) {
+            complete(response, "The isolated file was written; no verification command was run, so the task remains incomplete.");
           } else if (!isOwner) {
             complete(response, "No changes made; this task remains incomplete.");
           } else if (++ownerCalls === 1) {
@@ -143,7 +160,7 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
       process.env[key] = value;
     }
   });
-  test.beforeEach(() => { ownerPlan = ""; ownerCalls = 0; ownerResponse = null; catalogAvailable = true; expireWorkerCredential = false; workerBashCommand = ""; holdWorkerAfterRead = false; holdWorkerAfterWrite = false; workerResponse = null; workerCredentials.length = 0; });
+  test.beforeEach(() => { ownerPlan = ""; ownerCalls = 0; ownerResponse = null; catalogAvailable = true; expireWorkerCredential = false; workerBashCommand = ""; independentWritePath = ""; holdWorkerAfterRead = false; holdWorkerAfterWrite = false; workerResponse = null; workerCredentials.length = 0; });
   test.afterAll(async () => {
     try {
       server?.closeAllConnections();
@@ -154,35 +171,43 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
       }
     }
   });
-  test("blocks an independent agent before startup on the same source tree", async ({ page, runRoot }) => {
+  test("admits an independent writer in an isolated session while the owner plans", async ({ page, runRoot, projectRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const ownerId = await activeInstanceId(page);
     await startOwnerPlan(page, ownerId, "Plan:\n- [ ] Edit greeting.ts\n", runRoot);
+    const projectId = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.id === ownerId)!.projectId!;
+    const greeting = readFileSync(join(projectRoot, "greeting.ts"), "utf8");
     const other = await page.evaluate(() => window.termina.createTerminal({ type: "agent" }));
-    expect(other.ok).toBe(true);
+    expect(other).toMatchObject({ ok: true });
     const otherId = other.id!;
-    await waitForReady(runRoot, otherId);
+    const { candidate, sidecar } = await readyIndependentSession(page, projectId, otherId);
+    expect(realpathSync(candidate.root)).not.toBe(realpathSync(projectRoot));
+    expect(existsSync(join(runRoot, "events", `${otherId}.jsonl`))).toBe(false);
+    independentWritePath = "greeting.ts";
     await page.evaluate((id) => window.termina.writeTerminal(id, "Edit greeting.ts independently\r"), otherId);
-    await expect.poll(() => terminalText(page, otherId), { timeout: 15_000 }).toContain("Source files overlap");
-    const records = readFileSync(join(runRoot, "events", `${otherId}.jsonl`), "utf8").split("\n").map(parseSidecarRecord);
-    expect(records.some((record) => record?.t === "agent_start")).toBe(false);
-    const instances = await page.evaluate(() => window.termina.getInstances());
-    expect(instances.find((instance) => instance.id === ownerId)?.busy).toBe(true);
-    expect(instances.find((instance) => instance.id === otherId)?.busy).toBe(false);
+    await expect.poll(() => readFileSync(join(candidate.root, "greeting.ts"), "utf8")).toBe("isolated source output\n");
+    await expect.poll(() => readFileSync(sidecar, "utf8").split("\n").map(parseSidecarRecord)
+      .some((record) => record?.t === "tool_end" && record.toolCallId === "independent-source-write" && record.isError === false)).toBe(true);
+    const records = readFileSync(sidecar, "utf8").split("\n").map(parseSidecarRecord);
+    expect(records.some((record) => record?.t === "preflight_request" && record.readOnly === false)).toBe(true);
+    expect(records.some((record) => record?.t === "agent_start")).toBe(true);
+    expect((await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.id === ownerId)?.busy).toBe(true);
+    expect(readFileSync(join(projectRoot, "greeting.ts"), "utf8")).toBe(greeting);
   });
 
-  test("agent and shell admission requires a real source handoff, not concurrent unknown shell writes", async ({ page, runRoot, projectRoot, electronApp }) => {
+  test("read-only planning admits a shell but writers require a real source handoff", async ({ page, runRoot, projectRoot, electronApp }) => {
     await expect(page.locator("#splash")).toBeHidden();
     const ownerId = await activeInstanceId(page);
     await startOwnerPlan(page, ownerId, "Plan:\n- [ ] Inspect hello.txt\n", runRoot);
     const before = await page.evaluate(() => window.termina.getInstances());
-    const rejected = await page.evaluate(() => window.termina.createTerminal({ type: "shell", shell: "/bin/bash" }));
-    expect(rejected).toMatchObject({ ok: false, error: expect.stringContaining("Source files overlap") });
-    expect((await page.evaluate(() => window.termina.getInstances())).map((instance) => instance.id)).toEqual(before.map((instance) => instance.id));
-    complete(ownerResponse!, "The plan is ready; no files were changed.");
-    await expect.poll(() => page.evaluate((id) => window.termina.getInstances().then((instances) => instances.find((instance) => instance.id === id)?.busy), ownerId)).toBe(false);
     const shell = await page.evaluate(() => window.termina.createTerminal({ type: "shell", shell: "/bin/bash" }));
     expect(shell).toMatchObject({ ok: true });
+    expect((await page.evaluate(() => window.termina.getInstances())).map((instance) => instance.id)).toEqual([...before.map((instance) => instance.id), shell.id]);
+    expect((await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.id === ownerId)?.busy).toBe(true);
+    expect(readFileSync(join(runRoot, "events", `${ownerId}.jsonl`), "utf8").split("\n").map(parseSidecarRecord)
+      .some((record) => record?.t === "preflight_request" && record.readOnly === true)).toBe(true);
+    complete(ownerResponse!, "The plan is ready; no files were changed.");
+    await expect.poll(() => page.evaluate((id) => window.termina.getInstances().then((instances) => instances.find((instance) => instance.id === id)?.busy), ownerId)).toBe(false);
     await page.evaluate((id) => window.termina.writeTerminal(id, "printf '%s\\n' 'shell handoff source' > hello.txt\r"), shell.id!);
     await expect.poll(() => readFileSync(join(projectRoot, "hello.txt"), "utf8")).toBe("shell handoff source\n");
     const sidecar = join(runRoot, "events", `${ownerId}.jsonl`);
@@ -230,12 +255,18 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     complete(current, "Reading the handed-off source.", { id: "owner-handoff-read", name: "read_file", args: { path: "hello.txt" } });
     await expect.poll(() => ownerResponse !== null).toBe(true);
     expect(readFileSync(sidecar, "utf8").split("\n").map(parseSidecarRecord).some((record) => record?.t === "tool_end" && record.toolCallId === "owner-handoff-read" && record.isError === false)).toBe(true);
+    const writing = await page.evaluate(() => window.termina.getInstances());
+    const rejected = await page.evaluate(() => window.termina.createTerminal({ type: "shell", shell: "/bin/bash" }));
+    expect(rejected).toMatchObject({ ok: false, error: expect.stringContaining("Source files overlap") });
+    expect((await page.evaluate(() => window.termina.getInstances())).map((instance) => instance.id)).toEqual(writing.map((instance) => instance.id));
+    const requests = readFileSync(sidecar, "utf8").split("\n").map(parseSidecarRecord).filter((record) => record?.t === "preflight_request");
+    expect(requests.at(-1)).toMatchObject({ readOnly: false });
     complete(ownerResponse!, "Source inspected; no writes or verification commands were requested.");
     await expect.poll(() => page.evaluate((id) => window.termina.getInstances().then((instances) => instances.find((instance) => instance.id === id)?.busy), ownerId)).toBe(false);
     expect(readFileSync(join(projectRoot, "hello.txt"), "utf8")).toBe("shell handoff source\n");
   });
 
-  test("opening a physical-source alias preserves visible identity and rejects an independent writer", async ({ page, runRoot, projectRoot }) => {
+  test("opening a physical-source alias preserves visible identity and isolates its independent writer", async ({ page, runRoot, projectRoot }) => {
     await expect(page.locator("#splash")).toBeHidden();
     const ownerId = await activeInstanceId(page);
     await startOwnerPlan(page, ownerId, "Plan:\n- [ ] Edit greeting.ts\n", runRoot);
@@ -249,33 +280,49 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     expect(realpathSync(projects[0]!.cwd)).toBe(realpathSync(projectRoot));
     const select = page.locator(`#project-tabs .project-tab[data-project-id="${original.id}"] .project-select`);
     await expect(select).toContainText(original.cwd);
-    expect((await page.evaluate(() => window.termina.getWorkOverview())).projects).toEqual([
+    const overview = await page.evaluate(() => window.termina.getWorkOverview());
+    expect(overview.projects.map(({ projectId, name, root, working, attentionCount }) => ({ projectId, name, root, working, attentionCount }))).toEqual([
       { projectId: original.id, name: basename(original.cwd), root: original.cwd, working: 1, attentionCount: 0 },
     ]);
+    expect(overview.projects[0]!.terminals).toHaveLength(1);
+    expect(overview.projects[0]!.terminals[0]).toMatchObject({ terminalId: ownerId,
+      workArea: { kind: "project", root: original.cwd }, activity: { state: "working" },
+      tasks: [{ task: { text: "Edit greeting.ts", paths: ["greeting.ts"], state: "pending" },
+        nextAction: { kind: "plan", terminalId: ownerId, taskText: "Edit greeting.ts" } }],
+    });
+    expect(realpathSync(overview.projects[0]!.terminals[0]!.workArea!.root)).toBe(realpathSync(projectRoot));
     const greeting = readFileSync(join(projectRoot, "greeting.ts"), "utf8");
     const other = await page.evaluate((projectId) => window.termina.createTerminal({ type: "agent", projectId }), original.id);
     expect(other).toMatchObject({ ok: true });
-    await waitForReady(runRoot, other.id!);
+    const { candidate, sidecar } = await readyIndependentSession(page, original.id, other.id!);
+    expect(realpathSync(candidate.root)).not.toBe(realpathSync(alias));
+    independentWritePath = "greeting.ts";
     await page.evaluate((id) => window.termina.writeTerminal(id, "Edit greeting.ts independently through the alias\r"), other.id!);
-    await expect.poll(() => terminalText(page, other.id!)).toContain("Source files overlap");
-    const records = readFileSync(join(runRoot, "events", `${other.id}.jsonl`), "utf8").split("\n").map(parseSidecarRecord);
-    expect(records.some((record) => record?.t === "agent_start")).toBe(false);
+    await expect.poll(() => readFileSync(join(candidate.root, "greeting.ts"), "utf8")).toBe("isolated source output\n");
+    await expect.poll(() => readFileSync(sidecar, "utf8").split("\n").map(parseSidecarRecord)
+      .some((record) => record?.t === "tool_end" && record.toolCallId === "independent-source-write" && record.isError === false)).toBe(true);
+    const records = readFileSync(sidecar, "utf8").split("\n").map(parseSidecarRecord);
+    expect(records.some((record) => record?.t === "agent_start")).toBe(true);
     expect((await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.id === ownerId)?.busy).toBe(true);
     expect(readFileSync(join(alias, "greeting.ts"), "utf8")).toBe(greeting);
-    expect((await page.evaluate(() => window.termina.projectList())).find((project) => project.active)?.id).toBe(original.id);
+    expect(readFileSync(join(projectRoot, "greeting.ts"), "utf8")).toBe(greeting);
+    const current = await page.evaluate(() => window.termina.projectList());
+    expect(current).toHaveLength(1);
+    expect(current[0]).toMatchObject({ id: original.id, cwd: original.cwd, active: true });
   });
 
-  test("source denial happens before a named MCP process starts", async ({ page, runRoot, projectRoot }) => {
+  test("source denial precedes named MCP startup and an isolated session can start it", async ({ page, runRoot, projectRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const ownerId = await activeInstanceId(page);
     await startOwnerPlan(page, ownerId, "Plan:\n- [ ] Edit greeting.ts\n", runRoot);
+    const projectId = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.id === ownerId)!.projectId!;
     const agentDir = join(runRoot, "home", ".termina", "agent");
     const script = join(projectRoot, "mcp-server.mjs");
     const marker = join(projectRoot, "mcp-started");
     writeFileSync(script, `
       import { createInterface } from "node:readline";
       import { writeFileSync } from "node:fs";
-      writeFileSync(${JSON.stringify(marker)}, "started");
+      writeFileSync("mcp-started", "started");
       createInterface({ input: process.stdin }).on("line", (line) => {
         const request = JSON.parse(line);
         if (request.id === undefined) return;
@@ -286,42 +333,74 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
       });
     `);
     mkdirSync(agentDir, { recursive: true });
-    writeFileSync(join(agentDir, "mcp.json"), JSON.stringify({ mcpServers: { "fixture-mcp": { command: process.execPath, args: [script] } } }));
+    const config = JSON.stringify({ mcpServers: { "fixture-mcp": { command: "node", args: ["mcp-server.mjs"] } } });
+    writeFileSync(join(agentDir, "mcp.json"), config, { mode: 0o600 });
     const other = await page.evaluate(() => window.termina.createTerminal({ type: "agent" }));
-    expect(other.ok).toBe(true);
-    await waitForReady(runRoot, other.id!);
-    const prompt = "Use fixture-mcp to inspect greeting.ts\r";
-    await page.evaluate(({ id, prompt }) => window.termina.writeTerminal(id, prompt), { id: other.id!, prompt });
-    await expect.poll(() => terminalText(page, other.id!), { timeout: 15_000 }).toContain("Source files overlap");
-    expect(existsSync(marker)).toBe(false);
-    // A positive retry proves the named configuration really launches a process.
+    expect(other).toMatchObject({ ok: true });
+    const { candidate, sidecar } = await readyIndependentSession(page, projectId, other.id!);
+    const copiedConfig = join(dirname(candidate.root), `${candidate.label}-support`, "home", ".termina", "agent", "mcp.json");
+    expect(readFileSync(copiedConfig, "utf8")).toBe(config);
+    const candidateMarker = join(candidate.root, "mcp-started");
+    expect(existsSync(candidateMarker)).toBe(false);
+    const shell = await page.evaluate(() => window.termina.createTerminal({ type: "shell", shell: "/bin/bash" }));
+    expect(shell).toMatchObject({ ok: true });
     const pending = ownerResponse!;
     ownerResponse = null;
     complete(pending, "The plan is ready for review.");
     await expect.poll(() => page.evaluate((id) => window.termina.getInstances().then((instances) => instances.find((instance) => instance.id === id)?.busy), ownerId)).toBe(false);
-    await page.evaluate(({ id, prompt }) => window.termina.writeTerminal(id, `\x15${prompt}`), { id: other.id!, prompt });
-    await expect.poll(() => existsSync(marker), { timeout: 15_000 }).toBe(true);
+    const primarySidecar = join(runRoot, "events", `${ownerId}.jsonl`);
+    const starts = () => readFileSync(primarySidecar, "utf8").split("\n").map(parseSidecarRecord).filter((record) => record?.t === "agent_start").length;
+    const priorStarts = starts();
+    const priorCalls = ownerCalls;
+    const prompt = "Use fixture-mcp to inspect greeting.ts\r";
+    await page.evaluate(({ id, prompt }) => window.termina.writeTerminal(id, prompt), { id: ownerId, prompt });
+    await expect.poll(() => terminalText(page, ownerId)).toContain("Shell activity is unknown while its terminal is live");
+    expect(starts()).toBe(priorStarts);
+    expect(ownerCalls).toBe(priorCalls);
+    expect(workerCredentials).toEqual([]);
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(candidateMarker)).toBe(false);
+    // The copied configuration really starts, but only in the admitted tree.
+    await page.evaluate(({ id, prompt }) => window.termina.writeTerminal(id, prompt), { id: other.id!, prompt });
+    await expect.poll(() => terminalText(page, other.id!)).toContain("mcp fixture-mcp connected");
+    await expect.poll(() => readFileSync(sidecar, "utf8").split("\n").map(parseSidecarRecord).some((record) => record?.t === "agent_start")).toBe(true);
+    expect(readFileSync(candidateMarker, "utf8")).toBe("started");
+    expect(existsSync(marker)).toBe(false);
+    expect(readFileSync(join(agentDir, "mcp.json"), "utf8")).toBe(config);
   });
 
-  test("allows nested navigation but rejects its independent writer", async ({ page, runRoot, projectRoot }) => {
+  test("allows nested navigation and isolates its independent writer", async ({ page, runRoot, projectRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const ownerId = await activeInstanceId(page);
     await startOwnerPlan(page, ownerId, "Plan:\n- [ ] Edit greeting.ts\n", runRoot);
+    const parent = (await page.evaluate(() => window.termina.projectList())).find((project) => project.active)!;
     const nested = join(projectRoot, "nested");
     mkdirSync(nested);
     await page.evaluate((path) => window.termina.projectOpenPath(path), nested);
+    const nestedProject = (await page.evaluate(() => window.termina.projectList())).find((project) => project.active)!;
+    expect(nestedProject.id).not.toBe(parent.id);
+    expect(realpathSync(nestedProject.cwd)).toBe(realpathSync(nested));
     let nestedId = "";
     await expect.poll(async () => {
       const instances = await page.evaluate(() => window.termina.getInstances());
-      nestedId = instances.find((instance) => instance.cwd === nested && instance.type === "agent")?.id ?? "";
+      nestedId = instances.find((instance) => instance.projectId === nestedProject.id && instance.type === "agent")?.id ?? "";
       return nestedId;
     }).not.toBe("");
-    await waitForReady(runRoot, nestedId);
-    await page.evaluate((id) => window.termina.writeTerminal(id, "Create a nested file\r"), nestedId);
-    await expect.poll(() => terminalText(page, nestedId), { timeout: 15_000 }).toContain("Source files overlap");
-    const records = readFileSync(join(runRoot, "events", `${nestedId}.jsonl`), "utf8").split("\n").map(parseSidecarRecord);
-    expect(records.some((record) => record?.t === "agent_start")).toBe(false);
+    const { candidate, sidecar } = await readyIndependentSession(page, nestedProject.id, nestedId);
+    expect(realpathSync(candidate.root)).not.toBe(realpathSync(nested));
+    expect(realpathSync(candidate.root)).not.toBe(realpathSync(projectRoot));
+    independentWritePath = "nested-output.txt";
+    await page.evaluate((id) => window.termina.writeTerminal(id, "Create nested-output.txt in this session\r"), nestedId);
+    const output = join(candidate.root, "nested-output.txt");
+    await expect.poll(() => existsSync(output) ? readFileSync(output, "utf8") : "").toBe("isolated source output\n");
+    await expect.poll(() => readFileSync(sidecar, "utf8").split("\n").map(parseSidecarRecord)
+      .some((record) => record?.t === "tool_end" && record.toolCallId === "independent-source-write" && record.isError === false)).toBe(true);
+    const records = readFileSync(sidecar, "utf8").split("\n").map(parseSidecarRecord);
+    expect(records.some((record) => record?.t === "agent_start")).toBe(true);
+    expect(existsSync(join(nested, "nested-output.txt"))).toBe(false);
+    expect(existsSync(join(projectRoot, "nested-output.txt"))).toBe(false);
     expect((await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.id === ownerId)?.busy).toBe(true);
+    expect((await page.evaluate(() => window.termina.projectList())).find((project) => project.active)?.id).toBe(nestedProject.id);
   });
 
   test("renders plan panel and updates tasks dynamically", async ({ page, runRoot }) => {
@@ -437,7 +516,7 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     expect((await page.evaluate(() => window.termina.getWorkOverview())).projects[0]?.working).toBe(0);
     const attention = (await page.evaluate(() => window.termina.getWorkOverview())).items.find((item) => item.reason === "task-interrupted" && item.taskText === taskText)!;
     expect(attention).toMatchObject({ terminalId: ownerId, action: { kind: "plan", terminalId: ownerId } });
-    await page.locator("#btn-attention").click();
+    await expect(page.locator("#project-bar #attention-view #attention-heading")).toBeVisible();
     await page.locator(`#attention-list .attention-item[data-id="${attention.id}"] .attention-inspect`).click();
     await expect(page.locator("#plan-list .plan-task").filter({ hasText: taskText })).toContainText(`last interrupted · ${workerId}`);
     holdWorkerAfterRead = false;
@@ -534,10 +613,10 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     expect(failed.state).toBe("pending");
     const attention = (await page.evaluate(() => window.termina.getWorkOverview())).items.find((item) => item.reason === "task-failed" && item.taskText === taskText)!;
     expect(attention).toMatchObject({ terminalId: ownerId, action: { kind: "plan", terminalId: ownerId } });
-    await page.locator("#btn-attention").click();
+    await expect(page.locator("#project-bar #attention-view #attention-heading")).toBeVisible();
     const row = page.locator(`#attention-list .attention-item[data-id="${attention.id}"]`);
     await expect(row).toContainText(taskText);
-    await row.getByRole("button", { name: "Inspect plan", exact: true }).click();
+    await row.getByRole("button", { name: "Open plan", exact: true }).click();
     await expect(page.locator("#plan-list .plan-task").filter({ hasText: taskText })).toContainText(`last failed · ${workerId}`);
     expect((await page.evaluate(() => window.termina.getWorkOverview())).items.map((item) => item.id)).toContain(attention.id);
     await page.evaluate((id) => window.termina.writeTerminal(id, "/login openai key\r"), ownerId);
@@ -618,7 +697,7 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
           expect(readFileSync(held, "utf8")).toBe(sessionBefore);
           const attention = (await page.evaluate(() => window.termina.getWorkOverview())).items
             .find((item) => item.reason === "task-failed" && item.taskText === taskText)!;
-          await page.locator("#btn-attention").click();
+          await expect(page.locator("#project-bar #attention-view #attention-heading")).toBeVisible();
           await page.locator(`#attention-list .attention-item[data-id="${attention.id}"] .attention-inspect`).click();
           await expect(page.locator("#plan-list .plan-task").filter({ hasText: taskText })).toContainText(`last failed · ${workerId}`);
         } else {
@@ -677,6 +756,17 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     await expect.poll(() => workerResponse !== null).toBe(true);
     const workerId = (await page.evaluate((id) => window.termina.getPlan(id), ownerId))[0]!.workerId!;
     expect((await page.evaluate((id) => window.termina.getRuns(id), workerId)).at(-1)).toMatchObject({ replayable: true, overlap: false });
+    await page.evaluate((id) => (window as unknown as { __panes: Map<string, { tabEl: HTMLElement }> }).__panes.get(id)!.tabEl.click(), ownerId);
+    await page.locator(".activity-tab[data-tab='plan']").click();
+    const row = page.locator("#plan-list .plan-task").filter({ hasText: taskText });
+    await expect(row.locator(".plan-meta")).toContainText(workerId);
+    await expect(row.locator(".plan-task-action")).toHaveText("Show worker");
+    const ownerProjectId = (await page.evaluate(() => window.termina.projectList())).find((project) => project.active)!.id;
+    const work = (await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), ownerProjectId))!;
+    expect(work.terminals.find((terminal) => terminal.terminalId === ownerId)!.tasks[0]!.worker?.terminalId).toBe(workerId);
+    expect(work.terminals.find((terminal) => terminal.terminalId === workerId)!.workArea?.kind).toBe("project");
+    expect(work.terminals.find((terminal) => terminal.terminalId === workerId)!.verify?.state).toBe("untested");
+    expect((await page.evaluate((id) => window.termina.getPlan(id), ownerId))[0]!.workerId).toBe(workerId);
     complete(workerResponse!, "No changes made; this task remains incomplete.");
     workerResponse = null;
     await expect.poll(() => page.evaluate((id) => window.termina.getPlan(id).then((tasks) => tasks[0]?.dispatchResult?.outcome), ownerId)).toBe("incomplete");
@@ -684,6 +774,17 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     const run = (await page.evaluate((id) => window.termina.getRuns(id), workerId)).at(-1)!;
     expect(run, JSON.stringify(run, null, 2)).toMatchObject({ replayable: true, overlap: false, reason: null });
     expect(run.startStateId).toBe(run.settledStateId);
+    await expect(row.locator(".plan-dispatch-result")).toContainText(`last incomplete · ${workerId}`);
+    await expect(row.locator(".plan-task-action")).toHaveText("Retry task");
+    const attention = (await page.evaluate(() => window.termina.getWorkOverview())).items;
+    const item = attention.find((item) => item.reason === "task-incomplete" && item.taskText === taskText)!;
+    expect(item).toMatchObject({ terminalId: ownerId, action: { kind: "plan", terminalId: ownerId } });
+    await expect(page.locator("#project-bar #attention-view #attention-heading")).toBeVisible();
+    await expect(page.locator("#attention-list")).toContainText("Task attempt incomplete");
+    await page.locator(`#attention-list .attention-item[data-id="${item.id}"] .attention-inspect`).click();
+    await expect(page.locator("#attention-view")).toBeVisible();
+    await expect(page.locator("#plan-list")).toContainText(taskText);
+    expect((await page.evaluate(() => window.termina.getWorkOverview())).items).toEqual(attention);
   });
 
   test("an incomplete worker can be closed and the task retried without losing the last result", async ({ page, runRoot, electronApp }) => {
@@ -727,14 +828,17 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     await expect(row.locator(".plan-dispatch-result")).toContainText(`last incomplete · ${workerId}`);
     await expect(row).toHaveAttribute("title", "retry this task");
     const project = (await page.evaluate(() => window.termina.projectList())).find((project) => project.active)!;
-    const summary = await page.evaluate((id) => window.termina.getProjectWorkSummary(id), project.id);
+    const summary = await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), project.id);
     const work = summary!.terminals.find((terminal) => terminal.terminalId === ownerId)!;
     expect(work.tasks[0]).toMatchObject({ task: { text: taskText, state: "pending", dispatchResult: { workerId, outcome: "incomplete" } },
       worker: null, attention: ["task-incomplete"], nextAction: { kind: "plan", terminalId: ownerId } });
-    await page.locator("#work-summary > summary").click();
-    await expect(page.locator(".work-summary-tasks")).toContainText(`last incomplete (${workerId})`);
-    await expect(page.locator("#work-summary dd").filter({ hasText: "Task attempt incomplete" })).toBeVisible();
-    await page.locator(".work-summary-tasks").getByRole("button", { name: "Inspect plan" }).click();
+    const item = (await page.evaluate(() => window.termina.getWorkOverview())).items
+      .find((item) => item.reason === "task-incomplete" && item.taskText === taskText && item.terminalId === ownerId)!;
+    await expect(page.locator("#project-bar #attention-view #attention-heading")).toBeVisible();
+    await page.locator(`#attention-list .attention-item[data-id="${item.id}"] .attention-inspect`).click();
+    await expect(page.locator("#attention-view")).toBeVisible();
+    await expect(row.locator(".plan-task-action")).toBeFocused();
+    await expect(row.locator(".plan-dispatch-result")).toContainText(workerId);
     await expect(page.locator("#plan-panel")).toBeVisible();
     await row.locator(".plan-text").click();
     await expect.poll(() => page.evaluate((id) => window.termina.getPlan(id).then((tasks) => tasks[0]?.workerId ?? tasks[0]?.dispatchResult?.workerId), ownerId)).not.toBe(workerId);

@@ -85,7 +85,9 @@ import { DiagnosticsRunner } from "./diagnostics.js";
 import { ScheduleRunner, type ScheduleTickTask } from "./schedule.js";
 import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { formatProjectSnapshot, MAX_PROJECT_SNAPSHOT_BYTES } from "./main/project-snapshot.js";
+import { chooseProjectTerminal } from "./main/project-entry.js";
 import { projectWorkSummary, workOverview } from "./main/work-summary.js";
+import { planOwnerError, samePlanTaskSnapshot } from "./plan-board.js";
 import { formatVerifyContext, invalidateVerify, isVerifySourceCurrent, verifyOutputTail } from "./main/verify-source.js";
 import { closeConfirmation, closeTaskText, type CandidateCloseImpact, type TerminalCloseImpact } from "./main/close-confirm.js";
 import { SourceAdmissions, sourceTreesOverlap, type SourceClaim } from "./main/source-admission.js";
@@ -148,6 +150,7 @@ import {
 } from "./main/project-workspace.js";
 import { isPdfPreviewUrl, previewContentType, previewKind } from "../shared/preview-media.js";
 import { decodeEditorText, readEditorFile } from "./main/editor-file.js";
+import { reviewBaseline } from "./main/change-review.js";
 import { EditorDraftStore } from "./editor-drafts.js";
 import { EditorDraftSession } from "./main/editor-draft-session.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
@@ -431,6 +434,8 @@ function awaitCandidateAbortable<T>(promise: Promise<T>, signal?: AbortSignal): 
  */
 interface ProjectState {
   id: string;
+  /** Last admitted terminal in this application session; generation prevents recycled IDs. */
+  lastTerminal?: { id: string; generation: number };
   /** The opened folder. */
   cwd: string;
   /** The canonical project root (the Git top level). */
@@ -734,6 +739,8 @@ class TerminaApp {
   private dispatchWorkers = new Map<string, string>();
   /** Dispatch runs: worker terminal id → owner + the dispatched task text. */
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
+  /** Covers pick, leases, private startup files and spawn for every dispatch caller. */
+  private dispatchPreparations = new Set<string>();
   /** Dispatch mailbox notes per terminal, flushed to mailbox-<id>.md. */
   private dispatchMailbox = new Map<string, string[]>();
   /** Background schedule tick; main supplies live reads into app state. */
@@ -781,6 +788,11 @@ class TerminaApp {
   private coreTerminalFocused = false;
   /** Native terminal actions use the exact pane selected by this renderer document. */
   private terminalSelection: { id: string; generation: number; target: PtyRendererSendTarget } | null = null;
+  /** One canonical workspace activation, shared by pushes and selection replies. */
+  private workspaceActivation: {
+    projectId: string; workspaceId: string; activationGeneration: number; selectionAction: number;
+    target: PtyRendererSendTarget | null; current: (selection?: { id: string; generation: number }) => boolean; promise: Promise<FolderOpenedPayload | null>;
+  } | null = null;
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /clear (/new alias) slash-command detection (terminals:write is per keystroke). */
   private newCommandBuffers = new Map<string, string>();
@@ -830,7 +842,7 @@ class TerminaApp {
    * The last watcher change per path. A single physical write can produce
    * several fs events; the duplicates must not count as fresh user edits.
    */
-  private lastWatchChange = new Map<string, { identity: string; at: number }>();
+  private lastWatchChange = new Map<string, { workspaceId: string; identity: string; at: number }>();
   private static readonly LAST_WATCH_MAX = 500;
   private disposed = false;
   /** The project ids with an open or close in progress. Events of these
@@ -1520,7 +1532,7 @@ class TerminaApp {
       {
         label: "Terminal",
         submenu: [
-          { label: "New Terminal", accelerator: shortcut("new-terminal"), click: send("new-terminal") },
+          { label: "New agent", accelerator: shortcut("new-terminal"), click: send("new-terminal") },
           { label: "Close Terminal", accelerator: shortcut("close-terminal"), click: () => void this.closeActiveTerminal() },
           { type: "separator" },
           { label: "Next Terminal", accelerator: shortcut("next-terminal"), click: send("next-terminal") },
@@ -2235,6 +2247,7 @@ class TerminaApp {
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
     beforeSpawn?: (terminalId: string) => void;
     signal?: AbortSignal;
+    spawnGuard?: () => void;
   }): Promise<{ terminalId: string; pid: number }> {
     const eventsDir = opts.launch.env.TERMINA_EVENTS_DIR;
     // Allocate the id and arm the candidate-owned tailer before constructing
@@ -2268,6 +2281,10 @@ class TerminaApp {
         id: terminalId,
         sidecarTailer: tailer,
         skipSidecarWatch: true,
+        spawnGuard: () => {
+          if (opts.signal?.aborted) throw new Error("candidate startup was cancelled");
+          opts.spawnGuard?.();
+        },
       });
       if (opts.signal?.aborted) {
         this.terminateCandidate(inst.id);
@@ -2280,9 +2297,9 @@ class TerminaApp {
     }
   }
 
-  /** A candidate source tree workspace (no recording, own watcher). The
-   *  lineage base seeds its moment-capture chain (nested worldlines keep
-   *  the root promotion base). */
+  /** A candidate workspace has its own source tree and watcher, and records
+   *  in the project's shared snapshot store. The lineage base seeds its
+   *  moment-capture chain (nested worldlines keep the root promotion base). */
   private createCandidateWorkspace(project: ProjectState, root: string, baseStateId: string | null, comparisonId: string): string {
     const ws = this.createWorkspace(project, root, false);
     ws.comparisonId = comparisonId;
@@ -2922,6 +2939,7 @@ class TerminaApp {
                 paths: t.paths,
                 state: t.state === "done" ? "done" : "pending",
                 ...(t.dispatchResult ? { dispatchResult: t.dispatchResult } : {}),
+                ...(t.candidate ? { candidate: { ...t.candidate } } : {}),
                 ...(model ? { model } : {}),
               };
             });
@@ -3159,11 +3177,14 @@ class TerminaApp {
       resume?: { sessionId: string | null; sessionFile: string | null };
       /** Roster-pinned model for core resume: the session's own last model. */
       model?: string | null;
+      /** Internal strict dispatch fence, checked again immediately before PTY spawn. */
+      spawnGuard?: () => void;
     },
   ): Promise<AgentTerminalInstance> {
     // Terminal creation crosses several awaits (provider/session setup and
     // process spawn). Preserve the requesting document so a late completion
     // cannot publish its list into a replacement renderer.
+    opts?.spawnGuard?.();
     const rendererTarget = this.captureRendererSendTarget();
     const type = opts?.type ?? "agent";
     const persist = opts?.persist ?? (!opts?.launch && !opts?.id);
@@ -3171,6 +3192,7 @@ class TerminaApp {
     const workspaceId =
       opts?.workspaceId ?? requestedProject?.workspaces.values().next().value?.id ?? this.primaryWorkspace(requestedProject ?? undefined)?.id ?? this.primaryWorkspace()?.id ?? "";
     const owner = this.projectOfWorkspace(workspaceId) ?? requestedProject ?? this.project();
+    const terminalRoot = cwd ?? owner?.workspaces.get(workspaceId)?.root ?? owner?.cwd ?? this.terminalCwd();
     let id = opts?.id;
     if (id && this.runtime.has(id)) {
       // Two projects both restore term-1. Keep the session; never overwrite a live pty.
@@ -3198,6 +3220,7 @@ class TerminaApp {
       env = { ...opts.launch.env, TERMINA_TERMINAL_ID: id };
     } else if (type === "shell") {
       const shells = await detectShells();
+      opts?.spawnGuard?.();
       const chosen = opts?.shell && existsSync(opts.shell) ? { path: opts.shell, name: basename(opts.shell) } : shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       cmd = chosen.path;
       args = [];
@@ -3214,12 +3237,17 @@ class TerminaApp {
         ...thinkingStartupArgs(this.preferences.showThinking),
       ];
       if (persist) {
-        const sessionCwd = cwd ?? owner?.cwd ?? this.terminalCwd();
-        await this.reclaimUnusedEmptyCoreSessions(await this.coreProjectSessionDir(sessionCwd));
+        const sessionCwd = terminalRoot;
+        const sessionDir = await this.coreProjectSessionDir(sessionCwd);
+        opts?.spawnGuard?.();
+        await this.reclaimUnusedEmptyCoreSessions(sessionDir);
+        opts?.spawnGuard?.();
         sessionFile = sessionId && isCoreSessionId(sessionId) ? await this.coreSessionFile(sessionId, sessionCwd) : null;
+        opts?.spawnGuard?.();
         if (!sessionFile || this.sessionFileInUse(sessionFile)) {
           sessionId = `core-${randomUUID()}`;
           sessionFile = await this.coreSessionFile(sessionId, sessionCwd);
+          opts?.spawnGuard?.();
         }
       } else {
         sessionId = null;
@@ -3265,7 +3293,6 @@ class TerminaApp {
       throw new Error("unsupported terminal type");
     }
     const sidecarTailer = opts?.sidecarTailer ?? this.tailer;
-    const terminalRoot = cwd ?? this.terminalCwd();
     const shellRoot = type === "shell" ? await fsRealpath(terminalRoot) : null;
     let admittedGeneration: number | undefined;
     let inst: AgentTerminalInstance;
@@ -3283,6 +3310,7 @@ class TerminaApp {
         skipSidecarWatch: opts?.skipSidecarWatch,
         rendererTarget,
         beforeSpawn: (target) => {
+          opts?.spawnGuard?.();
           if (this.disposed || (owner && this.projects.get(owner.id) !== owner)) throw new Error("project closed before terminal startup");
           if (!shellRoot) return;
           const writer = this.sourceWorkspaceWriter(shellRoot);
@@ -3931,6 +3959,20 @@ class TerminaApp {
     if (project && !this.projectIsSwitching(project.id)) this.saveTerminalRoster(project);
   }
 
+  /** Callers supply current ownership already validated against the runtime. */
+  private planOwnerFacts(inst: AgentTerminalInstance, project: ProjectState, workspace: WorkspaceState | null) {
+    return {
+      available: !this.disposed && !inst.closed && !inst.pty.hasExited
+        && this.projects.get(project.id) === project && inst.projectId === project.id
+        && project.terminalIds.has(inst.id) && !this.projectIsSwitching(project.id)
+        && !this.terminalCloseRequests.has(inst) && !!workspace && workspace.terminalIds.has(inst.id)
+        && inst.workspaceId === workspace.id && project.workspaces.get(workspace.id) === workspace
+        && inst.cwd === workspace.root,
+      primary: workspace?.primary === true, persistent: inst.persist, agent: inst.type === "agent",
+      dispatchWorker: this.dispatchWorkers.has(inst.id), busy: inst.busy,
+    };
+  }
+
   private async applyPlanMessage(
     inst: AgentTerminalInstance,
     text: string,
@@ -4035,11 +4077,13 @@ class TerminaApp {
     source: unknown,
   ): Promise<{ entries: Array<{ relPath: string; matches?: number[] }>; truncated?: boolean }> {
     const project = this.project();
-    const cwd = project?.cwd ?? null;
-    if (!project || !cwd) return { entries: [] };
+    const workspace = project ? this.displayedWorkspace(project) : null;
+    const cwd = workspace?.root;
+    if (!project || !workspace || !cwd) return { entries: [] };
     const root = await this.canonicalPath(cwd);
     const { source: lane, seq } = this.fileSearchSeq.next(source);
-    const stop = () => this.disposed || !this.fileSearchSeq.current(lane, seq);
+    const stop = () => this.disposed || !this.fileSearchSeq.current(lane, seq)
+      || this.project() !== project || this.displayedWorkspace(project) !== workspace || workspace.root !== cwd;
     // Score the cached inventory when there is one: only the first search of a
     // project pays for the walk, and a superseded query still returns nothing
     // rather than a partial result.
@@ -4047,9 +4091,10 @@ class TerminaApp {
     // Empty queries lead with this project's recent files (rankProjectPaths
     // drops recents that left the tree); scored queries ignore them.
     const recent = (this.preferences.recentFiles ?? [])
-      .filter((file) => file.projectId === project.id)
+      .filter((file) => workspace.primary && file.projectId === project.id)
       .map((file) => file.relPath);
     const { entries, truncated } = await searchProjectFiles(root, query, { shouldStop: stop, candidates, recent });
+    if (stop()) return { entries: [] };
     return truncated ? { entries, truncated: true } : { entries };
   }
 
@@ -4067,13 +4112,16 @@ class TerminaApp {
     const unsafe = validateGrepPattern(pattern);
     if (unsafe) return { hits: [], error: unsafe };
     const project = this.project();
-    const cwd = project?.cwd ?? null;
-    if (!project || !cwd) return { hits: [] };
+    const workspace = project ? this.displayedWorkspace(project) : null;
+    const cwd = workspace?.root;
+    if (!project || !workspace || !cwd) return { hits: [] };
     const root = await this.canonicalPath(cwd);
     const { source: lane, seq } = this.contentSearchSeq.next(source);
-    const stop = () => this.disposed || !this.contentSearchSeq.current(lane, seq);
+    const stop = () => this.disposed || !this.contentSearchSeq.current(lane, seq)
+      || this.project() !== project || this.displayedWorkspace(project) !== workspace || workspace.root !== cwd;
     const candidates = await this.pathIndex.candidates(root, stop);
     const { hits, truncated } = await searchProjectContent(root, pattern, { shouldStop: stop, candidates });
+    if (stop()) return { hits: [] };
     return truncated ? { hits, truncated: true } : { hits };
   }
 
@@ -4089,10 +4137,9 @@ class TerminaApp {
     for (const inst of this.verifyRuns.values()) {
       if (inst.workspaceId === workspaceId) return true;
     }
-    for (const [workerId, entry] of this.dispatchRuns) {
+    for (const workerId of this.dispatchRuns.keys()) {
       if (workerId === terminalId) continue;
-      const owner = this.runtime.get(entry.ownerId);
-      if (owner && owner.workspaceId === workspaceId) return true;
+      if (this.runtime.get(workerId)?.workspaceId === workspaceId) return true;
     }
     return false;
   }
@@ -4110,8 +4157,8 @@ class TerminaApp {
     const used = new Set<string>();
     const owner = this.runtime.get(ownerId);
     if (!owner) return used;
-    for (const entry of this.dispatchRuns.values()) {
-      if (entry.ownerId !== ownerId) continue;
+    for (const [workerId, entry] of this.dispatchRuns) {
+      if (entry.ownerId !== ownerId || this.runtime.get(workerId)?.workspaceId !== owner.workspaceId) continue;
       const task = findTaskByText(owner.plan, entry.taskText);
       if (!task) continue;
       for (const p of task.paths) used.add(await this.taskPathKey(p, root));
@@ -4135,7 +4182,7 @@ class TerminaApp {
     const jobs: Array<{ task: PlanTask; id: string }> = [];
     const seen = new Set<string>();
     for (const [id, entry] of this.dispatchRuns) {
-      if (entry.ownerId !== owner.id) continue;
+      if (entry.ownerId !== owner.id || this.runtime.get(id)?.workspaceId !== owner.workspaceId) continue;
       const task = findTaskByText(owner.plan, entry.taskText);
       if (!task) continue;
       jobs.push({ task, id });
@@ -4172,6 +4219,22 @@ class TerminaApp {
     taskText?: string,
     model?: string,
   ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
+    if (this.dispatchPreparations.has(ownerId)) return { ok: false, error: "A dispatch is already preparing for this Plan Board." };
+    this.dispatchPreparations.add(ownerId);
+    try {
+      return await this.dispatchPreparedRun(ownerId, taskText, model);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      this.dispatchPreparations.delete(ownerId);
+    }
+  }
+
+  private async dispatchPreparedRun(
+    ownerId: string,
+    taskText: string | undefined,
+    model: string | undefined,
+  ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     const owner = this.runtime.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
     let ipcModel: string | undefined;
@@ -4189,19 +4252,139 @@ class TerminaApp {
     if (this.disposed || this.projectIsSwitching(dispatchOwnerId)) return { ok: false, error: "the project is changing" };
     const rendererTarget = this.captureRendererSendTarget();
     if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — run /plan first" };
+    const namedTask = taskText === undefined ? undefined : owner.plan.find((entry) => entry.text === taskText);
+    if (taskText === undefined) {
+      const isolated = owner.plan.filter((entry) => entry.candidate && !entry.workerId && entry.state !== "active" && entry.state !== "done");
+      let dispatched = 0;
+      let error: string | undefined;
+      for (const task of isolated) {
+        const result = await this.dispatchPreparedRun(ownerId, task.text, model);
+        dispatched += result.dispatched ?? 0;
+        error = result.error ?? error;
+      }
+      if (isolated.length) {
+        if (owner.plan.some((entry) => !entry.candidate && !entry.workerId && entry.state !== "active" && entry.state !== "done")) {
+          // Isolated attempts above are now active or remain explicitly fenced
+          // by their candidate provenance; shared selection excludes them.
+          const result = await this.dispatchSharedPreparedRun(ownerId, taskText, ipcModel);
+          dispatched += result.dispatched ?? 0;
+          error = result.error ?? error;
+        }
+        return dispatched ? { ok: true, dispatched } : { ok: false, error: error ?? "no dispatch worker started" };
+      }
+    }
+    if (namedTask?.candidate) {
+      if (this.ownerDispatchCount(ownerId) >= MAX_DISPATCH_WORKERS) return { ok: false, error: "All task workers are busy." };
+      const task = owner.plan.find((entry) => entry.text === taskText);
+      if (!task || task.state === "active" || task.state === "done" || task.workerId) return { ok: false, error: "The task is no longer pending." };
+      const manager = this.projectOfTerminal(ownerId)?.worldlines;
+      if (!manager) return { ok: false, error: "Isolated task sessions are unavailable." };
+      const original = structuredClone(task);
+      const project = this.projectOfTerminal(ownerId)!;
+      const workspace = this.workspaceOfTerminal(owner);
+      const plan = owner.plan;
+      const projectGeneration = project.activationGeneration;
+      const canonicalRoot = project.canonicalRoot;
+      const projectRoot = project.cwd;
+      const ownerGeneration = owner.generation;
+      const ownerModel = owner.model;
+      const ownerThinkingLevel = owner.thinkingLevel;
+      const workspaceGeneration = workspace?.generation;
+      const workspaceRoot = workspace?.root;
+      const startupAssignment: { workerId: string | null; snapshot: PlanTask | null } = { workerId: null, snapshot: null };
+      const assertIndependentCurrent = (): void => {
+        const settled = startupAssignment.workerId !== null && task.workerId === undefined && task.claimed === undefined
+          && task.dispatchResult?.workerId === startupAssignment.workerId;
+        const snapshot = startupAssignment.snapshot ?? original;
+        const executionTask = settled ? { ...task, state: snapshot.state, workerId: snapshot.workerId,
+          claimed: snapshot.claimed, dispatchResult: snapshot.dispatchResult } : task;
+        if (this.runtime.get(ownerId) !== owner || this.projectOfTerminal(ownerId) !== project
+          || this.projects.get(project.id) !== project || project.activationGeneration !== projectGeneration
+          || project.canonicalRoot !== canonicalRoot || project.cwd !== projectRoot || owner.generation !== ownerGeneration
+          || owner.model !== ownerModel || owner.thinkingLevel !== ownerThinkingLevel
+          || this.workspaceOfTerminal(owner) !== workspace || workspace?.generation !== workspaceGeneration
+          || workspace?.root !== workspaceRoot || owner.cwd !== workspaceRoot || owner.plan !== plan
+          || plan.filter((entry) => entry.text === original.text).length !== 1
+          || plan.find((entry) => entry.text === original.text) !== task
+          || !samePlanTaskSnapshot(executionTask, snapshot)
+          || (rendererTarget !== null && !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget))) {
+          throw new Error("The Plan Board context has changed.");
+        }
+        const ownerError = planOwnerError(this.planOwnerFacts(owner, project, workspace));
+        if (ownerError) throw new Error(ownerError);
+      };
+      assertIndependentCurrent();
+      const workerModel = dispatchWorkerModel(task, ipcModel);
+      const result = await manager.createIndependentSession({
+        model: workerModel ?? owner.model, thinkingLevel: owner.thinkingLevel,
+        initialTask: task.text, assertCurrent: assertIndependentCurrent,
+        beforeSpawn: (id, candidate) => {
+          assertIndependentCurrent();
+          startupAssignment.workerId = id;
+          this.dispatchWorkers.set(id, task.text);
+          this.dispatchRuns.set(id, { ownerId, taskText: task.text });
+          task.workerId = id;
+          task.claimed = [];
+          task.candidate = candidate;
+          delete task.dispatchResult;
+          task.state = "active";
+          startupAssignment.snapshot = structuredClone(task);
+          this.savePlanRoster(owner);
+        },
+      });
+      if (!result.ok) {
+        const { workerId, snapshot } = startupAssignment;
+        if (workerId) {
+          const assignment = this.dispatchRuns.get(workerId);
+          if (!assignment || (assignment.ownerId === ownerId && assignment.taskText === original.text)) {
+            if (this.dispatchWorkers.get(workerId) === original.text) this.dispatchWorkers.delete(workerId);
+            if (assignment) this.dispatchRuns.delete(workerId);
+          }
+          for (const row of new Set([task, ...owner.plan])) {
+            if (row.workerId !== workerId) continue;
+            delete row.workerId;
+            delete row.claimed;
+            if (row.state === "active") row.state = original.state;
+            if (JSON.stringify(row.candidate) === JSON.stringify(snapshot?.candidate)) {
+              if (original.candidate) row.candidate = { ...original.candidate };
+              else delete row.candidate;
+            }
+            if (row.dispatchResult === undefined && original.dispatchResult) row.dispatchResult = { ...original.dispatchResult };
+          }
+        }
+        if (this.runtime.get(ownerId) === owner && this.projects.get(project.id) === project
+          && project.terminalIds.has(ownerId)) {
+          this.savePlanRoster(owner);
+          this.sendPlan(owner, rendererTarget);
+        }
+        return { ok: false, error: result.error ?? "The isolated task could not start." };
+      }
+      this.sendPlan(owner, rendererTarget);
+      return { ok: true, dispatched: 1 };
+    }
+    return this.dispatchSharedPreparedRun(ownerId, taskText, ipcModel);
+  }
+
+  private async dispatchSharedPreparedRun(
+    ownerId: string, taskText: string | undefined, ipcModel: string | undefined,
+  ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
+    const owner = this.runtime.get(ownerId);
+    if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
     const ownerWs = this.workspaceOfTerminal(owner);
-    for (const entry of this.dispatchRuns.values()) {
-      if (entry.ownerId === ownerId) continue;
+    const rendererTarget = this.captureRendererSendTarget();
+    for (const [workerId, entry] of this.dispatchRuns) {
+      if (entry.ownerId === ownerId || this.runtime.get(workerId)?.workspaceId !== ownerWs?.id) continue;
       const running = this.runtime.get(entry.ownerId);
       if (running && ownerWs && running.workspaceId === ownerWs.id) {
         return { ok: false, error: "a dispatch is already running" };
       }
     }
     const dispatchRoot = ownerWs?.root ?? owner.cwd;
+    const inFlightPathKeys = await this.dispatchPathKeysInFlight(owner.id, dispatchRoot);
     const picked = await pickDispatchTasks({
-      plan: owner.plan,
+      plan: owner.plan.filter((entry) => !entry.candidate),
       remainingSlots: MAX_DISPATCH_WORKERS - this.ownerDispatchCount(owner.id),
-      inFlightPathKeys: await this.dispatchPathKeysInFlight(owner.id, dispatchRoot),
+      inFlightPathKeys,
       pathKey: (p) => this.taskPathKey(p, dispatchRoot),
       taskText,
     });
@@ -4209,8 +4392,7 @@ class TerminaApp {
     const chosen = picked.tasks;
     const alreadyDispatching = this.ownerDispatchCount(ownerId) > 0;
     if (owner.busy && !alreadyDispatching) owner.pty.write("\x03"); // the workers replace the owner's run
-    // Structured startup skips the interactive preflight. Hold a real write
-    // lease across the flush so the editor saves go through as a genuine
+    // Hold a real write lease across the flush so the editor saves go through as a genuine
     // holder (file:flush-save admits only the current holder).
     if (ownerWs) {
       const dispatchWriter = `dispatch:${ownerId}`;
@@ -4238,23 +4420,26 @@ class TerminaApp {
       }
     } catch (err) {
       for (const job of jobs) {
-        this.clearMailbox(job.id);
-        await this.removeDispatchStartupControl(job.id);
+        await Promise.all([this.clearMailbox(job.id), this.removeDispatchStartupControl(job.id)]);
       }
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
     let dispatched = 0;
+    let startError: string | undefined;
     for (const job of jobs) {
+      let worker: AgentTerminalInstance | undefined;
       try {
         const workerModel = dispatchWorkerModel(job.task, ipcModel);
-        const worker = await this.createTerminal(undefined, {
+        worker = await this.createTerminal(undefined, {
           type: "agent",
           engine: "core",
+          projectId: owner.projectId ?? undefined,
           workspaceId: owner.workspaceId,
           id: job.id,
           fromTerminalId: ownerId,
           ...(workerModel ? { model: workerModel } : {}),
         });
+        if (this.runtime.get(worker.id) !== worker || worker.closed || worker.pty.hasExited) throw new Error("The dispatch worker exited before assignment.");
         this.dispatchWorkers.set(worker.id, job.task.text);
         this.dispatchRuns.set(worker.id, { ownerId, taskText: job.task.text });
         this.runtime.subscribe(worker.id, dispatchViewerId(ownerId));
@@ -4263,17 +4448,17 @@ class TerminaApp {
         job.task.state = "active";
         dispatched++;
       } catch (err) {
-        this.clearMailbox(job.id);
-        await this.removeDispatchStartupControl(job.id);
+        startError = err instanceof Error ? err.message : String(err);
+        if (worker && this.runtime.get(worker.id) === worker) this.closeTerminal(worker.id);
+        await Promise.all([this.clearMailbox(job.id), this.removeDispatchStartupControl(job.id)]);
         console.warn(`[main] dispatch worker failed: ${(err as Error).message}`);
       }
     }
     if (dispatched === 0) {
       for (const job of jobs) {
-        this.clearMailbox(job.id);
-        await this.removeDispatchStartupControl(job.id);
+        await Promise.all([this.clearMailbox(job.id), this.removeDispatchStartupControl(job.id)]);
       }
-      return { ok: false, error: "no dispatch worker started" };
+      return { ok: false, error: startError ?? "no dispatch worker started" };
     }
     this.sendPlan(owner, rendererTarget);
     return { ok: true, dispatched };
@@ -4544,13 +4729,11 @@ class TerminaApp {
     }
   }
 
-  private clearMailbox(terminalId: string): void {
-    if (!this.dispatchMailbox.has(terminalId)) return;
+  private clearMailbox(terminalId: string): Promise<void> {
+    if (!this.dispatchMailbox.has(terminalId)) return Promise.resolve();
     this.dispatchMailbox.delete(terminalId);
     const path = this.mailboxFile(terminalId);
-    if (path) {
-      void this.removeEventsLeaf(basename(path));
-    }
+    return path ? this.removeEventsLeaf(basename(path)) : Promise.resolve();
   }
 
   private writeDispatchSettleNote(worker: AgentTerminalInstance, status: NonNullable<PlanTask["dispatchResult"]>["outcome"], startError?: string): void {
@@ -4577,6 +4760,7 @@ class TerminaApp {
     owner: AgentTerminalInstance,
     expected?: PtyRendererSendTarget | null,
   ): void {
+    if (worker.workspaceId !== owner.workspaceId) return;
     let changed = false;
     for (const [p, f] of worker.modified) {
       if (!owner.modified.has(p)) {
@@ -4903,15 +5087,28 @@ class TerminaApp {
     this.sendInstances();
   }
 
-  private selectTerminal(id: unknown, generation: unknown): { ok: boolean } {
+  private async selectTerminal(id: unknown, generation: unknown): Promise<import("../shared/types.js").ProjectActivateResult> {
     const ref = parseTerminalTarget(id, generation);
     const inst = ref ? this.runtime.get(ref.id) : undefined;
     const target = this.captureRendererSendTarget();
-    if (!ref || !inst || inst.closed || inst.generation !== ref.generation || !target
-      || this.disposed || this.projectIsSwitching(this.activeProjectId ?? undefined)
-      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId) return { ok: false };
+    const project = inst ? this.projectOfTerminal(inst.id) : null;
+    const workspace = inst ? this.workspaceOfTerminal(inst) : null;
+    if (!ref || !inst || inst.closed || inst.generation !== ref.generation || !target || !project || !workspace
+      || this.disposed || this.projectIsSwitching(project.id) || project.id !== this.activeProjectId) return { ok: false };
     this.terminalSelection = { ...ref, target };
-    return { ok: true };
+    const activation = this.workspaceActivation;
+    // Repeated selection waits for the same in-flight activation rather than
+    // advancing its epoch and superseding the original caller.
+    const pending = activation?.projectId === project.id && activation.workspaceId === workspace.id
+      && activation.activationGeneration === project.activationGeneration
+      && activation.selectionAction === this.projectSelectionAction
+      && !!activation.target && isPtyRendererSendTargetCurrent(target, activation.target) && activation.current(ref)
+      ? activation.promise : this.activateProject(project.id, target, undefined, workspace.id, ref);
+    const folder = await pending;
+    if (!folder || this.selectedTerminal() !== inst || inst.generation !== ref.generation
+      || this.workspaceOfTerminal(inst) !== workspace || folder.workspaceId !== workspace.id
+      || project.activationGeneration !== folder.activationGeneration) return { ok: false };
+    return { ok: true, folder };
   }
 
   private selectedTerminal(): AgentTerminalInstance | null {
@@ -4920,7 +5117,8 @@ class TerminaApp {
     const inst = this.runtime.get(selected.id);
     if (!inst || inst.closed || inst.generation !== selected.generation
       || this.disposed || this.projectIsSwitching(this.activeProjectId ?? undefined)
-      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId) return null;
+      || this.projectOfTerminal(inst.id)?.id !== this.activeProjectId
+      || !this.projectWorkspace({ projectId: inst.projectId, workspaceId: inst.workspaceId })) return null;
     return inst;
   }
 
@@ -4998,29 +5196,44 @@ class TerminaApp {
     }
   }
 
+  private async requestTerminalInterrupt(id: string, generation: number, ownsSelection: () => boolean = () => true): Promise<TerminalCloseResult> {
+    const inst = this.runtime.get(id);
+    if (!inst || inst.closed || inst.generation !== generation) return { ok: false, error: "the terminal is no longer available" };
+    const rendererTarget = this.captureRendererSendTarget();
+    const project = this.projectOfTerminal(id);
+    const workspaceId = inst.workspaceId;
+    const cwd = inst.cwd;
+    if (!rendererTarget) return { ok: false, error: "the terminal context is unavailable" };
+    const current = (): boolean => !this.disposed && !inst.closed && this.runtime.get(id) === inst
+      && inst.generation === generation && inst.workspaceId === workspaceId && inst.cwd === cwd
+      && this.projectOfTerminal(id) === project && !this.projectIsSwitching(project?.id) && ownsSelection()
+      && isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget);
+    if (!current()) return { ok: false, error: "the terminal context has changed" };
+    const impact = this.terminalCloseImpact(inst);
+    const options = closeConfirmation({ kind: "interrupt", id }, [impact]);
+    if (options) {
+      const win = this.win;
+      if (!win || win.isDestroyed()) return { ok: false, error: "confirmation is unavailable" };
+      try {
+        const result = await dialog.showMessageBox(win, options);
+        if (result.response !== 0) return { ok: false, cancelled: true };
+      } catch (error) {
+        return { ok: false, error: `could not confirm interrupt: ${(error as Error).message}` };
+      }
+    }
+    if (!current() || JSON.stringify(this.terminalCloseImpact(inst)) !== JSON.stringify(impact)) {
+      return { ok: false, error: "the terminal's work changed while confirming; try again to review it" };
+    }
+    inst.interruptedAt = Date.now();
+    inst.pty.interrupt();
+    return { ok: true };
+  }
+
   private async abortActive(): Promise<void> {
     const inst = this.selectedTerminal();
     if (!inst) return;
-    const rendererTarget = this.captureRendererSendTarget();
-    if (!rendererTarget) return;
-    const impact = this.terminalCloseImpact(inst);
-    const options = closeConfirmation({ kind: "interrupt", id: inst.id }, [impact]);
-    if (options) {
-      const win = this.win;
-      if (!win || win.isDestroyed()) return;
-      try {
-        const result = await dialog.showMessageBox(win, options);
-        if (result.response !== 0) return;
-      } catch (error) {
-        console.warn(`[main] could not confirm interrupt: ${(error as Error).message}`);
-        return;
-      }
-    }
-    if (this.selectedTerminal() !== inst || this.disposed
-      || !isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget)
-      || JSON.stringify(this.terminalCloseImpact(inst)) !== JSON.stringify(impact)) return;
-    inst.interruptedAt = Date.now();
-    inst.pty.interrupt();
+    const result = await this.requestTerminalInterrupt(inst.id, inst.generation, () => this.selectedTerminal() === inst);
+    if (!result.ok && result.error) console.warn(`[main] ${result.error}`);
   }
 
   private instanceList(): InstanceSummary[] {
@@ -5062,14 +5275,16 @@ class TerminaApp {
     const terminals = [...project.terminalIds].flatMap((id) => {
       const inst = this.runtime.get(id);
       if (!inst || inst.closed || inst.projectId !== project.id) return [];
+      const workspace = project.workspaces.get(inst.workspaceId) ?? null;
       return [{
         id: inst.id, generation: inst.generation, type: inst.type, model: inst.model,
         activity: activityView(activityFor(this.activityInputs.get(id) ?? emptyActivityInput())),
-        workspace: this.workspaceOfTerminal(inst), verify: inst.verify,
+        workspace, verify: inst.verify,
+        dispatchAssignment: this.dispatchRuns.get(inst.id) ?? null,
         trackedChanges: inst.modified.size, plan: inst.plan,
       }];
     });
-    return projectWorkSummary(project, terminals);
+    return projectWorkSummary(project, terminals, project.worldlines?.recoverySummaries() ?? [], project.worldlines?.list() ?? []);
   }
 
   private workOverview(): WorkOverview {
@@ -5359,7 +5574,7 @@ class TerminaApp {
             this.savePlanRoster(ownerInst);
             this.sendPlan(ownerInst, rendererTarget);
             this.collectWorker(inst, ownerInst, rendererTarget);
-            this.maybeAutoVerify(ownerInst, task?.state === "done" ? task.text : null);
+            this.maybeAutoVerify(inst.workspaceId === ownerInst.workspaceId ? ownerInst : inst, task?.state === "done" ? task.text : null);
           }
           // The run entry goes; the tab label stays until the terminal exits.
           this.dispatchRuns.delete(inst.id);
@@ -5545,6 +5760,9 @@ class TerminaApp {
   ): Promise<{ ok: boolean; failed: string[] }> {
     const project = this.projectOfWorkspace(workspaceId);
     if (!project) return Promise.resolve({ ok: false, failed: ["workspace is no longer owned by a project"] });
+    // Candidate preparation uses persisted files. Its editor tabs are read-only;
+    // recovered drafts must not be flushed into the candidate tree.
+    if (project.workspaces.get(workspaceId)?.primary === false) return Promise.resolve({ ok: true, failed: [] });
     return new Promise((resolve) => {
       // Random per-request id: sequential ids let a stale or foreign report
       // resolve another request's waiter.
@@ -5697,12 +5915,6 @@ class TerminaApp {
       acknowledgeFailure("preflight deadline expired during source admission");
       return;
     }
-    if (!ws.primary) {
-      // Candidate scopes participate in admission, but primary runs alone record.
-      this.writeAck(inst.id, requestId, { ok: true, token: null });
-      report("ok");
-      return;
-    }
     const preflightOwner = this.projectOfTerminal(inst.id);
     if (!preflightOwner || preflightOwner.workspaces.get(ws.id) !== ws) {
       acknowledgeFailure("terminal project ownership is unavailable");
@@ -5794,7 +6006,11 @@ class TerminaApp {
       }
       // gitHead is a single-flight core op: awaiting it outside the race
       // would let a busy core burn the bridge's wait with the lease held.
-      const capturePromise = (async () => store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null))();
+      const capturePromise = (async () => {
+        // The project store also records candidates, but must read their own tree.
+        const source = ws.primary ? undefined : { root: ws.root, gitDir: (await gitCommonDir(ws.root)) ?? ws.root };
+        return store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null, {}, {}, source);
+      })();
       const budgetMs = Math.max(0, remainingBudget());
       const captured = await Promise.race([
         capturePromise.then((state) => ({ ok: true as const, state })),
@@ -5922,8 +6138,9 @@ class TerminaApp {
         trustHashes: pending ? pending.trustHashes : null,
         model: event.model ?? null,
         thinkingLevel: event.thinkingLevel ?? null,
-        replayable: true,
-        reason: null,
+        // Candidate start states support review, not primary-run replay.
+        replayable: ws?.primary !== false,
+        reason: ws?.primary === false ? "candidate runs cannot be replayed" : null,
         interrupted: false,
         steering: false,
         overlap: this.overlapInWorkspace(inst.workspaceId, inst.id),
@@ -6697,7 +6914,7 @@ class TerminaApp {
 
   /** Last-tool counts for the Timeline header. Tiny payload. Not ranking. */
   private timelinePrefixOf(inst: AgentTerminalInstance | undefined): TimelinePrefix {
-    if (!inst) return { terminalId: "", ok: 0, error: 0, open: 0, activity: { state: "idle", reason: null } };
+    if (!inst) return { terminalId: "", ok: 0, error: 0, open: 0, activity: { state: "idle", reason: null, intervention: null } };
     let ok = 0;
     let error = 0;
     for (const v of inst.toolOutcomes.values()) {
@@ -6710,7 +6927,7 @@ class TerminaApp {
 
   private sendTimelinePrefix(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     const payload = this.timelinePrefixOf(inst);
-    const key = `${payload.ok}:${payload.error}:${payload.open}:${activityKey(payload.activity ?? { state: "idle", reason: null })}`;
+    const key = `${payload.ok}:${payload.error}:${payload.open}:${activityKey(payload.activity ?? { state: "idle", reason: null, intervention: null })}`;
     if (inst.lastTimelinePrefixKey === key) return;
     inst.lastTimelinePrefixKey = key;
     this.send("timeline:prefix", payload, expected);
@@ -6738,6 +6955,14 @@ class TerminaApp {
         break;
       case "agent_start_rejected":
         this.foldActivity(inst, { t: "agent_start_rejected", seq, at }, expected);
+        break;
+      case "intervention_requested":
+        if (!inst.closed && !inst.pty.hasExited) {
+          this.foldActivity(inst, { t: event.t, seq, at, requestId: event.requestId, kind: event.kind, since: event.since }, expected);
+        }
+        break;
+      case "intervention_resolved":
+        this.foldActivity(inst, { t: event.t, seq, at, requestId: event.requestId }, expected);
         break;
       case "agent_settled":
         this.foldActivity(inst, { t: "agent_settled", seq, at, error: event.error ?? null }, expected);
@@ -7491,58 +7716,120 @@ class TerminaApp {
     }
   }
 
+  /** The displayed work area never replaces the project's primary identity. */
+  private displayedWorkspace(project: ProjectState): WorkspaceState | null {
+    const activation = this.workspaceActivation;
+    if (this.activeProjectId === project.id && activation?.projectId === project.id) {
+      return project.workspaces.get(activation.workspaceId) ?? null;
+    }
+    return this.primaryWorkspace(project);
+  }
+
   /** Switch the renderer to another open project. Nothing is torn down. */
   private async activateProject(
     projectId: string,
     expected?: PtyRendererSendTarget | null,
     expectedSelectionAction?: number,
+    workspaceId?: string,
+    selection?: { id: string; generation: number },
+    intent: "entry" | "context" = "context",
   ): Promise<FolderOpenedPayload | null> {
     const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
     const project = this.projects.get(projectId);
     if (!project || this.projectIsSwitching(projectId)) return null;
+    const workspace = intent === "entry" ? this.primaryWorkspace(project)
+      : workspaceId ? project.workspaces.get(workspaceId) : this.displayedWorkspace(project);
+    if (!workspace) return null;
     const selectionAction = expectedSelectionAction ?? this.beginProjectSelectionAction();
     if (expectedSelectionAction !== undefined && this.projectSelectionAction !== expectedSelectionAction) return null;
     const activationGeneration = this.nextProjectActivationGeneration();
     this.activeProjectId = projectId;
     project.activationGeneration = activationGeneration;
     const sent = await this.sendFolderOpened(
-      project.cwd,
+      workspace.primary ? project.cwd : workspace.root,
       project.id,
-      this.primaryWorkspace(project)?.id ?? "",
+      workspace.id,
       activationGeneration,
       selectionAction,
       rendererTarget,
+      selection,
+      intent,
     );
     if (sent) void this.persistOpenProjects();
     return sent;
   }
 
+  /** Select only admitted terminals; activity notifications never call this policy. */
+  private projectNavigationTerminal(project: ProjectState, intent: "entry" | "context", workspaceId: string): AgentTerminalInstance | null {
+    const selected = intent === "context" ? this.selectedTerminal() : null;
+    if (selected?.projectId === project.id && selected.workspaceId === workspaceId) return selected;
+    const choices = [];
+    for (const inst of this.runtime.values()) {
+      if (inst.projectId !== project.id || inst.closed || inst.pty.hasExited
+        || (intent === "context" && inst.workspaceId !== workspaceId) || !this.workspaceOfTerminal(inst)) continue;
+      choices.push({ id: inst.id, generation: inst.generation,
+        intervention: inst.type === "agent" ? this.activityInputs.get(inst.id)?.intervention ?? null : null });
+    }
+    const choice = chooseProjectTerminal(choices, project.lastTerminal, intent);
+    return choice ? this.runtime.get(choice.id) ?? null : null;
+  }
+
   /** Push folder:opened with a login hint flag. The renderer never reads auth.json. */
-  private async sendFolderOpened(
+  private sendFolderOpened(
     cwd: string,
     projectId: string,
     workspaceId: string,
     activationGeneration: number,
     selectionAction = this.projectSelectionAction,
     expected?: PtyRendererSendTarget | null,
+    selection?: { id: string; generation: number },
+    intent: "entry" | "context" = "context",
   ): Promise<FolderOpenedPayload | null> {
     const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
     const project = this.projects.get(projectId);
-    const current = () => !this.disposed
-      && !!workspaceId
+    let workspace = project?.workspaces.get(workspaceId);
+    let workspaceRoot = workspace?.root;
+    let terminal = selection ? this.runtime.get(selection.id) : null;
+    const primary = project ? this.primaryWorkspace(project) : null;
+    const current = (requested?: { id: string; generation: number }) => !this.disposed
+      && (!requested || (selection?.id === requested.id && selection.generation === requested.generation))
+      && !!workspace && !!primary
       && this.projects.get(projectId) === project
+      && project?.workspaces.get(workspaceId) === workspace && workspace.root === workspaceRoot
       && this.activeProjectId === projectId
       && project?.activationGeneration === activationGeneration
       && this.projectActivationGeneration === activationGeneration
-      && this.projectSelectionAction === selectionAction;
-    if (!current()) return null;
-    const needsLogin = await this.agentNeedsLogin();
-    // Auth I/O is asynchronous. Re-check every active-project fence before
-    // publishing; an earlier request must never resurrect a closed/hidden tab.
-    if (!current()) return null;
-    const folder: FolderOpenedPayload = { cwd, projectId, workspaceId, activationGeneration, needsLogin };
-    this.send("folder:opened", folder, rendererTarget);
-    return folder;
+      && this.projectSelectionAction === selectionAction
+      && (!rendererTarget || isPtyRendererSendTargetCurrent(this.captureRendererSendTarget(), rendererTarget))
+      && (!selection || (!!terminal && this.selectedTerminal() === terminal
+        && terminal.generation === selection.generation && this.workspaceOfTerminal(terminal) === workspace));
+    if (!current() || !project || !primary) return Promise.resolve(null);
+    const promise = (async () => {
+      const needsLogin = await this.agentNeedsLogin();
+      // Choose after auth I/O, so resolved permissions and closed actors cannot win entry.
+      if (!current()) return null;
+      if (!selection) {
+        terminal = this.projectNavigationTerminal(project, intent, workspaceId);
+        workspace = terminal ? this.workspaceOfTerminal(terminal)! : workspace;
+        workspaceId = workspace!.id;
+        workspaceRoot = workspace!.root;
+        cwd = workspace!.primary ? project.cwd : workspace!.root;
+      }
+      const admitted = terminal ? { id: terminal.id, generation: terminal.generation } : null;
+      const folder: FolderOpenedPayload = { cwd, projectId, workspaceId, activationGeneration, needsLogin,
+        terminal: admitted, projectRoot: project.cwd, primaryWorkspaceId: primary.id };
+      this.send("folder:opened", folder, rendererTarget);
+      if (admitted) {
+        project.lastTerminal = admitted;
+        if (rendererTarget) this.terminalSelection = { ...admitted, target: rendererTarget };
+        selection = admitted;
+      } else this.terminalSelection = null;
+      const activation = this.workspaceActivation;
+      if (activation?.activationGeneration === activationGeneration) activation.workspaceId = workspaceId;
+      return folder;
+    })();
+    this.workspaceActivation = { projectId, workspaceId, activationGeneration, selectionAction, target: rendererTarget, current, promise };
+    return promise;
   }
 
   /**
@@ -7659,7 +7946,6 @@ class TerminaApp {
     // Capture the project's ids before teardown removes candidate workspaces
     // and exited terminals leave the sets.
     const closingWorkspaceIds = new Set(project.workspaces.keys());
-    const closingRoots = await Promise.all([...project.workspaces.values()].map((ws) => this.canonicalPath(ws.root)));
     const closingIds = [...project.terminalIds];
     // Snapshot identity before the awaits below. Roster restore can reuse a
     // free term-N; a late unfenced stop/close/drain would hit the new session.
@@ -7713,10 +7999,8 @@ class TerminaApp {
       // Scope every remaining cleanup to this project. Other open projects
       // keep their user edits, dispatch workers, and watch dedupe state.
       for (const wsId of closingWorkspaceIds) this.userEditsByWorkspace.delete(wsId);
-      for (const key of [...this.lastWatchChange.keys()]) {
-        if (closingRoots.some((root) => key === root || key.startsWith(root + sep))) {
-          this.lastWatchChange.delete(key);
-        }
+      for (const [key, change] of this.lastWatchChange) {
+        if (closingWorkspaceIds.has(change.workspaceId)) this.lastWatchChange.delete(key);
       }
       for (const { id, inst } of closingTerminals) {
         if (!closingInstanceOurs(id, inst) && this.runtime.has(id)) continue;
@@ -7920,9 +8204,12 @@ class TerminaApp {
       // window must outlive that delay, or the duplicate re-records an edit
       // the run already consumed. Identity is the full payload so a
       // suffix-only edit is not treated as the same write.
-      const lastWatch = this.lastWatchChange.get(path);
+      // Reopened candidates can retain a prior workspace observing the same
+      // tree. Each live workspace must receive its own source notification.
+      const watchKey = JSON.stringify([ws.id, path]);
+      const lastWatch = this.lastWatchChange.get(watchKey);
       const isDupWatch = lastWatch !== undefined && lastWatch.identity === watchIdentity && now - lastWatch.at < 5000;
-      this.lastWatchChange.set(path, { identity: watchIdentity, at: now });
+      this.lastWatchChange.set(watchKey, { workspaceId: ws.id, identity: watchIdentity, at: now });
       evictOldest(this.lastWatchChange, TerminaApp.LAST_WATCH_MAX);
       if (isDupWatch) return;
       // The generation moves only on a real tree change. A duplicate event
@@ -8132,13 +8419,19 @@ class TerminaApp {
     return relative(await this.canonicalPath(root), p);
   }
 
-  private explorerWorkspace(projectId: unknown): { project: ProjectState; workspace: WorkspaceState } | { error: string } {
-    if (typeof projectId !== "string") return { error: "invalid project" };
-    const project = this.projects.get(projectId);
-    if (!project || this.projectIsSwitching(projectId)) return { error: "project is not open" };
-    const workspace = this.primaryWorkspace(project);
-    if (!workspace) return { error: "project workspace is not available" };
-    return { project, workspace };
+  private explorerWorkspace(owner: unknown): { project: ProjectState; workspace: WorkspaceState } | { error: string } {
+    const target = this.projectWorkspace(owner);
+    if (!target) return { error: "invalid project workspace" };
+    if (this.projectIsSwitching(target.project.id)) return { error: "project is not open" };
+    return target;
+  }
+
+  /** Renderer file writes are only permitted in the open primary workspace. */
+  private writableProjectWorkspace(owner: unknown): { project: ProjectState; workspace: WorkspaceState } | { error: string } {
+    const target = this.explorerWorkspace(owner);
+    if ("error" in target) return target;
+    if (!target.workspace.primary) return { error: "Candidate files are read-only. Use candidate controls to promote or export changes." };
+    return target;
   }
 
   /** The project/workspace must still be owned and open before a write commits. */
@@ -8152,10 +8445,10 @@ class TerminaApp {
 
   /** Serialize one Explorer mutation with capture, close, and other writers. */
   private async mutateExplorer(
-    projectId: unknown,
+    owner: unknown,
     mutation: (workspace: WorkspaceState, live: () => boolean) => Promise<{ ok: boolean; error?: string; name?: string }>,
   ): Promise<{ ok: boolean; error?: string; name?: string }> {
-    const target = this.explorerWorkspace(projectId);
+    const target = this.writableProjectWorkspace(owner);
     if ("error" in target) return { ok: false, error: target.error };
     const requester = `explorer:${target.project.id}:${randomUUID()}`;
     const lease = await this.acquireWriteLease(target.workspace.id, requester, 5000);
@@ -8209,9 +8502,14 @@ class TerminaApp {
     await handle.close().catch(() => undefined);
   }
 
-  private async listDir(projectId: unknown, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
-    const target = this.explorerWorkspace(projectId);
+  private async listDir(owner: unknown, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
+    const target = this.explorerWorkspace(owner);
     if ("error" in target) return { entries: [], error: target.error };
+    const root = target.workspace.root;
+    const generation = target.workspace.generation;
+    const current = () => this.projectWorkspace(owner)?.workspace === target.workspace
+      && !this.projectIsSwitching(target.project.id)
+      && target.workspace.root === root && target.workspace.generation === generation;
     try {
       if (await this.hasDanglingSymlink(absPath)) return { entries: [], error: "path outside the project workspace" };
       const [rootCanon, dir] = await Promise.all([
@@ -8261,6 +8559,7 @@ class TerminaApp {
           type: isDir ? "dir" : "file",
         });
       }
+      if (!current()) return { entries: [], error: "project workspace changed while listing" };
       return truncated ? { entries, truncated: true } : { entries };
     } catch (err) {
       return { entries: [], error: (err as Error).message };
@@ -8494,10 +8793,6 @@ class TerminaApp {
       if (this.initialRestorePromise) await this.initialRestorePromise;
       return this.inspectWorkAttention(id);
     });
-    ipcMain.handle("project:work-summary", async (_e, projectId: unknown) => {
-      if (this.initialRestorePromise) await this.initialRestorePromise;
-      return this.workSummary(projectId);
-    });
     ipcMain.handle("project:open", async () => {
       if (this.initialRestorePromise) await this.initialRestorePromise;
       return this.openFolder();
@@ -8513,9 +8808,10 @@ class TerminaApp {
       }
       return this.openProjectAt(cwd);
     });
-    ipcMain.handle("project:activate", async (_e, projectId: unknown): Promise<ProjectActivateResult> => {
-      if (typeof projectId !== "string" || !this.projects.has(projectId)) return { ok: false };
-      const folder = await this.activateProject(projectId);
+    ipcMain.handle("project:activate", async (_e, projectId: unknown, intent: unknown): Promise<ProjectActivateResult> => {
+      if (typeof projectId !== "string" || !this.projects.has(projectId)
+        || (intent !== "entry" && intent !== "context")) return { ok: false };
+      const folder = await this.activateProject(projectId, undefined, undefined, undefined, undefined, intent);
       return folder ? { ok: true, folder } : { ok: false };
     });
     ipcMain.handle("project:close", async (_e, projectId: unknown) => {
@@ -8805,8 +9101,8 @@ class TerminaApp {
       // The TypeScript annotation is not runtime validation: null (or any
       // non-string/empty value) must never match an idle workspace's holder.
       if (typeof writerId !== "string" || writerId.length === 0) return { ok: false, error: "the flush does not hold the write lease" };
-      const target = this.projectWorkspace(owner);
-      if (!target) return { ok: false, error: "invalid project workspace" };
+      const target = this.writableProjectWorkspace(owner);
+      if ("error" in target) return { ok: false, error: target.error };
       const managed = await this.managedPath(absPath, target.workspace.id);
       if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
       // Join the holder's lease across the write: a stale holder that
@@ -8871,7 +9167,7 @@ class TerminaApp {
     });
     ipcMain.handle("timeline:prefix", (_e, terminalId: string) => {
       const inst = this.runtime.get(terminalId);
-      if (!inst) return { terminalId, ok: 0, error: 0, open: 0, activity: { state: "idle", reason: null } };
+      if (!inst) return { terminalId, ok: 0, error: 0, open: 0, activity: { state: "idle", reason: null, intervention: null } };
       return this.timelinePrefixOf(inst);
     });
     ipcMain.handle("timeline:progress", (_e, terminalId: string, seq: number) => this.timelineProgress(terminalId, seq));
@@ -8906,20 +9202,16 @@ class TerminaApp {
     // ---- Change Review ----
     ipcMain.handle("review:baseline", async (_e, terminalId: string, path: string) => {
       const inst = this.runtime.get(terminalId);
+      const workspace = inst ? this.workspaceById(inst.workspaceId) : null;
+      const root = workspace?.root;
+      const generation = workspace?.generation;
+      const workspaceId = inst?.workspaceId;
+      const live = () => !!inst && !inst.closed && this.runtime.get(terminalId) === inst
+        && inst.workspaceId === workspaceId && this.workspaceById(inst.workspaceId) === workspace
+        && workspace?.root === root && workspace?.generation === generation;
       const managed = inst ? await this.managedPath(path, inst.workspaceId) : null;
-      if (!inst || !managed || managed.workspace.id !== inst.workspaceId) return { status: "modified", baseline: undefined };
-      // A lazy capture can still be in flight when the user clicks the
-      // modified entry. Wait for it so the diff does not show a false
-      // "no baseline" state.
-      if (!inst.baselines.has(managed.path)) {
-        const pending = inst.baselineFills.get(managed.path);
-        if (pending) await pending;
-      }
-      const status = inst.modified.get(managed.path)?.status;
-      const b = inst.baselines.get(managed.path);
-      if (b === undefined) return { status: status === "deleted" ? "deleted" : "modified", baseline: undefined };
-      if (b === null) return { status: "created", baseline: null };
-      return { status: status === "deleted" ? "deleted" : "modified", baseline: b };
+      if (!inst || !live() || !managed || managed.workspace !== workspace) return { status: "modified", baseline: undefined };
+      return reviewBaseline(inst, managed.path, live);
     });
     ipcMain.handle("review:revert", (_e, terminalId: string, path: string) => this.revertReviewFile(terminalId, path));
 
@@ -8943,14 +9235,14 @@ class TerminaApp {
       if (target) this.editorDraftSession.forget(token, { projectId: target.project.id, workspaceId: target.workspace.id });
     });
 
-    ipcMain.handle("explorer:list-dir", (_e, projectId: unknown, absPath: unknown) => {
-      if (typeof projectId !== "string" || typeof absPath !== "string") return { entries: [], error: "invalid path" };
-      return this.listDir(projectId, absPath);
+    ipcMain.handle("explorer:list-dir", (_e, owner: unknown, absPath: unknown) => {
+      if (typeof absPath !== "string") return { entries: [], error: "invalid path" };
+      return this.listDir(owner, absPath);
     });
-    ipcMain.handle("explorer:create", async (_e, projectId: unknown, relPath: unknown, kind: unknown) => {
+    ipcMain.handle("explorer:create", async (_e, owner: unknown, relPath: unknown, kind: unknown) => {
       if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
       if (kind !== "file" && kind !== "dir") return { ok: false, error: "kind must be file or dir" };
-      return this.mutateExplorer(projectId, async (workspace, live) => {
+      return this.mutateExplorer(owner, async (workspace, live) => {
         const abs = await this.projectAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
         if (kind === "dir") {
@@ -8970,21 +9262,21 @@ class TerminaApp {
         return { ok: true };
       }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
-    ipcMain.handle("explorer:rename", async (_e, projectId: unknown, relPath: unknown, newName: unknown) => {
+    ipcMain.handle("explorer:rename", async (_e, owner: unknown, relPath: unknown, newName: unknown) => {
       if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
       if (typeof newName !== "string" || !newName || newName.includes("/") || newName === "." || newName === "..") {
         return { ok: false, error: "invalid name" };
       }
-      return this.mutateExplorer(projectId, async (workspace, live) => {
+      return this.mutateExplorer(owner, async (workspace, live) => {
         const abs = await this.projectAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
         await renameBoundEntry(workspace.root, abs, join(dirname(abs), newName));
         return { ok: true };
       }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
-    ipcMain.handle("explorer:delete", async (_e, projectId: unknown, relPath: unknown) => {
+    ipcMain.handle("explorer:delete", async (_e, owner: unknown, relPath: unknown) => {
       if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
-      return this.mutateExplorer(projectId, async (workspace, live) => {
+      return this.mutateExplorer(owner, async (workspace, live) => {
         const abs = await this.projectAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
         await rm(abs, { recursive: true, force: true });
@@ -9001,12 +9293,12 @@ class TerminaApp {
     // Deterministic collisions already get copy-names; a racy one fails
     // closed for moves (no-replace rename) and best-effort for copies
     // (errorOnExist is checked, not atomic).
-    ipcMain.handle("explorer:paste", async (_e, projectId: unknown, targetDirRel: unknown, srcRel: unknown, move: unknown) => {
+    ipcMain.handle("explorer:paste", async (_e, owner: unknown, targetDirRel: unknown, srcRel: unknown, move: unknown) => {
       if (typeof targetDirRel !== "string" || typeof srcRel !== "string" || typeof move !== "boolean") {
         return { ok: false, error: "invalid arguments" };
       }
       if (!srcRel || srcRel === ".") return { ok: false, error: "invalid source" };
-      return this.mutateExplorer(projectId, async (workspace, live) => {
+      return this.mutateExplorer(owner, async (workspace, live) => {
         const src = await this.projectAbs(workspace, srcRel);
         let dirAbs: string;
         if (targetDirRel === "" || targetDirRel === ".") {
@@ -9096,6 +9388,7 @@ class TerminaApp {
     const managed = await this.managedPath(absPath, target.workspace.id);
     if (!managed) return { ok: false, path: absPath, error: "path is outside a managed workspace" };
     const kind = previewKind(managed.path);
+    const readOnly = !managed.workspace.primary;
     const rendererGeneration = this.rendererGeneration;
     try {
       const draft = kind || purpose !== "editor" ? null
@@ -9112,7 +9405,7 @@ class TerminaApp {
       if (recoverySaveBlocked && !draft) return { ok: false, path: managed.path, error: "not a file" };
       if (kind && st) {
         if (st.size > MAX_PREVIEW_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to preview (${st.size} bytes)` };
-        return { ok: true, path: managed.path, preview: kind, version: st.mtimeMs };
+        return { ok: true, path: managed.path, readOnly, preview: kind, version: st.mtimeMs };
       }
       let content = "";
       try {
@@ -9127,8 +9420,8 @@ class TerminaApp {
         return { ok: false, path: managed.path, error: "file owner is no longer current" };
       }
       const changedLines = managed.workspace.changeLines.get(managed.path);
-      if (purpose !== "editor") return { ok: true, path: managed.path, content, changedLines };
-      return { ok: true, path: managed.path, content,
+      if (purpose !== "editor") return { ok: true, path: managed.path, readOnly, content, changedLines };
+      return { ok: true, path: managed.path, readOnly, content,
         recoveredDraft: draft?.content, deleted, recoveryDiskError, recoverySaveBlocked, changedLines };
     } catch (err) {
       return { ok: false, path: managed.path, error: (err as Error).message };
@@ -9281,8 +9574,8 @@ class TerminaApp {
   private async saveEditorFile(absPath: unknown, content: unknown, owner: unknown, restore: unknown): Promise<{ ok: boolean; error?: string }> {
     if (typeof absPath !== "string") return { ok: false, error: "invalid path" };
     if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
-    const target = this.projectWorkspace(owner);
-    if (!target) return { ok: false, error: "invalid project workspace" };
+    const target = this.writableProjectWorkspace(owner);
+    if ("error" in target) return { ok: false, error: target.error };
     const requester = `save:${randomUUID()}`;
     const lease = await this.acquireWriteLease(target.workspace.id, requester, 0);
     if (!lease.ok) return { ok: false, error: lease.error ?? "the workspace is busy" };

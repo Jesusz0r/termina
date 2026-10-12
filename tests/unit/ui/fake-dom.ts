@@ -17,6 +17,7 @@ type Listener = (event: FakeEvent) => void;
 
 function makeEvent(init: Record<string, unknown>): FakeEvent {
   let defaultPrevented = false;
+  let cancelBubble = false;
   return {
     ...init,
     get defaultPrevented(): boolean {
@@ -25,7 +26,12 @@ function makeEvent(init: Record<string, unknown>): FakeEvent {
     preventDefault(): void {
       defaultPrevented = true;
     },
-    stopPropagation(): void {},
+    get cancelBubble(): boolean {
+      return cancelBubble;
+    },
+    stopPropagation(): void {
+      cancelBubble = true;
+    },
   };
 }
 
@@ -42,10 +48,13 @@ export class FakeEl {
   placeholder = "";
   type = "";
   hidden = false;
+  inert = false;
   private _tabIndex = 0;
   disabled = false;
   offsetLeft = 0;
   scrollLeft = 0;
+  lastScrollIntoView: ScrollIntoViewOptions | undefined;
+  scrollIntoView(options?: ScrollIntoViewOptions): void { this.lastScrollIntoView = options; }
   scrollWidth = 0;
   clientWidth = 0;
   clientHeight = 0;
@@ -72,6 +81,8 @@ export class FakeEl {
   constructor(tagName = "div") {
     this.tagName = tagName.toUpperCase();
   }
+
+  get parentElement(): FakeEl | null { return this.parent; }
 
   get className(): string {
     return [...this.classes].join(" ");
@@ -104,6 +115,7 @@ export class FakeEl {
     let node: FakeEl | null = this;
     while (node) {
       for (const fn of node.listeners.get(type) ?? []) fn(event);
+      if (event.cancelBubble) break;
       node = node.parent;
     }
   }
@@ -187,9 +199,9 @@ export class FakeEl {
     return out;
   }
   get isConnected(): boolean {
-    let node: FakeEl | null = this;
-    while (node.parent) node = node.parent;
-    return node !== this || this.parent !== null;
+    let root: FakeEl = this;
+    while (root.parent) root = root.parent;
+    return root === this.document?.body || root === (globalThis.document?.body as unknown);
   }
 }
 
@@ -300,6 +312,7 @@ export function installFakeDom(): { document: FakeDocument; modalRoot: FakeEl; c
   const document = new FakeDocument();
   const modalRoot = document.createElement("div");
   modalRoot.id = "modal-root";
+  document.body.append(modalRoot);
   document.registerId("modal-root", modalRoot);
   const globals = globalThis as Record<string, unknown>;
   const prevDocument = globals.document;

@@ -40,8 +40,8 @@ interface ActivityPaneBindings<TPane extends ActivityPaneState> {
   getActivePaneId(): string | null;
   getPaneById(id: string): TPane | undefined;
   getAllPanes(): Iterable<TPane>;
-  onPlanContent(has: boolean, count: number, announce: boolean): void;
-  onModifiedContent(has: boolean, count: number, announce: boolean): void;
+  onPlanContent(has: boolean, count: number): void;
+  onModifiedContent(has: boolean, count: number): void;
   onReviewChanged(pane: TPane): void;
   onModifiedListChanged(pane: TPane): void;
   onShowWorker(workerId: string): void;
@@ -53,16 +53,25 @@ interface ActivityPaneBindings<TPane extends ActivityPaneState> {
 export function createActivityPane<TPane extends ActivityPaneState>(
   bindings: ActivityPaneBindings<TPane>,
 ): {
-  renderPlan(pane: TPane, announce?: boolean): void;
-  renderModified(pane: TPane, announce?: boolean): void;
+  renderPlan(pane: TPane): void;
+  focusTask(pane: TPane, taskText: string): void;
+  renderModified(pane: TPane): void;
   pruneReviewMarks(pane: TPane): void;
   dropStaleAcceptMarks(path: string): void;
   clear(): void;
   dispose(): void;
 } {
   const { elements } = bindings;
+  let planRenderedPaneId: string | null = null;
   let modifiedRenderedPaneId: string | null = null;
   const modelOverrides = new Map<string, string>();
+  let pendingPlanFocus: { pane: TPane; taskText: string } | null = null;
+
+  function focusTask(pane: TPane, taskText: string): void {
+    if (bindings.getActivePane() !== pane) return;
+    pendingPlanFocus = { pane, taskText };
+    renderPlan(pane);
+  }
 
   function overrideKey(instanceId: string, taskText: string): string {
     return `${instanceId}\0${taskText}`;
@@ -123,7 +132,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
   }
 
   /** Plan Board: the current run's tasks with live progress. */
-  function renderPlan(pane: TPane, announce = true): void {
+  function renderPlan(pane: TPane): void {
     if (!pane.planLoaded) {
       pane.planLoaded = true;
       const versionAtStart = pane.planVersion;
@@ -133,7 +142,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
         if (p.planVersion !== versionAtStart) return; // a push won the race
         p.plan = tasks;
         p.planLoadAttempts = 0;
-        if (bindings.getActivePaneId() === pane.instanceId) renderPlan(p, announce);
+        if (bindings.getActivePaneId() === pane.instanceId) renderPlan(p);
       }).catch((err) => {
         const p = bindings.getPaneById(pane.instanceId);
         if (!p || p.planVersion !== versionAtStart) return;
@@ -144,7 +153,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
           setTimeout(() => {
             const current = bindings.getPaneById(p.instanceId);
             if (current === p && current.planVersion === versionAtStart && bindings.getActivePaneId() === current.instanceId) {
-              renderPlan(current, announce);
+              renderPlan(current);
             }
           }, delay);
           return;
@@ -154,9 +163,17 @@ export function createActivityPane<TPane extends ActivityPaneState>(
     }
     elements.planCount.textContent = pane.plan.length ? `(${pane.plan.length})` : "";
     pruneModelOverrides(pane);
+    const activeControl = document.activeElement;
+    const focusedRow = planRenderedPaneId === pane.instanceId && activeControl && elements.planList.contains(activeControl)
+      ? activeControl.closest<HTMLElement>(".plan-task") : null;
+    const focusTaskText = pendingPlanFocus?.pane === pane ? pendingPlanFocus.taskText
+      : !pendingPlanFocus ? focusedRow?.dataset.taskText : undefined;
+    const focusModel = !pendingPlanFocus && activeControl?.classList.contains("plan-model");
+    planRenderedPaneId = pane.instanceId;
     elements.planList.replaceChildren();
     for (const task of pane.plan) {
       const li = document.createElement("li");
+      li.dataset.taskText = task.text;
       const state = asKnownState(task.state, KNOWN_PLAN_STATES);
       li.className = `plan-task state-${state}`;
       const mark = document.createElement("span");
@@ -188,18 +205,33 @@ export function createActivityPane<TPane extends ActivityPaneState>(
         li.addEventListener("click", (e) => {
           e.stopPropagation();
           if ((e.target as HTMLElement | null)?.closest?.(".plan-model")) return;
-          if (task.workerId) {
-            bindings.onShowWorker(task.workerId);
-            return;
-          }
-          // Success needs no toast: main re-sends the plan and the row shows the worker.
-          dispatchTask(pane, task);
+          activateTask();
         });
+        const activateTask = (): void => {
+          if (bindings.getActivePane() !== pane || bindings.getPaneById(pane.instanceId) !== pane || !pane.plan.includes(task)) return;
+          if (task.workerId) bindings.onShowWorker(task.workerId);
+          else dispatchTask(pane, task);
+        };
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = "plan-task-action";
+        action.textContent = task.workerId ? "Show worker" : task.dispatchResult ? "Retry task" : "Dispatch task";
+        action.setAttribute("aria-label", `${action.textContent}: ${task.text}`);
+        action.addEventListener("click", (event) => { event.stopPropagation(); activateTask(); });
+        li.appendChild(action);
       }
       elements.planList.appendChild(li);
+      if (focusTaskText === task.text) {
+        if (pendingPlanFocus?.pane === pane && pendingPlanFocus.taskText === task.text) pendingPlanFocus = null;
+        const target = (focusModel ? li.querySelector<HTMLElement>(".plan-model") : null)
+          ?? li.querySelector<HTMLElement>(".plan-task-action") ?? li;
+        if (target === li) li.tabIndex = -1;
+        target.scrollIntoView({ block: "nearest" });
+        target.focus();
+      }
     }
     elements.planPanel.classList.toggle("collapsed", pane.plan.length === 0);
-    bindings.onPlanContent(pane.plan.length > 0, pane.plan.length, announce);
+    bindings.onPlanContent(pane.plan.length > 0, pane.plan.length);
     // Dispatch is possible when the plan has tasks. The button label shows
     // whether a dispatch is running (main re-sends the plan on settle).
     elements.btnDispatch.hidden = pane.plan.length === 0;
@@ -231,7 +263,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
     }
   }
 
-  function renderModified(pane: TPane, announce = true): void {
+  function renderModified(pane: TPane): void {
     elements.modifiedCount.textContent = pane.modified.length ? `(${pane.modified.length})` : "";
     if (modifiedRenderedPaneId !== pane.instanceId) {
       elements.modifiedList.replaceChildren();
@@ -294,18 +326,20 @@ export function createActivityPane<TPane extends ActivityPaneState>(
       if (!seen.has(path)) row.remove();
     }
     elements.modifiedPanel.classList.toggle("collapsed", pane.modified.length === 0);
-    bindings.onModifiedContent(pane.modified.length > 0, pane.modified.length, announce);
+    bindings.onModifiedContent(pane.modified.length > 0, pane.modified.length);
   }
 
   function clear(): void {
+    pendingPlanFocus = null;
+    planRenderedPaneId = null;
     elements.planList.replaceChildren();
     elements.planPanel.classList.add("collapsed");
     elements.modifiedList.replaceChildren();
     modifiedRenderedPaneId = null;
     elements.modifiedPanel.classList.add("collapsed");
     elements.btnDispatch.hidden = true;
-    bindings.onPlanContent(false, 0, false);
-    bindings.onModifiedContent(false, 0, false);
+    bindings.onPlanContent(false, 0);
+    bindings.onModifiedContent(false, 0);
   }
 
   const onClearModified = (e: MouseEvent): void => {
@@ -406,6 +440,7 @@ export function createActivityPane<TPane extends ActivityPaneState>(
   ];
 
   function dispose(): void {
+    pendingPlanFocus = null;
     elements.btnClearModified.removeEventListener("click", onClearModified);
     elements.btnAcceptAll.removeEventListener("click", onAcceptAll);
     modifiedHeader?.removeEventListener("click", onModifiedHeader);
@@ -414,5 +449,5 @@ export function createActivityPane<TPane extends ActivityPaneState>(
     for (const unsub of unsubs) unsub();
   }
 
-  return { renderPlan, renderModified, pruneReviewMarks, dropStaleAcceptMarks, clear, dispose };
+  return { renderPlan, focusTask, renderModified, pruneReviewMarks, dropStaleAcceptMarks, clear, dispose };
 }

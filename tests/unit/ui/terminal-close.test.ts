@@ -21,7 +21,6 @@ function harness() {
     panes,
     pendingTerminalCloses: new Set(),
     closingPanes: new Map(),
-    lastActivePane: new Map([["p1", "term-1"]]),
     activeId: "term-1",
     window: { termina: { closeTerminal } },
     forgetPaneActivityCue: vi.fn(),

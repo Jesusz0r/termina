@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
-  ACTIVITY_TAB_LABELS,
   ACTIVITY_TABS,
   activityEmptyVisible,
   activityPanelTitleVisible,
@@ -51,38 +50,28 @@ describe("activity tabs", () => {
     expect(reduceActivityTab(s1, { type: "select", tab: "plan" })).toBe(s1);
   });
 
-  it("new plan/worldlines/modified content auto-switches once", () => {
+  it.each(ACTIVITY_TABS)("%s arrivals update content without opening or switching tools", (tab) => {
     const s0 = initialActivityTabState("timeline");
-    const s1 = reduceActivityTab(s0, { type: "content", tab: "plan", has: true });
-    expect(s1.active).toBe("plan");
-    // Already true: no new edge, state identity preserved.
-    expect(reduceActivityTab(s1, { type: "content", tab: "plan", has: true })).toBe(s1);
+    expect(s0.open).toBe(false);
+    const s1 = reduceActivityTab(s0, { type: "content", tab, has: true });
+    expect(s1.active).toBe("timeline");
+    expect(s1.open).toBe(false);
+    expect(s1.content[tab]).toBe(true);
+    expect(reduceActivityTab(s1, { type: "content", tab, has: true })).toBe(s1);
   });
 
-  it("an explicit tab pick holds the panel against content auto-switch", () => {
-    // #63: the user returns to Timeline, and a run that adds Modified files
-    // must not steal the panel. Picking the active tab still arms the hold.
-    const s0 = reduceActivityTab(initialActivityTabState("timeline"), { type: "select", tab: "timeline" });
-    expect(s0.held).toBe("timeline");
+  it("selection opens tools and closing retains their content and preferred tab", () => {
+    const s0 = reduceActivityTab(initialActivityTabState("timeline"), { type: "select", tab: "plan" });
+    expect(s0.open).toBe(true);
     const s1 = reduceActivityTab(s0, { type: "content", tab: "modified", has: true });
-    expect(s1.active).toBe("timeline");
-    // The arrival is not swallowed: the badge and the panel content still update.
-    expect(s1.content.modified).toBe(true);
-    // The hold moves with the user's next pick instead of expiring on its own.
-    const s2 = reduceActivityTab(s1, { type: "select", tab: "plan" });
-    const s3 = reduceActivityTab(s2, { type: "content", tab: "worldlines", has: true });
-    expect(s3.active).toBe("plan");
-    expect(reduceActivityTab(s3, { type: "select", tab: "plan" })).toBe(s3);
-  });
-
-  it("hiding the held tab releases the hold", () => {
-    const s0 = reduceActivityTab(initialActivityTabState("timeline"), { type: "select", tab: "modified" });
-    expect(s0.held).toBe("modified");
-    // A project with no Modified surface cannot keep the auto-switch muted.
-    const s1 = reduceActivityTab(s0, { type: "visibility", tab: "modified", visible: false });
-    expect(s1.active).toBe("timeline");
-    expect(s1.held).toBeNull();
-    expect(reduceActivityTab(s1, { type: "content", tab: "worldlines", has: true }).active).toBe("worldlines");
+    expect(s1.active).toBe("plan");
+    expect(s1.open).toBe(true);
+    const closed = reduceActivityTab(s1, { type: "close" });
+    expect(closed.open).toBe(false);
+    expect(closed.active).toBe("plan");
+    expect(closed.content.modified).toBe(true);
+    expect(reduceActivityTab(closed, { type: "close" })).toBe(closed);
+    expect(reduceActivityTab(closed, { type: "select", tab: "plan" }).open).toBe(true);
   });
 
   it("timeline content never auto-switches", () => {
@@ -92,15 +81,15 @@ describe("activity tabs", () => {
   });
 
   it("content loss never switches away", () => {
-    const s0 = reduceActivityTab(initialActivityTabState("timeline"), { type: "content", tab: "plan", has: true });
+    const s0 = reduceActivityTab(initialActivityTabState("plan"), { type: "content", tab: "plan", has: true });
     const s1 = reduceActivityTab(s0, { type: "content", tab: "plan", has: false });
     expect(s1.active).toBe("plan");
     expect(s1.content.plan).toBe(false);
   });
 
-  it("sync updates state without switching", () => {
+  it("updates badges without switching", () => {
     const s0 = initialActivityTabState("timeline");
-    const s1 = reduceActivityTab(s0, { type: "sync", tab: "modified", has: true });
+    const s1 = reduceActivityTab(s0, { type: "content", tab: "modified", has: true });
     expect(s1.active).toBe("timeline");
     expect(s1.content.modified).toBe(true);
   });
@@ -115,17 +104,17 @@ describe("activity tabs", () => {
 
   it("arrow navigation walks only the visible tabs and wraps", () => {
     const hidden = reduceActivityTab(initialActivityTabState("timeline"), { type: "visibility", tab: "plan", visible: false });
-    expect(visibleActivityTabs(hidden)).toEqual(["timeline", "worldlines", "modified"]);
+    expect(visibleActivityTabs(hidden)).toEqual(["checks", "timeline", "worldlines", "modified"]);
     // The hidden tab is skipped in both directions.
     expect(stepActivityTab(visibleActivityTabs(hidden), "timeline", 1)).toBe("worldlines");
     expect(stepActivityTab(visibleActivityTabs(hidden), "worldlines", -1)).toBe("timeline");
     const noWorldlines = reduceActivityTab(initialActivityTabState("timeline"), { type: "visibility", tab: "worldlines", visible: false });
-    expect(visibleActivityTabs(noWorldlines)).toEqual(["timeline", "plan", "modified"]);
+    expect(visibleActivityTabs(noWorldlines)).toEqual(["checks", "timeline", "plan", "modified"]);
     expect(stepActivityTab(visibleActivityTabs(noWorldlines), "plan", 1)).toBe("modified");
     expect(stepActivityTab(visibleActivityTabs(noWorldlines), "modified", -1)).toBe("plan");
     // Wrapping keeps every visible tab reachable by arrows alone.
-    expect(stepActivityTab(ACTIVITY_TABS, "modified", 1)).toBe("timeline");
-    expect(stepActivityTab(ACTIVITY_TABS, "timeline", -1)).toBe("modified");
+    expect(stepActivityTab(ACTIVITY_TABS, "modified", 1)).toBe("checks");
+    expect(stepActivityTab(ACTIVITY_TABS, "checks", -1)).toBe("modified");
     // Unreachable cases stay put instead of throwing.
     expect(stepActivityTab(["timeline"], "timeline", 1)).toBe("timeline");
     expect(stepActivityTab(ACTIVITY_TABS, "nope" as never, 1)).toBe("nope");
@@ -133,7 +122,8 @@ describe("activity tabs", () => {
 
   it("empty copy shows only on the selected tab with no content", () => {
     const s0 = initialActivityTabState("timeline");
-    expect(activityEmptyVisible(s0, "timeline")).toBe(true);
+    expect(activityEmptyVisible(s0, "timeline")).toBe(false);
+    expect(activityEmptyVisible(reduceActivityTab(s0, { type: "select", tab: "timeline" }), "timeline")).toBe(true);
     expect(activityEmptyVisible(s0, "plan")).toBe(false);
     expect(activityEmptyVisible(s0, "worldlines")).toBe(false);
     expect(activityEmptyVisible(s0, "modified")).toBe(false);
@@ -142,15 +132,15 @@ describe("activity tabs", () => {
     expect(activityEmptyVisible(s1, "timeline")).toBe(false);
     expect(activityEmptyVisible(s1, "plan")).toBe(true);
 
-    const s2 = reduceActivityTab(s1, { type: "sync", tab: "plan", has: true });
+    const s2 = reduceActivityTab(s1, { type: "content", tab: "plan", has: true });
     expect(activityEmptyVisible(s2, "plan")).toBe(false);
 
     // Terminal switch: this tab's content is gone, so the copy returns.
-    const s3 = reduceActivityTab(s2, { type: "sync", tab: "plan", has: false });
+    const s3 = reduceActivityTab(s2, { type: "content", tab: "plan", has: false });
     expect(activityEmptyVisible(s3, "plan")).toBe(true);
 
     // Another tab filling does not hide this tab's copy.
-    const s4 = reduceActivityTab(s3, { type: "sync", tab: "modified", has: true });
+    const s4 = reduceActivityTab(s3, { type: "content", tab: "modified", has: true });
     expect(activityEmptyVisible(s4, "plan")).toBe(true);
     expect(activityEmptyVisible(s4, "modified")).toBe(false);
   });
@@ -179,8 +169,9 @@ describe("activity tabs", () => {
   it("keeps the tablist as the single visible title for each panel", () => {
     const tabbar = html.match(/id="activity-tabbar"[\s\S]*?<\/div>/)?.[0];
     expect(tabbar).toBeTruthy();
+    const labels = { checks: "Checks", timeline: "Timeline", plan: "Plan", worldlines: "Worldlines", modified: "Modified" };
     for (const tab of ACTIVITY_TABS) {
-      const label = ACTIVITY_TAB_LABELS[tab];
+      const label = labels[tab];
       expect(tabbar).toContain(`data-tab="${tab}"`);
       expect(tabbar).toContain(label);
       const titles = [...html.matchAll(/class="activity-panel-title">([^<]*)<\/span>/g)].map((m) => m[1]);

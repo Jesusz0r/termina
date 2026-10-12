@@ -95,11 +95,12 @@ async function inspectStaleHistory(page: Page, projectId: string, terminalId: st
   const item = (await page.evaluate(() => window.termina.getWorkOverview())).items
     .find((entry) => entry.projectId === projectId && entry.terminalId === terminalId && entry.reason === "verify-stale")!;
   expect(item).toMatchObject({ action: { kind: "evidence", terminalId, generation } });
-  await page.locator("#btn-attention").click();
+  await expect(page.locator("#project-bar #attention-view")).toBeVisible();
+  await expect(page.locator("#attention-heading")).toContainText("Attention");
   await page.locator(`#attention-list .attention-item[data-id="${item.id}"] .attention-inspect`).click();
-  await expect(page.locator(".work-summary-report")).toContainText("**Status:** ⚠️ OUTDATED");
-  await expect(page.locator(".work-summary-report")).toContainText("**Historical execution:** ✅ PASSED (exit code 0)");
-  await expect(page.locator(".work-summary-report")).not.toContainText("**Status:** ✅ PASSED");
+  await expect(page.locator(".checks-report")).toContainText("**Status:** ⚠️ OUTDATED");
+  await expect(page.locator(".checks-report")).toContainText("**Historical execution:** ✅ PASSED (exit code 0)");
+  await expect(page.locator(".checks-report")).not.toContainText("**Status:** ✅ PASSED");
 }
 
 for (const loss of ["close", "error"] as const) {

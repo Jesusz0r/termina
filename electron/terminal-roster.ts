@@ -7,6 +7,7 @@ import { isCoreSessionId } from "../agent-core/session.ts";
 import { isRecord } from "../shared/guards.ts";
 import { DISPATCH_OUTCOMES, type PlanTask, type VerifyInfo } from "../shared/types.ts";
 import { parseStoredVerify, parseStoredVerifyOutput } from "./main/verify-source.ts";
+import { parsePlanTaskCandidate } from "./plan-board.ts";
 
 export const MAX_ROSTER_FILE_BYTES = 16 * 1024 * 1024;
 export const MAX_ROSTER_HANDOFF_BYTES = 64 * 1024;
@@ -32,7 +33,7 @@ export type TerminalRosterEntry = {
   model?: string;
   /** Handoff plan: task text, paths, and state. Worker assignments never
    *  persist — the restoring side resets active tasks to pending. */
-  plan?: Array<Pick<PlanTask, "text" | "paths" | "state" | "dispatchResult">>;
+  plan?: Array<Pick<PlanTask, "text" | "paths" | "state" | "dispatchResult" | "candidate">>;
   /** Last verify verdict for the badge. */
   verify?: VerifyInfo;
   /** Bounded execution output, private to persistence and agent context. */
@@ -77,7 +78,11 @@ function parseRosterPlan(value: unknown): TerminalRosterEntry["plan"] {
     const outcome = DISPATCH_OUTCOMES.find((value) => value === result?.outcome);
     const dispatchResult = result && typeof result.workerId === "string" && TERM_ID.test(result.workerId) && outcome
       ? { workerId: result.workerId, outcome } : undefined;
-    out.push({ text: rec.text, paths, state: rec.state, ...(dispatchResult ? { dispatchResult } : {}) });
+    const candidate = parsePlanTaskCandidate(rec.candidate);
+    // Losing an invalid independent-area reference must not turn Retry into a shared-source write.
+    if (rec.candidate !== undefined && !candidate) continue;
+    out.push({ text: rec.text, paths, state: rec.state, ...(dispatchResult ? { dispatchResult } : {}),
+      ...(candidate ? { candidate } : {}) });
   }
   return out.length > 0 ? out : undefined;
 }

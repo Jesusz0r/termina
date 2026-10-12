@@ -257,14 +257,14 @@ describe("tab activity dots", () => {
     expect(mainSrc).toContain("windowFocused: document.hasFocus()");
     expect(mainSrc).toContain("if (sounded && pane.type === \"agent\") announceActivityCue(pane, sounded)");
     expect(mainSrc).toContain("() => revealActivityPane(targetId)");
-    expect(mainSrc).toContain("void activateProject(targetProject).then((activated) => {");
+    expect(mainSrc).toContain("void activateProject(targetProject, \"context\").then((activated) => {");
     expect(mainSrc).toContain("if (!activated || activeProjectId !== targetProject) return");
   });
 
   it("projects canonical overview counts instead of mirroring terminal notification dots", () => {
     const railSrc = readFileSync(new URL("../../../src/main/project-rail.ts", import.meta.url), "utf8");
     expect(mainSrc).toContain("const projectRail = createProjectRail({");
-    expect(mainSrc).toContain("onOverview: (overview) => projectRail.setOverview(overview)");
+    expect(mainSrc).toContain("onOverview: (overview) => { projectRail.setOverview(overview); quickOpen.setWorkOverview(overview); }");
     expect(mainSrc).toContain("projectRail.setActive(activeProjectId)");
     expect(railSrc).toContain("project.working");
     expect(railSrc).toContain("project.attentionCount");

@@ -74,8 +74,8 @@ describe("renderer core hardening batch, items 2-10 (refs #217)", () => {
 
   it("routes nested projects by longest prefix (item 9)", () => {
     const projects = new Map([
-      ["parent", { id: "parent", cwd: "/project", workspaceId: "ws-parent" }],
-      ["nested", { id: "nested", cwd: "/project/sub", workspaceId: "ws-nested" }],
+      ["parent", { id: "parent", cwd: "/project", workspaceId: "ws-parent", workspace: { id: "ws-parent", root: "/project" } }],
+      ["nested", { id: "nested", cwd: "/project/sub", workspaceId: "ws-nested", workspace: { id: "ws-nested", root: "/project/sub" } }],
     ]);
     expect(renderer).toContain("const target = resolveFileNavigation(path, projectViews, requestedOwner ??");
     expect(resolveFileNavigation("/project/sub/file.ts", projects, { projectId: "parent", workspaceId: "ws-parent" })).toEqual({

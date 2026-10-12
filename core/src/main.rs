@@ -37,11 +37,11 @@ use crate::promote_fs::{
 use promotion_files::{
     op_promotion_bound_copy_file, op_promotion_bound_copy_tree,
     op_promotion_bound_create_directory, op_promotion_bound_create_symlink,
-    op_promotion_bound_ensure_directory, op_promotion_bound_install_directory,
-    op_promotion_bound_list_directories, op_promotion_bound_list_entries,
-    op_promotion_bound_open_directory, op_promotion_bound_prepare_directory,
-    op_promotion_bound_read_file, op_promotion_bound_read_journal, op_promotion_bound_write_file,
-    promotion_rename_unsupported,
+    op_promotion_bound_ensure_directory, op_promotion_bound_inspect_private_file,
+    op_promotion_bound_install_directory, op_promotion_bound_list_directories,
+    op_promotion_bound_list_entries, op_promotion_bound_open_directory,
+    op_promotion_bound_prepare_directory, op_promotion_bound_read_file,
+    op_promotion_bound_read_journal, op_promotion_bound_write_file, promotion_rename_unsupported,
 };
 mod promotion_remove;
 use promotion_remove::{
@@ -180,6 +180,7 @@ fn dispatch(op: &str, req: &Value) -> Result<Value, String> {
         "read-blob" => op_read_blob(req),
         "promotion-bound-read-journal" => op_promotion_bound_read_journal(req),
         "promotion-bound-read-file" => op_promotion_bound_read_file(req),
+        "promotion-bound-inspect-private-file" => op_promotion_bound_inspect_private_file(req),
         "promotion-bound-open-directory" => op_promotion_bound_open_directory(req),
         "promotion-bound-list-directories" => op_promotion_bound_list_directories(req),
         "promotion-bound-list-entries" => op_promotion_bound_list_entries(req),

@@ -128,56 +128,58 @@ body {
   flex: 1;
 }
 
-/* Global attention stays optional and does not cover the project navigator. */
-#btn-attention,
+/* Attention is a persistent rail section, never an overlay or a disclosure. */
+#attention-view {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 45%;
+  padding: 0 6px 10px;
+  overflow: auto;
+  scrollbar-width: thin;
+  border-bottom: 1px solid var(--border);
+  user-select: text;
+}
+#attention-heading {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 8px;
+  margin: 0;
+  padding: 2px 0 8px;
+  background: var(--bg-panel);
+  font-weight: 500;
+}
+.attention-count { color: var(--yellow); font-variant-numeric: tabular-nums; }
+#attention-status, #attention-message {
+  margin: 6px 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+#attention-message:empty { display: none; }
+#attention-message { color: var(--yellow); }
+#attention-list { list-style: none; padding: 0; margin: 0; }
+.attention-item { padding: 10px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.attention-item h3 { margin: 0 0 6px; font-size: 11px; color: var(--yellow); }
+.attention-item p { margin: 6px 0; font-size: 11px; line-height: 1.65; }
+.attention-context { white-space: pre-line; }
+.attention-area, .attention-detail { color: var(--text-dim); }
 #attention-view button {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   font: inherit;
   color: var(--text);
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 6px 9px;
+  padding: 5px 7px;
   cursor: pointer;
 }
-#btn-attention[aria-expanded="true"] { border-color: var(--accent); }
-.attention-count { color: var(--yellow); font-variant-numeric: tabular-nums; }
-#attention-view {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: min(620px, calc(100% - var(--project-rail-width) - 16px));
-  max-height: calc(100% - 16px);
-  padding: 14px;
-  overflow: auto;
-  z-index: 40;
-  background: var(--bg-panel);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-top: 3px solid var(--yellow);
-  border-radius: 6px;
-  box-shadow: 0 8px 30px color-mix(in srgb, var(--bg) 70%, transparent);
-  user-select: text;
-}
-#attention-view[hidden] { display: none; }
-.attention-header, .attention-toolbar { display: flex; align-items: start; gap: 12px; }
-.attention-header h2 { flex: 1; margin: 0; font-size: 14px; line-height: 1.6; }
-.attention-explainer, #attention-status, #attention-message {
-  margin: 10px 0;
-  color: var(--text-dim);
-  font-size: 11px;
-  line-height: 1.6;
-}
-#attention-status { flex: 1; }
-#attention-message:empty { display: none; }
-#attention-message { color: var(--yellow); }
-#attention-list { list-style: none; padding: 0; margin: 0; }
-.attention-item { padding: 14px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
-.attention-item h3 { margin: 0 0 8px; font-size: 13px; color: var(--yellow); }
-.attention-item p { margin: 6px 0; font-size: 11px; line-height: 1.65; }
-.attention-context { white-space: pre-line; }
-.attention-area, .attention-detail { color: var(--text-dim); }
-#attention-view button:hover, #btn-attention:hover { background: var(--bg-hover); }
-#attention-view button:focus-visible, #btn-attention:focus-visible, .work-summary-report:focus-visible {
+#attention-view button:hover { background: var(--bg-hover); }
+#attention-view button:focus-visible, .checks-report:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -781,75 +783,20 @@ body {
   background: var(--accent);
 }
 
-/* Optional factual context stays beside the terminal, not behind an overview. */
-#work-summary {
+#checks-panel {
   flex: 0 0 auto;
   min-width: 0;
-  border-bottom: 1px solid var(--border);
+  max-height: min(38vh, 320px);
+  overflow: auto;
   background: var(--bg-panel);
   font-size: 11px;
 }
-
-#work-summary > summary {
-  padding: 6px 12px;
-  color: var(--text-dim);
-  cursor: pointer;
-  overflow-wrap: anywhere;
-}
-
-#work-summary > summary:focus-visible,
-#work-summary button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.work-summary-content {
-  max-height: min(38vh, 320px);
-  overflow: auto;
-  padding: 0 12px 8px;
-}
-
-.work-summary-content dl {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 12px;
-  margin: 4px 0 8px;
-}
-
-.work-summary-content dt {
-  color: var(--text-dim);
-}
-
-.work-summary-content dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.work-summary-tasks {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.work-summary-tasks li {
-  padding: 6px 0;
-  border-top: 1px solid var(--border);
-  overflow-wrap: anywhere;
-}
-
-.work-summary-content button {
-  margin: 4px 8px 4px 0;
-}
-
-.work-summary-report {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-family: var(--font-chrome);
-}
-
-#left-pane.minimized #work-summary {
-  display: none;
-}
+.checks-context, .checks-report, .checks-foot { margin: 6px 10px 10px; overflow-wrap: anywhere; }
+.checks-context, .checks-report { white-space: pre-wrap; }
+.checks-report { font-family: var(--font-chrome); }
+.checks-details:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#checks-panel:not(.tab-active), #left-pane.minimized #checks-panel { display: none; }
+#checks-panel:not([data-repeat-title]) .activity-panel-title { display: none; }
 
 #left-pane.minimized,
 #right-pane.minimized {
@@ -895,12 +842,13 @@ body {
   visibility: hidden;
 }
 
-#left-pane.minimized #activity-tabbar,
+#left-pane.minimized #terminal-tools,
 #left-pane.minimized #timeline-strip,
 #left-pane.minimized #plan-panel,
 #left-pane.minimized #worldline-panel,
 #left-pane.minimized #modified-panel,
 #left-pane.minimized #terminal-tabs-list,
+#left-pane.minimized #btn-terminal-menu,
 #left-pane.minimized #btn-new-terminal {
   display: none;
 }
@@ -963,6 +911,7 @@ body {
 
 .terminal-tab,
 #btn-new-terminal,
+#btn-terminal-menu,
 #terminal-tabs-list,
 #btn-min-terminal {
   -webkit-app-region: no-drag;
@@ -1145,9 +1094,25 @@ body.tab-reordering * {
 .terminal-menu-item {
   display: flex;
   align-items: baseline;
+  width: 100%;
+  border: none;
+  background: none;
+  font: inherit;
+  text-align: left;
   gap: 10px;
   padding: 8px 12px;
   cursor: pointer;
+}
+
+.terminal-menu-item:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.terminal-menu p {
+  padding: 8px 12px;
+  color: var(--text-dim);
+  font-size: 11px;
 }
 
 .terminal-menu-item:hover,
@@ -1236,11 +1201,43 @@ body.tab-reordering * {
   transition: background 0.12s ease, color 0.12s ease;
 }
 
+#btn-terminal-menu {
+  align-self: flex-end;
+  height: 22px;
+  padding: 0 7px;
+  margin-left: -4px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 0 6px 0 0;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+#btn-new-terminal {
+  border-top-right-radius: 0;
+}
+
 #btn-new-terminal:hover,
-#btn-new-terminal:focus-visible {
+#btn-new-terminal:focus-visible,
+#btn-terminal-menu:hover,
+#btn-terminal-menu:focus-visible {
   color: var(--text);
   background: var(--bg-hover);
-  outline: none;
+}
+
+#btn-new-terminal:focus-visible,
+#btn-terminal-menu:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -2px;
+}
+
+#btn-new-terminal:disabled,
+#btn-terminal-menu:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 /* The hidden label shows only in the empty-strip full-tab state. */
@@ -1375,15 +1372,51 @@ body.tab-reordering * {
   position: relative;
 }
 
+.terminal-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text);
+}
+.terminal-empty[hidden] { display: none; }
+.terminal-empty h3, .terminal-empty p { margin: 0; }
+.terminal-empty p { color: var(--text-dim); }
+.terminal-empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.terminal-empty-actions button {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+.terminal-empty-actions button:hover { border-color: var(--accent); }
+.terminal-empty-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.terminal-empty-actions button:disabled { opacity: 0.6; cursor: wait; }
+#terminal-empty-status { min-height: 1.4em; }
+
 /* ------------------------------------------------------- activity tabs */
 
-/* HARNESS-BACKLOG #1: one activity panel shows at a time so the terminal
- * keeps its height. Inactive panels are display:none via .tab-active.
- * Tabs follow the terminal-tabs chip language: floating pills on a 30px
- * bar, active is raised with a border. Folder tabs (project-bar) can't
- * merge here because the panels share the bar's bg-panel background. */
-#activity-tabbar {
+/* Tools stay compact until explicitly opened, leaving the height to the PTY. */
+#terminal-tools {
   flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+#activity-tabbar {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1392,12 +1425,34 @@ body.tab-reordering * {
   max-height: 30px;
   padding: 0 8px;
   overflow-x: auto;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
+}
+
+#btn-close-activity {
+  flex: 0 0 auto;
+  margin: 0 6px;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#btn-close-activity:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+#btn-close-activity:focus-visible,
+.activity-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .activity-tab {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1771,6 +1826,20 @@ body.tab-reordering * {
 .plan-task.dispatchable:hover {
   background: var(--bg-hover);
 }
+
+.plan-task:has(.plan-task-action) { flex-wrap: wrap; }
+.plan-task-action {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.plan-task-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .plan-mark {
   flex: 0 0 auto;
@@ -2614,7 +2683,7 @@ body.tab-reordering * {
   border: none;
   border-radius: 3px;
 }
-#btn-new-project, #btn-all-projects {
+#btn-new-project {
   font: inherit;
   font-size: 11px;
   padding: 8px;
@@ -2625,7 +2694,6 @@ body.tab-reordering * {
   border-radius: 4px;
   cursor: pointer;
 }
-#project-bar #btn-attention { text-align: left; font-size: 11px; }
 #project-bar .newtab-label { display: inline; }
 #project-bar button:hover { background: var(--bg-hover); }
 #project-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -2961,10 +3029,17 @@ body.tab-reordering * {
   border: 1px solid transparent;
 }
 
-.search-modal .modal.search-content .search-hit {
+.search-modal .modal.search-content .search-hit,
+.search-hit.search-work {
   flex-direction: column;
   align-items: stretch;
   gap: 2px;
+}
+
+.search-hit.search-work .search-path {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .search-hit.clickable:hover {

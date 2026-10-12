@@ -34,7 +34,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "copy", label: "Copy", category: "Edit", description: "Copy from the focused surface", defaultShortcut: "CmdOrCtrl+C", scope: "renderer" },
   { command: "paste", label: "Paste", category: "Edit", description: "Paste into the focused surface", defaultShortcut: "CmdOrCtrl+V", scope: "renderer" },
   { command: "select-all", label: "Select all", category: "Edit", description: "Select all in the focused surface", defaultShortcut: "CmdOrCtrl+A", scope: "renderer" },
-  { command: "new-terminal", label: "New terminal", category: "Terminal", description: "Open a shell or agent terminal", defaultShortcut: "CmdOrCtrl+T", scope: "renderer" },
+  { command: "new-terminal", label: "New agent", category: "Terminal", description: "Create an agent in the current project", defaultShortcut: "CmdOrCtrl+T", scope: "renderer" },
   { command: "close-terminal", label: "Close terminal", category: "Terminal", description: "Close the active terminal", defaultShortcut: "CmdOrCtrl+Shift+W", scope: "main" },
   { command: "abort-terminal", label: "Abort terminal", category: "Terminal", description: "Send an interrupt to the active terminal", defaultShortcut: "CmdOrCtrl+.", scope: "main" },
   { command: "toggle-thinking", label: "Toggle Thinking", category: "Terminal", description: "Show or hide provider thinking in core terminals", defaultShortcut: "CmdOrCtrl+Shift+H", scope: "renderer" },
@@ -65,7 +65,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "session-search", label: "Search sessions", category: "View", description: "Search previous agent sessions", defaultShortcut: "CmdOrCtrl+Shift+P", scope: "renderer" },
   { command: "quick-open", label: "Quick open", category: "View", description: `Open a project file by name (${QUICK_OPEN_TERMINAL_NOTE})`, defaultShortcut: "CmdOrCtrl+P", scope: "renderer" },
   { command: "content-search", label: "Search file contents", category: "View", description: "Grep the project and jump to a match", defaultShortcut: "CmdOrCtrl+Alt+F", scope: "renderer" },
-  { command: "command-palette", label: "Command palette", category: "View", description: "Run a command by name", defaultShortcut: "CmdOrCtrl+K", scope: "renderer" },
+  { command: "command-palette", label: "Command palette", category: "View", description: "Find a project or task, or run a command by name", defaultShortcut: "CmdOrCtrl+K", scope: "renderer" },
   { command: "open-settings", label: "Open settings", category: "Settings", description: "Open this preferences window", defaultShortcut: "CmdOrCtrl+,", scope: "renderer" },
 ] as const satisfies readonly CommandDefinition[];
 

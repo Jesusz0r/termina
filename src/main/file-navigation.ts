@@ -5,6 +5,7 @@ interface FileNavigationProject {
   id: string;
   cwd: string;
   workspaceId: string;
+  workspace: { id: string; root: string };
 }
 
 function normalizePath(inputPath: string): string {
@@ -59,8 +60,11 @@ export function resolveFileNavigation(
 
   const project = owner ? projects.get(owner.projectId) : undefined;
   if (!owner || !project) return null;
+  const root = owner.workspaceId === project.workspaceId ? project.cwd
+    : owner.workspaceId === project.workspace.id ? project.workspace.root : null;
+  if (!cleanPath.startsWith("/") && !root) return null;
   return {
-    path: cleanPath.startsWith("/") ? cleanPath : normalizePath(`${project.cwd}/${cleanPath}`),
+    path: cleanPath.startsWith("/") ? cleanPath : normalizePath(`${root}/${cleanPath}`),
     owner,
   };
 }

@@ -1,29 +1,13 @@
 /**
- * Activity tabs (HARNESS-BACKLOG #1): the left pane below the terminal used
- * to stack Timeline, Plan, Worldlines, and Modified, squeezing the pty on
- * small screens. One tab shows at a time; the rest are badges.
- *
- * State transitions are a pure reducer (node-testable); the class below is
- * thin DOM glue over it. Content arrivals auto-switch on the empty →
- * non-empty edge for plan/worldlines/modified only — timeline dots stream
- * continuously and must never yank the tab. A tab the user picked by hand is
- * held: it outranks that auto-switch, so a run cannot steal the panel the
- * user is watching (the count badge still announces the new content). A
- * selected unused tab shows the `[data-empty]` sentence in that panel;
- * content hides it. Keyboard: one tab stop (roving tabindex) plus
- * arrows/Home/End along the visible tabs.
+ * On-demand tools below the canonical terminal. Only explicit selection opens
+ * a panel; content arrivals update badges without opening or switching tools.
+ * Closing retains the selected tool and its content. Keyboard: one tab stop,
+ * arrows/Home/End across visible tabs, and Escape from a tool back to its tab.
  */
 
-type ActivityTab = "timeline" | "plan" | "worldlines" | "modified";
+type ActivityTab = "timeline" | "plan" | "worldlines" | "modified" | "checks";
 
-export const ACTIVITY_TABS: readonly ActivityTab[] = ["timeline", "plan", "worldlines", "modified"];
-
-export const ACTIVITY_TAB_LABELS: Record<ActivityTab, string> = {
-  timeline: "Timeline",
-  plan: "Plan",
-  worldlines: "Worldlines",
-  modified: "Modified",
-};
+export const ACTIVITY_TABS: readonly ActivityTab[] = ["checks", "timeline", "plan", "worldlines", "modified"];
 
 const ACTIVITY_TAB_KEY = "termina.activityTab";
 
@@ -36,29 +20,25 @@ interface ActivityTabState {
   active: ActivityTab;
   content: Record<ActivityTab, boolean>;
   visible: Record<ActivityTab, boolean>;
-  /** The tab the user picked by hand (click, or an arrow key), if any. An
-   *  explicit choice outranks the content auto-switch; re-picking the active
-   *  tab re-arms it. Null until the user picks, and again once that tab is
-   *  hidden — the restored tab on launch is a preference, not a fresh choice. */
-  held: ActivityTab | null;
+  open: boolean;
 }
 
 type ActivityTabEvent =
   | { type: "select"; tab: ActivityTab }
   | { type: "content"; tab: ActivityTab; has: boolean }
-  | { type: "sync"; tab: ActivityTab; has: boolean }
+  | { type: "close" }
   | { type: "visibility"; tab: ActivityTab; visible: boolean };
 
-const ALL_TRUE: Record<ActivityTab, boolean> = { timeline: true, plan: true, worldlines: true, modified: true };
-const ALL_FALSE: Record<ActivityTab, boolean> = { timeline: false, plan: false, worldlines: false, modified: false };
+const ALL_TRUE: Record<ActivityTab, boolean> = { checks: true, timeline: true, plan: true, worldlines: true, modified: true };
+const ALL_FALSE: Record<ActivityTab, boolean> = { checks: false, timeline: false, plan: false, worldlines: false, modified: false };
 
 export function initialActivityTabState(active: ActivityTab): ActivityTabState {
-  return { active, content: { ...ALL_FALSE }, visible: { ...ALL_TRUE }, held: null };
+  return { active, content: { ...ALL_FALSE }, visible: { ...ALL_TRUE }, open: false };
 }
 
 /** Stored value → tab, falling back to timeline for anything unexpected. */
 export function resolveActivityTab(stored: unknown): ActivityTab {
-  return stored === "plan" || stored === "worldlines" || stored === "modified" ? stored : "timeline";
+  return stored === "checks" || stored === "plan" || stored === "worldlines" || stored === "modified" ? stored : "timeline";
 }
 
 /** The tabs a user can reach: a hidden tab (this terminal or project has no
@@ -77,46 +57,33 @@ export function stepActivityTab(tabs: readonly ActivityTab[], from: ActivityTab,
 
 /** Why-empty copy shows only on the selected tab when that tab has no content. */
 export function activityEmptyVisible(state: ActivityTabState, tab: ActivityTab): boolean {
-  return state.active === tab && !state.content[tab];
+  return state.open && state.active === tab && !state.content[tab];
 }
 
 export function reduceActivityTab(state: ActivityTabState, event: ActivityTabEvent): ActivityTabState {
   switch (event.type) {
     case "select": {
       if (!state.visible[event.tab]) return state;
-      // Picking the tab that is already active still arms the hold (the user
-      // just said "stay here"), so only the hold moves.
-      if (state.active === event.tab) return state.held === event.tab ? state : { ...state, held: event.tab };
-      return { ...state, active: event.tab, held: event.tab };
+      if (state.active === event.tab && state.open) return state;
+      return { ...state, active: event.tab, open: true };
     }
     case "content": {
       if (state.content[event.tab] === event.has) return state;
-      const content = { ...state.content, [event.tab]: event.has };
-      // New arrivals become visible, like the old un-collapse. Timeline
-      // streams dots constantly, so it never auto-switches; a tab the user
-      // picked by hand holds until they pick another.
-      const auto =
-        event.has && event.tab !== "timeline" && state.visible[event.tab] && state.active !== state.held;
-      return { ...state, content, active: auto ? event.tab : state.active };
-    }
-    case "sync": {
-      // Badge + state only, for re-renders that must not yank the tab
-      // (terminal/project switches redisplaying existing content).
-      if (state.content[event.tab] === event.has) return state;
       return { ...state, content: { ...state.content, [event.tab]: event.has } };
     }
+    case "close": return state.open ? { ...state, open: false } : state;
     case "visibility": {
       if (state.visible[event.tab] === event.visible) return state;
       const visible = { ...state.visible, [event.tab]: event.visible };
       const active = !event.visible && state.active === event.tab ? "timeline" : state.active;
-      const held = !event.visible && state.held === event.tab ? null : state.held;
-      return { ...state, visible, active, held };
+      return { ...state, visible, active };
     }
   }
 }
 
 interface ActivityTabsDeps {
   bar: HTMLElement;
+  closeButton: HTMLButtonElement;
   panels: Record<ActivityTab, HTMLElement>;
   counts: Record<ActivityTab, HTMLElement | null>;
   storage?: Pick<Storage, "getItem" | "setItem">;
@@ -140,7 +107,17 @@ export class ActivityTabs {
     // WAI-ARIA tabs: arrows move along the visible tabs and the panel follows
     // the focus (selection follows focus — switching is instant here).
     deps.bar.addEventListener("keydown", (event) => this.onKeydown(event));
+    deps.closeButton.addEventListener("click", () => this.close());
+    const onEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || event.defaultPrevented || !this.state.open) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.close();
+    };
+    deps.bar.addEventListener("keydown", onEscape);
+    deps.closeButton.addEventListener("keydown", onEscape);
     for (const tab of ACTIVITY_TABS) {
+      deps.panels[tab].addEventListener("keydown", onEscape);
       const button = deps.bar.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`);
       if (button) {
         this.buttons.set(tab, button);
@@ -164,14 +141,21 @@ export class ActivityTabs {
     this.apply();
   }
 
-  /** Content arrival + badge count. Auto-switches on the empty → non-empty edge. */
-  setHasContent(tab: ActivityTab, has: boolean, count: number): void {
-    this.update(tab, count, { type: "content", tab, has });
+  close(): void {
+    const next = reduceActivityTab(this.state, { type: "close" });
+    if (next === this.state) return;
+    this.state = next;
+    this.apply();
+    this.buttons.get(this.state.active)?.focus();
   }
 
-  /** Badge + state without switching (re-rendering existing content). */
-  syncContent(tab: ActivityTab, has: boolean, count: number): void {
-    this.update(tab, count, { type: "sync", tab, has });
+  /** Badge + content state, never a request to open or switch a tool. */
+  setContent(tab: ActivityTab, has: boolean, count: number): void {
+    const next = reduceActivityTab(this.state, { type: "content", tab, has });
+    this.writeCount(tab, count);
+    if (next === this.state) return;
+    this.state = next;
+    this.apply();
   }
 
   /** Arrow/Home/End move along the visible tabs (WAI-ARIA tabs pattern). */
@@ -215,16 +199,6 @@ export class ActivityTabs {
     if (badge) badge.textContent = label;
   }
 
-  private update(tab: ActivityTab, count: number, event: ActivityTabEvent): void {
-    const next = reduceActivityTab(this.state, event);
-    this.writeCount(tab, count);
-    if (next === this.state) return;
-    const switched = next.active !== this.state.active;
-    this.state = next;
-    if (switched) this.persist();
-    this.apply();
-  }
-
   setTabVisible(tab: ActivityTab, visible: boolean): void {
     const next = reduceActivityTab(this.state, { type: "visibility", tab, visible });
     if (next === this.state) return;
@@ -243,16 +217,19 @@ export class ActivityTabs {
   private apply(): void {
     const tabBarVisible = !this.deps.bar.hidden;
     const repeatTitle = activityPanelTitleVisible(tabBarVisible);
+    this.deps.closeButton.hidden = !this.state.open;
     for (const tab of ACTIVITY_TABS) {
+      const shown = this.state.open && this.state.active === tab && this.state.visible[tab];
       const panel = this.deps.panels[tab];
-      panel?.classList.toggle("tab-active", this.state.active === tab);
+      panel?.classList.toggle("tab-active", shown);
       const button = this.buttons.get(tab);
-      button?.classList.toggle("active", this.state.active === tab);
+      button?.classList.toggle("active", shown);
       if (button) {
         button.hidden = !this.state.visible[tab];
         // Roving tabindex: Tab enters the bar at the selected tab, arrows move.
         button.tabIndex = this.state.active === tab ? 0 : -1;
-        button.setAttribute("aria-selected", this.state.active === tab ? "true" : "false");
+        button.setAttribute("aria-selected", shown ? "true" : "false");
+        button.setAttribute("aria-expanded", shown ? "true" : "false");
         if (!button.id) button.id = `activity-tab-${tab}`;
       }
       if (panel) {

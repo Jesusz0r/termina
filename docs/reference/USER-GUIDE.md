@@ -85,9 +85,18 @@ check still counts after inspection. If facts cannot be loaded, the counts say
 **unknown** rather than implying there is no work or attention.
 
 Use `Tab` to reach a project button, `↑`/`↓` or `Home`/`End` to browse, and
-`Enter` or `Space` to activate. Drag vertically or use `Alt+↑`/`↓` to reorder
-projects; the order uses the existing project preferences. **All projects**
-opens global attention without filtering out other projects.
+`Enter` or `Space` to activate. The rail always opens that project's real
+workspace. When a live agent has a recorded pending permission, project entry
+focuses the one waiting longest; otherwise it returns to the last-used terminal
+that is still available, or another available terminal if that session closed.
+Explicitly selecting a terminal always opens that exact terminal.
+Background notifications never change your project, terminal, or keyboard focus.
+If no terminal is available, the workspace offers agent and shell creation;
+selecting the project does not create a session.
+
+Drag vertically or use `Alt+↑`/`↓` to reorder projects; the order uses the existing
+project preferences. The persistent **Attention** section above **Projects**
+shows recorded issues across projects without interrupting background work.
 
 Settling or blocking still plays a short chime and a named toast
 (`pi-editor is idle`, or `pi-editor · dispatch needs you` when that project
@@ -101,9 +110,9 @@ and terminal.
 
 | Area | What lives there |
 |---|---|
-| Project rail | Persistent project navigation, factual work/attention counts, All projects, Attention, and `＋` to open another folder |
+| Project rail | Direct workspace navigation, factual work/attention counts, Attention, and `＋` to open another folder |
 | Explorer | File tree beside the rail, collapsible with `Cmd/Ctrl+B` |
-| Terminal pane | Terminal tabs, the Session Timeline strip, the Plan Board, the Worldlines panel, and the Modified files panel |
+| Terminal pane | Terminal tabs and on-demand Checks, Timeline, Plan Board, Worldlines, and Modified files tools |
 | Editor pane | Editor tabs, the Monaco editor, and Change Review |
 | Status bar | Current folder, the Verify button, and the Git handoff buttons |
 
@@ -118,12 +127,15 @@ button:
 Terminal and editor cannot both be minimized. The editor stays minimized
 while no file or review is open.
 
-The strip at the bottom of the terminal pane is keyboard-navigable: `Tab`
-enters the activity tabs (Timeline, Plan, Worldlines, Modified) as a single
-stop, and `←`/`→` (`Home`/`End` for the ends) move between them. The panel
-follows the focus, so one keystroke both selects the tab and shows it. A tab
-you pick by hand stays put while a run works — new content only updates its
-`(n)` badge instead of stealing the panel.
+The compact strip below the terminal opens tools on demand: **Checks**,
+**Timeline**, **Plan**, **Worldlines**, and **Modified**. Panels start closed,
+even when a preferred tab was saved. New content updates count badges without
+opening or switching tools.
+
+`Tab` enters the strip as a single stop. `Enter` or `Space` opens its tool;
+`←`/`→` (`Home`/`End` for the ends) select and open another. **Close** or
+`Escape` within a tool closes the panel, retains its content, and returns
+focus to its tab. `Escape` in the terminal remains terminal input.
 
 ---
 
@@ -131,12 +143,19 @@ you pick by hand stays put while a run works — new content only updates its
 
 ### Terminals
 
-Click `＋` next to the terminal tabs to open the terminal chooser:
+Click `＋` (**New agent**) next to the terminal tabs, or press `Cmd/Ctrl+T`,
+to create an agent directly in the current project. The new agent reuses the
+active agent's model when available; isolated sessions also inherit its effort.
+Main retains the existing admission policy: when a live terminal overlaps the
+project source, another agent opens in a
+separate sandboxed work area. Creation does not submit a prompt or apply changes.
 
-- **Agent (core)** — Termina's in-house coding agent (the default for new tabs and new folders).
-- **Shells** — any shell detected on your system (`zsh`, `bash`, …).
+Use the adjacent `▾` (**Open shell menu**) to choose a detected shell
+(`zsh`, `bash`, …). The menu supports arrow keys, Home/End and Enter;
+Escape cancels and returns focus to its button. Shell tabs show the shell name
+as a badge. A refused creation shows the actual error and permits an explicit
+retry; it never falls back to a shell or shared-source agent.
 
-Shell tabs show the shell name as a badge. `Cmd/Ctrl+T` opens the chooser.
 Opening a folder starts one **Agent (core)** tab. Agent terminal tabs carry
 idle / working / blocked status dots; the project rail shows separate factual
 work and attention counts.
@@ -297,47 +316,90 @@ it does not clear the failure or its factual attention count.
 
 ### Attention across all projects
 
-Click **Attention** or **All projects** in the rail, choose **View → Attention
-across all projects**, or press `Cmd/Ctrl+Alt+A`. The optional global view keeps
-items from every open project available while another project is selected.
-Starting work still opens the terminal/editor directly, not this view.
+**Attention** is a non-interactive level-two heading above **Projects** in the
+project rail, not a button. Its rows remain visible for every open project while
+another project is selected. The heading shows the total current item count,
+not just the loaded page; canonical updates refresh that count, and a read
+failure makes it **unknown** rather than zero. Choose **View → Attention across
+all projects** or press `Cmd/Ctrl+Alt+A` to focus this persistent section.
+Starting work opens the terminal/editor directly. There is no Attention
+popover to open or close and no dedicated close button.
 
 Items identify their exact project path, task assignment when one is recorded,
 agent/model, work area, and reason. Blockers and unavailable workers appear
-before failed/incomplete/interrupted attempts, followed by check issues. A
-separate candidate tree is labelled separately from shared project files; it is
-not automatically a sandbox.
+before failed/incomplete/interrupted attempts, followed by check issues and
+**Result pending review**. A separate candidate tree is labelled separately from
+shared project files; it is not automatically a sandbox.
 
-**Inspect terminal**, **Inspect plan**, and **Inspect check** navigate to the
-current owner through main. Stale, closed, or superseded targets are rejected
-rather than opening a different project or terminal. Inspection never runs or
-cancels checks, retries a task, accepts changes, or resolves the item. Historical
-passing output remains **Outdated** when it no longer applies to current files.
+**Result pending review** means a task has a recorded completed attempt, not
+that an idle agent, a checked task box, or a passing check proves acceptance.
+Independent results additionally require an available captured candidate; the
+item names that result's root and version, not the source owner's checks.
+Inspection does not record human acceptance. A candidate that is explicitly
+promoted or discarded leaves this queue; a new attempt replaces its previous
+result. Shared-file results are historical completion records and do not claim
+that those files remain unapplied. Recording persistent human acceptance is not
+yet supported.
 
-The view initially shows up to 50 items; **Show more** reveals the next page.
-**Refresh** loads current facts. A loading failure is explicit and retained rows
-are marked potentially outdated, not replaced with a false empty-success state.
-`Escape` or **Close** returns focus to the opener when it is still available.
+In **Attention**, **Inspect terminal**, **Inspect plan**, and **Inspect check**
+navigate directly to the exact current owner through main. **Inspect plan**
+reveals the owner's Plan Board and **Inspect check** reveals its Checks tool.
+A check without a single recorded task opens its terminal's Checks; it is not
+attributed to the first task on that Plan Board. Stale, closed, or superseded
+targets are rejected rather than opening a different project or terminal.
+Inspection never runs or cancels checks, retries a task, accepts changes, or
+resolves the item. Historical passing output remains
+**Outdated** when it no longer applies to current files.
+
+The section initially shows up to 50 items; **Show more** reveals the next page.
+**Refresh** loads current facts. A loading failure is explicit, the count becomes
+**unknown**, and retained rows are marked potentially outdated, not replaced
+with a false empty-success state.
+
+### Jump to work
+
+Open the **Command palette** with `Cmd/Ctrl+K` to find an open project or an
+existing Plan Board task, as well as run commands. Search by project name,
+full path, or task text. Words are matched without case sensitivity; results
+include the project path and Plan Board owner to distinguish repeated names.
+Use `↑` / `↓`, `Home` / `End`, and `Enter`, or click a result. `Escape` cancels
+and restores focus to the opener.
+
+A project result activates that project's existing workspace. A task result
+opens its exact owner's **Plan Board** in the real workspace and focuses the
+existing task row. It does not start the task or automatically open its worker.
+Use the existing Plan Board controls for dispatch, retry, or worker navigation.
+Previous projects retain their editor buffers and background work when you
+switch back.
+
+Navigation never creates tasks or terminals, dispatches or retries work,
+answers permissions, or marks anything reviewed. Targets are checked again
+before opening. If the project, owner, assigned source, or task changed or
+closed, search again to choose its current context. The palette shows at most
+50 matching project/task results and asks you to refine broader searches;
+commands remain usable if project/task data is unavailable.
 
 ### Factual work context
 
-Expand **Project work** beside the terminal to inspect its project path,
-agent/model, Plan Board tasks, execution state, and assigned work area.
-Shared project files and a separate candidate tree are labelled differently;
-a separate tree alone is not a claim of filesystem sandboxing. The disclosure
-is optional and can be opened with the keyboard.
+Use the project rail and terminal tabs to select the real workspace, then open
+its **Plan**, **Checks**, **Worldlines**, or **Modified** tool as needed. The
+persistent **Attention** section identifies recorded issues and their assigned
+work areas across projects. Shared project files and a separate candidate tree are labelled
+differently; a separate tree alone is not a claim of filesystem sandboxing.
 
 An idle terminal is not proof of task completion. An incomplete, failed, or
-interrupted dispatch remains visible after its worker closes. **Inspect plan**
-returns to the existing task and retry action; the summary never retries work
-automatically.
+interrupted dispatch remains visible on its owner's Plan Board after its worker
+closes. Inspection and navigation never retry work automatically; retry remains
+an explicit Plan Board action.
 
-**Check details** shows the exact recorded command, tested source, timing,
-exit outcome, and retained bounded output. If source validity is lost, the
-summary says **Outdated** even when the historical execution passed. Inspecting
-this report does not run or cancel tests. Review paths are cumulative tracked
-paths, not proof of a clean tree or completed human review; **Inspect changes**
-opens the existing Change Review controls.
+Open **Checks** below the terminal, then **Check details**, for the exact
+recorded command, tested source, timing, exit outcome, and retained bounded
+output. If source validity is lost, the check says **Outdated** even when the
+historical execution passed. Loaded reports are invalidated when their terminal,
+workspace, generation, or exact evidence changes. Inspecting a report does not
+run or cancel tests. The **Modified** tool opens the existing Change Review
+controls; its cumulative tracked paths are not proof of a clean tree or
+completed human review.
 
 TypeScript projects get background typechecks: after your run settles,
 `tsc --noEmit` refreshes silently into the agent's next-turn context when the
@@ -611,7 +673,7 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 | Shortcut | Command |
 |---|---|
 | `Cmd/Ctrl+O` | Open folder |
-| `Cmd/Ctrl+T` | New terminal (chooser: agent or shell) |
+| `Cmd/Ctrl+T` | New agent in the current project |
 | `Cmd/Ctrl+Shift+W` | Close terminal |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous terminal tab |
 | `Cmd/Ctrl+Shift+[` / `]` | Previous / next project |

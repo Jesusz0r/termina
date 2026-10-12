@@ -195,8 +195,8 @@ test.describe("Incomplete history through real local producers", () => {
     const owner = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.type === "agent")!;
     expect(await page.evaluate((id) => window.termina.runVerify(id), owner.id)).toMatchObject({ ok: true });
     const project = (await page.evaluate(() => window.termina.projectList())).find((item) => item.active)!;
-    await expect.poll(() => page.evaluate((id) => window.termina.getProjectWorkSummary(id).then((summary) => summary?.terminals[0]?.verify?.state), project.id)).toBe("pass");
-    const original = (await page.evaluate((id) => window.termina.getProjectWorkSummary(id), project.id))!.terminals[0]!.verify!;
+    await expect.poll(() => page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null).then((summary) => summary?.terminals[0]?.verify?.state), project.id)).toBe("pass");
+    const original = (await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), project.id))!.terminals[0]!.verify!;
     const report = await page.evaluate(({ id, generation }) => window.termina.getVerifyReport(id, generation), owner);
     expect(report).toContain("Output (bounded tail)");
     expect(report).toContain("END-MARKER");
@@ -217,16 +217,16 @@ test.describe("Incomplete history through real local producers", () => {
       await expect(restored.locator("#splash")).toBeHidden();
       const restoredProject = (await restored.evaluate(() => window.termina.projectList())).find((item) => item.active)!;
       const restoredOwner = (await restored.evaluate(() => window.termina.getInstances())).find((item) => item.id === owner.id)!;
-      const summary = await restored.evaluate((id) => window.termina.getProjectWorkSummary(id), restoredProject.id);
+      const summary = await restored.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), restoredProject.id);
       const historical = summary!.terminals.find((item) => item.terminalId === owner.id)!.verify!;
       expect(historical.result).toEqual(original.result);
       expect(original.source).toBeDefined();
       expect(historical.source).toEqual(original.source);
-      await restored.locator("#work-summary > summary").click();
-      await restored.getByRole("button", { name: "Check details", exact: true }).click();
-      await expect(restored.locator(".work-summary-report")).toContainText("Output:** not retained for this historical run");
-      await expect(restored.locator(".work-summary-report")).toContainText("Historical execution:** ✅ PASSED (exit code 0)");
-      await expect(restored.locator(".work-summary-report")).not.toContainText("END-MARKER");
+      await restored.locator("#activity-tab-checks").click();
+      await restored.locator("#checks-panel").getByRole("button", { name: "Check details", exact: true }).click();
+      await expect(restored.locator(".checks-report")).toContainText("Output:** not retained for this historical run");
+      await expect(restored.locator(".checks-report")).toContainText("Historical execution:** ✅ PASSED (exit code 0)");
+      await expect(restored.locator(".checks-report")).not.toContainText("END-MARKER");
       expect(await restored.evaluate(({ id, generation }) => window.termina.getVerifyReport(id, generation + 1), restoredOwner)).toBeNull();
     } finally { await closeOwnedElectron(replacement); }
   });

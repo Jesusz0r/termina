@@ -93,7 +93,7 @@ describe("SessionFork Architecture Contracts", () => {
     expect(exitHook).not.toMatch(/if \(persistOwner\) \{\s*await this\.discardCoreSession/);
     const discard = methodBody(main, "private async discardCoreSession(", "private async reclaimUnusedEmptyCoreSessions(");
     expect(discard).toContain("if (!result.ok) throw new Error(result.error)");
-    expect(main).toContain("await this.reclaimUnusedEmptyCoreSessions(await this.coreProjectSessionDir(sessionCwd))");
+    expect(main).toMatch(/const sessionDir = await this\.coreProjectSessionDir\(sessionCwd\);\s+opts\?\.spawnGuard\?\.\(\);\s+await this\.reclaimUnusedEmptyCoreSessions\(sessionDir\);\s+opts\?\.spawnGuard\?\.\(\);/);
     const dispose = methodBody(main, "async dispose(): Promise<void> {", "focusWindow()");
     expect(dispose.indexOf("drainTerminals(null)")).toBeGreaterThanOrEqual(0);
     expect(dispose.indexOf("drainTerminals(null)")).toBeLessThan(dispose.indexOf("this.sessionFork.dispose()"));

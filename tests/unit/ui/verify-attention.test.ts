@@ -53,7 +53,7 @@ describe("Verify Attention Invariants", () => {
     // Project attention is factual, not a mirror of transient terminal nudges.
     const rail = readFileSync(new URL("../../../src/main/project-rail.ts", import.meta.url), "utf8");
     check("overview is wired directly to the canonical project rail",
-      renderer.includes("onOverview: (overview) => projectRail.setOverview(overview)")
+      renderer.includes("onOverview: (overview) => { projectRail.setOverview(overview); quickOpen.setWorkOverview(overview); }")
       && rail.includes("project.working")
       && rail.includes("project.attentionCount")
       && !rail.includes("verifyAttention")

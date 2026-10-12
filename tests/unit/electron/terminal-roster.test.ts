@@ -40,6 +40,25 @@ describe("terminal roster model pin", () => {
 });
 
 describe("terminal roster handoff", () => {
+  it("restores independent candidate intent without needing a live worker", () => {
+    const task = { text: "Fix file.ts", paths: ["file.ts"], state: "done",
+      candidate: { comparisonId: "cmp-12", label: "B" }, dispatchResult: { workerId: "term-2", outcome: "completed" } };
+    const [entry] = parseTerminalRoster([{ id: "term-1", type: "agent", plan: [task] }]);
+    expect(entry?.plan).toEqual([task]);
+    expect(entry?.plan?.[0]?.candidate).not.toBe(task.candidate);
+    expect(parseTerminalRoster(JSON.parse(JSON.stringify([entry])))[0]?.plan).toEqual([task]);
+  });
+
+  it("drops malformed independent rows rather than restoring them as shared-source retries", () => {
+    const legacy = { text: "Shared task", paths: [], state: "pending" };
+    const candidate = { text: "Independent task", paths: ["file.ts"], state: "pending" };
+    for (const invalid of [null, {}, { comparisonId: "cmp-0", label: "A" }, { comparisonId: "cmp-1", label: "C" },
+      { comparisonId: "../other", label: "A" }, { comparisonId: `cmp-${"1".repeat(64)}`, label: "A" }]) {
+      const [entry] = parseTerminalRoster([{ id: "term-1", type: "agent", plan: [legacy, { ...candidate, candidate: invalid }] }]);
+      expect(entry?.plan).toEqual([legacy]);
+    }
+  });
+
   it("keeps plan tasks and the last verdict", () => {
     const verify = {
       state: "fail", command: "npm test", summary: "1 failing",

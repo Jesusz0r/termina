@@ -17,10 +17,10 @@ import { boundedSidecarEdits, createSidecarWriter } from "../../../agent-core/ma
 const inertWatch: typeof fs.watch = (..._args: unknown[]) =>
   Object.assign(new EventEmitter(), { close() {} }) as FSWatcher;
 
-async function waitFor(predicate: () => boolean, timeoutMs: number, message: string): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-  expect(predicate(), message).toBe(true);
+  while (!(await predicate()) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(await predicate(), message).toBe(true);
 }
 
 describe("Wave 1 sidecar rotation regressions", () => {
@@ -109,9 +109,15 @@ describe("Wave 1 sidecar rotation regressions", () => {
 
         await waitFor(() => received.length === 5, 15000, "rotation beside a stale partial stalled the drain");
         expect(received).toEqual([1, 2, 3, 4, 5]);
+        // Delivery finishes before the cursor's atomic publication.
+        const cursorPath = join(eventsDir, `.cursor-${id}.json`);
+        await waitFor(async () => {
+          const cursor = JSON.parse(await readFile(cursorPath, "utf8"));
+          return cursor.sequence === 5;
+        }, 5000, "the rotated stream cursor was not published");
         const names = await readdir(eventsDir);
         expect(names.filter((name) => name.startsWith(`.quarantine-${id}`))).toEqual([]);
-        const cursor = JSON.parse(await readFile(join(eventsDir, `.cursor-${id}.json`), "utf8"));
+        const cursor = JSON.parse(await readFile(cursorPath, "utf8"));
         expect(cursor.sequence).toBe(5);
       } finally {
         tailer.stop();
@@ -708,8 +714,8 @@ describe("Wave 1 sidecar hardening regressions (refs #186)", () => {
       const tailer = new SidecarTailer(eventsDir, capturingWatch as never);
       tailer.onEvent = () => true;
       tailer.start();
-      tailer.watch(id);
       try {
+        expect(await tailer.watchReady(id)).toBe(true);
         const captured = listener as ((...args: unknown[]) => void) | null;
         if (!captured) throw new Error("watch listener was not captured");
         captured("rename", `.${id}.jsonl.mu0qwzke-99-uuid.sealed`);
@@ -742,8 +748,8 @@ describe("Wave 1 sidecar hardening regressions (refs #186)", () => {
         return true;
       };
       tailer.start();
-      tailer.watch(id);
       try {
+        expect(await tailer.watchReady(id)).toBe(true);
         // Exactly 65 bytes per line (64 content + newline): each completes in
         // a single bounded read and skips via the shared diagnostic.
         const big = (seq: number): string => {
@@ -756,6 +762,11 @@ describe("Wave 1 sidecar hardening regressions (refs #186)", () => {
         await waitFor(() => received.length === 1, 8000, "valid event behind over-cap lines was not delivered");
         expect(received).toEqual([4]);
         expect(warnings.filter((warning) => warning.includes("exceeds"))).toHaveLength(1);
+        // Delivery precedes cursor publication. Wait before removing the fixture.
+        await waitFor(async () => {
+          const cursor = JSON.parse(await readFile(join(eventsDir, `.cursor-${id}.json`), "utf8"));
+          return cursor.sequence === 4;
+        }, 8000, "valid event cursor was not published");
       } finally {
         tailer.stop();
       }

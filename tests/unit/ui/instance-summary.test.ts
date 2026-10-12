@@ -13,7 +13,7 @@ function pane(id: string): WorldlineInstancePane {
     cwd: null,
     workspaceId: "",
     busy: false,
-    activity: { state: "idle", reason: null },
+    activity: { state: "idle", reason: null, intervention: null },
     type: "shell",
     engine: undefined,
     shellName: undefined,
@@ -64,22 +64,22 @@ describe("applyInstanceSummary (issue #276)", () => {
     expect(target.recorderDetail).toBe("degraded: disk");
     expect(target.workspaceId).toBe("ws-primary");
     expect(target.dispatchWorker).toBe(false);
-    expect(target.activity).toEqual({ state: "idle", reason: null });
+    expect(target.activity).toEqual({ state: "idle", reason: null, intervention: null });
   });
 
   it("copies additive activity from the roster payload", () => {
     const target = pane("term-1");
-    applyInstanceSummary(target, summary({ activity: { state: "blocked", reason: "tool-error-loop" } }), {
+    applyInstanceSummary(target, summary({ activity: { state: "blocked", reason: "tool-error-loop", intervention: null } }), {
       setEngine: () => {},
     });
-    expect(target.activity).toEqual({ state: "blocked", reason: "tool-error-loop" });
+    expect(target.activity).toEqual({ state: "blocked", reason: "tool-error-loop", intervention: null });
   });
 
   it("leaves existing activity when the roster omits the additive field", () => {
     const target = pane("term-1");
-    target.activity = { state: "blocked", reason: "stalled" };
+    target.activity = { state: "blocked", reason: "stalled", intervention: null };
     applyInstanceSummary(target, summary(), { setEngine: () => {} });
-    expect(target.activity).toEqual({ state: "blocked", reason: "stalled" });
+    expect(target.activity).toEqual({ state: "blocked", reason: "stalled", intervention: null });
   });
 
   it("is the single hydration path for roster pushes", () => {
@@ -111,11 +111,12 @@ describe("applyInstanceSummary (issue #276)", () => {
     expect(main).toContain("applyInstanceSummary(pane, inst,");
     expect(main).toContain("handleWorldlineInstances(list,");
     expect(main).not.toContain("worldlinesView.labelOfTerminal(p.instanceId) === null");
-    expect(main).toContain("p.workspaceId === view.workspaceId");
+    expect(main).toContain("p.workspaceId === view.workspace.id");
     expect(main).not.toContain('engine: instance.engine ?? "core"');
     expect(main).not.toContain("modified: instance.modified ?? []");
     expect(main).not.toContain('recorderState: instance.recorderState ?? "paused"');
-    expect(main).toContain("pane.fromRoster = false");
-    expect(main).toContain("if (liveIds.has(id) || !pane.fromRoster) continue");
+    expect(main).not.toContain("createErrorPane");
+    expect(main).not.toContain("fromRoster");
+    expect(main).toContain("if (liveIds.has(id)) continue");
   });
 });

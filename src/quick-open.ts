@@ -1,9 +1,10 @@
 /**
- * Quick Open (files), Content Search (grep), and Command Palette (actions) modal.
+ * Quick Open (files), Content Search (grep), and Command Palette (commands and work) modal.
  * Triggered by View → Quick Open / Search File Contents / Command Palette.
  */
 import { COMMAND_DEFINITIONS, QUICK_OPEN_TERMINAL_NOTE, type CommandId } from "../shared/commands";
-import type { ContentHit } from "../shared/types";
+import type { ContentHit, WorkOverview } from "../shared/types";
+import { searchWork, type WorkSearchTarget } from "./main/work-search";
 
 type QuickOpenMode = "files" | "actions" | "content";
 
@@ -107,6 +108,11 @@ export class QuickOpen {
   /** Query the current rows belong to. Stale rows are not activated. */
   private rowsQuery = "";
   private mode: QuickOpenMode = "files";
+  private workOverview: WorkOverview | null = null;
+  private workLoadSequence = 0;
+  private workLoading = false;
+  private workUnavailable = false;
+  private workNavigationMessage: string | null = null;
   private selected = 0;
   private rows: Array<{
     key: string;
@@ -117,6 +123,7 @@ export class QuickOpen {
     matches?: number[];
     matchOffset?: number;
     matchLength?: number;
+    work?: WorkSearchTarget;
   }> = [];
   /** Focus to restore when the modal is cancelled, not when a row is opened. */
   private restoreFocus: { focus(): void; isConnected: boolean } | null = null;
@@ -126,6 +133,7 @@ export class QuickOpen {
   /** Mirror of the last content search, so the Explorer can list it persistently. */
   private onContentResults: (pattern: string, hits: ContentHit[], truncated: boolean, error?: string) => void = () => {};
   private onExecuteCommand: (command: CommandId) => void = () => {};
+  private onOpenWork: (target: WorkSearchTarget, isCurrent: () => boolean) => Promise<boolean> = async () => false;
   private getShortcut: (command: CommandId) => string = () => "";
   /** Bumped by Explorer clear so a late modal result cannot repaint a dismissed listing. */
   private contentGeneration: () => number = () => 0;
@@ -135,6 +143,7 @@ export class QuickOpen {
     onOpenContentHit: (relPath: string, line: number, column: number) => void;
     onContentResults: (pattern: string, hits: ContentHit[], truncated: boolean, error?: string) => void;
     onExecuteCommand: (command: CommandId) => void;
+    onOpenWork: (target: WorkSearchTarget, isCurrent: () => boolean) => Promise<boolean>;
     getShortcut: (command: CommandId) => string;
     contentGeneration?: () => number;
   }): void {
@@ -142,6 +151,7 @@ export class QuickOpen {
     this.onOpenContentHit = handlers.onOpenContentHit;
     this.onContentResults = handlers.onContentResults;
     this.onExecuteCommand = handlers.onExecuteCommand;
+    this.onOpenWork = handlers.onOpenWork;
     this.getShortcut = handlers.getShortcut;
     this.contentGeneration = handlers.contentGeneration ?? (() => 0);
   }
@@ -150,11 +160,13 @@ export class QuickOpen {
     const active = document.activeElement;
     if (active !== this.input && canRestoreFocus(active)) this.restoreFocus = active;
     this.mode = mode;
+    this.workNavigationMessage = null;
     this.selected = 0;
     this.rows = [];
     this.rowsQuery = "";
     // A mode switch must not paint the previous query's rows into this one.
     this.searchSeq++;
+    this.workLoadSequence++;
     this.inflightSeq = 0;
     if (this.searchTimer) {
       clearTimeout(this.searchTimer);
@@ -164,7 +176,7 @@ export class QuickOpen {
     this.modalEl?.classList.toggle("search-content", mode === "content");
     if (this.input) {
       this.input.value = "";
-      this.input.placeholder = mode === "files" ? "Open a project file…" : mode === "content" ? "Regular expression…" : "Run a command…";
+      this.input.placeholder = mode === "files" ? "Open a project file…" : mode === "content" ? "Regular expression…" : "Search commands, projects and tasks…";
       this.input.removeAttribute("aria-invalid");
     }
     const title = this.root?.querySelector(".modal-title");
@@ -173,12 +185,30 @@ export class QuickOpen {
     this.input?.focus();
     if (this.mode === "files") void this.runFileSearch("");
     else if (this.mode === "content") this.showEmpty(CONTENT_HINT);
-    else this.renderActions("");
+    else {
+      this.renderActions("");
+      void this.loadWorkOverview();
+    }
   }
 
-  /** Hide the modal and drop an in-flight search. Used on project switch. */
+  /** Accept live updates from Attention's canonical work projection; never poll independently. */
+  setWorkOverview(value: WorkOverview | null): void {
+    this.workLoadSequence++;
+    this.workOverview = value;
+    this.workLoading = false;
+    this.workUnavailable = value === null;
+    if (this.mode === "actions" && this.root?.style.display !== "none") this.renderActions(this.input?.value ?? "");
+  }
+
+  /** Global work and commands remain valid across project activation. File results do not. */
+  onProjectChange(): void {
+    if (this.mode !== "actions") this.close();
+  }
+
+  /** Hide the modal and drop an in-flight search or navigation. */
   close(): void {
     this.searchSeq++;
+    this.workLoadSequence++;
     this.inflightSeq = 0;
     if (this.searchTimer) {
       clearTimeout(this.searchTimer);
@@ -265,6 +295,9 @@ export class QuickOpen {
     });
     input.addEventListener("input", () => {
       if (this.mode === "actions") {
+        this.searchSeq++;
+        this.inflightSeq = 0;
+        this.workNavigationMessage = null;
         this.renderActions(input.value);
         return;
       }
@@ -272,6 +305,7 @@ export class QuickOpen {
       // Content search scans file bodies: debounce longer than name search.
       const delay = this.mode === "content" ? 250 : 150;
       this.searchTimer = setTimeout(() => {
+        this.searchTimer = null;
         if (this.mode === "content") void this.runContentSearch(input.value);
         else void this.runFileSearch(input.value);
       }, delay);
@@ -279,6 +313,9 @@ export class QuickOpen {
   }
 
   private dismiss(restore: boolean): void {
+    this.searchSeq++;
+    this.workLoadSequence++;
+    this.inflightSeq = 0;
     if (this.searchTimer) {
       clearTimeout(this.searchTimer);
       this.searchTimer = null;
@@ -307,8 +344,13 @@ export class QuickOpen {
       return;
     }
     if (this.inflightSeq !== 0) return;
-    if (this.mode !== "actions" && (this.input?.value ?? "") !== this.rowsQuery) return;
-    if (this.activate()) this.dismiss(false);
+    if ((this.input?.value ?? "") !== this.rowsQuery) return;
+    const row = this.rows[this.selected];
+    if (!row) return;
+    if (row.work) { void this.openWork(row.work); return; }
+    // A command can open this same modal in another mode. Dismiss the old one first.
+    this.dismiss(false);
+    this.activate();
   }
 
   private finishInflight(seq: number): void {
@@ -453,8 +495,50 @@ export class QuickOpen {
     }
   }
 
+  private async loadWorkOverview(): Promise<void> {
+    const sequence = ++this.workLoadSequence;
+    this.workLoading = true;
+    this.workUnavailable = false;
+    this.renderActions(this.input?.value ?? "");
+    try {
+      const value = await window.termina.getWorkOverview();
+      if (sequence !== this.workLoadSequence) return;
+      this.setWorkOverview(value);
+    } catch {
+      if (sequence === this.workLoadSequence) this.setWorkOverview(null);
+    }
+  }
+
+  private async openWork(target: WorkSearchTarget): Promise<void> {
+    const sequence = ++this.searchSeq;
+    this.inflightSeq = sequence;
+    const isCurrent = (): boolean => sequence === this.searchSeq && this.root?.style.display !== "none";
+    this.workNavigationMessage = "Opening work…";
+    this.setStatus(this.workNavigationMessage);
+    try {
+      const opened = await this.onOpenWork(target, isCurrent);
+      if (!isCurrent()) return;
+      if (opened) this.dismiss(false);
+      else {
+        this.workNavigationMessage = "This work changed or closed. Search again to choose its current context.";
+        this.setStatus(this.workNavigationMessage);
+        this.input?.focus();
+      }
+    } catch {
+      if (isCurrent()) {
+        this.workNavigationMessage = "Work unavailable. Search again and try opening its current context.";
+        this.setStatus(this.workNavigationMessage);
+        this.input?.focus();
+      }
+    } finally {
+      this.finishInflight(sequence);
+    }
+  }
+
   private renderActions(query: string): void {
     const q = query.trim().toLowerCase();
+    const previousKey = query === this.rowsQuery ? this.rows[this.selected]?.key : undefined;
+    this.rowsQuery = query;
     // Renderer handlers only exist for renderer-scope commands; main-scope
     // commands stay in the menu (executing them here would silently no-op).
     this.rows = COMMAND_DEFINITIONS.filter(
@@ -465,8 +549,16 @@ export class QuickOpen {
       const shortcut = this.getShortcut(d.command as CommandId);
       return { key: d.command, label: d.label, detail: paletteRowDetail(d.command as CommandId, d.category, shortcut) };
     });
-    this.selected = 0;
-    this.renderRows(null);
+    const work = this.workOverview ? searchWork(this.workOverview, query) : { rows: [], truncated: false };
+    const workRows = work.rows.map((row) => ({
+      key: `work:${JSON.stringify(row.target)}`, label: row.label, detail: row.detail, work: row.target,
+    }));
+    this.rows = q ? [...workRows, ...this.rows] : [...this.rows, ...workRows];
+    const previousIndex = this.rows.findIndex((row) => row.key === previousKey);
+    this.selected = previousIndex >= 0 ? previousIndex : 0;
+    this.renderRows(this.workNavigationMessage ?? (this.workUnavailable ? "Projects and tasks unavailable. Commands still available."
+      : this.workLoading ? "Loading projects and tasks…"
+      : work.truncated ? "50+ project/task results. Refine your search to find more work." : null));
   }
 
   private setStatus(message: string): void {
@@ -484,7 +576,7 @@ export class QuickOpen {
     }
     for (const [i, row] of this.rows.entries()) {
       const el = document.createElement("div");
-      el.className = "search-hit clickable" + (i === this.selected ? " selected" : "");
+      el.className = "search-hit clickable" + (i === this.selected ? " selected" : "") + (row.work ? " search-work" : "");
       el.id = optionId(i);
       el.setAttribute("role", "option");
       el.setAttribute("aria-selected", i === this.selected ? "true" : "false");
@@ -503,7 +595,7 @@ export class QuickOpen {
       el.append(text, detail);
       el.addEventListener("click", () => {
         this.selected = i;
-        if (this.activate()) this.dismiss(false);
+        this.commit();
       });
       list.appendChild(el);
     }

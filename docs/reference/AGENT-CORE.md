@@ -379,6 +379,38 @@ footprint, not these numbers.
   already counted on. Cancellation aborts pending admission, and launch
   rechecks the run and parent after lock waits.
 
+### Canonical human intervention
+
+`agent-core/main/approval.ts` owns the lifetime of the existing human permission
+pickers: bash, protected-file edits, and child requests displayed in the parent's
+TUI. Permission policy and serialization remain in `agent-core/main.ts`.
+
+- Only a successfully displayed picker emits `intervention_requested`, with a
+  bounded `requestId`, `kind: "permission"`, and producer epoch milliseconds
+  `since`. Queued prompts and headless parent-approval channels are not human
+  intervention events. Prompt text and command content stay in the TUI.
+- Answer, cancellation, teardown, and a child's original approval deadline pair
+  the request with `intervention_resolved` using the same identity. Cancellation
+  also invalidates queued human prompts and cleans up their child requests.
+- `electron/sidecar/parse.ts` validates the payload;
+  `electron/agent-activity.ts` owns reduction into
+  `AgentActivityView.intervention` (`AgentIntervention | null` in
+  `shared/types.ts`). Duplicate requests preserve the original `since`; unrelated
+  activity and parent settlement do not consume a pending child picker. Only
+  the matching resolution or terminal exit clears it.
+- Main publishes this view through the existing roster, timeline, project work
+  summary, and work overview. Real permission waits are blocked with reason
+  `permission-required`; other blocked reasons never imply human input.
+  `workOverview` puts real interventions first, oldest first with stable ties,
+  and its attention identity includes the pending request so a replaced picker
+  invalidates an old target. Renderer refreshes track that identity and age;
+  background notifications do not initiate terminal navigation.
+
+Failed checks, internal waits, result review, and questions expressed only as
+model text are not permission interventions. This contract does not change
+project-entry navigation or automatically answer, approve, execute, or promote
+anything.
+
 ### Delegation and waiting policy
 
 These defaults are policy choices, separate from the admission and cancellation

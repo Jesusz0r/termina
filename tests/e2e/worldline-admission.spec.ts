@@ -303,7 +303,7 @@ test.describe("Candidate admission through the real sandbox", () => {
     await page.evaluate((id) => window.termina.writeTerminal(id, "keep-primary-working-e2e\r"), ownerId);
     await expect.poll(() => primaryResponse !== null).toBe(true);
     const candidate = await fork(page, ownerId, projectId, moment);
-    const summary = await page.evaluate((id) => window.termina.getProjectWorkSummary(id), projectId);
+    const summary = await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), projectId);
     const work = summary!.terminals.find((terminal) => terminal.terminalId === candidate.terminalId)!;
     expect(work.workArea).toMatchObject({ kind: "candidate", root: candidate.root, comparisonId: candidate.comparisonId });
     await page.evaluate((id) => window.termina.writeTerminal(id, "candidate-simple-write-e2e\r"), candidate.terminalId!);
@@ -437,13 +437,13 @@ test.describe("Candidate admission through the real sandbox", () => {
         expect(overview.projects.map((project) => project.working)).toEqual([2, 2, 2]);
         expect(overview.items).toHaveLength(3);
         for (const context of contexts) {
-          const summary = await page.evaluate((id) => window.termina.getProjectWorkSummary(id), context.projectId);
+          const summary = await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), context.projectId);
           expect(summary!.terminals.map((terminal) => terminal.workArea?.kind).sort()).toEqual(["candidate", "project"]);
           expect(new Set(summary!.terminals.map((terminal) => terminal.workArea?.workspaceId)).size).toBe(2);
         }
         const selected = (await page.evaluate(() => window.termina.projectList())).find((project) => project.active)!;
         expect(selected.id).toBe(contexts[2]!.projectId);
-        await page.locator("#btn-attention").click();
+        await expect(page.locator("#project-bar #attention-view #attention-heading")).toBeVisible();
         await expect(page.locator("#attention-list .attention-item")).toHaveCount(3);
         for (const context of contexts) {
           const item = page.locator(`#attention-list .attention-item[data-project-id="${context.projectId}"]`);
@@ -453,8 +453,8 @@ test.describe("Candidate admission through the real sandbox", () => {
         }
         // Inspect one background owner through the real view, without opening the other five terminals.
         await page.locator(`#attention-list .attention-item[data-project-id="${contexts[0]!.projectId}"] .attention-inspect`).click();
-        await expect(page.locator("#attention-view")).toBeHidden();
-        await expect(page.locator(".work-summary-report")).toContainText("**Status:** ⚠️ OUTDATED");
+        await expect(page.locator("#attention-view")).toBeVisible();
+        await expect(page.locator(".checks-report")).toContainText("**Status:** ⚠️ OUTDATED");
         expect((await page.evaluate(() => window.termina.projectList())).find((project) => project.active)?.id).toBe(contexts[0]!.projectId);
         expect((await page.evaluate(() => window.termina.getInstances())).filter((instance) => instance.type === "agent" && instance.busy)).toHaveLength(6);
         await testInfo.attach("six-running-agents", { body: JSON.stringify({ overview, work, pids, instances: await page.evaluate(() => window.termina.getInstances()) }, null, 2), contentType: "application/json" });
@@ -463,10 +463,10 @@ test.describe("Candidate admission through the real sandbox", () => {
             const context = contexts[cycle % contexts.length]!;
             const started = Date.now();
             await page.locator(`#project-tabs .project-tab[data-project-id="${context.projectId}"] .project-select`).click();
-            await page.locator("#btn-attention").click();
+            await expect(page.locator("#project-bar #attention-view #attention-heading")).toBeVisible();
             await expect(page.locator("#attention-list .attention-item")).toHaveCount(3);
             await page.locator(`#attention-list .attention-item[data-project-id="${context.projectId}"] .attention-inspect`).click();
-            await expect(page.locator(".work-summary-report")).toContainText("**Status:** ⚠️ OUTDATED");
+            await expect(page.locator(".checks-report")).toContainText("**Status:** ⚠️ OUTDATED");
             navigationMs.push(Date.now() - started);
             expect((await page.evaluate(() => window.termina.getInstances())).filter((instance) => instance.busy)).toHaveLength(6);
             const snapshot = (await sample(`live-${cycle}`))!;
@@ -543,11 +543,11 @@ test.describe("Candidate admission through the real sandbox", () => {
     expect(stale.result).toEqual(previous.result);
     const item = (await page.evaluate(() => window.termina.getWorkOverview())).items.find((item) => item.projectId === projectId && item.reason === "verify-stale")!;
     expect(item).toMatchObject({ terminalId: ownerId, action: { kind: "evidence", terminalId: ownerId } });
-    await page.locator("#btn-attention").click();
+    await expect(page.locator("#project-bar #attention-view #attention-heading")).toBeVisible();
     await page.locator(`#attention-list .attention-item[data-id="${item.id}"] .attention-inspect`).click();
-    await expect(page.locator(".work-summary-report")).toContainText("**Status:** ⚠️ OUTDATED");
-    await expect(page.locator(".work-summary-report")).toContainText("**Historical execution:** ✅ PASSED (exit code 0)");
-    await expect(page.locator(".work-summary-report")).not.toContainText("**Status:** ✅ PASSED");
+    await expect(page.locator(".checks-report")).toContainText("**Status:** ⚠️ OUTDATED");
+    await expect(page.locator(".checks-report")).toContainText("**Historical execution:** ✅ PASSED (exit code 0)");
+    await expect(page.locator(".checks-report")).not.toContainText("**Status:** ✅ PASSED");
     expect(await readVerifyStages(projectRoot)).toHaveLength(1);
     expect((await page.evaluate(() => window.termina.getWorkOverview())).items.map((item) => item.id)).toContain(item.id);
     expect(sourceWriteCalls).toBe(2);
@@ -609,7 +609,7 @@ test.describe("Candidate admission through the real sandbox", () => {
     await expect.poll(() => primaryResponse !== null).toBe(true);
     const candidate = await fork(page, ownerId, projectId, moment);
     expect(candidate.root).not.toBe(projectRoot);
-    const summary = await page.evaluate((id) => window.termina.getProjectWorkSummary(id), projectId);
+    const summary = await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), projectId);
     const work = summary!.terminals.find((terminal) => terminal.terminalId === candidate.terminalId)!;
     expect(work.workArea).toMatchObject({ kind: "candidate", root: candidate.root, comparisonId: candidate.comparisonId });
     const opened = await page.evaluate(({ comparisonId, label }) => window.termina.openWorldlineTerminal(comparisonId, label), candidate);

@@ -1,47 +1,52 @@
-import type { AgentActivityView, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview } from "../../shared/types";
+import type { AgentActivityView, TerminaBridge, WorkAttentionInspectResult, WorkAttentionItem, WorkOverview, WorkSummaryAction } from "../../shared/types";
 import { presentBlockedLabel } from "../known-state";
-import { ACTION_LABELS, ATTENTION_LABELS } from "./work-summary";
+import { ACTION_LABELS, ATTENTION_LABELS } from "./work-labels";
+import { findWorkTask } from "./work-search";
+import type { WorkSearchTarget } from "./work-search";
 
 const PAGE_SIZE = 50;
 
 /** Global read-only projection. Visiting a reason does not acknowledge or resolve it. */
 export function createAttentionView(bindings: {
   element: HTMLElement;
-  toggle: HTMLButtonElement;
+  heading: HTMLElement;
   bridge: TerminaBridge;
   onOverview(overview: WorkOverview | null): void;
   onInspect(result: Extract<WorkAttentionInspectResult, { ok: true }>, isCurrent: () => boolean): Promise<boolean>;
-}): { open(opener?: HTMLElement): void; close(): void; dispose(): void } {
-  const { element, toggle, bridge } = bindings;
+  onNavigate(projectId: string, action: WorkSummaryAction | null, isCurrent: () => boolean): Promise<boolean>;
+  onReveal(projectId: string, action: WorkSummaryAction | null): void;
+}): {
+  focus(): void;
+  revealWork(target: WorkSearchTarget, isCurrent: () => boolean): Promise<boolean>;
+  cancelNavigation(): void;
+  dispose(): void;
+} {
+  const { element, heading, bridge } = bindings;
   const list = element.querySelector<HTMLElement>("#attention-list")!;
   const status = element.querySelector<HTMLElement>("#attention-status")!;
   const message = element.querySelector<HTMLElement>("#attention-message")!;
-  const closeButton = element.querySelector<HTMLButtonElement>("#btn-close-attention")!;
   const refreshButton = element.querySelector<HTMLButtonElement>("#btn-refresh-attention")!;
   const moreButton = element.querySelector<HTMLButtonElement>("#btn-more-attention")!;
-  const count = toggle.querySelector<HTMLElement>(".attention-count")!;
+  const count = heading.querySelector<HTMLElement>(".attention-count")!;
   const rows = new Map<string, { element: HTMLLIElement; title: HTMLElement; context: HTMLElement; area: HTMLElement; detail: HTMLElement; button: HTMLButtonElement; item: WorkAttentionItem }>();
   const activity = new Map<string, AgentActivityView>();
   const models = new Map<string, string | null>();
   let overview: WorkOverview | null = null;
   let unavailable = false;
-  let opener: HTMLElement = toggle;
   let limit = PAGE_SIZE;
   let loadSequence = 0;
   let inspectSequence = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
 
-  function close(restoreFocus = true): void {
+  function cancelNavigation(): void {
     inspectSequence++;
-    element.hidden = true;
-    toggle.setAttribute("aria-expanded", "false");
-    if (restoreFocus) (opener.isConnected ? opener : toggle).focus();
+    message.textContent = "";
   }
 
   async function inspect(id: string): Promise<void> {
     const sequence = ++inspectSequence;
-    const isCurrent = (): boolean => !disposed && !element.hidden && sequence === inspectSequence;
+    const isCurrent = (): boolean => !disposed && sequence === inspectSequence;
     message.textContent = "Opening the current owner…";
     try {
       const result = await bridge.inspectWorkAttention(id);
@@ -53,8 +58,10 @@ export function createAttentionView(bindings: {
       }
       const opened = await bindings.onInspect(result, isCurrent);
       if (!isCurrent()) return;
-      if (opened) close(false);
-      else message.textContent = "The target changed or closed. Refresh attention and choose its current owner.";
+      if (opened) {
+        cancelNavigation();
+        bindings.onReveal(result.folder.projectId, result.action);
+      } else message.textContent = "The target changed or closed. Refresh attention and choose its current owner.";
     } catch {
       if (isCurrent()) {
         message.textContent = "Could not open this item. Refresh attention and try again.";
@@ -74,7 +81,7 @@ export function createAttentionView(bindings: {
       const focused = row.element.contains(document.activeElement);
       row.element.remove();
       rows.delete(id);
-      if (focused && !element.hidden) refreshButton.focus();
+      if (focused) refreshButton.focus();
     }
     visible.forEach((item, index) => {
       let row = rows.get(item.id);
@@ -108,8 +115,9 @@ export function createAttentionView(bindings: {
       row.title.textContent = ATTENTION_LABELS[item.reason];
       row.context.textContent = `${project?.name ?? "Project unavailable"} · ${project?.root ?? "path unavailable"}\n`
         + `${item.taskText ?? "No single task assignment recorded"} · ${item.terminalId} · ${item.model ?? "model unknown"}`;
-      row.area.textContent = item.workArea
-        ? `${item.workArea.kind === "project" ? "Shared project files" : "Separate candidate tree"} · ${item.workArea.root}` : "Assigned work area unavailable";
+      row.area.textContent = item.candidate
+        ? `Separate candidate result · ${item.candidate.root} · version ${item.candidate.version}`
+        : item.workArea ? `${item.workArea.kind === "project" ? "Shared project files" : "Separate candidate tree"} · ${item.workArea.root}` : "Assigned work area unavailable";
       row.detail.textContent = item.reason === "blocked" ? presentBlockedLabel(item.detail) : item.detail ?? "";
       row.detail.hidden = !row.detail.textContent;
       row.button.textContent = ACTION_LABELS[item.action.kind];
@@ -127,25 +135,67 @@ export function createAttentionView(bindings: {
       : "No recorded attention. Idle is not proof of task completion or review.";
   }
 
+  function receiveOverview(value: WorkOverview): void {
+    overview = value;
+    unavailable = false;
+    count.textContent = String(value.items.length);
+    heading.setAttribute("aria-label", `Attention across all projects: ${value.items.length} recorded items`);
+    bindings.onOverview(value);
+    render();
+  }
+
+  function overviewUnavailable(): void {
+    unavailable = true;
+    count.textContent = "?";
+    heading.setAttribute("aria-label", "Attention across all projects: unavailable");
+    bindings.onOverview(null);
+    status.textContent = "Attention unavailable. Previous rows may be outdated. Refresh to load current facts.";
+  }
+
+  async function revealWork(target: WorkSearchTarget, externalCurrent: () => boolean): Promise<boolean> {
+    if (disposed || !externalCurrent()) return false;
+    const sequence = ++inspectSequence;
+    const isCurrent = (): boolean => !disposed && sequence === inspectSequence && externalCurrent();
+    // Revalidate against current owners, not the palette's earlier result rows.
+    const revision = loadSequence;
+    const value = await bridge.getWorkOverview();
+    if (!isCurrent() || revision !== loadSequence) return false;
+    if (target.kind === "project") {
+      if (!value.projects.some((project) => project.projectId === target.projectId && project.root === target.root)) return false;
+      const opened = await bindings.onNavigate(target.projectId, null, isCurrent);
+      if (!opened || !isCurrent()) return false;
+      cancelNavigation();
+      bindings.onReveal(target.projectId, null);
+      return true;
+    }
+    const selected = findWorkTask(value, target.task);
+    if (!selected) return false;
+    const action: WorkSummaryAction = { kind: "plan", terminalId: selected.owner.terminalId,
+      generation: selected.owner.generation, taskText: selected.task.task.text };
+    const activated = await bindings.onNavigate(target.task.projectId, action, isCurrent);
+    if (!activated || !isCurrent()) return false;
+    // Activation is asynchronous: do not select an owner/source replaced during it.
+    const activatedRevision = loadSequence;
+    const current = await bridge.getWorkOverview();
+    if (!isCurrent() || activatedRevision !== loadSequence || !findWorkTask(current, target.task)) return false;
+    loadSequence++;
+    if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
+    receiveOverview(current);
+    cancelNavigation();
+    bindings.onReveal(target.task.projectId, action);
+    return true;
+  }
+
   async function load(): Promise<void> {
     timer = undefined;
     const sequence = ++loadSequence;
     try {
       const value = await bridge.getWorkOverview();
       if (disposed || sequence !== loadSequence) return;
-      overview = value;
-      unavailable = false;
-      count.textContent = String(value.items.length);
-      toggle.setAttribute("aria-label", `Attention across all projects: ${value.items.length} recorded items`);
-      bindings.onOverview(value);
-      if (!element.hidden) render();
+      receiveOverview(value);
     } catch {
       if (disposed || sequence !== loadSequence) return;
-      unavailable = true;
-      count.textContent = "?";
-      toggle.setAttribute("aria-label", "Attention across all projects: unavailable");
-      bindings.onOverview(null);
-      status.textContent = "Attention unavailable. Previous rows may be outdated. Refresh to load current facts.";
+      overviewUnavailable();
     }
   }
 
@@ -155,19 +205,11 @@ export function createAttentionView(bindings: {
     if (timer === undefined) timer = setTimeout(() => { void load(); }, 150);
   }
 
-  function open(source: HTMLElement = toggle): void {
+  function focus(): void {
     if (disposed) return;
-    opener = source;
-    element.hidden = false;
-    toggle.setAttribute("aria-expanded", "true");
-    if (overview) render();
-    else status.textContent = unavailable ? "Attention unavailable. Refresh to load current facts." : "Loading attention across all projects…";
-    closeButton.focus();
-    refresh();
+    cancelNavigation();
+    (list.querySelector<HTMLButtonElement>(".attention-inspect") ?? refreshButton).focus();
   }
-
-  const onToggle = (): void => { if (element.hidden) open(); else close(); };
-  const onClose = (): void => close();
   const onRefresh = (): void => { message.textContent = ""; refresh(); };
   const onMore = (): void => {
     const nextId = overview?.items[limit]?.id;
@@ -177,13 +219,11 @@ export function createAttentionView(bindings: {
     (nextId ? rows.get(nextId)?.button ?? refreshButton : refreshButton).focus();
   };
   const onKey = (event: KeyboardEvent): void => {
-    if (event.key !== "Escape") return;
+    if (event.key !== "Escape" || event.defaultPrevented) return;
     event.preventDefault();
     event.stopPropagation();
-    close();
+    cancelNavigation();
   };
-  toggle.addEventListener("click", onToggle);
-  closeButton.addEventListener("click", onClose);
   refreshButton.addEventListener("click", onRefresh);
   moreButton.addEventListener("click", onMore);
   element.addEventListener("keydown", onKey);
@@ -196,8 +236,14 @@ export function createAttentionView(bindings: {
       }
       refresh();
     }),
-    bridge.onPlanUpdate(refresh), bridge.onVerifyState(refresh), bridge.onTimelineClear(refresh),
-    bridge.onFolderOpened(refresh), bridge.onProjectClosed(refresh),
+    bridge.onPlanUpdate(refresh),
+    bridge.onModifiedList(refresh),
+    bridge.onFileChanged(refresh),
+    bridge.onFileDeleted(refresh),
+    bridge.onVerifyState(refresh),
+    bridge.onTimelineClear(refresh),
+    bridge.onFolderOpened(refresh),
+    bridge.onProjectClosed(refresh),
     bridge.onAgentStatus(({ terminalId, model }) => {
       if (models.has(terminalId) && models.get(terminalId) === model) return;
       models.set(terminalId, model);
@@ -206,22 +252,23 @@ export function createAttentionView(bindings: {
     bridge.onTimelinePrefix(({ terminalId, activity: next }) => {
       if (!next) return;
       const previous = activity.get(terminalId);
-      if (previous?.state === next.state && previous.reason === next.reason) return;
+      if (previous?.state === next.state && previous.reason === next.reason
+        && previous.intervention?.requestId === next.intervention?.requestId
+        && previous.intervention?.since === next.intervention?.since) return;
       activity.set(terminalId, next);
       refresh();
     }),
   ];
   void load();
   return {
-    open,
-    close: () => close(),
+    focus,
+    revealWork,
+    cancelNavigation,
     dispose: () => {
       if (disposed) return;
       disposed = true;
       inspectSequence++; loadSequence++;
       if (timer !== undefined) clearTimeout(timer);
-      toggle.removeEventListener("click", onToggle);
-      closeButton.removeEventListener("click", onClose);
       refreshButton.removeEventListener("click", onRefresh);
       moreButton.removeEventListener("click", onMore);
       element.removeEventListener("keydown", onKey);

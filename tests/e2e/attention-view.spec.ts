@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import type { Page } from "@playwright/test";
 import type { WorkAttentionItem, WorkAttentionReason } from "../../shared/types.ts";
 import { readVerifyStages, writeVerifyPackage } from "../fixtures/verify-package.ts";
+import { parseSidecarRecord } from "../../electron/sidecar.ts";
 
 const test = base.extend({
   projectRoot: async ({ projectRoot }, use) => {
@@ -42,9 +43,10 @@ async function waitForItem(page: Page, projectId: string, reason: WorkAttentionR
   return found!;
 }
 
-async function openAttention(page: Page, opener = "#btn-attention") {
-  await page.locator(opener).click();
-  await expect(page.getByRole("region", { name: "Attention across all projects", exact: true })).toBeVisible();
+async function waitForAttention(page: Page) {
+  await expect(page.locator("#project-bar #attention-view")).toBeVisible();
+  await expect(page.locator("#attention-heading")).toContainText("Attention");
+  await expect(page.locator("#attention-heading .attention-count")).toHaveText(/^\d+$/);
   await expect(page.locator("#attention-status")).not.toContainText("Loading", { timeout: 15_000 });
 }
 
@@ -67,7 +69,7 @@ async function failVerify(page: Page, projectRoot: string, projectId: string) {
 test("startup stays in the workspace; empty global attention is keyboard-accessible and factual", async ({ page }) => {
   await expect(page.locator("#splash")).toBeHidden();
   await expect(page.locator(".term-pane.active")).toBeVisible();
-  await expect(page.locator("#attention-view")).toBeHidden();
+  await expect(page.locator("#attention-view")).toBeVisible();
   await expect(page.locator("aside#project-bar")).toBeVisible();
   const project = await activeProject(page);
   const tab = projectTab(page, project.id);
@@ -78,26 +80,20 @@ test("startup stays in the workspace; empty global attention is keyboard-accessi
   await expect(tab.locator(".project-attention")).toContainText("0");
   expect((await page.evaluate(() => window.termina.getWorkOverview())).items).toEqual([]);
 
-  const button = page.locator("#btn-attention");
-  await expect(button).toBeVisible();
-  await button.focus();
-  await page.keyboard.press("Enter");
-  await expect(page.locator("#attention-view")).toBeVisible();
+  await waitForAttention(page);
+  await expect(page.locator("#attention-heading .attention-count")).toHaveText("0");
   await expect(page.locator("#attention-status")).toContainText(/no .*attention|nothing .*attention/i);
   await expect(page.locator("#attention-list .attention-item")).toHaveCount(0);
+  const refresh = page.locator("#btn-refresh-attention");
+  await refresh.focus();
+  await page.keyboard.press("Enter");
+  await expect(refresh).toBeFocused();
   await page.keyboard.press("Escape");
-  await expect(page.locator("#attention-view")).toBeHidden();
-  await expect(button).toBeFocused();
-
-  const allProjects = page.locator("#btn-all-projects");
-  await allProjects.focus();
-  await page.keyboard.press("Space");
-  await expect(page.getByRole("region", { name: "Attention across all projects", exact: true })).toBeVisible();
+  await expect(page.locator("#attention-view")).toBeVisible();
+  await expect(refresh).toBeFocused();
   expect((await activeProject(page)).id).toBe(project.id);
-  await page.locator("#btn-refresh-attention").click();
+  await refresh.click();
   await expect(page.locator("#attention-list .attention-item")).toHaveCount(0);
-  await page.locator("#btn-close-attention").click();
-  await expect(allProjects).toBeFocused();
   await expect(tab.locator(".project-working")).not.toContainText(/success|complete|passed/i);
 });
 
@@ -128,9 +124,10 @@ test("sixty saved task results paginate without losing identity, focus or exact 
   expect(overview.projects).toHaveLength(4);
   expect(overview.items).toHaveLength(60);
   expect(overview.projects.map((project) => project.working)).toEqual([0, 0, 0, 0]);
-  await openAttention(page);
+  await waitForAttention(page);
   const rows = page.locator("#attention-list .attention-item");
   await expect(rows).toHaveCount(50);
+  await expect(page.locator("#attention-heading .attention-count")).toHaveText("60");
   const ids = () => rows.evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.id));
   expect(await ids()).toEqual(overview.items.slice(0, 50).map((item) => item.id));
   const first = rows.first().locator(".attention-inspect");
@@ -147,10 +144,12 @@ test("sixty saved task results paginate without losing identity, focus or exact 
     expect(await first.evaluate((button, original) => button === original, retained)).toBe(true);
     const last = overview.items.at(-1)!;
     const owner = restored.find((project) => project.projectId === last.projectId)!;
-    await attentionItem(page, last).getByRole("button", { name: "Inspect plan", exact: true }).click();
+    await attentionItem(page, last).getByRole("button", { name: "Open plan", exact: true }).click();
     expect((await activeProject(page)).id).toBe(owner.projectId);
     await expect(page.locator("#plan-list .plan-task")).toHaveCount(20);
     await expect(page.locator("#plan-list")).toContainText(last.taskText!);
+    await expect(page.locator("#plan-list .plan-task").filter({ hasText: last.taskText! }).locator(".plan-task-action")).toBeFocused();
+    await expect(page.locator("#attention-view")).toBeVisible();
     expect((await page.evaluate(() => window.termina.getWorkOverview())).items).toHaveLength(60);
     await testInfo.attach("attention-restored-results", { body: JSON.stringify({ restored, overview }, null, 2), contentType: "application/json" });
   } finally {
@@ -158,13 +157,13 @@ test("sixty saved task results paginate without losing identity, focus or exact 
   }
 });
 
-test("the application Attention command opens the same region and Escape restores its previous focus", async ({ page, electronApp }) => {
+test("the application Attention command focuses Refresh or the first current action without project activation", async ({ page, electronApp, projectRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const project = await activeProject(page);
   const opener = projectTab(page, project.id).locator(".project-select");
   await opener.focus();
   // Invoke the real application menu command, not a synthetic IPC push.
-  await electronApp.evaluate(({ Menu, BrowserWindow }) => {
+  const runCommand = () => electronApp.evaluate(({ Menu, BrowserWindow }) => {
     const findAttention = (items: Electron.MenuItem[]): Electron.MenuItem | undefined => {
       for (const item of items) {
         if (/attention/i.test(item.label) && item.type === "normal") return item;
@@ -177,11 +176,28 @@ test("the application Attention command opens the same region and Escape restore
     if (!action) throw new Error("Application Attention command not found");
     action.click(undefined, BrowserWindow.getAllWindows()[0], {});
   });
-  await expect(page.getByRole("region", { name: "Attention across all projects", exact: true })).toBeVisible();
+  await runCommand();
+  await waitForAttention(page);
+  const refresh = page.locator("#btn-refresh-attention");
+  await expect(refresh).toBeFocused();
   expect((await activeProject(page)).id).toBe(project.id);
   await page.keyboard.press("Escape");
-  await expect(page.locator("#attention-view")).toBeHidden();
-  await expect(opener).toBeFocused();
+  await expect(page.locator("#attention-view")).toBeVisible();
+  await expect(refresh).toBeFocused();
+  await expect(opener).not.toBeFocused();
+
+  const item = await failVerify(page, projectRoot, project.id);
+  await waitForAttention(page);
+  const inspect = attentionItem(page, item).locator(".attention-inspect");
+  await expect(inspect).toBeVisible();
+  await opener.focus();
+  await runCommand();
+  await expect(inspect).toBeFocused();
+  expect((await activeProject(page)).id).toBe(project.id);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#attention-view")).toBeVisible();
+  await expect(inspect).toBeFocused();
+  await expect(opener).not.toBeFocused();
 });
 
 test("a background failed Verify is globally attributed and Inspect opens only its canonical evidence", async ({ page, projectRoot, runRoot }) => {
@@ -223,11 +239,11 @@ const { setTimeout: delay } = require("node:timers/promises");
     const item = await waitForItem(page, original.id, "verify-failed");
     await expect(projectTab(page, original.id).locator(".project-attention")).toContainText("1");
     await expect(projectTab(page, original.id).locator(".project-working")).toContainText("0");
-    await expect(page.locator("#btn-attention")).toContainText("1");
+    await expect(page.locator("#attention-heading .attention-count")).toHaveText("1");
     await expect(otherSelect).toBeFocused();
     expect((await activeProject(page)).id).toBe(other.id);
 
-    await openAttention(page);
+    await waitForAttention(page);
     expect((await activeProject(page)).id).toBe(other.id);
     const row = attentionItem(page, item);
     await expect(row).toHaveAttribute("data-project-id", original.id);
@@ -243,24 +259,26 @@ const { setTimeout: delay } = require("node:timers/promises");
 
     await projectTab(page, original.id).locator(".project-select").click();
     await expect(page.locator("#attention-view")).toBeVisible();
-    await expect(row).toBeVisible();
+    expect((await activeProject(page)).id).toBe(original.id);
     await otherSelect.click();
     await expect(page.locator("#attention-view")).toBeVisible();
+    expect((await activeProject(page)).id).toBe(other.id);
+    await waitForAttention(page);
     await expect(row).toBeVisible();
     const canonicalReport = await page.evaluate(({ terminalId, generation }) => window.termina.getVerifyReport(terminalId, generation), item);
     expect(canonicalReport).toContain("**Status:** ❌ FAILED (exit code 7)");
     await row.locator(".attention-inspect").click();
-    await expect(page.locator("#attention-view")).toBeHidden();
+    await expect(page.locator("#attention-view")).toBeVisible();
     expect((await activeProject(page)).id).toBe(original.id);
-    await expect(page.locator("#work-summary")).toHaveAttribute("open", "");
-    await expect(page.locator(".work-summary-report")).toBeVisible();
-    await expect.poll(() => page.locator(".work-summary-report").textContent()).toBe(canonicalReport);
-    await expect(page.locator("#work-summary dd").filter({ hasText: /^term-1 ·/ })).toBeVisible();
-    const summary = await page.evaluate((id) => window.termina.getProjectWorkSummary(id), original.id);
+    await expect(page.locator("#checks-panel")).toBeVisible();
+    await expect(page.locator(".checks-report")).toBeVisible();
+    await expect.poll(() => page.locator(".checks-report").textContent()).toBe(canonicalReport);
+    await expect(page.locator(".checks-context")).toContainText("term-1");
+    const summary = await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), original.id);
     expect(summary?.terminals.find((terminal) => terminal.terminalId === item.terminalId)?.generation).toBe(item.generation);
     expect(await readVerifyStages(projectRoot)).toHaveLength(1);
 
-    await openAttention(page);
+    await waitForAttention(page);
     await expect(attentionItem(page, item)).toContainText("Verify failed");
     expect((await page.evaluate(() => window.termina.getWorkOverview())).items.find((entry) => entry.id === item.id)).toEqual(item);
     expect(await readVerifyStages(projectRoot)).toHaveLength(1);
@@ -300,17 +318,18 @@ test("Attention loads summaries only; exact check output is fetched on inspectio
   }, channels);
   const calls = () => electronApp.evaluate(() => (globalThis as unknown as { __attentionInvokes: AttentionInvokeProbe }).__attentionInvokes.calls);
   try {
-    await openAttention(page);
+    await waitForAttention(page);
+    await page.locator("#btn-refresh-attention").click();
     await expect.poll(async () => (await calls()).filter((call) => call.channel === "work:overview").length).toBeGreaterThan(0);
     const initialLoads = (await calls()).filter((call) => call.channel === "work:overview").length;
-    // Cached rows can open before the coalesced load runs. Observe that first
-    // request before demanding a separate explicit Refresh request.
+    // Persistent rows may already be cached. Observe a coalesced summary load
+    // before demanding a separate explicit Refresh request.
     await page.locator("#btn-refresh-attention").click();
     await expect.poll(async () => (await calls()).filter((call) => call.channel === "work:overview").length).toBeGreaterThan(initialLoads);
     const before = await calls();
     expect(before.filter((call) => call.channel !== "work:overview")).toEqual([]);
-    await attentionItem(page, item).getByRole("button", { name: "Inspect check", exact: true }).click();
-    await expect(page.locator(".work-summary-report")).toContainText("**Status:** ❌ FAILED (exit code 7)");
+    await attentionItem(page, item).getByRole("button", { name: "Check details", exact: true }).click();
+    await expect(page.locator(".checks-report")).toContainText("**Status:** ❌ FAILED (exit code 7)");
     const after = await calls();
     const reports = after.filter((call) => call.channel === "verify:report");
     expect(reports.length).toBeGreaterThan(0);
@@ -331,27 +350,35 @@ test("historical pass becomes outdated attention, never current passing evidence
   await expect(page.locator("#splash")).toBeHidden();
   const project = await activeProject(page);
   expect(await page.evaluate(() => window.termina.runVerify("term-1"))).toEqual({ ok: true });
-  await expect.poll(() => page.evaluate((id) => window.termina.getProjectWorkSummary(id).then((summary) => summary?.terminals[0]?.verify?.state), project.id)).toBe("pass");
+  await expect.poll(() => page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null).then((summary) => summary?.terminals[0]?.verify?.state), project.id)).toBe("pass");
   expect((await page.evaluate(() => window.termina.getWorkOverview())).items).toEqual([]);
   await writeFile(join(projectRoot, "greeting.ts"), 'export const greeting = "changed after attention verification";\n');
   const item = await waitForItem(page, project.id, "verify-stale");
-  await openAttention(page);
+  await waitForAttention(page);
   await expect(attentionItem(page, item)).toContainText("Verify is outdated");
   await attentionItem(page, item).locator(".attention-inspect").click();
-  await expect(page.locator("#attention-view")).toBeHidden();
-  const report = page.locator(".work-summary-report");
+  await expect(page.locator("#attention-view")).toBeVisible();
+  const report = page.locator(".checks-report");
   await expect(report).toContainText("**Status:** ⚠️ OUTDATED");
   await expect(report).not.toContainText("**Status:** ✅ PASSED");
   await expect(report).toContainText("**Historical execution:** ✅ PASSED (exit code 0)");
   await expect(report).toContainText("attention-pass");
   await expect.poll(() => report.textContent()).toBe(await page.evaluate(({ terminalId, generation }) => window.termina.getVerifyReport(terminalId, generation), item));
   expect(await readVerifyStages(projectRoot)).toHaveLength(1);
-  await openAttention(page);
+  await waitForAttention(page);
   await expect(attentionItem(page, item)).toContainText("Verify is outdated");
 });
 
-test("missing attention ids reject without activation and ordinary shells produce no phantom issue", async ({ page }) => {
+test("missing attention ids reject without activation and ordinary shells produce no phantom issue", async ({ page, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
+  // The agent reports its boot model asynchronously. Wait for main to reflect it before capturing the baseline.
+  await expect.poll(async () => {
+    const text = await readFile(join(runRoot, "events", "term-1.jsonl"), "utf8").catch(() => "");
+    const settings = text.split("\n").map(parseSidecarRecord).reverse().find((record) => record?.t === "agent_settings");
+    if (typeof settings?.model !== "string" || !settings.model) return false;
+    return page.evaluate((model) => window.termina.getInstances()
+      .then((instances) => instances.find((instance) => instance.id === "term-1")?.model === model), settings.model);
+  }).toBe(true);
   const project = await activeProject(page);
   const shell = await page.evaluate(() => window.termina.createTerminal({ type: "shell" }));
   expect(shell.ok).toBe(true);
@@ -363,10 +390,10 @@ test("missing attention ids reject without activation and ordinary shells produc
   expect(result.ok).toBe(false);
   expect((await activeProject(page)).id).toBe(project.id);
   expect(await page.evaluate(() => window.termina.getWorkOverview())).toEqual(before);
-  const summary = await page.evaluate((id) => window.termina.getProjectWorkSummary(id), project.id);
+  const summary = await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), project.id);
   const shellWork = summary?.terminals.find((terminal) => terminal.terminalId === shell.id);
   expect(shellWork).toMatchObject({ type: "shell", activity: null, verify: null, attention: [] });
-  await openAttention(page, "#btn-all-projects");
+  await waitForAttention(page);
   await expect(page.locator("#attention-list .attention-item")).toHaveCount(0);
   await expect(page.locator("#attention-status")).toContainText(/no .*attention|nothing .*attention/i);
 });
@@ -378,7 +405,7 @@ test("closing the active project invalidates its previous attention id instead o
   const other = await openSameNameProject(page, join(runRoot, "close-other", basename(projectRoot)));
   await projectTab(page, original.id).locator(".project-select").click();
   expect((await activeProject(page)).id).toBe(original.id);
-  await openAttention(page);
+  await waitForAttention(page);
   await expect(attentionItem(page, item)).toBeVisible();
   await projectTab(page, original.id).getByRole("button", { name: `Close project ${original.name}`, exact: true }).click();
   await expect(projectTab(page, original.id)).toHaveCount(0);
@@ -415,14 +442,15 @@ test("attention and rail navigation preserve an unsaved editor buffer without wr
   }, draft);
   await expect.poll(bufferText).toBe(draft);
   await expect(greetingTab.locator(".tab-dirty")).toBeVisible();
-  await openAttention(page);
+  await waitForAttention(page);
   await page.keyboard.press("Escape");
   const other = await openSameNameProject(page, join(runRoot, "draft-other", basename(projectRoot)));
-  await openAttention(page, "#btn-all-projects");
+  await waitForAttention(page);
+  expect((await activeProject(page)).id).toBe(other.id);
+  await expect(page.locator("#project-work-inspector, #project-details")).toHaveCount(0);
   await projectTab(page, original.id).locator(".project-select").click();
   await expect(page.locator("#attention-view")).toBeVisible();
   expect((await activeProject(page)).id).toBe(original.id);
-  await page.locator("#btn-close-attention").click();
   await expect.poll(bufferText).toBe(draft);
   await expect(greetingTab.locator(".tab-dirty")).toBeVisible();
   expect(await readFile(path, "utf8")).toBe(diskText);
@@ -442,8 +470,8 @@ test("explorer resizing is measured from the explorer, not the persistent rail",
   await page.mouse.move(box!.x + 240, divider!.y + divider!.height / 2, { steps: 8 });
   await page.mouse.up();
   await expect.poll(async () => (await explorer.boundingBox())!.width).toBeCloseTo(240, 0);
-  await openAttention(page);
-  await page.locator("#btn-close-attention").click();
+  await waitForAttention(page);
+  await page.locator("#btn-refresh-attention").click();
   await expect.poll(async () => (await explorer.boundingBox())!.width).toBeCloseTo(240, 0);
 });
 
@@ -470,9 +498,9 @@ test("the persistent project rail keeps vertical order and works at compact 200 
   await failVerify(page, projectRoot, original.id);
   await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1000, 720));
   await page.evaluate(() => { document.body.style.zoom = "2"; });
-  await expect(page.locator("#btn-attention")).toBeVisible();
-  await openAttention(page);
-  await expect(page.locator("#btn-close-attention")).toBeVisible();
+  await waitForAttention(page);
+  await expect(page.locator("#attention-heading")).toBeVisible();
+  await expect(page.locator("#btn-refresh-attention")).toBeVisible();
   await expect(page.locator("#attention-list .attention-inspect")).toBeVisible();
   const tokens = await page.evaluate(() => {
     const style = getComputedStyle(document.documentElement);
@@ -553,7 +581,7 @@ for (const workload of [
     expect(paneGeometry.every((pane) => pane.width > 0 && pane.height > 0)).toBe(true);
     expect(paneGeometry.filter((pane) => pane.visible)).toHaveLength(1);
     expect(paneGeometry.filter((pane) => !pane.visible).every((pane) => pane.inert)).toBe(true);
-    await openAttention(page);
+    await waitForAttention(page);
     await expect(page.locator("#attention-list .attention-item")).toHaveCount(workload.projects);
     for (const project of projects) {
       await expect(page.locator(`#attention-list .attention-item[data-project-id="${project.id}"]`)).toContainText(project.cwd);
@@ -612,7 +640,7 @@ for (const workload of [
       const busy = await measureOverview(page, workload.busySamples);
       await sampleMemory("busy");
       await expect(inspect).toBeFocused();
-      // The nonmodal Attention region overlaps this pointer target; use its real keyboard action.
+      // Use the terminal's real keyboard minimize action without moving Attention focus implicitly.
       await page.locator("#btn-min-terminal").focus();
       await page.keyboard.press("Space");
       await expect(page.locator(".term-pane.active:visible")).toHaveCount(0);
@@ -639,19 +667,24 @@ for (const workload of [
       await expect(inspect).toBeFocused();
       expect(await inspect.evaluate((button, originalButton) => button === originalButton, stable)).toBe(true);
       await page.keyboard.press("Escape");
-      await expect(page.locator("#attention-view")).toBeHidden();
-      await expect(page.locator("#btn-attention")).toBeFocused();
+      await expect(page.locator("#attention-view")).toBeVisible();
+      await expect(inspect).toBeFocused();
       await writeFile(stopPath, "stop");
       await expect.poll(async () => Object.values(await output()).every((stream) => stream.done), { timeout: 15_000 }).toBe(true);
       await sampleMemory("output-finished");
-      // Repeated ordinary navigation must reuse the same bounded rows and restore focus.
+      // Repeated project navigation and Refresh must reuse the same bounded rows.
       for (let cycle = 0; cycle < 10; cycle++) {
-        await openAttention(page);
+        await projectTab(page, projects[cycle % projects.length]!.id).locator(".project-select").click();
+        await waitForAttention(page);
+        await page.locator("#btn-refresh-attention").click();
         await expect(page.locator("#attention-list .attention-item")).toHaveCount(workload.projects);
+        expect(await inspect.evaluate((button, originalButton) => button === originalButton, stable)).toBe(true);
+        await inspect.focus();
         await page.keyboard.press("Escape");
-        await expect(page.locator("#btn-attention")).toBeFocused();
+        await expect(page.locator("#attention-view")).toBeVisible();
+        await expect(inspect).toBeFocused();
       }
-      await sampleMemory("after-ten-open-close-cycles");
+      await sampleMemory("after-ten-navigation-refresh-cycles");
       const result = { workload: { projects: workload.projects, idleAgentTerminals: agents.length, shells: shells.length, maxSecondsPerShell: workload.maxSeconds, lineCharacters: 4096 }, idle, busy, minimized, mainPulse, memory, output: await output() };
       console.log("attention overview scale baseline", JSON.stringify(result));
       await testInfo.attach("attention-overview-scale", { body: JSON.stringify(result, null, 2), contentType: "application/json" });
@@ -684,17 +717,13 @@ test("keyboard inspection reflows at native 200 percent zoom with enlarged inher
   });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.evaluate(() => { document.body.style.fontSize = "20px"; });
-  const opener = page.locator("#btn-all-projects");
-  await opener.focus();
-  await page.keyboard.press("Enter");
-  const region = page.getByRole("region", { name: "Attention across all projects", exact: true });
-  const close = page.getByRole("button", { name: "Close attention", exact: true });
-  await expect(region).toBeVisible();
-  await expect(close).toBeFocused();
+  await waitForAttention(page);
+  const region = page.locator("#project-bar #attention-view");
+  const refresh = region.getByRole("button", { name: "Refresh", exact: true });
+  await refresh.focus();
+  await expect(refresh).toBeFocused();
   await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeFocused();
-  await page.keyboard.press("Tab");
-  const inspect = attentionItem(page, item).getByRole("button", { name: "Inspect check", exact: true });
+  const inspect = attentionItem(page, item).getByRole("button", { name: "Check details", exact: true });
   await expect(inspect).toBeFocused();
   expect(await inspect.evaluate((button) => getComputedStyle(button).outlineStyle)).not.toBe("none");
   const geometry = await region.evaluate((element) => {
@@ -715,23 +744,27 @@ test("keyboard inspection reflows at native 200 percent zoom with enlarged inher
   expect(geometry.reducedMotion).toBe(true);
   expect(geometry.animations).toBe(0);
   const semantics = await region.ariaSnapshot();
-  expect(semantics).toContain('heading "Attention across all projects" [level=2]');
+  expect(semantics).toMatch(/heading "Attention[^"]*" \[level=2\]/);
+  await expect(region.locator("#attention-heading .attention-count")).toHaveText("1");
   expect(semantics).toContain(project.cwd);
-  expect(semantics).toContain('button "Inspect check"');
+  expect(semantics).toContain('button "Check details"');
   await testInfo.attach("attention-accessibility-geometry", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
   await testInfo.attach("attention-accessibility-tree", { body: semantics, contentType: "text/plain" });
   await testInfo.attach("attention-native-zoom-enlarged-text", { body: await page.screenshot(), contentType: "image/png" });
   await page.keyboard.press("Escape");
-  await expect(region).toBeHidden();
-  await expect(opener).toBeFocused();
-  await page.keyboard.press("Enter");
-  await expect(close).toBeFocused();
-  await page.keyboard.press("Tab");
-  await page.keyboard.press("Tab");
+  await expect(region).toBeVisible();
   await expect(inspect).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(region).toBeHidden();
-  await expect(page.locator(".work-summary-report")).toContainText("**Status:** ❌ FAILED (exit code 7)");
+  await expect(region).toBeVisible();
+  await expect(page.locator("#project-work-inspector, #project-details")).toHaveCount(0);
+  const checks = page.locator("#checks-panel");
+  await expect(checks).toBeVisible();
+  await expect(checks.locator(".checks-details")).toBeFocused();
+  expect(await checks.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  await expect(page.locator(".checks-report")).toContainText("FAILED (exit code 7)");
+  await expect.poll(() => page.locator(".checks-report").textContent()).toBe(
+    await page.evaluate(({ terminalId, generation }) => window.termina.getVerifyReport(terminalId, generation), item),
+  );
   expect((await activeProject(page)).id).toBe(project.id);
   expect(await readVerifyStages(projectRoot)).toHaveLength(1);
   expect((await page.evaluate(() => window.termina.getWorkOverview())).items.map((entry) => entry.id)).toContain(item.id);

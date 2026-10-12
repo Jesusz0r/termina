@@ -60,7 +60,7 @@ describe("review identity staging (refs #207)", () => {
 
   it("stages preRevertContent and provides an undoable stickyToast on successful revert", () => {
     const revertBody = methodBody(review, "async revert(): Promise<void>");
-    expect(revertBody).toContain("const preRevertContent = this.modifiedModel?.getValue()");
+    expect(revertBody).toContain("const preRevertContent = this.currentText");
     expect(revertBody).toContain("await window.termina.reviewRevert(this.terminalId, targetPath)");
     expect(revertBody).toContain("stickyToast(");
     expect(revertBody).toContain('label: "Undo"');

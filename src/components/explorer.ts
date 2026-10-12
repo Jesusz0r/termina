@@ -6,7 +6,7 @@
  * the explorer:paste backend, so no new IPC exists for drag-drop.
  */
 import { canonicalizePath } from "../../shared/canonical-path";
-import { type CommandId, type ContentHit, type ExplorerEntry } from "../../shared/types";
+import { type CommandId, type ContentHit, type ExplorerEntry, type ProjectWorkspaceRef } from "../../shared/types";
 import { isRecord } from "../../shared/guards";
 import {
   ancestorDirs,
@@ -53,7 +53,8 @@ export class Explorer {
   private dirs = new Map<string, DirState>(); // keyed by abs path
   /** Mounted directory nodes, so watcher refreshes can target one branch. */
   private dirViews = new Map<string, DirView>();
-  private projectId: string | null = null;
+  private owner: Readonly<ProjectWorkspaceRef> | null = null;
+  private readOnly = true;
   private projectCwd: string | null = null;
   private selected: ExplorerEntry | null = null;
   /** Project-relative entry waiting for Paste. */
@@ -169,7 +170,9 @@ export class Explorer {
   async reveal(relPath: string): Promise<void> {
     const rel = normalizeRelPath(relPath);
     if (!rel || !this.projectCwd) return;
+    const owner = this.owner;
     await this.expandToMatches([rel]);
+    if (this.owner !== owner) return;
     const row = this.keyboard.rowByRel(rel);
     if (!row) return;
     this.keyboard.markFocus(row);
@@ -207,6 +210,7 @@ export class Explorer {
 
   /** File-menu commands (File → New File / New Folder / Rename / Delete…). */
   handleCommand(command: CommandId): void {
+    if (this.readOnly && command !== "refresh") return;
     switch (command) {
       case "new-file":
         void this.createAt(this.createTargetRel(), "file");
@@ -249,9 +253,10 @@ export class Explorer {
   }
 
   /** Called when the project folder changes. Null clears the tree. */
-  setProject(projectId: string | null, cwd: string | null): void {
+  setProject(projectId: string | null, cwd: string | null, workspaceId: string | null, readOnly: boolean): void {
     this.tree.reset();
-    this.projectId = projectId;
+    this.owner = projectId && workspaceId && cwd ? Object.freeze({ projectId, workspaceId }) : null;
+    this.readOnly = readOnly;
     this.projectCwd = cwd;
     this.dirs.clear();
     this.dirViews.clear();
@@ -277,8 +282,10 @@ export class Explorer {
   }
 
   private async expandToMatches(matches: readonly string[]): Promise<void> {
+    const owner = this.owner;
     for (const match of matches) {
       for (const dirRel of ancestorDirs(match)) {
+        if (this.owner !== owner) return;
         const mounted = this.mountedDirView(dirRel);
         if (mounted && !mounted.view.state.expanded) await this.setDirExpanded(mounted.absPath, true);
       }
@@ -350,7 +357,9 @@ export class Explorer {
     const name = makeNameEl(entry.name || entry.path, false);
 
     row.append(arrow, icon, name, makeChangeMark());
+    const owner = this.owner;
     row.addEventListener("click", () => {
+      if (this.owner !== owner) return;
       this.select(entry, row);
       this.keyboard.markFocus(row);
       void this.setDirExpanded(canonicalizePath(entry.path), !state.expanded);
@@ -389,7 +398,9 @@ export class Explorer {
     }
     view.arrow.textContent = expanded ? "▾" : "▸";
     applyRowA11y(view.row, view.entry, expanded);
+    const owner = this.owner;
     await this.renderChildren(view.children, view.entry, view.state);
+    if (this.owner !== owner) return;
     // Collapsing may unmount the focused row; fall back to the folder itself.
     this.keyboard.restoreFocus(normalizeRelPath(view.entry.relPath));
   }
@@ -406,20 +417,20 @@ export class Explorer {
       children.replaceChildren();
       children.appendChild(makeNote("loading…"));
     }
-    const projectId = this.projectId;
+    const owner = this.owner;
     const cwd = this.projectCwd;
-    if (!projectId) return;
+    if (!owner) return;
     let res: { entries: ExplorerEntry[]; error?: string; truncated?: boolean };
     try {
-      res = await window.termina.listDir(projectId, entry.path);
+      res = await window.termina.listDir(owner, entry.path);
     } catch (err) {
-      if (!state.expanded || seq !== state.loadSeq || this.projectCwd !== cwd) return;
+      if (!state.expanded || seq !== state.loadSeq || this.owner !== owner || this.projectCwd !== cwd) return;
       state.loaded = false;
       if (!hadContent) children.replaceChildren();
       toast(`could not list ${entry.name}: ${(err as Error).message}`, "error");
       return;
     }
-    if (!state.expanded || seq !== state.loadSeq || this.projectId !== projectId || this.projectCwd !== cwd) return;
+    if (!state.expanded || seq !== state.loadSeq || this.owner !== owner || this.projectCwd !== cwd) return;
     state.loaded = true;
     if (res.error) {
       state.loaded = false;
@@ -482,12 +493,15 @@ export class Explorer {
     row.append(icon, name, makeChangeMark());
     this.rowEntry.set(row, entry);
     if (this.selected && canonicalizePath(this.selected.path) === canonicalizePath(entry.path)) this.select(entry, row);
+    const owner = this.owner;
     row.addEventListener("click", () => {
+      if (this.owner !== owner) return;
       this.select(entry, row);
       this.keyboard.markFocus(row);
       this.onOpenFile(entry.path, true);
     });
     row.addEventListener("dblclick", () => {
+      if (this.owner !== owner) return;
       this.select(entry, row);
       this.keyboard.markFocus(row);
       this.onOpenFile(entry.path, false);
@@ -500,8 +514,10 @@ export class Explorer {
   }
 
   private bindRowMenu(row: HTMLElement, entry: ExplorerEntry): void {
+    const owner = this.owner;
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
+      if (this.owner !== owner) return;
       e.stopPropagation();
       this.select(entry, row);
       showContextMenu(this.entryMenuItems(entry), e.clientX, e.clientY);
@@ -512,9 +528,11 @@ export class Explorer {
 
   /** The root never moves; every other row is a drag source. */
   private setupDragSource(row: HTMLElement, entry: ExplorerEntry): void {
-    if (!entry.relPath) return;
+    if (!entry.relPath || this.readOnly) return;
+    const owner = this.owner;
     row.draggable = true;
     row.addEventListener("dragstart", (e) => {
+      if (this.owner !== owner || this.readOnly) { e.preventDefault(); return; }
       closeContextMenu();
       this.dragSrc = entry;
       try {
@@ -539,9 +557,10 @@ export class Explorer {
     entry: ExplorerEntry,
     state: DirState,
   ): void {
+    const owner = this.owner;
     const target = entry.relPath;
     const over = (e: DragEvent) => {
-      if (!this.canDrop(target)) return;
+      if (this.owner !== owner || !this.canDrop(target)) return;
       // Invalid inner targets return early WITHOUT stopping propagation,
       // so an outer folder can still accept the drop. A valid inner target
       // claims the event so ancestors don't highlight alongside it.
@@ -553,7 +572,7 @@ export class Explorer {
       if (!state.expanded && !this.expandTimer) {
         this.expandTimer = setTimeout(() => {
           this.expandTimer = null;
-          if (!this.dragSrc || state.expanded) return;
+          if (this.owner !== owner || this.readOnly || !this.dragSrc || state.expanded) return;
           // Same toggle owner as click/keyboard: keeps the chevron and
           // aria-expanded in step with the state.
           void this.setDirExpanded(entry.path, true);
@@ -569,7 +588,7 @@ export class Explorer {
       this.clearExpandTimer();
     };
     const drop = (e: DragEvent) => {
-      if (!this.canDrop(target)) return;
+      if (this.owner !== owner || !this.canDrop(target)) return;
       e.preventDefault();
       e.stopPropagation();
       const src = this.dragSrc;
@@ -595,16 +614,17 @@ export class Explorer {
   }
 
   private setupFileDrop(row: HTMLElement, entry: ExplorerEntry): void {
+    const owner = this.owner;
     const target = parentRel(entry.relPath);
     row.addEventListener("dragover", (e) => {
-      if (!this.canDrop(target)) return;
+      if (this.owner !== owner || !this.canDrop(target)) return;
       e.preventDefault();
       e.stopPropagation();
       if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
       row.classList.add("drop-target");
     });
     row.addEventListener("dragenter", (e) => {
-      if (!this.canDrop(target)) return;
+      if (this.owner !== owner || !this.canDrop(target)) return;
       e.preventDefault();
       e.stopPropagation();
       row.classList.add("drop-target");
@@ -615,7 +635,7 @@ export class Explorer {
       row.classList.remove("drop-target");
     });
     row.addEventListener("drop", (e) => {
-      if (!this.canDrop(target)) return;
+      if (this.owner !== owner || !this.canDrop(target)) return;
       e.preventDefault();
       e.stopPropagation();
       const src = this.dragSrc;
@@ -627,7 +647,7 @@ export class Explorer {
 
   /** False for no-ops the backend would turn into " copy" duplicates. */
   private canDrop(targetDirRel: string): boolean {
-    return canDropEntry(this.dragSrc, targetDirRel);
+    return !this.readOnly && canDropEntry(this.dragSrc, targetDirRel);
   }
 
   private clearExpandTimer(): void {
@@ -646,10 +666,11 @@ export class Explorer {
 
   /** Drag-drop is a cut + paste move; collisions keep the backend suffix. */
   private async moveDragged(src: ExplorerEntry, targetDirRel: string): Promise<boolean> {
-    const projectId = this.projectId;
-    if (!projectId) return false;
+    const owner = this.owner;
+    if (!owner || this.readOnly) return false;
     try {
-      const res = await window.termina.pasteEntry(projectId, targetDirRel, src.relPath, true);
+      const res = await window.termina.pasteEntry(owner, targetDirRel, src.relPath, true);
+      if (this.owner !== owner) return false;
       if (!res.ok) {
         toast(res.error ?? "move failed", "error");
         return false;
@@ -680,8 +701,21 @@ export class Explorer {
     else toast("Select a file or folder in the explorer first", "warning");
   }
 
+  private fenceMenu(items: ContextMenuItem[]): ContextMenuItem[] {
+    const owner = this.owner;
+    const mutations = new Set(["New File", "New Folder", "Cut", "Copy", "Paste", "Rename", "Delete"]);
+    return items.map((item) => {
+      const action = item.action;
+      if (!action) return item;
+      const mutation = mutations.has(item.label ?? "");
+      return { ...item, disabled: item.disabled || (mutation && this.readOnly), action: () => {
+        if (this.owner === owner && (!mutation || !this.readOnly)) action();
+      } };
+    });
+  }
+
   private rootMenuItems(): ContextMenuItem[] {
-    return [
+    return this.fenceMenu([
       { label: "New File", action: () => void this.createAt("", "file") },
       { label: "New Folder", action: () => void this.createAt("", "dir") },
       { separator: true },
@@ -689,7 +723,7 @@ export class Explorer {
       { separator: true },
       { label: "Refresh", action: () => void this.refresh() },
       { label: "Copy Path", action: () => this.copyPath(this.projectCwd ?? "") },
-    ];
+    ]);
   }
 
   private entryMenuItems(entry: ExplorerEntry): ContextMenuItem[] {
@@ -718,17 +752,19 @@ export class Explorer {
       { label: "Delete", action: () => void this.deleteAt(entry) },
     );
     if (entry.type === "dir") items.push({ label: "Refresh", action: () => void this.refresh() });
-    return items;
+    return this.fenceMenu(items);
   }
 
   // -------------------------------------------------------------- actions --
 
   private cutEntry(entry: ExplorerEntry): void {
+    if (!this.owner || this.readOnly) return;
     this.clipboardEntry = { relPath: entry.relPath, cut: true };
     toast(`Cut ${entry.relPath || entry.name} — paste to move`, "info");
   }
 
   private copyEntry(entry: ExplorerEntry): void {
+    if (!this.owner || this.readOnly) return;
     this.clipboardEntry = { relPath: entry.relPath, cut: false };
     toast(`Copied ${entry.relPath || entry.name} — paste to duplicate`, "info");
   }
@@ -736,11 +772,12 @@ export class Explorer {
   /** Paste the clipboard entry under targetDir ("" is the project root). */
   private async pasteAt(targetDirRel: string): Promise<void> {
     const clip = this.clipboardEntry;
-    const projectId = this.projectId;
-    if (!clip || !projectId) return;
+    const owner = this.owner;
+    if (!clip || !owner || this.readOnly) return;
     let pastedName: string | undefined;
     try {
-      const res = await window.termina.pasteEntry(projectId, targetDirRel, clip.relPath, clip.cut);
+      const res = await window.termina.pasteEntry(owner, targetDirRel, clip.relPath, clip.cut);
+      if (this.owner !== owner) return;
       if (!res.ok) {
         toast(res.error ?? "paste failed", "error");
         return;
@@ -764,13 +801,15 @@ export class Explorer {
   }
 
   private async createAt(parentRel: string, kind: "file" | "dir"): Promise<void> {
-    const projectId = this.projectId;
-    if (!projectId) return;
+    const owner = this.owner;
+    if (!owner || this.readOnly) return;
     const name = await showInput(kind === "file" ? "New file" : "New folder", "name", "");
-    if (name.cancelled || !name.value?.trim()) return;
+    if (this.owner !== owner || this.readOnly || name.cancelled || !name.value?.trim()) return;
     const rel = parentRel ? `${parentRel}/${name.value.trim()}` : name.value.trim();
     try {
-      this.toastIfFailed(await window.termina.createEntry(projectId, rel, kind));
+      const result = await window.termina.createEntry(owner, rel, kind);
+      if (this.owner !== owner) return;
+      this.toastIfFailed(result);
     } catch (err) {
       toast(`could not create: ${(err as Error).message}`, "error");
       return;
@@ -778,6 +817,7 @@ export class Explorer {
     // Expand the target folder BEFORE refreshing, so an entry created in a
     // collapsed folder is revealed by the reload instead of staying hidden.
     await this.revealDirRel(parentRel);
+    if (this.owner !== owner) return;
     await this.refresh();
   }
 
@@ -793,12 +833,14 @@ export class Explorer {
   }
 
   private async renameAt(entry: ExplorerEntry): Promise<void> {
-    const projectId = this.projectId;
-    if (!projectId) return;
+    const owner = this.owner;
+    if (!owner || this.readOnly) return;
     const res = await showInput("Rename", "new name", entry.name);
-    if (res.cancelled || !res.value?.trim() || res.value.trim() === entry.name) return;
+    if (this.owner !== owner || this.readOnly || res.cancelled || !res.value?.trim() || res.value.trim() === entry.name) return;
     try {
-      this.toastIfFailed(await window.termina.renameEntry(projectId, entry.relPath, res.value.trim()));
+      const result = await window.termina.renameEntry(owner, entry.relPath, res.value.trim());
+      if (this.owner !== owner) return;
+      this.toastIfFailed(result);
     } catch (err) {
       toast(`could not rename: ${(err as Error).message}`, "error");
       return;
@@ -808,12 +850,14 @@ export class Explorer {
   }
 
   private async deleteAt(entry: ExplorerEntry): Promise<void> {
-    const projectId = this.projectId;
-    if (!projectId) return;
+    const owner = this.owner;
+    if (!owner || this.readOnly) return;
     const ok = await showConfirm("Delete", deleteConfirmMessage(entry));
-    if (!ok.confirmed) return;
+    if (this.owner !== owner || this.readOnly || !ok.confirmed) return;
     try {
-      this.toastIfFailed(await window.termina.deleteEntry(projectId, entry.relPath));
+      const result = await window.termina.deleteEntry(owner, entry.relPath);
+      if (this.owner !== owner) return;
+      this.toastIfFailed(result);
     } catch (err) {
       toast(`could not delete: ${(err as Error).message}`, "error");
       return;

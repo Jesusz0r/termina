@@ -48,6 +48,7 @@ export interface CandidateLaunchHost {
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
     beforeSpawn?: (terminalId: string) => void;
     signal?: AbortSignal;
+    spawnGuard?: () => void;
   }): Promise<{ terminalId: string; pid: number }>;
   createCandidateWorkspace(root: string, baseStateId: string | null, comparisonId: string): string;
   terminateCandidate?(terminalId: string): void;
@@ -66,7 +67,10 @@ export class CandidateLaunch {
   constructor(private host: CandidateLaunchHost) {}
 
   /** Launch one candidate inside its sandbox (A or a moment candidate). */
-  async launchCandidate(cmp: ComparisonState, cand: CandidateState, headStateId: string | null): Promise<void> {
+  async launchCandidate(
+    cmp: ComparisonState, cand: CandidateState, headStateId: string | null,
+    admission?: { assertCurrent?: () => void; beforeSpawn?: (terminalId: string) => void },
+  ): Promise<void> {
     if (!cand.sessionFile) throw new Error("core candidate session fork did not commit");
     if (!cand.startupControlOpId) throw new Error("candidate startup control is missing");
     const attempt: CandidateLaunchAttempt = {
@@ -90,8 +94,10 @@ export class CandidateLaunch {
     this.candidateLaunchAttempts.set(attempt.opId, attempt);
 
     const operation = (async (): Promise<void> => {
+      admission?.assertCurrent?.();
       this.ensureLive(cmp, cand, attempt);
       const { cmd, args, env } = await this.host.candidateLaunch(cmp, cand);
+      admission?.assertCurrent?.();
       this.ensureLive(cmp, cand, attempt);
       cand.headStateId = headStateId ?? cand.headStateId ?? cmp.baseStateId;
       const workspaceId = this.host.createCandidateWorkspace(cand.dir, cand.headStateId, cmp.id);
@@ -102,15 +108,19 @@ export class CandidateLaunch {
         engine: "core",
         launch: { cmd, args, env },
         signal: attempt.controller.signal,
+        spawnGuard: admission?.assertCurrent,
         beforeSpawn: (terminalId) => {
+          admission?.assertCurrent?.();
           this.ensureLive(cmp, cand, attempt);
           routedTerminalId = terminalId;
           attempt.terminalId = terminalId;
           this.installCandidateRouting(cmp, cand, terminalId, attempt.opId);
+          admission?.beforeSpawn?.(terminalId);
         },
       });
       attempt.terminalId = attempt.terminalId ?? created.terminalId;
       attempt.pid = created.pid;
+      admission?.assertCurrent?.();
       this.ensureLive(cmp, cand, attempt);
       const { terminalId, pid } = created;
       if (routedTerminalId !== terminalId) throw new Error("candidate terminal routing was not installed before spawn");
@@ -144,10 +154,12 @@ export class CandidateLaunch {
       if (!pending) throw new Error("candidate startup handshake was not armed");
       const [lstart] = await awaitAbortable(Promise.all([identity, pending.promise]), attempt.controller.signal);
       attempt.lstart = lstart;
+      admission?.assertCurrent?.();
       this.ensureLive(cmp, cand, attempt);
       if (pending.state !== "accepted") throw new Error("candidate startup handshake did not complete");
       cand.lstart = lstart;
       await this.host.updateManifest(cmp, cand, attempt);
+      admission?.assertCurrent?.();
       this.ensureLive(cmp, cand, attempt);
       if (pending.state !== "accepted") throw new Error("candidate exited before ready was published");
       this.publishReady(cmp, cand);
