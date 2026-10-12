@@ -30,6 +30,20 @@ describe("forkRun tree budget (issue #380)", () => {
     expect(journalSrc).not.toContain("measureRetainedClaimTree");
   });
 
+  it("counts an asar-named archive as one physical file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "termina-promo-asar-"));
+    try {
+      const archive = join(root, "dependency.asar");
+      await writeFile(archive, Buffer.alloc(128, 7));
+      const rootInfo = await lstat(root, { bigint: true });
+      const archiveInfo = await lstat(archive, { bigint: true });
+      expect(await measurePromotionTreeBytes(root, 1_000_000n)).toBe(rootInfo.size + archiveInfo.size);
+      expect(await measurePromotionTreeBytes(root, 1n)).toBe(1n);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("sums lstat sizes, saturates at the limit, and does not follow symlinks", async () => {
     const root = await mkdtemp(join(tmpdir(), "termina-promo-tree-"));
     try {

@@ -9,7 +9,7 @@ import { parseComparisonManifest } from "./comparison-manifest.js";
 import { randomUUID, createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
-import { lstat as lstatPath, opendir, readFile } from "node:fs/promises";
+import { diskFs } from "../disk-fs.js";
 import { join, resolve } from "node:path";
 import { boundPromotionWriteJsonFile } from "../worldline-git.js";
 import { promotionIdentityOf, refreshBoundPromotionDirectory } from "./bindings.js";
@@ -43,6 +43,8 @@ import type {
   UncertainComparisonUsage,
   UncertainComparisonUsageLedger,
 } from "./types.js";
+
+const { lstat: lstatPath, opendir, readFile } = diskFs;
 
 function readComparisonManifest(dir: string): Promise<ComparisonManifest | null> {
   return readFile(join(dir, "manifest.json"), "utf8").then(

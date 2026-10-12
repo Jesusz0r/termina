@@ -5,7 +5,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { lstat as lstatPath, opendir } from "node:fs/promises";
+import { diskFs } from "../disk-fs.js";
 import { join, resolve } from "node:path";
 import { boundPromotionWriteJsonFile } from "../worldline-git.js";
 import {
@@ -37,6 +37,8 @@ import type {
 import { boundedWorldlineEntries } from "./uncertain-comparison.js";
 import { errorCode } from "../../shared/guards.js";
 import { promotionIdentityOf, refreshBoundPromotionDirectory } from "./bindings.js";
+
+const { lstat: lstatPath, opendir } = diskFs;
 
 /**
  * In-process tree size (`lstat`, no symlink follow). Saturates at `limit`.

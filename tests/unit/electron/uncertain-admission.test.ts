@@ -62,6 +62,33 @@ async function topIdentity(dir: string): Promise<{ dev: string; ino: string; siz
 }
 
 describe("uncertain admission measurement (issue #192)", () => {
+  it("accounts for an asar-named archive as a physical file and retains it", async () => {
+    const { root, worldsRoot } = await setupWorlds();
+    try {
+      const { dir, victim } = await seedRetained(worldsRoot, "retained-asar", 0);
+      const archive = join(dir, "dependency.asar");
+      const content = Buffer.alloc(128, 7);
+      await writeFile(archive, content);
+      const paths = [dir, join(dir, "sub"), victim, join(dir, MARKER), join(dir, "manifest.json"), archive];
+      const expectedBytes = (await Promise.all(paths.map((path) => lstat(path))))
+        .reduce((bytes, info) => bytes + info.size, 0);
+      const binding = await ensureBoundDirectory(worldsRoot, "worlds root");
+      const owner = uncertainComparisonAdmissionOwnerFor(binding);
+      try {
+        const admission = await owner.acquire(() => false);
+        expect(admission.ok).toBe(true);
+        if (admission.ok) admission.lease.release();
+        await owner.drain();
+        expect(await ledgerEntry(worldsRoot)).toMatchObject({ counted: true, bytes: expectedBytes, entries: paths.length });
+        expect(await readFile(archive)).toEqual(content);
+      } finally {
+        releaseUncertainComparisonAdmissionOwner(owner);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("detects a content-only write that leaves the top identity untouched", async () => {
     const { root, worldsRoot } = await setupWorlds();
     try {
