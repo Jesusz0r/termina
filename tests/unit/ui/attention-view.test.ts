@@ -41,7 +41,7 @@ function deferred<T>() {
 const flush = async (): Promise<void> => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 const refreshDelay = async (): Promise<void> => { await vi.advanceTimersByTimeAsync(150); await flush(); };
 const text = (node: FakeEl): string => [node.textContent, ...node.children.map(text)].join("\n");
-const hooks = ["onInstances", "onPlanUpdate", "onModifiedList", "onFileChanged", "onFileDeleted", "onVerifyState", "onTimelineClear", "onFolderOpened", "onProjectClosed", "onAgentStatus", "onTimelinePrefix"] as const;
+const hooks = ["onInstances", "onPlanUpdate", "onModifiedList", "onFileChanged", "onFileDeleted", "onVerifyState", "onTimelineClear", "onFolderOpened", "onProjectClosed", "onWorldlineUpdate", "onWorldlineRemoved", "onWorldlineRunsChanged", "onEvidenceUpdate", "onPromotionOpened", "onAgentStatus", "onTimelinePrefix"] as const;
 let dom: ReturnType<typeof installFakeDom>;
 let view: ReturnType<typeof createAttentionView> | undefined;
 
@@ -231,7 +231,8 @@ describe("global attention projection", () => {
 
 describe("refresh scheduling and stable rows", () => {
   it.each(["onInstances", "onPlanUpdate", "onModifiedList", "onFileChanged", "onFileDeleted", "onVerifyState",
-    "onTimelineClear", "onFolderOpened", "onProjectClosed"] as const)("updates current attention without a manual control on %s", async (hook) => {
+    "onTimelineClear", "onFolderOpened", "onProjectClosed", "onWorldlineUpdate", "onWorldlineRemoved",
+    "onWorldlineRunsChanged", "onEvidenceUpdate", "onPromotionOpened"] as const)("updates current attention without a manual control on %s", async (hook) => {
     const h = harness(overview([])); await h.ready();
     h.outside.focus();
     expect(h.element.querySelector("#btn-refresh-attention")).toBeNull();

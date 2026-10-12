@@ -258,6 +258,11 @@ export function createAttentionView(bindings: {
     bridge.onTimelineClear(refresh),
     bridge.onFolderOpened(refresh),
     bridge.onProjectClosed(refresh),
+    bridge.onWorldlineUpdate(refresh),
+    bridge.onWorldlineRemoved(refresh),
+    bridge.onWorldlineRunsChanged(refresh),
+    bridge.onEvidenceUpdate(refresh),
+    bridge.onPromotionOpened(refresh),
     bridge.onAgentStatus(({ terminalId, model }) => {
       if (models.has(terminalId) && models.get(terminalId) === model) return;
       models.set(terminalId, model);
