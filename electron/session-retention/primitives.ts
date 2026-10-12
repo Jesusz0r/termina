@@ -9,8 +9,10 @@ import { type PromotionFsIdentity } from "../worldline-git.js";
 import { ensureBoundRetainedRoot } from "../worldlines/index.js";
 import { createHash } from "node:crypto";
 import { type BigIntStats } from "node:fs";
-import { lstat, opendir } from "node:fs/promises";
+import { diskFs } from "../disk-fs.js";
 import { join, resolve } from "node:path";
+
+const { lstat, opendir } = diskFs;
 
 
 export const MAX_RETAINED_SESSION_BUNDLES = 128;

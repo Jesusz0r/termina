@@ -8,7 +8,7 @@ import { coreSessionFile, isCoreSessionId, parseSessionBundlePath } from "../../
 import { errorCode } from "../../shared/guards.js";
 import { acquireSessionRetentionLock, releaseSessionRetentionLock, type SessionRetentionLock } from "../../shared/session-retention-lock.js";
 import { boundPromotionOpenDirectory } from "../worldline-git.js";
-import { lstat } from "node:fs/promises";
+import { diskFs } from "../disk-fs.js";
 import { join } from "node:path";
 import { isUncertainRetentionResult, readRetainedClaimAsync, removeRetainedClaim, removeRetainedEntry, retainedClaimName, writeRetainedClaim } from "./claims.js";
 import type { RetainedClaimRemovalTestHook, RetainedSessionClaim } from "./claims.js";
@@ -16,6 +16,8 @@ import { accountingFromEntries, addRetainedTransactionEntries, claimLedgerEntry,
 import { discardOwnedRetainedStaging, measureRetainedBundle, measureRetainedClaimTree, measureRetainedStaging } from "./measure.js";
 import { MAX_RETAINED_SESSION_BUNDLES, MAX_RETAINED_SESSION_BUNDLE_BYTES, MAX_RETAINED_SESSION_BYTES, RETAINED_CLAIM_BYTES, RETENTION_QUEUE_HIGH_WATER, bindRetainedRoot, identityOf, inspectPath, sameIdentity, usageAdd } from "./primitives.js";
 import type { RetainedIdentity, RetainedLedgerEntry, RetainedRootBinding, RetainedUsageLedger } from "./primitives.js";
+
+const { lstat } = diskFs;
 
 
 type SessionRetentionOwnerOptions = {

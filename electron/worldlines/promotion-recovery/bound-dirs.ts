@@ -10,10 +10,12 @@ import { errorCode } from "../../../shared/guards.js";
 import { MAX_PROMOTION_SCAN_DEPTH, MAX_PROMOTION_SCAN_WORK_BYTES } from "../limits.js";
 import { type BoundPromotionDirectory, type ComparisonState, type PromotionDirectoryPlan, type PromotionRootProvenance } from "../types.js";
 import { createHash } from "node:crypto";
-import { lstatSync } from "node:fs";
-import { lstat as lstatPath, realpath } from "node:fs/promises";
+import { diskFs, diskFsSync } from "../../disk-fs.js";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { splitPromotionComponents } from "./primitives.js";
+
+const { lstatSync } = diskFsSync;
+const { lstat: lstatPath, realpath } = diskFs;
 
 
 const PROMOTION_ROOT_PROVENANCE_VERSION = 1;

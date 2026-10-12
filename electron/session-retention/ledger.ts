@@ -9,12 +9,14 @@ import { isRecord } from "../../shared/guards.js";
 import { RETAINED_SESSION_ADMISSION_LOCK } from "../../shared/session-retention-lock.js";
 import { boundPromotionWriteJsonFile } from "../worldline-git.js";
 import { type BigIntStats } from "node:fs";
-import { lstat, readFile } from "node:fs/promises";
+import { diskFs } from "../disk-fs.js";
 import { join } from "node:path";
 import { readRetainedClaimAsync } from "./claims.js";
 import { measureClaimedDestination, measureRetainedBundle, measureRetainedStaging } from "./measure.js";
 import { MAX_RETAINED_BUNDLE_ENTRIES, MAX_RETAINED_ROOT_ENTRIES, MAX_RETAINED_SESSION_BUNDLES, MAX_RETAINED_SESSION_BYTES, RETAINED_CLAIM, RETAINED_SESSION_ROOT_MARKER, RETAINED_SESSION_USAGE_LEDGER, RETAINED_STAGING, RETAINED_USAGE_LEDGER_TEMP, RETAINED_USAGE_LEDGER_VERSION, boundedDirectoryEntries, identityOf, inspectPath, retainedTreeProof, sameIdentity, usageAdd, usageZero } from "./primitives.js";
 import type { RetainedAccounting, RetainedIdentity, RetainedLedgerDestination, RetainedLedgerEntry, RetainedRootBinding, RetainedRootIdentity, RetainedTreeProof, RetainedUsage, RetainedUsageLedger } from "./primitives.js";
+
+const { lstat, readFile } = diskFs;
 
 
 function isRetainedLedgerMetadata(name: string): boolean {

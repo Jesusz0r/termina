@@ -12,10 +12,13 @@ import { MAX_PROMOTION_FILE_BYTES } from "../limits.js";
 import { type BoundPromotionDirectory, type CanonicalPath, type PromotionDirectoryPlan, type PromotionEntryState } from "../types.js";
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat as lstatPath, open as openFile, readlink, type FileHandle } from "node:fs/promises";
+import { diskFs } from "../../disk-fs.js";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ensureBoundRelativeDirectory } from "./bound-dirs.js";
 import { isSafePromotionRelativePath, promotionNoFollowFlag, sha256Hex, splitPromotionComponents, statIdentityEqual } from "./primitives.js";
+
+const { lstat: lstatPath, open: openFile, readlink } = diskFs;
+type FileHandle = Awaited<ReturnType<typeof openFile>>;
 
 type PromotionParentIdentity = { path: string; dev: number; ino: number; capability?: string };
 

@@ -9,10 +9,12 @@ import { promotionIdentityOf } from "../bindings.js";
 import { MAX_PROMOTION_OPERATION_BYTES, MAX_PROMOTION_SCAN_DEPTH, MAX_PROMOTION_SCAN_ENTRIES, MAX_PROMOTION_SCAN_PENDING, MAX_PROMOTION_SCAN_WORK_BYTES } from "../limits.js";
 import { type PromotionArtifactEntry, type PromotionArtifactManifest, type PromotionEntryState, type PromotionJournalBinding, type PromotionJournalPath, type PromotionRecoveryTestHook } from "../types.js";
 import { boundedWorldlineEntries } from "../uncertain-comparison.js";
-import { lstat as lstatPath } from "node:fs/promises";
+import { diskFs } from "../../disk-fs.js";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { isMaterializedPromotionState, isRestorablePromotionState, promotionStateHash, readPromotionEntry } from "./entry-state.js";
 import { EMPTY_PROMOTION_HASH, SHA256_HEX, exactObjectKeys, isSafePromotionRelativePath, statIdentityEqual } from "./primitives.js";
+
+const { lstat: lstatPath } = diskFs;
 
 
 

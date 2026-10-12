@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { lstat as lstatPath, readFile, realpath, stat } from "node:fs/promises";
+import { diskFs } from "../disk-fs.js";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { buildSandboxProfile, candidateSandboxLaunch, type SandboxPaths } from "../sandbox.js";
 import {
@@ -860,7 +861,7 @@ export class WorldlineManager {
         if (RUNTIME_ALLOWLIST.includes(p.split(/[\\/]/)[0])) continue;
         count++;
         try {
-          bytes = Math.min(MAX_IGNORED_BYTES, bytes + (await lstatPath(join(cand.dir, p))).size);
+          bytes = Math.min(MAX_IGNORED_BYTES, bytes + (await diskFs.lstat(join(cand.dir, p))).size);
         } catch {
           /* The file can disappear before it is measured. */
         }

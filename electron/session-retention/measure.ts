@@ -8,11 +8,13 @@ import { MAX_SESSION_BUNDLE_BYTES, RETAINED_STAGING_OWNER_NAME, SESSION_ACTIVE_N
 import { errorCode } from "../../shared/guards.js";
 import { type SessionRetentionLock } from "../../shared/session-retention-lock.js";
 import { createReadStream, type BigIntStats, type Stats } from "node:fs";
-import { lstat, readFile } from "node:fs/promises";
+import { diskFs } from "../disk-fs.js";
 import { join } from "node:path";
 import { removeRetainedEntry } from "./claims.js";
 import { MAX_RETAINED_BUNDLE_ENTRIES, MAX_RETAINED_ROOT_ENTRIES, MAX_RETAINED_SCAN_DEPTH, MAX_RETAINED_SCAN_PENDING, MAX_RETAINED_SCAN_WORK_BYTES, MAX_RETAINED_SESSION_BYTES, RETAINED_STAGING, RETAINED_STAGING_OWNER_BYTES, SESSION_ARCHIVE, SESSION_PART, STORED_IMAGE, boundedDirectoryEntries, inspectPath, usageAdd, usageZero } from "./primitives.js";
 import type { RetainedMeasurement } from "./primitives.js";
+
+const { lstat, readFile } = diskFs;
 
 
 /** Measure a claim's destination even when its tree is only partially

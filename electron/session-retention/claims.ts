@@ -9,10 +9,12 @@ import { syncDirectoryAsync } from "../../shared/fsync.js";
 import { errorCode } from "../../shared/guards.js";
 import { validateSessionRetentionLease, type SessionRetentionLock } from "../../shared/session-retention-lock.js";
 import { boundPromotionRemoveTree, boundPromotionWriteJsonFile } from "../worldline-git.js";
-import { lstat, readFile } from "node:fs/promises";
+import { diskFs } from "../disk-fs.js";
 import { join } from "node:path";
 import { RETAINED_CLAIM, RETAINED_CLAIM_BYTES } from "./primitives.js";
 import type { RetainedRootBinding } from "./primitives.js";
+
+const { lstat, readFile } = diskFs;
 
 
 type RetainedClaimRecord = {

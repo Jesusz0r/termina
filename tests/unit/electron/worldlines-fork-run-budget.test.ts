@@ -26,6 +26,8 @@ describe("forkRun tree budget (issue #380)", () => {
     expect(journalSrc).toContain("export async function measurePromotionTreeBytes");
     expect(uncertainSrc).toContain("async function measureUncertainComparisonTree");
     expect(retainedSrc).toContain("export async function measureRetainedClaimTree");
+    expect(retainedSrc).toContain('from "../disk-fs.js"');
+    expect(managerSrc).toContain("diskFs.lstat");
     expect(journalSrc).not.toContain("measureUncertainComparisonTree");
     expect(journalSrc).not.toContain("measureRetainedClaimTree");
   });

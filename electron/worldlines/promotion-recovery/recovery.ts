@@ -12,13 +12,15 @@ import { errorCode } from "../../../shared/guards.js";
 import { promotionJournalAdmissionOwnerFor, releasePromotionJournalAdmissionOwner } from "../promotion-journal.js";
 import { type BoundPromotionDirectory, type CanonicalPath, type PromotionArtifactManifest, type PromotionDirectoryPlan, type PromotionEntryState, type PromotionJournalBinding, type PromotionRecoveryContext } from "../types.js";
 import { randomUUID } from "node:crypto";
-import { lstat as lstatPath } from "node:fs/promises";
+import { diskFs } from "../../disk-fs.js";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { assertBoundPromotionDirectory, ensureBoundDirectory, ensureBoundRelativeDirectory, existingPromotionDirectoryIdentity, filesystemCanonicalPath, probePromotionDirectory } from "./bound-dirs.js";
 import { assertPromotionState, boundPromotionExpectedLeaf, promotionDestination, promotionDestinationComponents, promotionParentComponents, promotionParentIdentity, promotionSourceComponents, promotionStatesEqual, readPromotionEntry } from "./entry-state.js";
 import { createPromotionArtifactManifest, parsePromotionArtifactManifest, runPromotionRecoveryTestHook, validatePromotionJournalHeader, validatePromotionJournalPaths, validatePromotionRollbackTemps, writePromotionJournal } from "./journals.js";
 import type { PromotionRollbackTemp } from "./journals.js";
 import { SHA256_HEX, isSafePromotionRelativePath, sha256Hex, withPromotionTransaction } from "./primitives.js";
+
+const { lstat: lstatPath } = diskFs;
 
 
 /** Bytes bound for the adopted journal.json read when persisting a recovery marker. */
