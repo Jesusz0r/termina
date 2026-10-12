@@ -53,7 +53,9 @@ Rules:
   and the skill index never mutate mid-session. Skill bodies are not in
   zone 1; the model loads `SKILL.md` with `read_file`, so they sit in the
   transcript tail. If the tool set must change, start a new session rather
-  than mutating zone 1–2.
+  than mutating zone 1–2. A `/plan` turn refuses non-read calls without
+  changing that prefix; the next request in the same session still sees
+  the frozen schemas (`agent-core/tool-eligibility.ts`).
 - Dynamic front matter enters deterministically: environment, user-global
   `AGENTS.md`, the skill index, and project `AGENTS.md` are read once, at
   process start, in a fixed order. Two sessions with the same inputs must

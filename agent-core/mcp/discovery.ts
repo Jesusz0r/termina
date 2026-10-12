@@ -2,6 +2,7 @@
  * only requested definitions enter conversation history as search results. */
 import { isRecord } from "../../shared/guards.ts";
 import type { McpSession } from "./client.ts";
+import { mcpDiscoveryDeclared } from "../tool-eligibility.ts";
 import { mcpToolDefs, type McpClientTool } from "./tools.ts";
 
 const SEARCH_PAGE_BYTES = 18 * 1024;
@@ -33,7 +34,7 @@ export function mcpClientTools(
   kernel: Array<Record<string, unknown>>,
   catalog: readonly McpClientTool[],
 ): Array<Record<string, unknown>> {
-  return [...kernel, ...(catalog.length ? structuredClone(DISCOVERY_TOOLS) : [])];
+  return [...kernel, ...(mcpDiscoveryDeclared(catalog.length) ? structuredClone(DISCOVERY_TOOLS) : [])];
 }
 
 export function searchMcpTools(catalog: readonly McpClientTool[], input: unknown): string {

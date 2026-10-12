@@ -22,6 +22,7 @@ Images used by the repository README are kept in [`assets/`](assets/).
 Dated findings and exploratory designs, not guarantees of current behavior.
 
 - [`reference/WORKSPACE-EXPERIENCE-AUDIT.md`](reference/WORKSPACE-EXPERIENCE-AUDIT.md) — product, UI/UX, and developer-experience audit with evidence and validation limits
+- [`reference/TOOL-AVAILABILITY-AUDIT.md`](reference/TOOL-AVAILABILITY-AUDIT.md) — dated audit of tool selection, execution authorization, and proposed improvements
 - [`mockups/workspace/README.md`](mockups/workspace/README.md) — interactive, simulated attention-first workspace study
 
 ## Plans

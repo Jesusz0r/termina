@@ -125,7 +125,8 @@ import {
   emptyToolLoopTracker,
   trackToolLoopTurn,
 } from "./stall.ts";
-import { READ_TOOLS, providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
+import { providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
+import { planTurnRejectsTool, sessionOmitsTool } from "./tool-eligibility.ts";
 import { READ_TOOL_DEFS } from "./main/read-tools.ts";
 import {
   HIGH_WATER,
@@ -1672,7 +1673,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
   // MCP annotations, bash commands, and child briefs cannot establish read-only
   // behavior. Admit only the existing built-in observational tools.
-  if (planToolsRestricted && !READ_TOOLS.has(use.name)) {
+  if (planToolsRestricted && planTurnRejectsTool(use.name)) {
     return notExecuted(`error: ${use.name} is not executed on a /plan turn. Only reads and search are allowed; submit a non-/plan request to implement.`);
   }
   if (use.name === "read_file") {
@@ -1747,7 +1748,9 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     // Worldline candidates run sandboxed with auto-approve; a host-spawned
     // child would escape that sandbox, so the tool fails closed here and the
     // host refuses their sidecar spawns too.
-    if (IS_WORLDLINE_CANDIDATE) return done(use, "error: spawn_subagent is disabled in worldline candidates", true);
+    if (sessionOmitsTool(use.name, { worldlineCandidate: IS_WORLDLINE_CANDIDATE, subagentToolsVisible: true })) {
+      return done(use, "error: spawn_subagent is disabled in worldline candidates", true);
+    }
     // A length-truncated turn may carry cut-off brief arguments that parse
     // but are silently incomplete. Never spawn from one: the child would boot
     // on a broken brief and burn its run failing.
@@ -1945,7 +1948,7 @@ const TOOLS: Array<Record<string, unknown>> = [
 const SUBAGENT_DEPTH = subagentDepthFromEnv(process.env);
 const IS_WORLDLINE_CANDIDATE = isWorldlineCandidateEnv(process.env);
 for (const def of visibleSubagentTools(SUBAGENT_DEPTH)) {
-  if (IS_WORLDLINE_CANDIDATE && def.name === "spawn_subagent") continue;
+  if (typeof def.name !== "string" || sessionOmitsTool(def.name, { worldlineCandidate: IS_WORLDLINE_CANDIDATE, subagentToolsVisible: true })) continue;
   TOOLS.push(def);
 }
 
@@ -4252,6 +4255,8 @@ async function runPrompt(
 ): Promise<void> {
   // Publication may carry over to a later user request, but tool refusal only
   // belongs to an actual `/plan` rewrite. A parsed list never grants write access.
+  // The refusal does not change the session tool prefix: the next request in
+  // this session still implements with the frozen schemas.
   const planTurn = plan.publish;
   planToolsRestricted = plan.rewrite;
   // Arm before early aborts so a failed `/plan` start still publishes the
