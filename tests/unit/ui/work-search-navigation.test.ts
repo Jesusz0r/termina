@@ -26,7 +26,7 @@ afterEach(() => { view?.dispose(); vi.useRealTimers(); dom.cleanup(); });
 function harness(value = overview()) {
   const element = dom.document.createElement("section");
   for (const id of ["attention-list", "attention-status",
-    "attention-message", "btn-refresh-attention", "btn-more-attention"]) {
+    "attention-message", "btn-more-attention"]) {
     const node = dom.document.createElement(id.startsWith("btn-") ? "button" : "div"); node.id = id; element.append(node);
   }
   const heading = dom.document.createElement("h2");

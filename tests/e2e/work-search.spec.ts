@@ -195,7 +195,7 @@ test("compact native 200 percent zoom supports keyboard cancellation without act
     win.setSize(1000, 720);
     win.webContents.setZoomFactor(2);
   });
-  const opener = page.locator("#btn-refresh-attention");
+  const opener = page.locator(`#project-tabs .project-tab[data-project-id="${active.id}"] .project-select`);
   await opener.focus();
   const modal = await palette(page, "repair");
   await expect(modal.locator(".search-hit")).toHaveCount(1);

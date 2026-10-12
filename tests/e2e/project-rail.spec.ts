@@ -18,10 +18,14 @@ test("the project rail navigates exact same-name roots while native Attention st
   const attention = page.locator("#project-bar #attention-view");
   const heading = attention.locator("#attention-heading");
   await expect(attention).toBeVisible();
+  await expect(attention.getByRole("button", { name: /^Refresh$/, includeHidden: true })).toHaveCount(0);
+  await expect(attention).not.toContainText("Idle is not proof of task completion or review.");
   await expect(heading).toHaveJSProperty("tagName", "H2");
   expect(await heading.evaluate((element) => [...element.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join("").trim())).toBe("Attention");
   await expect(heading.locator(".attention-count")).toHaveText("0");
-  for (const attribute of ["role", "aria-expanded", "aria-controls", "tabindex"]) expect(await heading.getAttribute(attribute)).toBeNull();
+  await expect(heading).toHaveAttribute("aria-label", "Attention across all projects: 0 recorded items");
+  for (const attribute of ["role", "aria-expanded", "aria-controls"]) expect(await heading.getAttribute(attribute)).toBeNull();
+  expect(await heading.getAttribute("tabindex")).toBe("-1");
   await expect(page.getByRole("button", { name: /^Attention(?:\s|$)/, includeHidden: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Close attention", exact: true, includeHidden: true })).toHaveCount(0);
   expect(await attention.evaluate((element) => {
@@ -94,4 +98,19 @@ test("the project rail navigates exact same-name roots while native Attention st
   await expect(rail.locator('.project-select[aria-current="page"]')).toHaveCount(1);
   expect((await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.id === first.owners[0])?.cwd).toBe(first.project.cwd);
   expect(await readVerifyStages(first.project.cwd)).toHaveLength(1);
+
+  await writeVerifyPackage(first.project.cwd, { test: "termina-verify-fixture pass" });
+  expect(await page.evaluate((id) => window.termina.runVerify(id), first.owners[0]!)).toEqual({ ok: true });
+  await expect.poll(() => page.evaluate((id) => window.termina.getInstances()
+    .then((instances) => instances.find((instance) => instance.id === id)?.verify?.state), first.owners[0]!)).toBe("pass");
+  await expect(row(first.project.id).locator(".project-attention")).toHaveText("0 attention");
+  await expect(row(first.project.id).locator(".project-working")).toHaveText("0 working");
+  await expect(heading.locator(".attention-count")).toHaveText("0");
+  await expect(heading).toHaveAttribute("aria-label", "Attention across all projects: 0 recorded items");
+  await expect(page.locator("#attention-list .attention-item")).toHaveCount(0);
+  await expect(attention).not.toContainText("Idle is not proof of task completion or review.");
+  const resolved = await page.evaluate(() => window.termina.getWorkOverview());
+  expect(resolved.items).toEqual([]);
+  expect(resolved.projects.find((project) => project.projectId === first.project.id)?.attentionCount).toBe(0);
+  expect((await readVerifyStages(first.project.cwd)).map((stage) => stage.args)).toEqual([["fail"], ["pass"]]);
 });

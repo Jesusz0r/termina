@@ -51,6 +51,7 @@ afterEach(() => { view?.dispose(); view = undefined; vi.useRealTimers(); dom.cle
 function harness(initial = overview(), pending?: Promise<WorkOverview>) {
   const element = dom.document.createElement("section");
   const heading = dom.document.createElement("h2");
+  heading.setAttribute("tabindex", "-1");
   const count = dom.document.createElement("span");
   count.className = "attention-count";
   heading.append(count);
@@ -65,7 +66,6 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
   const list = child("ul", "attention-list");
   const status = child("p", "attention-status");
   const message = child("p", "attention-message");
-  const refresh = child("button", "btn-refresh-attention");
   const more = child("button", "btn-more-attention");
   const outside = dom.document.createElement("button");
   dom.document.body.append(element, workspace, outside);
@@ -92,7 +92,7 @@ function harness(initial = overview(), pending?: Promise<WorkOverview>) {
   });
   return {
     element, heading, workspace, onNavigate, onReveal,
-    count, list, status, message, refresh, more, outside,
+    count, list, status, message, more, outside,
     getWorkOverview, inspectWorkAttention, getVerifyReport, onOverview, onInspect, unsubs,
     emit: (hook: typeof hooks[number], payload: unknown = {}) => callbacks.get(hook)!(payload),
     ready: flush,
@@ -128,7 +128,7 @@ describe("global attention projection", () => {
     expect(h.heading.getAttribute("aria-expanded")).toBeNull();
     expect(h.heading.getAttribute("aria-controls")).toBeNull();
     expect(h.heading.getAttribute("role")).toBeNull();
-    expect(h.heading.getAttribute("tabindex")).toBeNull();
+    expect(h.heading.getAttribute("tabindex")).toBe("-1");
     expect(h.count.textContent).toBe("1");
     expect(h.heading.getAttribute("aria-label")).toBe("Attention across all projects: 1 recorded items");
     expect(h.list.children).toHaveLength(1);
@@ -141,7 +141,7 @@ describe("global attention projection", () => {
     expect(h.onNavigate).not.toHaveBeenCalled();
   });
 
-  it("focuses the first canonical action only on command, using Refresh when there are no items", async () => {
+  it("focuses the first canonical action only on command, using the heading when there are no items", async () => {
     const first = item({ id: "first" });
     const second = item({ id: "second" });
     const h = harness(overview([first, second])); await h.ready();
@@ -153,7 +153,7 @@ describe("global attention projection", () => {
     h.getWorkOverview.mockResolvedValue(overview([]));
     h.emit("onPlanUpdate"); await refreshDelay();
     h.outside.focus(); view!.focus();
-    expect(dom.document.activeElement).toBe(h.refresh);
+    expect(dom.document.activeElement).toBe(h.heading);
     expect(h.element.hidden).toBe(false);
   });
 
@@ -199,7 +199,7 @@ describe("global attention projection", () => {
   it("does not infer completion from a successful empty overview", async () => {
     const h = harness(overview([])); await h.ready();
     expect(h.count.textContent).toBe("0");
-    expect(h.status.textContent).toBe("No recorded attention. Idle is not proof of task completion or review.");
+    expect(h.status.textContent).toBe("No recorded attention.");
     expect(h.more.hidden).toBe(true);
   });
 
@@ -230,6 +230,35 @@ describe("global attention projection", () => {
 });
 
 describe("refresh scheduling and stable rows", () => {
+  it.each(["onInstances", "onPlanUpdate", "onModifiedList", "onFileChanged", "onFileDeleted", "onVerifyState",
+    "onTimelineClear", "onFolderOpened", "onProjectClosed"] as const)("updates current attention without a manual control on %s", async (hook) => {
+    const h = harness(overview([])); await h.ready();
+    h.outside.focus();
+    expect(h.element.querySelector("#btn-refresh-attention")).toBeNull();
+    const current = overview([item(), item({ id: "other", projectId: "proj-2" })]);
+    h.getWorkOverview.mockResolvedValue(current);
+    h.emit(hook, hook === "onInstances" ? [] : { terminalId: "term-1", projectId: "proj-1" });
+    await refreshDelay();
+    expect(h.count.textContent).toBe("2");
+    expect(h.list.children.map((row) => row.dataset.id)).toEqual(["attention-1", "other"]);
+    expect(h.onOverview).toHaveBeenLastCalledWith(current);
+    expect(dom.document.activeElement).toBe(h.outside);
+    h.getWorkOverview.mockResolvedValue(overview([]));
+    h.emit("onPlanUpdate"); await refreshDelay();
+    expect(h.count.textContent).toBe("0");
+    expect(h.list.children).toHaveLength(0);
+    expect(h.status.textContent).toBe("No recorded attention.");
+    expect(h.inspectWorkAttention).not.toHaveBeenCalled();
+    expect(h.getVerifyReport).not.toHaveBeenCalled();
+    expect(h.onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("does not poll after a successful update", async () => {
+    const h = harness(); await h.ready();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(1);
+  });
+
   it("coalesces updates across every project without stealing focus or clearing unresolved items", async () => {
     const h = harness(); await h.ready();
     const row = h.list.children[0]!;
@@ -321,11 +350,11 @@ describe("refresh scheduling and stable rows", () => {
     expect(dom.document.activeElement).toBe(button);
   });
 
-  it("moves focus to Refresh only when the focused row is no longer present", async () => {
+  it("moves focus to the heading only when the focused row is no longer present", async () => {
     const h = harness(); await h.ready(); h.inspectButton().focus();
     h.getWorkOverview.mockResolvedValue(overview([])); h.emit("onPlanUpdate"); await refreshDelay();
     expect(h.list.children).toHaveLength(0);
-    expect(dom.document.activeElement).toBe(h.refresh);
+    expect(dom.document.activeElement).toBe(h.heading);
   });
 
   it("invalidates a focused cached failure when the current stale-check projection arrives", async () => {
@@ -339,7 +368,7 @@ describe("refresh scheduling and stable rows", () => {
     await refreshDelay();
     expect(text(h.list)).toContain("Verify is outdated");
     expect(h.inspectButton()).not.toBe(old);
-    expect(dom.document.activeElement).toBe(h.refresh);
+    expect(dom.document.activeElement).toBe(h.heading);
   });
 
   it("does not steal focus outside the panel during a background refresh", async () => {
@@ -379,7 +408,7 @@ describe("request fencing and unavailable facts", () => {
     expect(h.status.textContent).not.toContain("unavailable");
   });
 
-  it("retains prior rows on refresh failure, publishes null overview and never claims a fresh empty result", async () => {
+  it("retains prior rows on failure and recovers automatically without claiming an empty result", async () => {
     const h = harness(); await h.ready();
     const row = h.list.children[0]!;
     const button = h.inspectButton(); button.focus();
@@ -388,7 +417,7 @@ describe("request fencing and unavailable facts", () => {
     expect(h.count.textContent).toBe("?");
     expect(h.heading.getAttribute("aria-label")).toBe("Attention across all projects: unavailable");
     expect(h.onOverview).toHaveBeenLastCalledWith(null);
-    expect(h.status.textContent).toBe("Attention unavailable. Previous rows may be outdated. Refresh to load current facts.");
+    expect(h.status.textContent).toBe("Attention unavailable. Previous rows may be outdated. Retrying automatically…");
     expect(h.status.textContent).not.toContain("No recorded attention");
     expect(h.list.children[0]).toBe(row);
     expect(h.inspectButton()).toBe(button);
@@ -396,12 +425,17 @@ describe("request fencing and unavailable facts", () => {
     expect(h.element.hidden).toBe(false);
     expect(h.status.textContent).toContain("Previous rows may be outdated");
     expect(h.list.children[0]).toBe(row);
-    h.getWorkOverview.mockResolvedValue(overview([])); h.refresh.click(); await refreshDelay();
+    h.getWorkOverview.mockResolvedValue(overview([]));
+    const calls = h.getWorkOverview.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(calls);
+    await vi.advanceTimersByTimeAsync(1); await refreshDelay();
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(calls + 1);
     expect(h.count.textContent).toBe("0");
     expect(h.heading.getAttribute("aria-label")).toBe("Attention across all projects: 0 recorded items");
     expect(h.onOverview).toHaveBeenLastCalledWith(overview([]));
     expect(h.list.children).toHaveLength(0);
-    expect(h.status.textContent).toContain("Idle is not proof");
+    expect(h.status.textContent).toBe("No recorded attention.");
   });
 
   it("shows unavailable on an initial rejection without an opener", async () => {
@@ -416,6 +450,69 @@ describe("request fencing and unavailable facts", () => {
     expect(h.status.textContent).not.toContain("No recorded attention");
   });
 
+  it("recovers an initial failed read automatically without user interaction", async () => {
+    const failed = deferred<WorkOverview>();
+    const current = overview([item({ id: "recovered" })]);
+    const h = harness(current, failed.promise);
+    h.outside.focus();
+    failed.reject(new Error("Initial unavailable")); await flush();
+    expect(h.count.textContent).toBe("?");
+    await vi.advanceTimersByTimeAsync(5000); await refreshDelay();
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(2);
+    expect(h.count.textContent).toBe("1");
+    expect(h.list.children[0]!.dataset.id).toBe("recovered");
+    expect(h.onOverview).toHaveBeenLastCalledWith(current);
+    expect(dom.document.activeElement).toBe(h.outside);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses a new event immediately instead of waiting for the failed-read retry", async () => {
+    const h = harness(); await h.ready();
+    h.getWorkOverview.mockRejectedValueOnce(new Error("IPC failed"));
+    h.emit("onVerifyState"); await refreshDelay();
+    expect(h.count.textContent).toBe("?");
+    const current = overview([item({ id: "current" })]);
+    h.getWorkOverview.mockResolvedValue(current);
+    h.emit("onPlanUpdate"); await refreshDelay();
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(3);
+    expect(h.onOverview).toHaveBeenLastCalledWith(current);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(3);
+  });
+
+  it("spaces repeated failed reads rather than spinning or adding overlapping retry timers", async () => {
+    const failed = deferred<WorkOverview>();
+    const h = harness(overview(), failed.promise);
+    h.getWorkOverview.mockRejectedValue(new Error("Still unavailable"));
+    failed.reject(new Error("Initial unavailable")); await flush();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const calls = h.getWorkOverview.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(h.getWorkOverview).toHaveBeenCalledTimes(calls);
+      await vi.advanceTimersByTimeAsync(1); await refreshDelay();
+      expect(h.getWorkOverview).toHaveBeenCalledTimes(calls + 1);
+      expect(h.count.textContent).toBe("?");
+      expect(vi.getTimerCount()).toBe(1);
+    }
+  });
+
+  it.each(["scheduled", "pending"] as const)("cancels a %s failed-read retry on disposal", async (phase) => {
+    const failed = deferred<WorkOverview>();
+    const h = harness(overview(), failed.promise);
+    failed.reject(new Error("Unavailable")); await flush();
+    const pending = deferred<WorkOverview>();
+    h.getWorkOverview.mockReturnValueOnce(pending.promise);
+    if (phase === "pending") { await vi.advanceTimersByTimeAsync(5000); await refreshDelay(); }
+    const calls = h.getWorkOverview.mock.calls.length;
+    view!.dispose();
+    pending.resolve(overview()); await flush();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.getWorkOverview).toHaveBeenCalledTimes(calls);
+    expect(h.onOverview).toHaveBeenCalledExactlyOnceWith(null);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("disposes all subscriptions, cancels scheduled refresh and ignores late overview responses", async () => {
     const old = deferred<WorkOverview>();
     const h = harness(overview(), old.promise);
@@ -425,7 +522,7 @@ describe("request fencing and unavailable facts", () => {
     expect(h.getWorkOverview).toHaveBeenCalledTimes(1);
     expect(h.onOverview).not.toHaveBeenCalled();
     for (const unsub of h.unsubs) expect(unsub).toHaveBeenCalledTimes(1);
-    h.outside.focus(); h.heading.click(); h.refresh.click(); view!.focus();
+    h.outside.focus(); h.heading.click(); view!.focus();
     await refreshDelay();
     expect(h.element.hidden).toBe(false);
     expect(dom.document.activeElement).toBe(h.outside);

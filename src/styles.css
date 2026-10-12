@@ -179,7 +179,7 @@ body {
   cursor: pointer;
 }
 #attention-view button:hover { background: var(--bg-hover); }
-#attention-view button:focus-visible, .checks-report:focus-visible {
+#attention-heading:focus-visible, #attention-view button:focus-visible, .checks-report:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }

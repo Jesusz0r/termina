@@ -352,9 +352,10 @@ resolves the item. Historical passing output remains
 **Outdated** when it no longer applies to current files.
 
 The section initially shows up to 50 items; **Show more** reveals the next page.
-**Refresh** loads current facts. A loading failure is explicit, the count becomes
-**unknown**, and retained rows are marked potentially outdated, not replaced
-with a false empty-success state.
+Session, task, file, check, and project changes update the section automatically.
+A loading failure is explicit, the count becomes **unknown**, and retained rows
+are marked potentially outdated, not replaced with a false empty-success state.
+Attention retries failed reads automatically; there is no manual refresh button.
 
 ### Jump to work
 

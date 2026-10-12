@@ -5,6 +5,7 @@ import { findWorkTask } from "./work-search";
 import type { WorkSearchTarget } from "./work-search";
 
 const PAGE_SIZE = 50;
+const RETRY_DELAY_MS = 5000;
 
 /** Global read-only projection. Visiting a reason does not acknowledge or resolve it. */
 export function createAttentionView(bindings: {
@@ -25,7 +26,6 @@ export function createAttentionView(bindings: {
   const list = element.querySelector<HTMLElement>("#attention-list")!;
   const status = element.querySelector<HTMLElement>("#attention-status")!;
   const message = element.querySelector<HTMLElement>("#attention-message")!;
-  const refreshButton = element.querySelector<HTMLButtonElement>("#btn-refresh-attention")!;
   const moreButton = element.querySelector<HTMLButtonElement>("#btn-more-attention")!;
   const count = heading.querySelector<HTMLElement>(".attention-count")!;
   const rows = new Map<string, { element: HTMLLIElement; title: HTMLElement; context: HTMLElement; area: HTMLElement; detail: HTMLElement; button: HTMLButtonElement; item: WorkAttentionItem }>();
@@ -37,7 +37,13 @@ export function createAttentionView(bindings: {
   let loadSequence = 0;
   let inspectSequence = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
+
+  function cancelRetry(): void {
+    if (retryTimer !== undefined) clearTimeout(retryTimer);
+    retryTimer = undefined;
+  }
 
   function cancelNavigation(): void {
     inspectSequence++;
@@ -61,10 +67,13 @@ export function createAttentionView(bindings: {
       if (opened) {
         cancelNavigation();
         bindings.onReveal(result.folder.projectId, result.action);
-      } else message.textContent = "The target changed or closed. Refresh attention and choose its current owner.";
+      } else {
+        message.textContent = "The target changed or closed. Choose its current owner.";
+        refresh();
+      }
     } catch {
       if (isCurrent()) {
-        message.textContent = "Could not open this item. Refresh attention and try again.";
+        message.textContent = "Could not open this item. Try again.";
         refresh();
       }
     }
@@ -81,7 +90,7 @@ export function createAttentionView(bindings: {
       const focused = row.element.contains(document.activeElement);
       row.element.remove();
       rows.delete(id);
-      if (focused) refreshButton.focus();
+      if (focused) heading.focus();
     }
     visible.forEach((item, index) => {
       let row = rows.get(item.id);
@@ -130,12 +139,13 @@ export function createAttentionView(bindings: {
     });
     moreButton.hidden = overview.items.length <= limit;
     moreButton.textContent = `Show more (${Math.max(0, overview.items.length - limit)} remaining)`;
-    status.textContent = unavailable ? "Attention unavailable. Previous rows may be outdated. Refresh to load current facts."
+    status.textContent = unavailable ? "Attention unavailable. Previous rows may be outdated. Retrying automatically…"
       : overview.items.length ? `${overview.items.length} recorded attention item${overview.items.length === 1 ? "" : "s"} across all projects.`
-      : "No recorded attention. Idle is not proof of task completion or review.";
+      : "No recorded attention.";
   }
 
   function receiveOverview(value: WorkOverview): void {
+    cancelRetry();
     overview = value;
     unavailable = false;
     count.textContent = String(value.items.length);
@@ -149,7 +159,7 @@ export function createAttentionView(bindings: {
     count.textContent = "?";
     heading.setAttribute("aria-label", "Attention across all projects: unavailable");
     bindings.onOverview(null);
-    status.textContent = "Attention unavailable. Previous rows may be outdated. Refresh to load current facts.";
+    status.textContent = "Attention unavailable. Previous rows may be outdated. Retrying automatically…";
   }
 
   async function revealWork(target: WorkSearchTarget, externalCurrent: () => boolean): Promise<boolean> {
@@ -196,11 +206,17 @@ export function createAttentionView(bindings: {
     } catch {
       if (disposed || sequence !== loadSequence) return;
       overviewUnavailable();
+      // Successful views update from events; only unavailable facts retry.
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        refresh();
+      }, RETRY_DELAY_MS);
     }
   }
 
   function refresh(): void {
     if (disposed) return;
+    cancelRetry();
     loadSequence++;
     if (timer === undefined) timer = setTimeout(() => { void load(); }, 150);
   }
@@ -208,15 +224,14 @@ export function createAttentionView(bindings: {
   function focus(): void {
     if (disposed) return;
     cancelNavigation();
-    (list.querySelector<HTMLButtonElement>(".attention-inspect") ?? refreshButton).focus();
+    (list.querySelector<HTMLButtonElement>(".attention-inspect") ?? heading).focus();
   }
-  const onRefresh = (): void => { message.textContent = ""; refresh(); };
   const onMore = (): void => {
     const nextId = overview?.items[limit]?.id;
     limit += PAGE_SIZE;
     render();
     // The last page hides Show more; continue at the first newly revealed action.
-    (nextId ? rows.get(nextId)?.button ?? refreshButton : refreshButton).focus();
+    (nextId ? rows.get(nextId)?.button ?? heading : heading).focus();
   };
   const onKey = (event: KeyboardEvent): void => {
     if (event.key !== "Escape" || event.defaultPrevented) return;
@@ -224,7 +239,6 @@ export function createAttentionView(bindings: {
     event.stopPropagation();
     cancelNavigation();
   };
-  refreshButton.addEventListener("click", onRefresh);
   moreButton.addEventListener("click", onMore);
   element.addEventListener("keydown", onKey);
   const unsubs = [
@@ -269,7 +283,7 @@ export function createAttentionView(bindings: {
       disposed = true;
       inspectSequence++; loadSequence++;
       if (timer !== undefined) clearTimeout(timer);
-      refreshButton.removeEventListener("click", onRefresh);
+      cancelRetry();
       moreButton.removeEventListener("click", onMore);
       element.removeEventListener("keydown", onKey);
       for (const unsub of unsubs) unsub();
