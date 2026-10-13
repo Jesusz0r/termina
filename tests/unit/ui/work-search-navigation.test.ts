@@ -39,7 +39,8 @@ function harness(value = overview()) {
   const getVerifyReport = vi.fn().mockResolvedValue(null);
   const bridge = { getWorkOverview, getVerifyReport } as unknown as TerminaBridge;
   for (const hook of ["onInstances", "onPlanUpdate", "onModifiedList", "onFileChanged", "onFileDeleted", "onVerifyState",
-    "onTimelineClear", "onFolderOpened", "onProjectClosed", "onAgentStatus", "onTimelinePrefix"] as const) {
+    "onTimelineClear", "onFolderOpened", "onProjectClosed", "onWorldlineUpdate", "onWorldlineRemoved",
+    "onWorldlineRunsChanged", "onEvidenceUpdate", "onPromotionOpened", "onAgentStatus", "onTimelinePrefix"] as const) {
     bridge[hook] = ((callback: () => void) => { callbacks.set(hook, callback); return () => {}; }) as never;
   }
   const onNavigate = vi.fn().mockResolvedValue(true);

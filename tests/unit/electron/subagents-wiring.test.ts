@@ -15,6 +15,7 @@ describe("Subagent Wiring Invariants", () => {
   const host = readFileSync(new URL("../../../electron/subagents.ts", import.meta.url), "utf8");
   const kernel = readFileSync(new URL("../../../agent-core/subagents.ts", import.meta.url), "utf8");
   const agentMain = readFileSync(new URL("../../../agent-core/main.ts", import.meta.url), "utf8");
+  const eligibility = readFileSync(new URL("../../../agent-core/tool-eligibility.ts", import.meta.url), "utf8");
   const manager = readFileSync(new URL("../../../electron/worldlines/manager.ts", import.meta.url), "utf8");
 
   it("spawns delegate to the single host owner", () => {
@@ -99,7 +100,8 @@ describe("Subagent Wiring Invariants", () => {
     assert.match(manager, /TERMINA_WORLDLINE_CANDIDATE: "1"/);
     assert.match(kernel, /isWorldlineCandidateEnv/);
     assert.match(agentMain, /spawn_subagent is disabled in worldline candidates/);
-    assert.match(agentMain, /IS_WORLDLINE_CANDIDATE && def\.name === "spawn_subagent"/);
+    assert.match(agentMain, /sessionOmitsTool\(def\.name, \{\s*worldlineCandidate: IS_WORLDLINE_CANDIDATE,/);
+    assert.match(eligibility, /scope\.worldlineCandidate && name === "spawn_subagent"/);
     assert.match(host, /isWorldlineTerminal\(sourceTerminalId\)/);
     assert.match(host, /subagents are disabled in worldline candidates/);
     assert.match(main, /isWorldlineTerminal: \(terminalId\)/);
