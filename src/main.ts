@@ -1269,11 +1269,39 @@ function disposePane(pane: Pane): void {
   pane.tabEl.remove();
 }
 
+/** The next visible tab in this project, or the previous one when the closed tab was last. */
+function nextOpenPane(closed: Pane): Pane | undefined {
+  const sameProject = (candidate: Pane): boolean => candidate !== closed
+    && (closed.projectId === null || candidate.projectId === closed.projectId);
+  const list = typeof document === "undefined" ? null : document.getElementById("terminal-tabs-list");
+  const tabs = list ? [...list.querySelectorAll<HTMLElement>(".terminal-tab")] : [];
+  const ordered = tabs.flatMap((tab) => {
+    const candidate = [...panes.values()].find((item) => item.tabEl === tab);
+    return candidate && sameProject(candidate) ? [candidate] : [];
+  });
+  if (ordered.length > 0) {
+    const index = tabs.indexOf(closed.tabEl);
+    return ordered.find((candidate) => tabs.indexOf(candidate.tabEl) > index) ?? ordered[ordered.length - 1];
+  }
+  const rest = [...panes.values()].filter(sameProject);
+  return rest[rest.length - 1];
+}
+
+function showNextPane(closed: Pane): void {
+  const next = nextOpenPane(closed);
+  if (next) activatePane(next.instanceId);
+  else {
+    activeId = null;
+    renderChrome();
+  }
+}
+
 async function closePane(instanceId: string): Promise<TerminalCloseResult> {
   const pane = panes.get(instanceId);
   if (!pane || pendingTerminalCloses.has(pane)) return { ok: false, error: "The terminal is unavailable or already closing." };
   const terminalGeneration = pane.generation;
   pendingTerminalCloses.add(pane);
+  const wasActive = activeId === instanceId;
   try {
     const result = await window.termina.closeTerminal(instanceId, terminalGeneration);
     if (!result?.ok) {
@@ -1284,15 +1312,14 @@ async function closePane(instanceId: string): Promise<TerminalCloseResult> {
     const currentPane = panes.get(instanceId);
     if ((currentPane && currentPane !== pane) || pane.generation !== terminalGeneration) return result;
     closingPanes.set(instanceId, { generation: terminalGeneration });
-    if (!currentPane) return result;
+    if (!currentPane) {
+      if (wasActive && (activeId === instanceId || activeId === null || !panes.has(activeId))) showNextPane(pane);
+      return result;
+    }
+    const next = wasActive ? nextOpenPane(pane) : undefined;
     disposePane(pane);
     syncExplorerChanged();
-    if (activeId === instanceId) {
-      // Prefer this project's terminal, never a hidden background project.
-      const candidates = pane.projectId !== null
-        ? [...panes.values()].filter((p) => p.projectId === pane.projectId)
-        : [...panes.values()];
-      const next = candidates[candidates.length - 1];
+    if (wasActive) {
       if (next) activatePane(next.instanceId);
       else {
         activeId = null;
@@ -2564,11 +2591,17 @@ window.termina.onInstances((list: InstanceSummary[]) => {
   const liveIds = new Set(list.map((inst) => inst.id));
 
   let prunedPane = false;
+  let successor: Pane | undefined;
   for (const [id, pane] of [...panes.entries()]) {
     if (liveIds.has(id)) continue;
+    const wasActive = activeId === id;
+    const next = wasActive ? nextOpenPane(pane) : undefined;
     disposePane(pane);
     prunedPane = true;
-    if (activeId === id) activeId = null;
+    if (wasActive) {
+      successor = next;
+      activeId = next?.instanceId ?? null;
+    }
   }
   // A pruned pane takes its changed-file contributions with it.
   if (prunedPane) {
@@ -2602,6 +2635,8 @@ window.termina.onInstances((list: InstanceSummary[]) => {
     if (pane && !pane.exited && (pane.projectId === activeProjectId || pane.projectId === null)) {
       activatePane(pendingActivateId);
     }
+  } else if (successor) {
+    activatePane(successor.instanceId);
   } else {
     const current = activeId ? panes.get(activeId) : undefined;
     if (!current || current.projectId !== activeProjectId) activateProjectPane();

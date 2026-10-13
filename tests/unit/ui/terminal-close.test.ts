@@ -4,7 +4,7 @@ import ts from "typescript";
 import type { TerminalCloseResult } from "../../../shared/types.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-const functions = ["disposePane", "closePane"].map((name) => source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === name)!.getText(source));
+const functions = ["disposePane", "nextOpenPane", "showNextPane", "closePane"].map((name) => source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === name)!.getText(source));
 const code = ts.transpileModule(`${functions.join("\n")}\nreturn closePane;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
 function pane(id: string, projectId = "p1") {
@@ -93,5 +93,6 @@ describe("renderer acknowledged terminal close", () => {
     await h.close("term-1");
     expect(h.first.view.dispose).toHaveBeenCalledOnce();
     expect(h.closingPanes.get("term-1")).toEqual({ generation: 1 });
+    expect(h.activatePane).toHaveBeenCalledExactlyOnceWith("term-2");
   });
 });
