@@ -3,20 +3,21 @@ import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { codexActivitySignals, codexHookFacts, observeCodexHookWire } from "../../../electron/external-cli/codex-activity.ts";
-import { CodexHookServer, codexSocketPath } from "../../../electron/external-cli/codex-hook-server.ts";
-import { codexHome, codexHookCommand, codexLaunchArgs, codexProfileToml, resolveCodexNode, writeCodexHookScript, writeCodexProfile } from "../../../electron/external-cli/codex-launch.ts";
+import { hookActivitySignals, hookFacts, observeHookWire } from "../../../electron/external-cli/activity.ts";
+import { HookServer, hookSocketPath } from "../../../electron/external-cli/hook-server.ts";
+import { hookCommand, resolveHookNode, writeHookScript } from "../../../electron/external-cli/hook-script.ts";
+import { codexHome, codexLaunchArgs, codexProfileToml, writeCodexProfile } from "../../../electron/external-cli/codex.ts";
 
 describe("Codex hook facts", () => {
   it("does not start work from a prompt or session open", () => {
-    expect(codexHookFacts({ hook_event_name: "UserPromptSubmit", prompt: "fix the login" })).toEqual([]);
-    expect(codexHookFacts({ hook_event_name: "SessionStart", source: "startup" })).toEqual([]);
-    expect(codexHookFacts({ hook_event_name: "SubagentStart" })).toEqual([]);
-    expect(codexHookFacts(null)).toEqual([]);
+    expect(hookFacts("codex", { hook_event_name: "UserPromptSubmit", prompt: "fix the login" })).toEqual([]);
+    expect(hookFacts("codex", { hook_event_name: "SessionStart", source: "startup" })).toEqual([]);
+    expect(hookFacts("codex", { hook_event_name: "SubagentStart" })).toEqual([]);
+    expect(hookFacts("codex", null)).toEqual([]);
   });
 
   it("maps a tool, a permission, a failed result, and a subagent stop", () => {
-    expect(codexHookFacts({
+    expect(hookFacts("codex", {
       hook_event_name: "PreToolUse",
       tool_name: "apply_patch",
       tool_use_id: "call-1",
@@ -24,11 +25,11 @@ describe("Codex hook facts", () => {
       { t: "external_turn" },
       { t: "external_tool", target: "call-1" },
     ]);
-    expect(codexHookFacts({ hook_event_name: "PermissionRequest", tool_name: "Bash" })).toEqual([
+    expect(hookFacts("codex", { hook_event_name: "PermissionRequest", tool_name: "Bash" })).toEqual([
       { t: "external_turn" },
       { t: "external_permission", requestId: "codex:Bash" },
     ]);
-    expect(codexHookFacts({
+    expect(hookFacts("codex", {
       hook_event_name: "PostToolUse",
       tool_name: "Bash",
       tool_use_id: "call-2",
@@ -38,10 +39,10 @@ describe("Codex hook facts", () => {
       { t: "external_permission_clear", requestId: "codex:Bash" },
       { t: "external_tool_end", target: "call-2", isError: true },
     ]);
-    expect(codexHookFacts({ hook_event_name: "SubagentStop", agent_id: "child" })).toEqual([
+    expect(hookFacts("codex", { hook_event_name: "SubagentStop", agent_id: "child" })).toEqual([
       { t: "external_subagent_stop" },
     ]);
-    const signals = codexActivitySignals({ hook_event_name: "PermissionRequest", tool_name: "Bash" }, 4, 40);
+    const signals = hookActivitySignals("codex", { hook_event_name: "PermissionRequest", tool_name: "Bash" }, 4, 40);
     expect(signals[1]).toMatchObject({ t: "intervention_requested", requestId: "codex:Bash", kind: "permission" });
   });
 });
@@ -50,7 +51,7 @@ describe("Codex launch profile", () => {
   it("adds an observational profile without bypassing hook trust", () => {
     expect(codexLaunchArgs()).toEqual(["-p", "termina"]);
     expect(codexLaunchArgs().join(" ")).not.toContain("dangerously-bypass");
-    const command = codexHookCommand(
+    const command = hookCommand(
       "/Users/a/Library/Application Support/node",
       "/Users/a/Library/Application Support/Termina/codex-hook.mjs",
     );
@@ -80,8 +81,8 @@ describe("Codex hook wire", () => {
       tool_input: { command: "x".repeat(100) },
     }).slice(0, 180);
     const tail = `,"tool_response":{"exit_code":2},"tool_use_id":"call-9"}`;
-    const observed = observeCodexHookWire({ head, tail });
-    const facts = codexHookFacts(observed);
+    const observed = observeHookWire({ head, tail });
+    const facts = hookFacts("codex", observed);
     expect(facts).toContainEqual({ t: "external_permission_clear", requestId: "codex:Bash" });
     expect(facts).toContainEqual({ t: "external_tool_end", target: "call-9", isError: true });
   });
@@ -91,15 +92,15 @@ describe("Codex hook wire", () => {
     const dir = await mkdtemp(join(tmpdir(), "termina-node-"));
     await writeFile(join(dir, "node"), "");
     await chmod(join(dir, "node"), 0o755);
-    expect(resolveCodexNode(join(dir, "codex"))).toBe(join(dir, "node"));
+    expect(resolveHookNode(join(dir, "codex"))).toBe(join(dir, "node"));
     const empty = await mkdtemp(join(tmpdir(), "termina-no-node-"));
-    expect(resolveCodexNode(join(empty, "codex"), () => null)).toBeNull();
+    expect(resolveHookNode(join(empty, "codex"), () => null)).toBeNull();
   });
 });
 
 describe("Codex hook socket", () => {
   it("drops a message whose token belongs to another terminal", () => {
-    const server = new CodexHookServer(() => undefined);
+    const server = new HookServer(() => undefined);
     const token = server.issue("term-1", 3);
     expect(server.accept(JSON.stringify({
       v: 1, token, terminalId: "term-2", generation: 3, payload: "{}",
@@ -117,8 +118,8 @@ describe("Codex hook socket", () => {
   });
 
   it("keeps a short socket under user data and refuses to reuse an overlong path", () => {
-    expect(codexSocketPath("/tmp/termina", 42)).toBe("/tmp/termina/codex-hook-42.sock");
-    const path = codexSocketPath(`/tmp/${"a".repeat(120)}`, 42);
+    expect(hookSocketPath("/tmp/termina", 42)).toBe("/tmp/termina/external-hook-42.sock");
+    const path = hookSocketPath(`/tmp/${"a".repeat(120)}`, 42);
     expect(path.includes("a".repeat(80))).toBe(false);
     expect(path.endsWith("hook.sock")).toBe(true);
   });
@@ -127,9 +128,9 @@ describe("Codex hook socket", () => {
     const dir = await mkdtemp(join(tmpdir(), "th-"));
     const script = join(dir, "hook.mjs");
     const sock = join(dir, "hook.sock");
-    await writeCodexHookScript(script);
+    await writeHookScript(script);
     const received: Array<{ head?: string; tail?: string; payload?: string }> = [];
-    const server = new CodexHookServer((message) => received.push(message));
+    const server = new HookServer((message) => received.push(message));
     await server.listen(sock);
     const token = server.issue("term-1", 1);
     const body = JSON.stringify({
@@ -159,9 +160,45 @@ describe("Codex hook socket", () => {
       });
       expect(code).toBe(0);
       expect(received).toHaveLength(1);
-      const facts = codexHookFacts(observeCodexHookWire(received[0]!));
+      const facts = hookFacts("codex", observeHookWire(received[0]!));
       expect(facts).toContainEqual({ t: "external_permission_clear", requestId: "codex:Bash" });
       expect(facts).toContainEqual({ t: "external_tool_end", target: "call-9", isError: true });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("stamps the Antigravity event onto a payload that does not name one", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "th-stamp-"));
+    const script = join(dir, "hook.mjs");
+    const sock = join(dir, "hook.sock");
+    await writeHookScript(script);
+    const received: Array<{ payload?: string }> = [];
+    const server = new HookServer((message) => received.push(message));
+    await server.listen(sock);
+    const token = server.issue("term-1", 1);
+    try {
+      const code = await new Promise<number>((resolve, reject) => {
+        const child = spawn(process.execPath, [script], {
+          env: {
+            TERMINA_EXTERNAL_HOOK_SOCKET: sock,
+            TERMINA_EXTERNAL_HOOK_TOKEN: token,
+            TERMINA_TERMINAL_ID: "term-1",
+            TERMINA_TERMINAL_GENERATION: "1",
+            TERMINA_HOOK_EVENT: "Stop",
+          },
+        });
+        const timer = setTimeout(() => {
+          child.kill();
+          reject(new Error("hook script timed out"));
+        }, 3000);
+        child.on("error", (error) => { clearTimeout(timer); reject(error); });
+        child.on("exit", (status) => { clearTimeout(timer); resolve(status ?? 1); });
+        child.stdin.end(`\n\n{"fullyIdle":true,"note":"${"x".repeat(500)} hook_event_name"}`);
+      });
+      expect(code).toBe(0);
+      expect(received[0]?.payload).toContain('"hook_event_name":"Stop"');
+      expect(hookFacts("gemini", observeHookWire(received[0]!))).toEqual([{ t: "external_stop" }]);
     } finally {
       await server.close();
     }

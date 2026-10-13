@@ -78,10 +78,10 @@ import {
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
 import { filterAgentEnvironment } from "./agent-env.js";
-import { externalActivitySignals, observeCodexHookWire } from "./external-cli/codex-activity.js";
-import { externalCliLaunch, prepareExternalCli } from "./external-cli/install-hooks.js";
-import { CodexHookServer, codexSocketPath, type CodexHookMessage } from "./external-cli/codex-hook-server.js";
-import { codexHome, codexHookCommand, codexLaunchArgs, resolveCodexNode, writeCodexHookScript, writeCodexProfile } from "./external-cli/codex-launch.js";
+import { hookActivitySignals, observeHookWire } from "./external-cli/activity.js";
+import { HookServer, hookSocketPath, type HookMessage } from "./external-cli/hook-server.js";
+import { hookCommand, resolveHookNode, writeHookScript } from "./external-cli/hook-script.js";
+import { externalCliLaunch, prepareExternalCli } from "./external-cli/prepare.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
 import { MAX_SESSION_SEARCH_QUERY } from "./session-search.js";
@@ -798,7 +798,7 @@ class TerminaApp {
 
   /** The app-owned worlds root. */
   private userDataDir = process.env.TERMINA_USER_DATA_DIR ?? app.getPath("userData");
-  private codexHooks: { server: CodexHookServer; socketPath: string } | null = null;
+  private externalHooks: { server: HookServer; socketPath: string } | null = null;
   /** Durable provenance for the launch-persistent events root. */
   private eventsDirAnchorPath = join(this.userDataDir, "termina-events-root.json");
   /** Durable root for core finalization artifacts, separate from launch scratch. */
@@ -3252,16 +3252,13 @@ class TerminaApp {
       const spec = externalCliLaunch(externalCli);
       const bin = this.paths.findOnPath(spec.bin);
       if (!bin) throw new Error(`${spec.bin} is not installed`);
-      const nodePath = resolveCodexNode(bin, (name) => this.paths.findOnPath(name));
+      const nodePath = resolveHookNode(bin, (name) => this.paths.findOnPath(name));
       if (!nodePath) throw new Error(`node was not found beside ${spec.bin}`);
-      const hooks = await this.ensureCodexHooks();
+      const hooks = await this.ensureExternalHooks();
       const scriptPath = join(this.userDataDir, "external-hook.mjs");
-      await writeCodexHookScript(scriptPath);
-      const command = codexHookCommand(nodePath, scriptPath);
-      if (externalCli === "codex") await writeCodexProfile(codexHome(), command);
-      const prepared = externalCli === "codex"
-        ? { args: codexLaunchArgs(), env: {} as Record<string, string> }
-        : await prepareExternalCli(externalCli, command, { userData: this.userDataDir });
+      await writeHookScript(scriptPath);
+      const command = hookCommand(nodePath, scriptPath);
+      const prepared = await prepareExternalCli(externalCli, command, { userData: this.userDataDir });
       opts?.spawnGuard?.();
       cmd = bin;
       args = prepared.args;
@@ -3367,8 +3364,8 @@ class TerminaApp {
         rendererTarget,
         beforeSpawn: (target) => {
           opts?.spawnGuard?.();
-          if (externalCli && this.codexHooks) {
-            env.TERMINA_EXTERNAL_HOOK_TOKEN = this.codexHooks.server.issue(target.id, target.generation);
+          if (externalCli && this.externalHooks) {
+            env.TERMINA_EXTERNAL_HOOK_TOKEN = this.externalHooks.server.issue(target.id, target.generation);
             env.TERMINA_TERMINAL_ID = target.id;
             env.TERMINA_TERMINAL_GENERATION = String(target.generation);
           }
@@ -3407,7 +3404,7 @@ class TerminaApp {
       });
     } catch (error) {
       if (admittedGeneration !== undefined) this.sourceAdmissions.remove(id, admittedGeneration);
-      this.codexHooks?.server.revoke(id);
+      this.externalHooks?.server.revoke(id);
       throw error;
     }
     if (owner) {
@@ -3462,7 +3459,7 @@ class TerminaApp {
     // The exit marker was delivered and acknowledged by PtyEgressScheduler;
     // it is not sent through the unsequenced generic channel.
     this.closeRunOnExit(inst);
-    this.codexHooks?.server.revoke(inst.id);
+    this.externalHooks?.server.revoke(inst.id);
     this.foldActivity(inst, { t: "pty_exit", seq: inst.timelineSeq, at: Date.now() }, rendererTarget);
     void this.cleanupPromptPayloads(inst);
     for (const event of inst.timeline) {
@@ -7048,22 +7045,22 @@ class TerminaApp {
     }
   }
 
-  private async ensureCodexHooks(): Promise<{ server: CodexHookServer; socketPath: string }> {
-    if (this.codexHooks) return this.codexHooks;
-    const socketPath = codexSocketPath(this.userDataDir);
-    const server = new CodexHookServer((message) => this.ingestCodexHook(message));
+  private async ensureExternalHooks(): Promise<{ server: HookServer; socketPath: string }> {
+    if (this.externalHooks) return this.externalHooks;
+    const socketPath = hookSocketPath(this.userDataDir);
+    const server = new HookServer((message) => this.ingestExternalHook(message));
     await server.listen(socketPath);
-    this.codexHooks = { server, socketPath };
-    return this.codexHooks;
+    this.externalHooks = { server, socketPath };
+    return this.externalHooks;
   }
 
-  private ingestCodexHook(message: CodexHookMessage): void {
+  private ingestExternalHook(message: HookMessage): void {
     try {
       const inst = this.runtime.get(message.terminalId);
       if (!inst?.externalCli || inst.generation !== message.generation || inst.closed || inst.pty.hasExited) return;
       const at = Date.now();
-      const observed = observeCodexHookWire(message);
-      for (const signal of externalActivitySignals(inst.externalCli, observed, ++inst.externalActivitySeq, at)) {
+      const observed = observeHookWire(message);
+      for (const signal of hookActivitySignals(inst.externalCli, observed, ++inst.externalActivitySeq, at)) {
         this.foldActivity(inst, signal);
       }
     } catch {
@@ -9991,8 +9988,8 @@ class TerminaApp {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    await this.codexHooks?.server.close();
-    this.codexHooks = null;
+    await this.externalHooks?.server.close();
+    this.externalHooks = null;
     this.sourceAdmissions.dispose();
     this.editorDraftSession.reset();
     if (this.loginHintTimer) {

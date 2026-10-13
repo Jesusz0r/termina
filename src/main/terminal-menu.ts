@@ -7,7 +7,7 @@ const EXTERNAL_MENU: Array<{ cli: ExternalCli; label: string; desc: string }> = 
   { cli: "codex", label: "Codex", desc: "original Codex TUI; trust its hook for activity" },
   { cli: "claude", label: "Claude", desc: "original Claude Code TUI; trust its hook for activity" },
   { cli: "grok", label: "Grok", desc: "original Grok TUI; its hook reports activity" },
-  { cli: "gemini", label: "Gemini", desc: "original Gemini CLI; its hook reports activity" },
+  { cli: "gemini", label: "Gemini", desc: "Antigravity CLI (agy); its hook reports activity" },
   { cli: "muse", label: "Muse", desc: "original Muse Code TUI; its hook reports activity" },
 ];
 

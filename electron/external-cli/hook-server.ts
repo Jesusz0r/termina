@@ -1,5 +1,5 @@
 /**
- * Local socket that receives observational Codex hook messages.
+ * Local socket that receives observational hook messages from any external CLI.
  * One token per terminal generation. A late or cross-terminal message is dropped.
  */
 import { randomBytes } from "node:crypto";
@@ -9,11 +9,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isRecord } from "../../shared/guards.ts";
 
-export const CODEX_HOOK_MESSAGE_MAX_BYTES = 256 * 1024;
-const CODEX_HOOK_HEAD_MAX_BYTES = 32 * 1024;
-const CODEX_HOOK_TAIL_MAX_BYTES = 16 * 1024;
+export const HOOK_MESSAGE_MAX_BYTES = 256 * 1024;
+const HOOK_HEAD_MAX_BYTES = 32 * 1024;
+const HOOK_TAIL_MAX_BYTES = 16 * 1024;
 
-export type CodexHookMessage = {
+export type HookMessage = {
   token: string;
   terminalId: string;
   generation: number;
@@ -23,22 +23,22 @@ export type CodexHookMessage = {
 };
 
 /** Prefer a per-process socket under user data. A too-long path gets a private tmp directory. */
-export function codexSocketPath(userDataDir: string, pid = process.pid): string {
-  const preferred = join(userDataDir, `codex-hook-${pid}.sock`);
+export function hookSocketPath(userDataDir: string, pid = process.pid): string {
+  const preferred = join(userDataDir, `external-hook-${pid}.sock`);
   if (Buffer.byteLength(preferred) <= 100) return preferred;
-  const dir = join(tmpdir(), `termina-codex-${randomBytes(6).toString("hex")}`);
+  const dir = join(tmpdir(), `termina-external-hook-${randomBytes(6).toString("hex")}`);
   mkdirSync(dir, { mode: 0o700 });
   return join(dir, "hook.sock");
 }
 
 type BoundToken = { terminalId: string; generation: number };
 
-export class CodexHookServer {
+export class HookServer {
   private server: Server | null = null;
   private socketPath: string | null = null;
   private readonly tokens = new Map<string, BoundToken>();
 
-  constructor(private readonly onMessage: (message: CodexHookMessage) => void) {}
+  constructor(private readonly onMessage: (message: HookMessage) => void) {}
 
   async listen(socketPath: string): Promise<void> {
     if (this.server) return;
@@ -75,8 +75,8 @@ export class CodexHookServer {
   }
 
   /** Validate one connection body. Does not apply activity. */
-  accept(raw: string): CodexHookMessage | null {
-    if (raw.length === 0 || Buffer.byteLength(raw) > CODEX_HOOK_MESSAGE_MAX_BYTES) return null;
+  accept(raw: string): HookMessage | null {
+    if (raw.length === 0 || Buffer.byteLength(raw) > HOOK_MESSAGE_MAX_BYTES) return null;
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { return null; }
     if (!isRecord(parsed) || parsed.v !== 1) return null;
@@ -86,9 +86,9 @@ export class CodexHookServer {
     const head = typeof parsed.head === "string" ? parsed.head : undefined;
     const tail = typeof parsed.tail === "string" ? parsed.tail : undefined;
     if (payload === undefined && head === undefined) return null;
-    if (payload !== undefined && Buffer.byteLength(payload) > CODEX_HOOK_MESSAGE_MAX_BYTES) return null;
-    if (head !== undefined && Buffer.byteLength(head) > CODEX_HOOK_HEAD_MAX_BYTES) return null;
-    if (tail !== undefined && Buffer.byteLength(tail) > CODEX_HOOK_TAIL_MAX_BYTES) return null;
+    if (payload !== undefined && Buffer.byteLength(payload) > HOOK_MESSAGE_MAX_BYTES) return null;
+    if (head !== undefined && Buffer.byteLength(head) > HOOK_HEAD_MAX_BYTES) return null;
+    if (tail !== undefined && Buffer.byteLength(tail) > HOOK_TAIL_MAX_BYTES) return null;
     const bound = this.tokens.get(parsed.token);
     if (!bound || bound.terminalId !== parsed.terminalId || bound.generation !== parsed.generation) return null;
     return {
@@ -127,7 +127,7 @@ export class CodexHookServer {
     };
     socket.on("data", (chunk: Buffer) => {
       bytes += chunk.length;
-      if (bytes > CODEX_HOOK_MESSAGE_MAX_BYTES) {
+      if (bytes > HOOK_MESSAGE_MAX_BYTES) {
         settled = true;
         socket.destroy();
         return;

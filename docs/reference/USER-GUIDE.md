@@ -146,7 +146,7 @@ focus to its tab. `Escape` in the terminal remains terminal input.
 Click `＋` (**New terminal**) next to the terminal tabs, or press
 `Cmd/Ctrl+T`, to choose what to open: **Agent** (Termina's in-house agent), an
 original agent TUI when its program is on `PATH` (**Codex**, **Claude**,
-**Grok**, **Gemini**, or **Muse**), or a detected shell (`zsh`, `bash`, …).
+**Grok**, **Gemini** via `agy`, or **Muse**), or a detected shell (`zsh`, `bash`, …).
 Nothing starts until you pick a row. The new agent reuses the active agent's
 model when available; isolated sessions also inherit its effort. Main retains
 the existing admission policy: when a live terminal overlaps the project

@@ -1,5 +1,5 @@
 /**
- * Codex hook payloads → the shared activity signals.
+ * External CLI hook payloads → the shared activity signals.
  *
  * Observational only. This does not approve a tool, inject a prompt, or
  * decide that a Stop hook finished the turn. UserPromptSubmit can still be
@@ -8,8 +8,9 @@
 import type { ActivitySignal } from "../agent-activity.ts";
 import { isRecord } from "../../shared/guards.ts";
 import type { ExternalCli } from "../../shared/types.ts";
+import { museNotificationFacts } from "./muse.ts";
 
-export type CodexHookFact =
+export type HookFact =
   | { t: "external_turn" }
   | { t: "external_stop" }
   | { t: "external_permission"; requestId: string }
@@ -26,12 +27,22 @@ function textField(record: Record<string, unknown>, ...keys: string[]): string {
   return "";
 }
 
+function toolCallRecord(record: Record<string, unknown>): Record<string, unknown> | null {
+  const call = record.toolCall ?? record.tool_call;
+  return isRecord(call) ? call : null;
+}
+
 function toolName(record: Record<string, unknown>): string {
-  return textField(record, "tool_name", "toolName");
+  return textField(record, "tool_name", "toolName") || textField(toolCallRecord(record) ?? {}, "name");
+}
+
+function stepTarget(record: Record<string, unknown>): string {
+  const step = record.stepIdx ?? record.step_idx;
+  return typeof step === "number" && Number.isInteger(step) && step >= 0 ? `step:${step}` : "";
 }
 
 function toolTarget(record: Record<string, unknown>): string {
-  return textField(record, "tool_use_id", "toolUseId") || toolName(record);
+  return textField(record, "tool_use_id", "toolUseId") || stepTarget(record) || toolName(record);
 }
 
 function permissionId(prefix: string, record: Record<string, unknown>): string {
@@ -52,10 +63,8 @@ const EVENT_NAMES: Record<string, string> = {
   subagentstart: "SubagentStart",
   subagentstop: "SubagentStop",
   notification: "Notification",
-  beforeagent: "BeforeAgent",
-  afteragent: "AfterAgent",
-  beforetool: "BeforeTool",
-  aftertool: "AfterTool",
+  preinvocation: "PreInvocation",
+  postinvocation: "PostInvocation",
 };
 
 function eventName(record: Record<string, unknown>): string {
@@ -98,7 +107,7 @@ function normalizedHook(record: Record<string, unknown>): Record<string, unknown
   const event = eventName(record);
   if (!event) return null;
   const name = toolName(record);
-  const id = textField(record, "tool_use_id", "toolUseId");
+  const id = textField(record, "tool_use_id", "toolUseId") || stepTarget(record);
   const type = textField(record, "type", "notification_type", "notificationType");
   const response = record.tool_response ?? record.toolResponse ?? record.result;
   const error = typeof record.error === "string" ? record.error : undefined;
@@ -115,8 +124,9 @@ function normalizedHook(record: Record<string, unknown>): Record<string, unknown
 /**
  * Keep the fields activity needs. A complete body is parsed. A body split
  * around a huge tool input uses the head for names and the tail for the result.
+ * Antigravity nests the tool under `toolCall` and identifies a step with `stepIdx`.
  */
-export function observeCodexHookWire(parts: { payload?: string; head?: string; tail?: string }): unknown {
+export function observeHookWire(parts: { payload?: string; head?: string; tail?: string }): unknown {
   if (typeof parts.payload === "string") {
     try {
       const parsed = JSON.parse(parts.payload);
@@ -127,19 +137,34 @@ export function observeCodexHookWire(parts: { payload?: string; head?: string; t
   return scannedHook(parts.head ?? "", parts.tail ?? "");
 }
 
+function toolCallName(raw: string): string | null {
+  const match = /"toolCall"\s*:\s*\{\s*"name"\s*:\s*"([^"\\]{1,200})"/.exec(raw);
+  return match?.[1] ?? null;
+}
+
+function stepIndex(raw: string): number | undefined {
+  const match = /"(?:stepIdx|step_idx)"\s*:\s*(\d+)/.exec(raw);
+  if (!match) return undefined;
+  const step = Number(match[1]);
+  return Number.isInteger(step) ? step : undefined;
+}
+
 function scannedHook(head: string, tail: string): Record<string, unknown> | null {
   const event = fieldAny(head, ["hook_event_name", "hookEventName"]) ?? fieldAny(tail, ["hook_event_name", "hookEventName"]);
   if (!event) return null;
-  const tool_name = fieldAny(head, ["tool_name", "toolName"]) ?? fieldAny(tail, ["tool_name", "toolName"]);
+  const tool_name = fieldAny(head, ["tool_name", "toolName"]) ?? fieldAny(tail, ["tool_name", "toolName"])
+    ?? toolCallName(head) ?? toolCallName(tail);
   const tool_use_id = fieldAny(head, ["tool_use_id", "toolUseId"]) ?? fieldAny(tail, ["tool_use_id", "toolUseId"]);
   const type = fieldAny(head, ["type", "notification_type", "notificationType"])
     ?? fieldAny(tail, ["type", "notification_type", "notificationType"]);
   const error = fieldAny(tail, ["error"]) ?? fieldAny(head, ["error"]);
+  const stepIdx = stepIndex(head) ?? stepIndex(tail);
   const response = responseFrom(tail);
   return normalizedHook({
     hook_event_name: event,
     ...(tool_name ? { tool_name } : {}),
     ...(tool_use_id ? { tool_use_id } : {}),
+    ...(stepIdx !== undefined ? { stepIdx } : {}),
     ...(type ? { type } : {}),
     ...(response ? { tool_response: response } : {}),
     ...(error ? { error } : {}),
@@ -153,14 +178,9 @@ function toolErrored(payload: Record<string, unknown>, force = false): boolean {
     || isRecord(payload.error);
 }
 
-function geminiPermission(payload: Record<string, unknown>): boolean {
-  const type = textField(payload, "type", "notification_type", "notificationType");
-  return type === "ToolPermission";
-}
-
-function toolEnd(cli: ExternalCli, payload: Record<string, unknown>, forceError = false): CodexHookFact[] {
+function toolEnd(cli: ExternalCli, payload: Record<string, unknown>, forceError = false): HookFact[] {
   const target = toolTarget(payload);
-  const facts: CodexHookFact[] = [
+  const facts: HookFact[] = [
     { t: "external_turn" },
     { t: "external_permission_clear", requestId: permissionId(cli, payload) },
   ];
@@ -169,36 +189,33 @@ function toolEnd(cli: ExternalCli, payload: Record<string, unknown>, forceError 
 }
 
 /** Facts for one external CLI hook. Unknown events produce none. */
-export function externalHookFacts(cli: ExternalCli, payload: unknown): CodexHookFact[] {
+export function hookFacts(cli: ExternalCli, payload: unknown): HookFact[] {
   if (!isRecord(payload)) return [];
   switch (eventName(payload)) {
     case "UserPromptSubmit":
     case "SessionStart":
     case "SubagentStart":
       return [];
-    case "BeforeAgent":
+    case "PreInvocation":
+      return cli === "gemini" ? [{ t: "external_turn" }] : [];
+    case "PostInvocation":
       return [];
-    case "PreToolUse":
-    case "BeforeTool": {
+    case "PreToolUse": {
       const target = toolTarget(payload);
       return target ? [{ t: "external_turn" }, { t: "external_tool", target }] : [{ t: "external_turn" }];
     }
     case "PermissionRequest":
       return [{ t: "external_turn" }, { t: "external_permission", requestId: permissionId(cli, payload) }];
     case "Notification":
-      if (cli === "muse" || (cli === "gemini" && geminiPermission(payload))) {
-        return [{ t: "external_turn" }, { t: "external_permission", requestId: permissionId(cli, payload) }];
-      }
+      if (cli === "muse") return museNotificationFacts(permissionId(cli, payload));
       return [];
     case "PostToolUse":
-    case "AfterTool":
       return toolEnd(cli, payload);
     case "PostToolUseFailure":
       return toolEnd(cli, payload, true);
     case "Stop":
     case "StopFailure":
     case "SessionEnd":
-    case "AfterAgent":
       return [{ t: "external_stop" }];
     case "SubagentStop":
       return [{ t: "external_subagent_stop" }];
@@ -207,23 +224,10 @@ export function externalHookFacts(cli: ExternalCli, payload: unknown): CodexHook
   }
 }
 
-/** Codex hook facts. Field names stay the ones Codex documents. */
-export function codexHookFacts(payload: unknown): CodexHookFact[] {
-  return externalHookFacts("codex", payload);
-}
-
 /** Activity signals for one hook. Permission uses the existing intervention owner. */
-export function externalActivitySignals(cli: ExternalCli, payload: unknown, seq: number, at: number): ActivitySignal[] {
-  return activitySignals(externalHookFacts(cli, payload), seq, at);
-}
-
-export function codexActivitySignals(payload: unknown, seq: number, at: number): ActivitySignal[] {
-  return externalActivitySignals("codex", payload, seq, at);
-}
-
-function activitySignals(facts: CodexHookFact[], seq: number, at: number): ActivitySignal[] {
+export function hookActivitySignals(cli: ExternalCli, payload: unknown, seq: number, at: number): ActivitySignal[] {
   const signals: ActivitySignal[] = [];
-  for (const fact of facts) {
+  for (const fact of hookFacts(cli, payload)) {
     if (fact.t === "external_permission") {
       signals.push({
         t: "intervention_requested",

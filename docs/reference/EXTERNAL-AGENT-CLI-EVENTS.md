@@ -2,7 +2,7 @@
 
 Fecha de revisión: 7 de octubre de 2026.
 
-Estado: investigación del 7 de octubre de 2026. El menú lanza el TUI original de Codex, Claude Code, Grok, Gemini CLI y Muse Code, con un hook observacional que alimenta el mismo reductor de actividad. No es soporte completo: no hay una prueba con un prompt real, y Termina no restaura ni bifurca esas sesiones. Los contratos consultados son [Codex](https://developers.openai.com/codex/hooks), [Claude Code](https://code.claude.com/docs/en/hooks), [Grok](https://docs.x.ai/build/features/hooks), [Gemini CLI](https://geminicli.com/docs/hooks/reference/) y [Muse Code](https://dev.meta.ai/docs/muse-code/extending). Esta nota no cambia las reglas de [AGENTS.md](../../AGENTS.md).
+Estado: investigación del 7 de octubre de 2026. El menú lanza el TUI original de Codex, Claude Code, Grok, Antigravity CLI (`agy`) y Muse Code, con un hook observacional que alimenta el mismo reductor de actividad. No es soporte completo: no hay una prueba con un prompt real, y Termina no restaura ni bifurca esas sesiones. Los contratos consultados son [Codex](https://developers.openai.com/codex/hooks), [Claude Code](https://code.claude.com/docs/en/hooks), [Grok](https://docs.x.ai/build/features/hooks), [Antigravity CLI](https://antigravity.google/docs/hooks/) y [Muse Code](https://dev.meta.ai/docs/muse-code/extending). Esta nota no cambia las reglas de [AGENTS.md](../../AGENTS.md).
 
 ## Objetivo de producto
 
@@ -29,15 +29,15 @@ Abrir uno de esos CLI desde una terminal shell no lo conecta automáticamente co
 
 La tabla compara hooks, que permiten observar eventos mientras se conserva la interfaz del CLI. Los nombres parecidos no garantizan el mismo esquema, orden, cobertura o significado.
 
-| Señal | [Codex](https://learn.chatgpt.com/docs/hooks) | [Claude Code](https://code.claude.com/docs/en/hooks) | [Grok Build](https://docs.x.ai/build/features/hooks) | [Gemini CLI](https://geminicli.com/docs/hooks/reference/) |
+| Señal | [Codex](https://learn.chatgpt.com/docs/hooks) | [Claude Code](https://code.claude.com/docs/en/hooks) | [Grok Build](https://docs.x.ai/build/features/hooks) | [Antigravity CLI](https://antigravity.google/docs/hooks/) |
 | --- | --- | --- | --- | --- |
-| Prompt recibido | `UserPromptSubmit` | `UserPromptSubmit` | `UserPromptSubmit` | `BeforeAgent` |
-| Fin de respuesta | `Stop` | `Stop` | `Stop` | `AfterAgent` |
-| Herramienta por ejecutar | `PreToolUse` | `PreToolUse` | `PreToolUse` | `BeforeTool` |
-| Herramienta ejecutada | `PostToolUse` | `PostToolUse`, `PostToolUseFailure` | `PostToolUse`, `PostToolUseFailure` | `AfterTool`, con error en el resultado cuando existe |
-| Solicitud de permiso | `PermissionRequest` | `PermissionRequest` | No figura como hook en la lista consultada | `Notification`, tipo `ToolPermission` |
-| Aviso del CLI | No figura `Notification` en la lista consultada | `Notification` | `Notification` | `Notification` |
-| Ciclo de sesión | `SessionStart`, `SessionEnd` | `SessionStart`, `SessionEnd` | `SessionStart`, `SessionEnd` | `SessionStart`, `SessionEnd` |
+| Prompt recibido | `UserPromptSubmit` | `UserPromptSubmit` | `UserPromptSubmit` | `PreInvocation` |
+| Fin de respuesta | `Stop` | `Stop` | `Stop` | `Stop` |
+| Herramienta por ejecutar | `PreToolUse` | `PreToolUse` | `PreToolUse` | `PreToolUse` |
+| Herramienta ejecutada | `PostToolUse` | `PostToolUse`, `PostToolUseFailure` | `PostToolUse`, `PostToolUseFailure` | `PostToolUse`, con `error` cuando la herramienta falla |
+| Solicitud de permiso | `PermissionRequest` | `PermissionRequest` | No figura como hook en la lista consultada | No figura como hook en la lista consultada |
+| Aviso del CLI | No figura `Notification` en la lista consultada | `Notification` | `Notification` | No figura `Notification` en la lista consultada |
+| Ciclo de sesión | `SessionStart`, `SessionEnd` | `SessionStart`, `SessionEnd` | `SessionStart`, `SessionEnd` | `SessionStart` |
 | Ciclo de subagente | `SubagentStart`, `SubagentStop` | `SubagentStart`, `SubagentStop` | `SubagentStart`, `SubagentStop` | No figura en la referencia de hooks consultada |
 
 ### Codex
@@ -56,11 +56,9 @@ Los hooks aceptan comandos o HTTP y usan campos camelCase: `hookEventName`, `ses
 
 Grok documenta ACP con `grok agent stdio`. ACP define `session/request_permission`, actualizaciones de herramientas y el resultado de `session/prompt` con `stopReason`. Esa ruta permite estudiar permisos explícitos; su cobertura concreta en Grok sigue pendiente de prueba. [Grok headless y ACP](https://docs.x.ai/build/cli/headless-scripting), [herramientas ACP](https://agentclientprotocol.com/protocol/v1/tool-calls), [turnos ACP](https://agentclientprotocol.com/protocol/v1/prompt-turn).
 
-### Gemini CLI
+### Antigravity CLI (`agy`)
 
-`BeforeAgent` ocurre antes de planificar y puede rechazar el prompt. `AfterAgent` puede forzar un reintento mediante otros hooks. `AfterTool` incluye entrada y resultado; `Notification` documenta `ToolPermission` y datos de la alerta, sin resolver permisos. [Hooks de Gemini](https://geminicli.com/docs/hooks/reference/).
-
-Gemini documenta ACP mediante `gemini --acp`. También ofrece avisos de terminal experimentales mediante OSC 9 o BEL, deshabilitados por defecto. Estos avisos pueden servir como señal visual, pero no reemplazan los eventos necesarios para correlacionar runs y herramientas. [Gemini ACP](https://geminicli.com/docs/cli/acp-mode/), [notificaciones de Gemini](https://geminicli.com/docs/cli/notifications/).
+El comando es `agy`. Los hooks globales viven en `~/.gemini/config/hooks.json`. `PreInvocation` ocurre antes de cada llamada al modelo. `PreToolUse` y `PostToolUse` traen `toolCall.name` y `stepIdx`; `PostToolUse` incluye `error` cuando la herramienta falla. `Stop` cierra el ciclo. La referencia consultada no documenta un hook de permiso. [Hooks de Antigravity](https://antigravity.google/docs/hooks/).
 
 ## Salidas estructuradas alternativas
 
@@ -69,7 +67,7 @@ Gemini documenta ACP mediante `gemini --acp`. También ofrece avisos de terminal
 | Codex | `codex exec --json`; app-server | JSONL con `turn.started`, `turn.completed`, `turn.failed` e `item.*`; app-server ofrece conversación y solicitudes al cliente. [Modo no interactivo](https://learn.chatgpt.com/docs/non-interactive-mode), [app-server](https://learn.chatgpt.com/docs/app-server) |
 | Claude Code | `claude -p --output-format stream-json --verbose` | Salida de print mode; `--include-hook-events` añade eventos de hooks, con excepciones documentadas. No es el TUI interactivo. [Referencia CLI](https://code.claude.com/docs/en/cli-reference) |
 | Grok Build | `grok -p "…" --output-format streaming-json`; `grok agent stdio` | NDJSON en headless o JSON-RPC por ACP. La ayuda local identifica streaming-json como actualizaciones ACP. [Headless y scripting](https://docs.x.ai/build/cli/headless-scripting) |
-| Gemini CLI | Headless con salida Streaming JSON; `gemini --acp` | Eventos `init`, `message`, `tool_use`, `tool_result`, `error` y `result`, o integración ACP. [Headless](https://geminicli.com/docs/cli/headless/), [ACP](https://geminicli.com/docs/cli/acp-mode/) |
+| Antigravity CLI | TUI `agy` | Hooks observacionales en `~/.gemini/config/hooks.json`. [Hooks](https://antigravity.google/docs/hooks/) |
 
 Headless y ACP cambian quién presenta la conversación y recibe la entrada. No debe sustituirse silenciosamente el CLI interactivo por una interfaz propia para obtener eventos. La ruta inicial a estudiar para el objetivo de producto es PTY original más hooks observacionales y el watcher existente. Donde los hooks no basten, documentar la capacidad ausente y evaluar el protocolo del proveedor.
 
@@ -88,7 +86,7 @@ Estas son condiciones para una implementación futura, no nuevos eventos ya disp
 | Herramienta terminada y cambio observado | Correlacionar resultado y archivo sin duplicar la entrada ni inventar contenido anterior. |
 | Stream perdido o proceso cerrado durante el run | Conservar la incertidumbre o el fallo. El silencio y los bytes del PTY no son evidencia de éxito. |
 
-`Stop` y `AfterAgent` pueden preceder una continuación solicitada por otro hook. La integración debe comprobar cómo distinguir ese intento de cierre del cierre definitivo; un temporizador arbitrario no demuestra que el run haya terminado. En un canal que no permita probarlo, la UI debe expresar esa limitación.
+`Stop` puede preceder una continuación solicitada por otro hook. La integración debe comprobar cómo distinguir ese intento de cierre del cierre definitivo; un temporizador arbitrario no demuestra que el run haya terminado. En un canal que no permita probarlo, la UI debe expresar esa limitación.
 
 Los payloads requieren traducción. Codex y Claude usan campos como `session_id`, `hook_event_name` y `tool_use_id`; Grok documenta camelCase; Gemini tiene su propio esquema. IDs del proveedor, IDs de terminal, generaciones y runs de Termina tienen responsabilidades distintas. No deben mezclarse ni sintetizarse entradas de sesión o IDs de snapshots que el proveedor no produjo.
 
@@ -138,7 +136,7 @@ Para cambios de runtime, aplicar typecheck, unit tests relevantes, build y E2E d
 | Codex | `codex-cli 0.155.1`; ayuda de CLI, exec y app-server; `hooks` figura estable y habilitado en `codex features list`. |
 | Claude Code | `2.1.292`; ayuda local confirma print mode, stream-json e inclusión de eventos de hooks. |
 | Grok Build | `1.0.44`, stable; ayuda local confirma streaming-json y ACP. Se deshabilitó el auto-update para estas consultas. |
-| Gemini CLI | No se encontró `gemini` en PATH. Revisión documental, sin versión local comprobada. |
+| Gemini | Antigravity CLI, comando `agy`. Hooks en `~/.gemini/config/hooks.json` ([Hooks](https://antigravity.google/docs/hooks/)). |
 
 Las páginas oficiales se consultaron en la fecha indicada. Pueden describir una versión más reciente que la instalada; esta nota no fija una versión mínima de soporte. La definición de ACP es evidencia del protocolo, no una prueba de que un CLI emita todas sus variantes.
 
