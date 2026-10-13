@@ -69,7 +69,9 @@ describe("terminal chooser", () => {
   it("opens Codex from the menu without treating it as a detected shell", async () => {
     const h = harness(); await h.open();
     const codex = [...dom.document.body.querySelectorAll(".terminal-menu-name")].find((el) => el.textContent === "Codex");
-    (codex?.parentElement as HTMLElement).click();
+    const row = codex?.parentElement;
+    expect(row).toBeTruthy();
+    row!.click();
     await Promise.resolve();
     expect(h.onOpenCli).toHaveBeenCalledExactlyOnceWith("codex");
     expect(h.onCreateAgent).not.toHaveBeenCalled();

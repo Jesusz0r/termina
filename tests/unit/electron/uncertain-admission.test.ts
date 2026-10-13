@@ -221,7 +221,7 @@ describe("uncertain admission measurement (issue #192)", () => {
       await writeFile(safeCopy, JSON.stringify(manifest));
       await writeFile(manifestPath, JSON.stringify(manifest));
       const owner = uncertainComparisonAdmissionOwnerFor(await ensureBoundDirectory(worldsRoot, "worlds root"));
-      const unregister = owner.register(() => [name]);
+      const unregister = owner.register(() => new Set([name]));
       try {
         const safe = await owner.acquire(() => false);
         expect(safe.ok).toBe(true);
