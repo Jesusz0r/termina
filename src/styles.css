@@ -2621,8 +2621,9 @@ body.tab-reordering * {
   border: 1px solid transparent;
   border-radius: 4px;
 }
-.project-tab:hover { background: var(--bg-hover); }
 .project-tab.active { background: var(--bg-raised); border-color: var(--accent); }
+.project-tab:hover,
+.project-tab.active:hover { background: var(--bg-hover); }
 .project-select {
   min-width: 0;
   flex: 1;
