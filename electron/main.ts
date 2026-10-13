@@ -3250,9 +3250,10 @@ class TerminaApp {
       env = { ...opts.launch.env, TERMINA_TERMINAL_ID: id };
     } else if (externalCli) {
       const spec = externalCliLaunch(externalCli);
-      const bin = this.paths.findOnPath(spec.bin);
+      await this.paths.warmHostPath();
+      const bin = this.paths.findOnHostPath(spec.bin);
       if (!bin) throw new Error(`${spec.bin} is not installed`);
-      const nodePath = resolveHookNode(bin, (name) => this.paths.findOnPath(name));
+      const nodePath = resolveHookNode(bin, (name) => this.paths.findOnHostPath(name));
       if (!nodePath) throw new Error(`node was not found beside ${spec.bin}`);
       const hooks = await this.ensureExternalHooks();
       const scriptPath = join(this.userDataDir, "external-hook.mjs");
@@ -3267,6 +3268,7 @@ class TerminaApp {
       env = {
         ...filterAgentEnvironment(process.env),
         ...prepared.env,
+        PATH: this.paths.hostPathEnv(),
         TERMINA_EXTERNAL_HOOK_SOCKET: hooks.socketPath,
       };
       sessionId = null;
