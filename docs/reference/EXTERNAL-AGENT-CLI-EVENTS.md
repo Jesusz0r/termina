@@ -2,7 +2,7 @@
 
 Fecha de revisión: 7 de octubre de 2026.
 
-Estado: investigación del 7 de octubre de 2026. El 12 de octubre de 2026 empezó un corte de Codex (`codex-cli` 0.155.1, hooks consultados en [Hooks](https://developers.openai.com/codex/hooks)): el menú abre el TUI original, un perfil aditivo registra un hook observacional y esos eventos alimentan el reductor de actividad existente. No es soporte completo. Falta la prueba de integración con un prompt real, y Gemini CLI, Grok y Claude Code no se lanzan. Esta nota no cambia las reglas de [AGENTS.md](../../AGENTS.md).
+Estado: investigación del 7 de octubre de 2026. El menú lanza el TUI original de Codex, Claude Code, Grok, Gemini CLI y Muse Code, con un hook observacional que alimenta el mismo reductor de actividad. No es soporte completo: no hay una prueba con un prompt real, y Termina no restaura ni bifurca esas sesiones. Los contratos consultados son [Codex](https://developers.openai.com/codex/hooks), [Claude Code](https://code.claude.com/docs/en/hooks), [Grok](https://docs.x.ai/build/features/hooks), [Gemini CLI](https://geminicli.com/docs/hooks/reference/) y [Muse Code](https://dev.meta.ai/docs/muse-code/extending). Esta nota no cambia las reglas de [AGENTS.md](../../AGENTS.md).
 
 ## Objetivo de producto
 

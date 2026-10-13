@@ -1,17 +1,27 @@
-/** Direct agent creation and the secondary shell picker; main owns creation and selection. */
+/** One new-terminal control. The button and Cmd/Ctrl+T open the chooser. */
+import type { ExternalCli } from "../../shared/types";
+
 type CreateResult = { ok: boolean; error?: string };
 
+const EXTERNAL_MENU: Array<{ cli: ExternalCli; label: string; desc: string }> = [
+  { cli: "codex", label: "Codex", desc: "original Codex TUI; trust its hook for activity" },
+  { cli: "claude", label: "Claude", desc: "original Claude Code TUI; trust its hook for activity" },
+  { cli: "grok", label: "Grok", desc: "original Grok TUI; its hook reports activity" },
+  { cli: "gemini", label: "Gemini", desc: "original Gemini CLI; its hook reports activity" },
+  { cli: "muse", label: "Muse", desc: "original Muse Code TUI; its hook reports activity" },
+];
+
 interface TerminalMenuBindings {
-  agentButton: HTMLButtonElement;
-  anchor: HTMLButtonElement;
+  button: HTMLButtonElement;
   onCreateAgent(): Promise<CreateResult>;
   onOpenShell(path: string): Promise<CreateResult>;
-  onOpenCodex(): Promise<CreateResult>;
+  onOpenCli(cli: ExternalCli): Promise<CreateResult>;
   onError(message: string): void;
 }
 
 export function createTerminalMenu(bindings: TerminalMenuBindings): {
   isOpen(): boolean;
+  open(): Promise<void>;
   createAgent(): Promise<void>;
   close(): void;
   dispose(): void;
@@ -29,8 +39,8 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
     if (disposed || pending) return;
     closeTerminalMenu(false);
     pending = true;
-    bindings.agentButton.disabled = bindings.anchor.disabled = true;
-    bindings.agentButton.setAttribute("aria-busy", "true");
+    bindings.button.disabled = true;
+    bindings.button.setAttribute("aria-busy", "true");
     try {
       const result = await action();
       if (!disposed && !result.ok) bindings.onError(result.error ?? "Could not create terminal. Try again.");
@@ -39,8 +49,8 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
     } finally {
       pending = false;
       if (!disposed) {
-        bindings.agentButton.disabled = bindings.anchor.disabled = false;
-        bindings.agentButton.setAttribute("aria-busy", "false");
+        bindings.button.disabled = false;
+        bindings.button.setAttribute("aria-busy", "false");
       }
     }
   }
@@ -64,15 +74,15 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
     return shellsCache;
   }
 
-  async function openTerminalMenu(): Promise<void> {
+  async function openTerminalMenu(toggle = false): Promise<void> {
     if (disposed || pending) return;
     if (terminalMenu || opening) {
-      closeTerminalMenu();
+      if (toggle) closeTerminalMenu();
       return;
     }
     const sequence = ++openSequence;
     opening = true;
-    bindings.anchor.setAttribute("aria-expanded", "true");
+    bindings.button.setAttribute("aria-expanded", "true");
     const shells = await getAvailableShells();
     if (disposed || sequence !== openSequence) return;
     opening = false;
@@ -80,7 +90,7 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
     menu.id = "terminal-shell-menu";
     menu.className = "terminal-menu";
     menu.setAttribute("role", "menu");
-    menu.setAttribute("aria-label", "Open shell");
+    menu.setAttribute("aria-label", "New terminal");
     menu.tabIndex = -1;
     menu.addEventListener("click", (e) => e.stopPropagation());
 
@@ -121,7 +131,10 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
       items.push({ row, run });
     };
 
-    addItem("Codex", "original Codex TUI; trust its hook for activity", () => { void create(() => bindings.onOpenCodex()); });
+    addItem("Agent", "Termina's in-house coding agent", () => { void createAgent(); });
+    for (const item of EXTERNAL_MENU) {
+      addItem(item.label, item.desc, () => { void create(() => bindings.onOpenCli(item.cli)); });
+    }
     for (const shell of shells) {
       addItem(shell.name, `interactive ${shell.name} shell`, () => { void create(() => bindings.onOpenShell(shell.path)); });
     }
@@ -170,10 +183,10 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
     });
 
     document.body.appendChild(menu);
-    const rect = bindings.anchor.getBoundingClientRect();
+    const rect = bindings.button.getBoundingClientRect();
     const pad = 8;
-    const left = Math.max(pad, Math.min(rect.left, window.innerWidth - 240 - pad));
-    const top = Math.max(pad, Math.min(rect.bottom + 6, window.innerHeight - 100));
+    const left = Math.max(pad, Math.min(rect.left, window.innerWidth - menu.offsetWidth - pad));
+    const top = Math.max(pad, Math.min(rect.bottom + 6, window.innerHeight - menu.offsetHeight - pad));
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
     terminalMenu = menu;
@@ -184,7 +197,7 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
   function closeTerminalMenu(restoreFocus = true): void {
     openSequence++;
     opening = false;
-    bindings.anchor.setAttribute("aria-expanded", "false");
+    bindings.button.setAttribute("aria-expanded", "false");
     for (const cleanup of terminalMenuCleanups) cleanup();
     terminalMenuCleanups = [];
     const menu = terminalMenu;
@@ -192,17 +205,16 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
     terminalMenu?.remove();
     terminalMenu = null;
     // Outside clicks must not steal editor focus.
-    if (restoreFocus && ownedFocus) bindings.anchor.focus();
+    if (restoreFocus && ownedFocus) bindings.button.focus();
   }
 
   function isOpen(): boolean {
     return terminalMenu !== null;
   }
 
-  const onAgentClick = (): void => { void createAgent(); };
-  const onAnchorClick = (e: MouseEvent): void => {
+  const onButtonClick = (e: MouseEvent): void => {
     e.stopPropagation();
-    void openTerminalMenu();
+    void openTerminalMenu(true);
   };
   const onWindowClick = (): void => {
     closeTerminalMenu();
@@ -210,20 +222,18 @@ export function createTerminalMenu(bindings: TerminalMenuBindings): {
   const onWindowBlur = (): void => {
     closeTerminalMenu();
   };
-  bindings.agentButton.addEventListener("click", onAgentClick);
-  bindings.anchor.addEventListener("click", onAnchorClick);
+  bindings.button.addEventListener("click", onButtonClick);
   window.addEventListener("click", onWindowClick);
   window.addEventListener("blur", onWindowBlur);
 
   function dispose(): void {
     if (disposed) return;
     disposed = true;
-    bindings.agentButton.removeEventListener("click", onAgentClick);
-    bindings.anchor.removeEventListener("click", onAnchorClick);
+    bindings.button.removeEventListener("click", onButtonClick);
     window.removeEventListener("click", onWindowClick);
     window.removeEventListener("blur", onWindowBlur);
     closeTerminalMenu(false);
   }
 
-  return { isOpen, createAgent, close: closeTerminalMenu, dispose };
+  return { isOpen, open: () => openTerminalMenu(false), createAgent, close: closeTerminalMenu, dispose };
 }

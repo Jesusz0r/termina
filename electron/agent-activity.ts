@@ -209,11 +209,18 @@ export function applyActivityEvent(input: AgentActivityInput, event: ActivitySig
       }
       break;
     case "external_tool_end":
-      // The tool already finished. The hook did not grant the permission;
-      // the observed wait is over.
-      next.intervention = null;
       if (countableToolTarget(event.target)) {
         next.openToolIds = next.openToolIds.filter((id) => id !== event.target);
+        if (event.isError) {
+          if (next.errorStreakTarget === event.target) next.errorStreak += 1;
+          else {
+            next.errorStreakTarget = event.target;
+            next.errorStreak = 1;
+          }
+        } else {
+          next.errorStreak = 0;
+          next.errorStreakTarget = null;
+        }
       }
       break;
     case "external_stop":
@@ -263,7 +270,7 @@ export function activityFor(input: AgentActivityInput): AgentActivity {
     return { state: "blocked", reason: "stalled", ...since(input.lastBoundarySeq, input.lastBoundaryAt) };
   }
   if (
-    input.lastBoundary === "agent_start"
+    (input.lastBoundary === "agent_start" || input.lastBoundary === "external_turn")
     && input.errorStreak >= TOOL_ERROR_LOOP_STREAK
     && input.errorStreakTarget
   ) {

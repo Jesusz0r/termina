@@ -3,23 +3,39 @@
  * One token per terminal generation. A late or cross-terminal message is dropped.
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, unlinkSync } from "node:fs";
+import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { isRecord } from "../../shared/guards.ts";
 
 export const CODEX_HOOK_MESSAGE_MAX_BYTES = 256 * 1024;
+const CODEX_HOOK_HEAD_MAX_BYTES = 32 * 1024;
+const CODEX_HOOK_TAIL_MAX_BYTES = 16 * 1024;
 
 export type CodexHookMessage = {
   token: string;
   terminalId: string;
   generation: number;
-  payload: string;
+  payload?: string;
+  head?: string;
+  tail?: string;
 };
+
+/** Prefer a per-process socket under user data. A too-long path gets a private tmp directory. */
+export function codexSocketPath(userDataDir: string, pid = process.pid): string {
+  const preferred = join(userDataDir, `codex-hook-${pid}.sock`);
+  if (Buffer.byteLength(preferred) <= 100) return preferred;
+  const dir = join(tmpdir(), `termina-codex-${randomBytes(6).toString("hex")}`);
+  mkdirSync(dir, { mode: 0o700 });
+  return join(dir, "hook.sock");
+}
 
 type BoundToken = { terminalId: string; generation: number };
 
 export class CodexHookServer {
   private server: Server | null = null;
+  private socketPath: string | null = null;
   private readonly tokens = new Map<string, BoundToken>();
 
   constructor(private readonly onMessage: (message: CodexHookMessage) => void) {}
@@ -29,10 +45,12 @@ export class CodexHookServer {
     try { unlinkSync(socketPath); } catch { /* first listen */ }
     const server = createServer((socket) => this.take(socket));
     this.server = server;
+    this.socketPath = socketPath;
     await new Promise<void>((resolve, reject) => {
       const fail = (error: Error): void => {
         server.close();
         this.server = null;
+        this.socketPath = null;
         reject(error);
       };
       server.once("error", fail);
@@ -64,21 +82,34 @@ export class CodexHookServer {
     if (!isRecord(parsed) || parsed.v !== 1) return null;
     if (typeof parsed.token !== "string" || typeof parsed.terminalId !== "string") return null;
     if (typeof parsed.generation !== "number" || !Number.isSafeInteger(parsed.generation) || parsed.generation < 1) return null;
-    if (typeof parsed.payload !== "string" || Buffer.byteLength(parsed.payload) > CODEX_HOOK_MESSAGE_MAX_BYTES) return null;
+    const payload = typeof parsed.payload === "string" ? parsed.payload : undefined;
+    const head = typeof parsed.head === "string" ? parsed.head : undefined;
+    const tail = typeof parsed.tail === "string" ? parsed.tail : undefined;
+    if (payload === undefined && head === undefined) return null;
+    if (payload !== undefined && Buffer.byteLength(payload) > CODEX_HOOK_MESSAGE_MAX_BYTES) return null;
+    if (head !== undefined && Buffer.byteLength(head) > CODEX_HOOK_HEAD_MAX_BYTES) return null;
+    if (tail !== undefined && Buffer.byteLength(tail) > CODEX_HOOK_TAIL_MAX_BYTES) return null;
     const bound = this.tokens.get(parsed.token);
     if (!bound || bound.terminalId !== parsed.terminalId || bound.generation !== parsed.generation) return null;
     return {
       token: parsed.token,
       terminalId: parsed.terminalId,
       generation: parsed.generation,
-      payload: parsed.payload,
+      ...(payload !== undefined ? { payload } : {}),
+      ...(head !== undefined ? { head } : {}),
+      ...(tail !== undefined ? { tail } : {}),
     };
   }
 
   async close(): Promise<void> {
     const server = this.server;
+    const socketPath = this.socketPath;
     this.server = null;
+    this.socketPath = null;
     this.tokens.clear();
+    if (socketPath) {
+      try { unlinkSync(socketPath); } catch { /* already gone */ }
+    }
     if (!server) return;
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

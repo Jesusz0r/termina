@@ -90,7 +90,7 @@ import {
 } from "./activity-cue";
 import { attachTabReorder } from "./main/tab-reorder";
 import { CHALLENGE_PROFILES, isTuiOwnedShortcut, pathBasename } from "../shared/types";
-import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, UnsavedConfirmResult, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary, WorkSummaryAction, TerminalCloseResult } from "../shared/types";
+import type { AgentActivityView, AppUpdateState, ChallengeProfile, CommandId, ExternalCli, FolderOpenedPayload, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, UnsavedConfirmResult, RecorderState, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary, WorkSummaryAction, TerminalCloseResult } from "../shared/types";
 
 type EditorManagerInstance = import("./editor").EditorManager;
 type ReviewViewInstance = import("./review").ReviewView;
@@ -1315,7 +1315,7 @@ function updatePaneTab(pane: Pane): void {
     ? `dispatch worker — ${pane.dispatchTask ?? "plan task"}`
     : `${pane.cwd ?? "?"}${
         pane.type === "shell" && pane.shellName
-          ? ` · ${pane.shellName}${pane.shellName === "Codex" ? "" : " shell"}`
+          ? ` · ${pane.shellName}${isExternalAgentShell(pane.shellName) ? "" : " shell"}`
           : " · core agent"
       }`;
   const presented = presentActivity(pane);
@@ -1341,13 +1341,13 @@ function updatePaneTab(pane: Pane): void {
           paneProjectId: pane.projectId,
           activeProjectId,
           activePane: activeId === pane.instanceId,
-          tuiFocused: isCoreTerminalFocused() || (pane.shellName === "Codex" && isTerminalTextFocused(pane)),
+          tuiFocused: isCoreTerminalFocused() || (isExternalAgentShell(pane.shellName) && isTerminalTextFocused(pane)),
         }),
         windowFocused: document.hasFocus(),
         announceIdle: presented.idleLabel === "idle",
       },
     );
-    if (sounded && (pane.type === "agent" || pane.shellName === "Codex")) announceActivityCue(pane, sounded);
+    if (sounded && (pane.type === "agent" || isExternalAgentShell(pane.shellName))) announceActivityCue(pane, sounded);
   }
 }
 
@@ -1392,7 +1392,7 @@ function renderStatus(pane: Pane): void {
   statusState.textContent = presented.blocked
     ? `● ${presented.blockedLabel}`
     : presented.working
-      ? (pane.shellName === "Codex" ? "● Codex working" : "● agent working")
+      ? (isExternalAgentShell(pane.shellName) ? `● ${pane.shellName} working` : "● agent working")
       : presented.idleLabel;
   statusState.classList.toggle("busy", presented.working);
   statusState.classList.toggle("blocked", presented.blocked);
@@ -1609,12 +1609,12 @@ async function openFileSmartInner(
 
 // ---------------------------------------------------------------- panels ----
 
-async function createCodexTerminal(): Promise<{ ok: boolean; error?: string }> {
+async function createExternalTerminal(cli: ExternalCli): Promise<{ ok: boolean; error?: string }> {
   const projectId = activeProjectId;
   const projectGeneration = activeProjectGeneration;
   if (!projectId) return { ok: false, error: "Open a project first." };
   try {
-    const result = await window.termina.createTerminal({ type: "shell", cli: "codex", projectId });
+    const result = await window.termina.createTerminal({ type: "shell", cli, projectId });
     if (result.ok && result.id && activeProjectId === projectId && activeProjectGeneration === projectGeneration) {
       activatePaneWhenReady(result.id);
     }
@@ -1651,11 +1651,10 @@ const terminalEmpty = createTerminalEmpty({
 });
 
 const terminalMenu = createTerminalMenu({
-  agentButton: btnNewTerminal,
-  anchor: document.getElementById("btn-terminal-menu") as HTMLButtonElement,
+  button: btnNewTerminal,
   onCreateAgent: () => createProjectTerminal("agent"),
   onOpenShell: (shell) => createProjectTerminal("shell", shell),
-  onOpenCodex: () => createCodexTerminal(),
+  onOpenCli: (cli) => createExternalTerminal(cli),
   onError: (message) => toast(message, "warning"),
 });
 window.addEventListener("unload", () => terminalMenu.dispose(), { once: true });
@@ -1824,7 +1823,7 @@ commands.register("select-all", () => runMenuEdit("select-all"));
 commands.register("new-terminal", () => {
   layout.revealTerminal();
   attentionView.cancelNavigation();
-  void terminalMenu.createAgent();
+  void terminalMenu.open();
 });
 commands.register("next-terminal", () => cycleTerminals(1));
 commands.register("previous-terminal", () => cycleTerminals(-1));
@@ -1925,13 +1924,19 @@ function normalizeShortcut(value: string): string {
   return value.replace("CmdOrCtrl", isMacPlatform() ? "Cmd" : "Ctrl");
 }
 
-/** True when a live core TUI owns keyboard focus: its textarea is the focused element of the active core pane. Shells and exited panes keep menu behavior. */
+const EXTERNAL_AGENT_SHELLS = new Set(["Codex", "Claude", "Grok", "Gemini", "Muse"]);
+
+function isExternalAgentShell(name: string | undefined): boolean {
+  return name !== undefined && EXTERNAL_AGENT_SHELLS.has(name);
+}
+
 function isTerminalTextFocused(pane: Pane | undefined): boolean {
   if (!pane || pane.error || pane.exited) return false;
   const textarea = pane.view.getTerminal().textarea;
   return !!textarea && document.activeElement === textarea;
 }
 
+/** True when a live core TUI owns keyboard focus: its textarea is the focused element of the active core pane. Shells and exited panes keep menu behavior. */
 function isCoreTerminalFocused(): boolean {
   const pane = activeId ? panes.get(activeId) : undefined;
   if (!pane || pane.error || pane.exited || pane.engine !== "core") return false;

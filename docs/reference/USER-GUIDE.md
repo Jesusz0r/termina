@@ -143,23 +143,24 @@ focus to its tab. `Escape` in the terminal remains terminal input.
 
 ### Terminals
 
-Click `＋` (**New agent**) next to the terminal tabs, or press `Cmd/Ctrl+T`,
-to create an agent directly in the current project. The new agent reuses the
-active agent's model when available; isolated sessions also inherit its effort.
-Main retains the existing admission policy: when a live terminal overlaps the
-project source, another agent opens in a
-separate sandboxed work area. Creation does not submit a prompt or apply changes.
+Click `＋` (**New terminal**) next to the terminal tabs, or press
+`Cmd/Ctrl+T`, to choose what to open: **Agent** (Termina's in-house agent), an
+original agent TUI when its program is on `PATH` (**Codex**, **Claude**,
+**Grok**, **Gemini**, or **Muse**), or a detected shell (`zsh`, `bash`, …).
+Nothing starts until you pick a row. The new agent reuses the active agent's
+model when available; isolated sessions also inherit its effort. Main retains
+the existing admission policy: when a live terminal overlaps the project
+source, another agent opens in a separate sandboxed work area. Creation does
+not submit a prompt or apply changes.
 
-Use the adjacent `▾` (**Open shell menu**) to choose a detected shell
-(`zsh`, `bash`, …) or **Codex**, the original Codex TUI when `codex` is on
-`PATH`. Codex keeps its own login and conversation. Termina does not fork,
+Each external CLI keeps its own login and conversation. Termina does not fork,
 promote, or restore that session. Activity (working, waiting for permission,
-or an unconfirmed stop) appears after you trust Termina's observational hook
-in Codex with `/hooks`. A prompt alone does not count as started work, and a
-Stop hook does not mean the task succeeded. File changes still come from the
-project watcher. Gemini CLI, Grok, and Claude Code are not in this menu.
+or an unconfirmed stop) comes from an observational hook. A prompt alone does
+not count as started work, and a stop event does not mean the task succeeded.
+Grok has no documented permission hook, so a Grok approval may not show as
+waiting. File changes still come from the project watcher.
 The menu supports arrow keys, Home/End and Enter;
-Escape cancels and returns focus to its button. Shell tabs show the shell name
+Escape cancels and returns focus to `＋`. Shell tabs show the shell name
 as a badge. A refused creation shows the actual error and permits an explicit
 retry; it never falls back to a shell or shared-source agent.
 
@@ -681,7 +682,7 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 | Shortcut | Command |
 |---|---|
 | `Cmd/Ctrl+O` | Open folder |
-| `Cmd/Ctrl+T` | New agent in the current project |
+| `Cmd/Ctrl+T` | Choose a new terminal in the current project |
 | `Cmd/Ctrl+Shift+W` | Close terminal |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous terminal tab |
 | `Cmd/Ctrl+Shift+[` / `]` | Previous / next project |

@@ -206,6 +206,16 @@ describe("external CLI activity", () => {
     expect(activityView(activityFor(cleared))).toEqual({ state: "idle", reason: "outcome-unknown", intervention: null });
   });
 
+  it("does not clear a permission when a different tool finishes", () => {
+    const waiting = fold([
+      { t: "external_turn", ...at(1) },
+      { t: "intervention_requested", ...at(2), requestId: "codex:Bash", kind: "permission", since: 2000 },
+      { t: "external_tool_end", ...at(3), target: "call-grep", isError: false },
+    ]);
+    expect(activityView(activityFor(waiting)).reason).toBe("permission-required");
+    expect(activityView(activityFor(waiting)).intervention?.requestId).toBe("codex:Bash");
+  });
+
   it("does not treat a stop with no observed turn as success or as work", () => {
     const stopped = fold([{ t: "external_stop", ...at(1) }]);
     expect(activityView(activityFor(stopped))).toEqual({ state: "idle", reason: null, intervention: null });

@@ -269,6 +269,7 @@ import {
   subagentCancelFileName,
   subagentCancelSidecarRecord,
   subagentChildTid,
+  MAX_SUBAGENT_DEPTH,
   subagentDepthFromEnv,
   subagentLiveFileName,
   subagentMarkerExists,
@@ -1676,6 +1677,15 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   if (planToolsRestricted && planTurnRejectsTool(use.name)) {
     return notExecuted(`error: ${use.name} is not executed on a /plan turn. Only reads and search are allowed; submit a non-/plan request to implement.`);
   }
+  if (sessionOmitsTool(use.name, {
+    worldlineCandidate: IS_WORLDLINE_CANDIDATE,
+    subagentToolsVisible: SUBAGENT_DEPTH < MAX_SUBAGENT_DEPTH,
+  })) {
+    if (use.name === "spawn_subagent" && IS_WORLDLINE_CANDIDATE) {
+      return done(use, "error: spawn_subagent is disabled in worldline candidates", true);
+    }
+    return notExecuted(`error: ${use.name} is not available in this session`);
+  }
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
     return done(use, got);
@@ -1748,9 +1758,6 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     // Worldline candidates run sandboxed with auto-approve; a host-spawned
     // child would escape that sandbox, so the tool fails closed here and the
     // host refuses their sidecar spawns too.
-    if (sessionOmitsTool(use.name, { worldlineCandidate: IS_WORLDLINE_CANDIDATE, subagentToolsVisible: true })) {
-      return done(use, "error: spawn_subagent is disabled in worldline candidates", true);
-    }
     // A length-truncated turn may carry cut-off brief arguments that parse
     // but are silently incomplete. Never spawn from one: the child would boot
     // on a broken brief and burn its run failing.
@@ -1948,7 +1955,10 @@ const TOOLS: Array<Record<string, unknown>> = [
 const SUBAGENT_DEPTH = subagentDepthFromEnv(process.env);
 const IS_WORLDLINE_CANDIDATE = isWorldlineCandidateEnv(process.env);
 for (const def of visibleSubagentTools(SUBAGENT_DEPTH)) {
-  if (typeof def.name !== "string" || sessionOmitsTool(def.name, { worldlineCandidate: IS_WORLDLINE_CANDIDATE, subagentToolsVisible: true })) continue;
+  if (typeof def.name !== "string" || sessionOmitsTool(def.name, {
+    worldlineCandidate: IS_WORLDLINE_CANDIDATE,
+    subagentToolsVisible: SUBAGENT_DEPTH < MAX_SUBAGENT_DEPTH,
+  })) continue;
   TOOLS.push(def);
 }
 

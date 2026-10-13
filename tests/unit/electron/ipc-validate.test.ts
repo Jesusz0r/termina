@@ -87,7 +87,11 @@ describe("IPC request-shape checks", () => {
       ok: true,
       value: { type: undefined, shell: undefined, engine: undefined, cli: "codex", fromTerminalId: undefined, projectId: undefined },
     });
-    expect(parseTerminalCreateOptions({ cli: "gemini" })).toEqual({ ok: false, error: "invalid terminal cli" });
+    expect(parseTerminalCreateOptions({ cli: "gemini" })).toEqual({
+      ok: true,
+      value: { type: undefined, shell: undefined, engine: undefined, cli: "gemini", fromTerminalId: undefined, projectId: undefined },
+    });
+    expect(parseTerminalCreateOptions({ cli: "nope" })).toEqual({ ok: false, error: "invalid terminal cli" });
     expect(parseTerminalCreateOptions({ cli: "codex", engine: "core" })).toEqual({ ok: false, error: "invalid terminal cli" });
   });
 });

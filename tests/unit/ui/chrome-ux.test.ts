@@ -255,7 +255,7 @@ describe("tab activity dots", () => {
     expect(mainSrc).toContain("paneProjectId: pane.projectId");
     expect(mainSrc).toContain("tuiFocused: isCoreTerminalFocused()");
     expect(mainSrc).toContain("windowFocused: document.hasFocus()");
-    expect(mainSrc).toContain("if (sounded && (pane.type === \"agent\" || pane.shellName === \"Codex\")) announceActivityCue(pane, sounded)");
+    expect(mainSrc).toContain("if (sounded && (pane.type === \"agent\" || isExternalAgentShell(pane.shellName))) announceActivityCue(pane, sounded)");
     expect(mainSrc).toContain("() => revealActivityPane(targetId)");
     expect(mainSrc).toContain("void activateProject(targetProject, \"context\").then((activated) => {");
     expect(mainSrc).toContain("if (!activated || activeProjectId !== targetProject) return");

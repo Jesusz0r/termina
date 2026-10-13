@@ -9,6 +9,7 @@ import { PtyKeyboardModeTracker } from "./pty-keyboard-mode.js";
 import type { RunRecord } from "./worldlines/index.js";
 import type { PromotionEntryState } from "./worldlines/types.js";
 import type {
+  ExternalCli,
   ModifiedFile,
   PlanTask,
   RecorderState,
@@ -32,7 +33,7 @@ export class AgentTerminalInstance {
   /** The engine for an agent terminal. Shells leave this unset. */
   engine?: "core";
   /** Original external CLI in this PTY. Not a core engine and not a worldline. */
-  externalCli?: "codex";
+  externalCli?: ExternalCli;
   externalActivitySeq = 0;
   /** Persist this tab in the project roster (user terminals, not dispatch or candidates). */
   persist = true;

@@ -3,7 +3,7 @@
  * handlers and calls these before any fs/pty/snapshot work.
  */
 import { isRecord } from "../../shared/guards.js";
-import { CHALLENGE_PROFILES, type ChallengeProfile, type RendererIpcCapability, type UnsavedConfirmResult } from "../../shared/types.js";
+import { CHALLENGE_PROFILES, EXTERNAL_CLIS, type ChallengeProfile, type ExternalCli, type RendererIpcCapability, type UnsavedConfirmResult } from "../../shared/types.js";
 
 export function isChallengeProfile(value: unknown): value is ChallengeProfile {
   return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
@@ -67,7 +67,7 @@ export type TerminalCreateRequest = {
   type?: "agent" | "shell";
   shell?: string;
   engine?: "core";
-  cli?: "codex";
+  cli?: ExternalCli;
   fromTerminalId?: string;
   projectId?: string;
 };
@@ -85,8 +85,8 @@ export function parseTerminalCreateOptions(opts: unknown):
   if (rec.engine !== undefined && rec.engine !== "core") {
     return { ok: false, error: "invalid agent engine" };
   }
-  if (rec.cli !== undefined && rec.cli !== "codex") return { ok: false, error: "invalid terminal cli" };
-  if (rec.cli === "codex" && (rec.engine !== undefined || rec.shell !== undefined || (rec.type !== undefined && rec.type !== "shell"))) {
+  if (rec.cli !== undefined && !EXTERNAL_CLIS.includes(rec.cli as ExternalCli)) return { ok: false, error: "invalid terminal cli" };
+  if (rec.cli !== undefined && (rec.engine !== undefined || rec.shell !== undefined || (rec.type !== undefined && rec.type !== "shell"))) {
     return { ok: false, error: "invalid terminal cli" };
   }
   if (rec.shell !== undefined && typeof rec.shell !== "string") return { ok: false, error: "invalid shell" };
@@ -112,7 +112,7 @@ export function parseTerminalCreateOptions(opts: unknown):
       type: rec.type,
       shell: rec.shell,
       engine: rec.engine,
-      ...(rec.cli === "codex" ? { cli: "codex" as const } : {}),
+      ...(EXTERNAL_CLIS.includes(rec.cli as ExternalCli) ? { cli: rec.cli as ExternalCli } : {}),
       fromTerminalId,
       projectId,
     },

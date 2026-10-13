@@ -24,7 +24,7 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { access, cp, lstat, mkdir, open, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { revertReviewedFile } from "./review-revert.js";
@@ -78,9 +78,10 @@ import {
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
 import { filterAgentEnvironment } from "./agent-env.js";
-import { codexActivitySignals } from "./external-cli/codex-activity.js";
-import { CodexHookServer, type CodexHookMessage } from "./external-cli/codex-hook-server.js";
-import { codexHome, codexLaunchArgs, writeCodexHookScript, writeCodexProfile } from "./external-cli/codex-launch.js";
+import { externalActivitySignals, observeCodexHookWire } from "./external-cli/codex-activity.js";
+import { externalCliLaunch, prepareExternalCli } from "./external-cli/install-hooks.js";
+import { CodexHookServer, codexSocketPath, type CodexHookMessage } from "./external-cli/codex-hook-server.js";
+import { codexHome, codexHookCommand, codexLaunchArgs, resolveCodexNode, writeCodexHookScript, writeCodexProfile } from "./external-cli/codex-launch.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
 import { MAX_SESSION_SEARCH_QUERY } from "./session-search.js";
@@ -172,6 +173,7 @@ import {
   type ContentHit,
   type ExplorerEntry,
   type EditorFileResult,
+  type ExternalCli,
   type UnsavedConfirmResult,
   type InstanceSummary,
   type TerminalCloseResult,
@@ -1556,7 +1558,7 @@ class TerminaApp {
       {
         label: "Terminal",
         submenu: [
-          { label: "New agent", accelerator: shortcut("new-terminal"), click: send("new-terminal") },
+          { label: "New terminal", accelerator: shortcut("new-terminal"), click: send("new-terminal") },
           { label: "Close Terminal", accelerator: shortcut("close-terminal"), click: () => void this.closeActiveTerminal() },
           { type: "separator" },
           { label: "Next Terminal", accelerator: shortcut("next-terminal"), click: send("next-terminal") },
@@ -3202,7 +3204,7 @@ class TerminaApp {
       /** Roster-pinned model for core resume: the session's own last model. */
       model?: string | null;
       /** Original Codex TUI. Not the core engine. */
-      cli?: "codex";
+      cli?: ExternalCli;
       /** Internal strict dispatch fence, checked again immediately before PTY spawn. */
       spawnGuard?: () => void;
     },
@@ -3212,7 +3214,7 @@ class TerminaApp {
     // cannot publish its list into a replacement renderer.
     opts?.spawnGuard?.();
     const rendererTarget = this.captureRendererSendTarget();
-    const externalCli = opts?.cli === "codex" ? "codex" as const : undefined;
+    const externalCli: ExternalCli | undefined = opts?.cli;
     const type = externalCli ? "shell" : (opts?.type ?? "agent");
     // Codex conversations stay in Codex. A roster shell resume would drop the hook.
     const persist = externalCli ? false : (opts?.persist ?? (!opts?.launch && !opts?.id));
@@ -3246,21 +3248,29 @@ class TerminaApp {
       cmd = opts.launch.cmd;
       args = opts.launch.args;
       env = { ...opts.launch.env, TERMINA_TERMINAL_ID: id };
-    } else if (externalCli === "codex") {
-      const bin = this.paths.findOnPath("codex");
-      if (!bin) throw new Error("codex is not installed");
+    } else if (externalCli) {
+      const spec = externalCliLaunch(externalCli);
+      const bin = this.paths.findOnPath(spec.bin);
+      if (!bin) throw new Error(`${spec.bin} is not installed`);
+      const nodePath = resolveCodexNode(bin, (name) => this.paths.findOnPath(name));
+      if (!nodePath) throw new Error(`node was not found beside ${spec.bin}`);
       const hooks = await this.ensureCodexHooks();
-      const scriptPath = join(this.userDataDir, "codex-hook.mjs");
+      const scriptPath = join(this.userDataDir, "external-hook.mjs");
       await writeCodexHookScript(scriptPath);
-      await writeCodexProfile(codexHome(), scriptPath);
+      const command = codexHookCommand(nodePath, scriptPath);
+      if (externalCli === "codex") await writeCodexProfile(codexHome(), command);
+      const prepared = externalCli === "codex"
+        ? { args: codexLaunchArgs(), env: {} as Record<string, string> }
+        : await prepareExternalCli(externalCli, command, { userData: this.userDataDir });
       opts?.spawnGuard?.();
       cmd = bin;
-      args = codexLaunchArgs();
-      shellName = "Codex";
+      args = prepared.args;
+      shellName = spec.label;
       shellPath = bin;
       env = {
         ...filterAgentEnvironment(process.env),
-        TERMINA_CODEX_HOOK_SOCKET: hooks.socketPath,
+        ...prepared.env,
+        TERMINA_EXTERNAL_HOOK_SOCKET: hooks.socketPath,
       };
       sessionId = null;
       sessionFile = null;
@@ -3357,8 +3367,8 @@ class TerminaApp {
         rendererTarget,
         beforeSpawn: (target) => {
           opts?.spawnGuard?.();
-          if (externalCli === "codex" && this.codexHooks) {
-            env.TERMINA_CODEX_HOOK_TOKEN = this.codexHooks.server.issue(target.id, target.generation);
+          if (externalCli && this.codexHooks) {
+            env.TERMINA_EXTERNAL_HOOK_TOKEN = this.codexHooks.server.issue(target.id, target.generation);
             env.TERMINA_TERMINAL_ID = target.id;
             env.TERMINA_TERMINAL_GENERATION = String(target.generation);
           }
@@ -7038,15 +7048,9 @@ class TerminaApp {
     }
   }
 
-  private codexSocketPath(): string {
-    const preferred = join(this.userDataDir, "codex-hook.sock");
-    if (Buffer.byteLength(preferred) <= 100) return preferred;
-    return join(tmpdir(), `termina-codex-${process.pid}.sock`);
-  }
-
   private async ensureCodexHooks(): Promise<{ server: CodexHookServer; socketPath: string }> {
     if (this.codexHooks) return this.codexHooks;
-    const socketPath = this.codexSocketPath();
+    const socketPath = codexSocketPath(this.userDataDir);
     const server = new CodexHookServer((message) => this.ingestCodexHook(message));
     await server.listen(socketPath);
     this.codexHooks = { server, socketPath };
@@ -7054,13 +7058,16 @@ class TerminaApp {
   }
 
   private ingestCodexHook(message: CodexHookMessage): void {
-    const inst = this.runtime.get(message.terminalId);
-    if (!inst || inst.externalCli !== "codex" || inst.generation !== message.generation || inst.closed || inst.pty.hasExited) return;
-    let payload: unknown;
-    try { payload = JSON.parse(message.payload); } catch { return; }
-    const at = Date.now();
-    for (const signal of codexActivitySignals(payload, ++inst.externalActivitySeq, at)) {
-      this.foldActivity(inst, signal);
+    try {
+      const inst = this.runtime.get(message.terminalId);
+      if (!inst?.externalCli || inst.generation !== message.generation || inst.closed || inst.pty.hasExited) return;
+      const at = Date.now();
+      const observed = observeCodexHookWire(message);
+      for (const signal of externalActivitySignals(inst.externalCli, observed, ++inst.externalActivitySeq, at)) {
+        this.foldActivity(inst, signal);
+      }
+    } catch {
+      /* A bad hook must not throw out of the socket server. */
     }
   }
 
@@ -7069,7 +7076,7 @@ class TerminaApp {
     event: ActivitySignal,
     expected?: PtyRendererSendTarget | null,
   ): void {
-    if (inst.type !== "agent" && inst.externalCli !== "codex") return;
+    if (inst.type !== "agent" && !inst.externalCli) return;
     const next = applyActivityEvent(this.activityInputs.get(inst.id) ?? emptyActivityInput(), event);
     this.activityInputs.set(inst.id, next);
     const view = activityView(activityFor(next));

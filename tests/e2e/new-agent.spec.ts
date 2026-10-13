@@ -78,29 +78,37 @@ for (const zoom of [1, 2]) {
     const original = await page.evaluate(() => window.termina.getInstances());
     await expect.poll(() => records(join(runRoot, "events", `${original[0]!.id}.jsonl`)).some((record) => record?.t === "session_ready" && record.ok)).toBe(true);
     const source = readFileSync(join(projectRoot, "hello.txt"), "utf8");
-    const agent = page.getByRole("button", { name: "New agent", exact: true });
-    await expect(agent).toBeInViewport(); await agent.click();
+    const chord = process.platform === "darwin" ? "Meta+t" : "Control+t";
+    const opener = page.getByRole("button", { name: "New terminal", exact: true });
+    await expect(opener).toBeInViewport();
+    const menu = page.getByRole("menu", { name: "New terminal", exact: true });
+    await page.keyboard.press(chord);
+    await expect(menu).toBeVisible();
+    expect((await page.evaluate(() => window.termina.getInstances())).map((entry) => entry.id)).toEqual(original.map((entry) => entry.id));
+    await expect(menu.getByRole("menuitem").first()).toContainText("Agent");
+    await page.keyboard.press("Enter");
     const first = await newSession(page, project.id, original.map((entry) => entry.id));
     expect(first.created.cwd).not.toBe(project.cwd);
     expect(readFileSync(join(projectRoot, "hello.txt"), "utf8")).toBe(source);
-    // The same command/shortcut creates directly with persistent Attention visible.
+    // The same shortcut opens the chooser again; Agent is an explicit choice.
     await expect(page.locator("#project-bar #attention-view")).toBeVisible();
     await expect(page.locator("#attention-heading")).toContainText("Attention");
-    await page.keyboard.press(process.platform === "darwin" ? "Meta+t" : "Control+t");
+    await page.keyboard.press(chord);
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("Enter");
     await expect(page.locator("#attention-view")).toBeVisible();
     const second = await newSession(page, project.id, [...original.map((entry) => entry.id), first.created.id]);
     expect(second.candidate.comparisonId).not.toBe(first.candidate.comparisonId);
     const ids = (await page.evaluate(() => window.termina.getInstances())).map((entry) => entry.id);
-    const shellMenu = page.getByRole("button", { name: "Open shell menu", exact: true });
-    await expect(shellMenu).toBeInViewport(); await shellMenu.focus(); await page.keyboard.press("Enter");
-    const menu = page.getByRole("menu", { name: "Open shell", exact: true });
+    await opener.focus(); await page.keyboard.press("Enter");
     await expect(menu).toBeVisible();
     const shells = await page.evaluate(() => window.termina.getShells());
-    await expect(menu.getByRole("menuitem")).toHaveCount(shells.length);
+    await expect(menu.getByRole("menuitem")).toHaveCount(shells.length + 6);
+    await expect(menu.getByRole("menuitem").first()).toContainText("Agent");
     expect(shells.length).toBeGreaterThan(0);
     await expect(menu.getByRole("menuitem").first()).toBeFocused();
     await page.keyboard.press("Escape");
-    await expect(menu).toBeHidden(); await expect(shellMenu).toBeFocused();
+    await expect(menu).toBeHidden(); await expect(opener).toBeFocused();
     expect((await page.evaluate(() => window.termina.getInstances())).map((entry) => entry.id)).toEqual(ids);
     await page.keyboard.press("Enter"); await expect(menu).toBeVisible();
     const box = (await menu.boundingBox())!;
@@ -108,7 +116,6 @@ for (const zoom of [1, 2]) {
     expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(viewport.width + 1);
     expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
     await page.keyboard.press("End"); await expect(menu.getByRole("menuitem").last()).toBeFocused();
-    await page.keyboard.press("Home"); await expect(menu.getByRole("menuitem").first()).toBeFocused();
     await page.keyboard.press("Enter"); await expect(menu).toBeHidden();
     await expect.poll(() => page.evaluate(() => window.termina.getInstances().then((instances) => instances.length))).toBe(ids.length + 1);
     const shell = (await page.evaluate(() => window.termina.getInstances())).find((entry) => !ids.includes(entry.id))!;
@@ -123,27 +130,36 @@ for (const zoom of [1, 2]) {
   });
 }
 
-test("direct creation admits a fourth independent session without replacing existing terminals or starting a run", async ({ page, electronApp, projectRoot, runRoot }) => {
+test("choosing Agent admits a fourth independent session without replacing existing terminals or starting a run", async ({ page, electronApp, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const project = (await page.evaluate(() => window.termina.projectList())).find((entry) => entry.active)!;
   const source = readFileSync(join(projectRoot, "hello.txt"), "utf8");
   let instances = await page.evaluate(() => window.termina.getInstances());
   const ownerId = instances[0]!.id;
-  for (let index = 0; index < 3; index++) {
-    if (index < 2) await page.getByRole("button", { name: "New agent", exact: true }).click();
+  const chord = process.platform === "darwin" ? "Meta+t" : "Control+t";
+  const pickAgent = async (via: "chord" | "menu"): Promise<void> => {
+    if (via === "chord") await page.keyboard.press(chord);
     else await electronApp.evaluate(({ Menu, BrowserWindow }) => {
       const terminal = Menu.getApplicationMenu()?.items.find((item) => item.label === "Terminal");
-      const action = terminal?.submenu?.items.find((item) => item.label === "New agent");
-      if (!action) throw new Error("Missing native New agent action");
+      const action = terminal?.submenu?.items.find((item) => item.label === "New terminal");
+      if (!action) throw new Error("Missing native New terminal action");
       action.click(undefined, BrowserWindow.getAllWindows()[0], {});
     });
+    const menu = page.getByRole("menu", { name: "New terminal", exact: true });
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole("menuitem").first()).toContainText("Agent");
+    await page.keyboard.press("Enter");
+    await expect(menu).toBeHidden();
+  };
+  for (let index = 0; index < 3; index++) {
+    await pickAgent(index < 2 ? "chord" : "menu");
     await newSession(page, project.id, instances.map((entry) => entry.id));
     instances = await page.evaluate(() => window.termina.getInstances());
   }
   const identities = instances.map(({ id, generation, cwd, type }) => ({ id, generation, cwd, type }));
-  await page.getByRole("button", { name: "New agent", exact: true }).click();
+  await pickAgent("chord");
   const fourth = await newSession(page, project.id, instances.map((entry) => entry.id));
-  await expect(page.getByRole("button", { name: "New agent", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
   const retained = (await page.evaluate(() => window.termina.getInstances())).filter((entry) => entry.id !== fourth.created.id);
   expect(retained.map(({ id, generation, cwd, type }) => ({ id, generation, cwd, type }))).toEqual(identities);
   await expect(page.locator(".toast-warning")).toHaveCount(0);

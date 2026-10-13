@@ -13,7 +13,7 @@ for (const kind of ["project", "terminal"] as const) {
       }
     } else {
       for (let count = 2; count <= 3; count++) {
-        await page.getByRole("button", { name: "Open shell menu", exact: true }).click();
+        await page.getByRole("button", { name: "New terminal", exact: true }).click();
         await page.locator(".terminal-menu-item").filter({ hasText: "interactive" }).first().click();
         await expect(page.locator(".terminal-tab:visible")).toHaveCount(count);
       }

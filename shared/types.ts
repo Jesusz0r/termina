@@ -94,6 +94,10 @@ const AGENT_ACTIVITY_REASONS = [
 ] as const;
 export type AgentActivityReason = (typeof AGENT_ACTIVITY_REASONS)[number];
 
+/** Original CLIs launched in a PTY. Core stays the only worldline engine. */
+export const EXTERNAL_CLIS = ["codex", "claude", "grok", "gemini", "muse"] as const;
+export type ExternalCli = (typeof EXTERNAL_CLIS)[number];
+
 /** A currently displayed human permission picker, not inferred from output or idle. */
 export interface AgentIntervention {
   requestId: string;
@@ -813,7 +817,7 @@ export interface TerminaBridge {
   onUpdateState(cb: (state: AppUpdateState) => void): () => void;
 
   // terminals (agent = core TUI, shell = a real shell like zsh)
-  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "core"; cli?: "codex"; fromTerminalId?: string; projectId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
+  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "core"; cli?: ExternalCli; fromTerminalId?: string; projectId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
   getShells(): Promise<{ name: string; path: string }[]>;
   /** Complete the renderer-side pane hydration fence for this PTY generation. */
   readyTerminal(id: string, generation: number): void;

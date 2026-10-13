@@ -848,7 +848,6 @@ body {
 #left-pane.minimized #worldline-panel,
 #left-pane.minimized #modified-panel,
 #left-pane.minimized #terminal-tabs-list,
-#left-pane.minimized #btn-terminal-menu,
 #left-pane.minimized #btn-new-terminal {
   display: none;
 }
@@ -911,7 +910,6 @@ body {
 
 .terminal-tab,
 #btn-new-terminal,
-#btn-terminal-menu,
 #terminal-tabs-list,
 #btn-min-terminal {
   -webkit-app-region: no-drag;
@@ -1201,41 +1199,18 @@ body.tab-reordering * {
   transition: background 0.12s ease, color 0.12s ease;
 }
 
-#btn-terminal-menu {
-  align-self: flex-end;
-  height: 22px;
-  padding: 0 7px;
-  margin-left: -4px;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 0 6px 0 0;
-  background: var(--bg-raised);
-  color: var(--text-dim);
-  font: inherit;
-  cursor: pointer;
-  flex: 0 0 auto;
-}
-
-#btn-new-terminal {
-  border-top-right-radius: 0;
-}
-
 #btn-new-terminal:hover,
-#btn-new-terminal:focus-visible,
-#btn-terminal-menu:hover,
-#btn-terminal-menu:focus-visible {
+#btn-new-terminal:focus-visible {
   color: var(--text);
   background: var(--bg-hover);
 }
 
-#btn-new-terminal:focus-visible,
-#btn-terminal-menu:focus-visible {
+#btn-new-terminal:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: -2px;
 }
 
-#btn-new-terminal:disabled,
-#btn-terminal-menu:disabled {
+#btn-new-terminal:disabled {
   opacity: 0.6;
   cursor: wait;
 }

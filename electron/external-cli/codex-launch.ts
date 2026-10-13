@@ -3,9 +3,10 @@
  * The profile is additive. It does not replace the user's Codex config,
  * and it does not bypass hook trust.
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { accessSync, constants } from "node:fs";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { durableAtomicWrite } from "../../shared/durable-write.ts";
 
 export const CODEX_PROFILE_NAME = "termina";
@@ -29,7 +30,28 @@ export function codexLaunchArgs(): string[] {
 
 export function codexHome(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
   const configured = env.CODEX_HOME?.trim();
-  return configured ? configured : join(home, ".codex");
+  if (configured && isAbsolute(configured) && !configured.includes("\0")) return configured;
+  return join(home, ".codex");
+}
+
+/** Single-quote a shell word. Codex runs the hook command through a shell. */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+export function codexHookCommand(nodePath: string, scriptPath: string): string {
+  return `${shellQuote(nodePath)} ${shellQuote(scriptPath)}`;
+}
+
+/** Node that can run the hook when the app's PATH does not include nvm or Homebrew. */
+export function resolveCodexNode(codexBin: string, lookup: (name: string) => string | null = () => null): string | null {
+  const sibling = join(dirname(codexBin), "node");
+  try {
+    accessSync(sibling, constants.X_OK);
+    return sibling;
+  } catch {
+    return lookup("node");
+  }
 }
 
 function tomlBasic(value: string): string {
@@ -55,46 +77,70 @@ export function codexProfileToml(command: string): string {
 
 export const CODEX_HOOK_SCRIPT = `#!/usr/bin/env node
 import { connect } from "node:net";
-import { readFileSync } from "node:fs";
 
-const MAX = 256 * 1024;
+const HEAD = 32 * 1024;
+const TAIL = 16 * 1024;
 
+let finished = false;
 function finish() {
-  try { process.stdout.write("{}\\n"); } catch { /* observational hook still exits 0 */ }
+  if (finished) return;
+  finished = true;
+  process.stdout.write("{}\\n", () => process.exit(0));
 }
 
 try {
-  const socketPath = process.env.TERMINA_CODEX_HOOK_SOCKET ?? "";
-  const token = process.env.TERMINA_CODEX_HOOK_TOKEN ?? "";
+  const socketPath = process.env.TERMINA_EXTERNAL_HOOK_SOCKET ?? "";
+  const token = process.env.TERMINA_EXTERNAL_HOOK_TOKEN ?? "";
   const terminalId = process.env.TERMINA_TERMINAL_ID ?? "";
   const generation = Number(process.env.TERMINA_TERMINAL_GENERATION);
-  let raw = "";
-  try { raw = readFileSync(0, "utf8"); } catch { raw = ""; }
-  if (raw.length > MAX) raw = raw.slice(0, MAX);
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const input = Buffer.concat(chunks);
+  let wire;
+  if (input.length <= HEAD) {
+    wire = { v: 1, token, terminalId, generation, payload: input.toString("utf8") };
+  } else {
+    wire = {
+      v: 1, token, terminalId, generation,
+      head: input.subarray(0, HEAD).toString("utf8"),
+      tail: input.subarray(input.length - TAIL).toString("utf8"),
+    };
+  }
   if (!socketPath || !token || !terminalId || !Number.isInteger(generation)) {
     finish();
-    process.exit(0);
+  } else {
+    const body = JSON.stringify(wire);
+    const sock = connect(socketPath);
+    let sent = false;
+    const done = () => {
+      if (sent) return;
+      sent = true;
+      sock.destroy();
+      finish();
+    };
+    sock.setTimeout(1000);
+    sock.on("timeout", done);
+    sock.on("error", done);
+    sock.on("connect", () => sock.end(body));
+    sock.on("close", done);
   }
-  const body = JSON.stringify({ v: 1, token, terminalId, generation, payload: raw });
-  const sock = connect(socketPath);
-  const done = () => { sock.destroy(); finish(); process.exit(0); };
-  sock.setTimeout(1000);
-  sock.on("timeout", done);
-  sock.on("error", done);
-  sock.on("connect", () => sock.end(body));
-  sock.on("close", done);
 } catch {
   finish();
-  process.exit(0);
 }
 `;
 
 export async function writeCodexHookScript(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, CODEX_HOOK_SCRIPT, { mode: 0o755 });
+  await writeFile(path, CODEX_HOOK_SCRIPT);
+  await chmod(path, 0o755);
 }
 
 export async function writeCodexProfile(codexHomeDir: string, command: string): Promise<void> {
   await mkdir(codexHomeDir, { recursive: true });
-  await durableAtomicWrite(join(codexHomeDir, `${CODEX_PROFILE_NAME}.config.toml`), codexProfileToml(command));
+  const path = join(codexHomeDir, `${CODEX_PROFILE_NAME}.config.toml`);
+  const next = codexProfileToml(command);
+  try {
+    if (await readFile(path, "utf8") === next) return;
+  } catch { /* create it */ }
+  await durableAtomicWrite(path, next);
 }
