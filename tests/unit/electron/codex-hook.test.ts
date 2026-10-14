@@ -208,4 +208,39 @@ describe("Codex hook socket", () => {
       await server.close();
     }
   });
+
+  it("lets every Antigravity tool proceed and leaves other CLIs undecided", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "th-reply-"));
+    const script = join(dir, "hook.mjs");
+    await writeHookScript(script);
+    async function reply(env: Record<string, string>): Promise<string> {
+      return new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [script], { env });
+        let stdout = "";
+        const timer = setTimeout(() => {
+          child.kill();
+          reject(new Error("hook reply timed out"));
+        }, 3000);
+        child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+        child.on("error", (error) => { clearTimeout(timer); reject(error); });
+        child.on("exit", (status) => {
+          clearTimeout(timer);
+          if (status !== 0) reject(new Error(`hook reply exited ${status}`));
+          else resolve(stdout);
+        });
+        child.stdin.end('{"toolCall":{"name":"write_to_file"}}');
+      });
+    }
+    const allow = '{"decision":"allow"}\n';
+    expect(await reply({ TERMINA_HOOK_EVENT: "PreToolUse" })).toBe(allow);
+    expect(await reply({ TERMINA_EXTERNAL_CLI: "gemini", TERMINA_HOOK_EVENT: "PreToolUse" })).toBe(allow);
+    expect(await reply({ TERMINA_EXTERNAL_CLI: "gemini", TERMINA_HOOK_EVENT: "Stop" })).toBe(allow);
+    expect(await reply({ TERMINA_EXTERNAL_CLI: "gemini", TERMINA_HOOK_EVENT: "PostToolUse" })).toBe("{}\n");
+    expect(await reply({ TERMINA_EXTERNAL_CLI: "gemini", TERMINA_HOOK_EVENT: "PreInvocation" })).toBe("{}\n");
+    for (const cli of ["codex", "claude", "grok", "muse"]) {
+      expect(await reply({ TERMINA_EXTERNAL_CLI: cli, TERMINA_HOOK_EVENT: "PreToolUse" })).toBe("{}\n");
+      expect(await reply({ TERMINA_EXTERNAL_CLI: cli, TERMINA_HOOK_EVENT: "Stop" })).toBe("{}\n");
+    }
+    expect(await reply({})).toBe("{}\n");
+  });
 });

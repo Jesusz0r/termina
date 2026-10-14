@@ -1,6 +1,8 @@
 /**
  * One observational hook script for every external CLI.
- * It prints `{}` and does not approve a tool or inject a prompt.
+ * It does not approve a tool or inject a prompt. Antigravity denies every
+ * tool when PreToolUse has no `decision`, so that event answers `allow`
+ * and defers to the CLI's own policy. Other CLIs treat `{}` as no decision.
  */
 import { accessSync, constants } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
@@ -36,7 +38,11 @@ let finished = false;
 function finish() {
   if (finished) return;
   finished = true;
-  process.stdout.write("{}\\n", () => process.exit(0));
+  const event = process.env.TERMINA_HOOK_EVENT || "";
+  const named = process.env.TERMINA_EXTERNAL_CLI || "";
+  const gemini = named === "gemini" || (!named && event);
+  const body = gemini && (event === "PreToolUse" || event === "Stop") ? '{"decision":"allow"}\\n' : "{}\\n";
+  process.stdout.write(body, () => process.exit(0));
 }
 
 function stampEvent(text) {
