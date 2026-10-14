@@ -648,20 +648,21 @@ export class AgentTui {
         complete: hit.complete,
       };
     }
-    let budget = displayBudget(cols, want);
+    // A page-up asks for a taller tail than the last paint. Doubling the
+    // cached window keeps those extra rows, so the next pages slice instead
+    // of re-wrapping every older line.
+    const extending = hit !== null && hit.revision === entry.revision && hit.width === cols && !hit.complete;
+    const growTo = extending ? Math.max(want, hit.cover * 2) : want;
+    let budget = displayBudget(cols, growTo);
     let chunk = this.entryTailSpans(entry, budget);
     let wrapped = wrapSpans(chunk.spans, cols);
-    for (let pass = 0; pass < 3 && !chunk.complete && wrapped.length < want && budget < entry.text.length; pass++) {
+    for (let pass = 0; pass < 3 && !chunk.complete && wrapped.length < growTo && budget < entry.text.length; pass++) {
       budget = Math.min(entry.text.length, budget * 2);
       chunk = this.entryTailSpans(entry, budget);
       wrapped = wrapSpans(chunk.spans, cols);
     }
-    let rows = wrapped.map((row) => row.frags.map((frag) => frag.text).join(""));
-    let painted = wrapped.map((row) => paintRow(row.frags, cols, entry, row.cells));
-    if (!chunk.complete && rows.length > want) {
-      rows = rows.slice(-want);
-      painted = painted.slice(-want);
-    }
+    const rows = wrapped.map((row) => row.frags.map((frag) => frag.text).join(""));
+    const painted = wrapped.map((row) => paintRow(row.frags, cols, entry, row.cells));
     entry.cache = {
       revision: entry.revision,
       width: cols,
@@ -670,7 +671,12 @@ export class AgentTui {
       rows,
       painted,
     };
-    return entry.cache;
+    if (rows.length <= want) return entry.cache;
+    return {
+      rows: rows.slice(-want),
+      painted: painted.slice(-want),
+      complete: chunk.complete,
+    };
   }
 
   private visibleSlice(

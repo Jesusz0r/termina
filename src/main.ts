@@ -105,6 +105,10 @@ function ensureEditorModule(): Promise<EditorModule> {
   });
   return editorModulePromise;
 }
+// Start the editor chunk while the rest of this module and preferences load.
+// Boot still awaits the same promise; this catch only avoids an unhandled
+// rejection if the import fails before that await is attached.
+void ensureEditorModule().catch(() => undefined);
 
 /** One open project tab: its editor view and its tab element. */
 interface ProjectView {
@@ -348,7 +352,7 @@ function setActiveProject(projectId: string | null): void {
     sessionSearch.close();
   }
   activeProjectId = nextId;
-  if (view) ensureProjectEditor(view);
+  if (view && editorModule) ensureProjectEditor(view);
   activeProjectGeneration++;
   const baseChrome = document.getElementById("editor-chrome")!;
   const baseContainer = document.getElementById("editor-container")!;
@@ -359,7 +363,7 @@ function setActiveProject(projectId: string | null): void {
   if (!noProject) {
     baseEditorInstance?.setProjectOpen(true);
     baseEmptyEl.hidden = true;
-  } else {
+  } else if (editorModule) {
     getBaseEditor().setProjectOpen(false);
   }
   for (const item of projectViews.values()) {
@@ -688,7 +692,10 @@ function worldlineProjectEffects() {
     upsert: (summary: Parameters<WorldlinesView["upsert"]>[0]) => worldlinesView.upsert(summary),
     updatePaneTab: (pane: Pane) => updatePaneTab(pane),
     refreshCandidateTest: (pane: Pane) => refreshCandidateTestCommand(pane),
-    refreshEditorBadges: () => activeEditor().refreshBadges(),
+    refreshEditorBadges: () => {
+      const editor = activeProjectId ? projectViews.get(activeProjectId)?.editorMgr : baseEditorInstance;
+      editor?.refreshBadges();
+    },
     updateEditorLock: () => updateEditorLock(),
   };
 }
@@ -1623,6 +1630,8 @@ async function openFileSmartInner(
   // revealing before routing resizes the terminal twice on cross-project opens.
   layout.revealEditor();
   try {
+    await ensureEditorModule();
+    if (projectViews.get(owner.projectId) !== view || activeProjectId !== owner.projectId) return;
     await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });
     // Navigation and editor keys use canonical paths; the project may retain a macOS alias.
     // A successful open is the recency signal, whatever path led here.
@@ -2663,6 +2672,9 @@ setTimeout(removeSplash, 10000);
 
 async function boot(attempt = 0): Promise<void> {
   layout.restore();
+  // The editor chunk has been loading since module start. Finish it in
+  // parallel with the project list, then attach Monaco.
+  const editorReady = ensureEditorModule();
 
   try {
     // Build the project tab bar; the active project owns the initial view.
@@ -2674,7 +2686,7 @@ async function boot(attempt = 0): Promise<void> {
       createProjectView(project);
       if (project.active) activeProjectId = project.id;
     }
-    await ensureEditorModule();
+    await editorReady;
     setActiveProject(activeProjectId);
     const bootView = activeProjectId ? projectViews.get(activeProjectId) : undefined;
     if (bootView) {

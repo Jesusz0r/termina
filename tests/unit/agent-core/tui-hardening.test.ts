@@ -136,8 +136,9 @@ describe("TUI app hardening (#227)", () => {
       tui.feed("[5~");
       tui.frame();
     }
-    // Pre-fix this re-parsed ~40M chars; the cached prefix bounds it near the entry size.
-    expect(tui.markdownScannedChars - before).toBeLessThan(5 * 1024 * 1024);
+    // Re-wrapping the growing tail on every page scanned ~3.8M chars here.
+    // The cached window should stay near one pass over the entry.
+    expect(tui.markdownScannedChars - before).toBeLessThan(2 * 1024 * 1024);
   }, 120_000);
 });
 
