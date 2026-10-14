@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { hookFacts, observeHookWire } from "../../../electron/external-cli/activity.ts";
 import { installAgyHooks } from "../../../electron/external-cli/agy.ts";
 import { claudeLaunchArgs, installClaudeSettings } from "../../../electron/external-cli/claude.ts";
+import { prepareExternalCli } from "../../../electron/external-cli/prepare.ts";
 import { installGrokHooks } from "../../../electron/external-cli/grok.ts";
 import { writeJson } from "../../../electron/external-cli/hook-config.ts";
 import { installMuseHooks } from "../../../electron/external-cli/muse.ts";
@@ -78,8 +79,13 @@ describe("external CLI hook facts", () => {
 describe("external CLI hook install", () => {
   it("adds Claude settings for one launch and a Grok file beside other hooks", async () => {
     const dir = await mkdtemp(join(tmpdir(), "termina-cli-"));
-    const settings = await installClaudeSettings(dir, "/opt/node /opt/hook.mjs");
-    expect(claudeLaunchArgs(settings)).toEqual(["--settings", settings]);
+    await writeFile(join(dir, "settings.json"), JSON.stringify({ theme: "dark", model: "opus" }));
+    await installClaudeSettings(dir, "TERMINA_EXTERNAL_CLI=claude /opt/node /opt/hook.mjs");
+    expect(claudeLaunchArgs()).toEqual([]);
+    const claude = JSON.parse(await readFile(join(dir, "settings.json"), "utf8")) as { theme: string; model: string; hooks: { Stop: unknown } };
+    expect(claude.theme).toBe("dark");
+    expect(claude.model).toBe("opus");
+    expect(JSON.stringify(claude.hooks)).toContain("TERMINA_EXTERNAL_CLI=claude");
     const grok = join(dir, "grok");
     await writeFile(join(grok, "hooks", "mine.json"), "{}\n").catch(async () => {
       const { mkdir } = await import("node:fs/promises");
@@ -129,5 +135,27 @@ describe("external CLI hook install", () => {
     const blocked = join(dir, "not-a-file");
     await mkdir(blocked);
     await expect(writeJson(blocked, { ok: true })).rejects.toThrow();
+  });
+
+  it("names Codex, Claude, Grok, Gemini, and Muse in the hook command", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "termina-cli-name-"));
+    const roots = { userData: dir, home: dir, env: {} };
+    const command = "/opt/node /opt/external-hook.mjs";
+    await prepareExternalCli("codex", command, roots);
+    await prepareExternalCli("claude", command, roots);
+    await prepareExternalCli("grok", command, roots);
+    await prepareExternalCli("gemini", command, roots);
+    await prepareExternalCli("muse", command, roots);
+    const codex = await readFile(join(dir, ".codex", "hooks.json"), "utf8");
+    const claude = await readFile(join(dir, ".claude", "settings.json"), "utf8");
+    const grok = await readFile(join(dir, ".grok", "hooks", "termina.json"), "utf8");
+    const gemini = await readFile(join(dir, ".gemini", "config", "hooks.json"), "utf8");
+    const muse = await readFile(join(dir, ".config", "muse", "termina-hooks.json"), "utf8");
+    expect(codex).toContain("TERMINA_EXTERNAL_CLI=codex");
+    expect(claude).toContain("TERMINA_EXTERNAL_CLI=claude");
+    expect(grok).toContain("TERMINA_EXTERNAL_CLI=grok");
+    expect(gemini).toContain("TERMINA_EXTERNAL_CLI=gemini");
+    expect(gemini).toContain("TERMINA_HOOK_EVENT=Stop");
+    expect(muse).toContain("TERMINA_EXTERNAL_CLI=muse");
   });
 });

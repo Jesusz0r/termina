@@ -1,10 +1,11 @@
 /**
- * Codex TUI. The profile is additive and does not bypass hook trust.
+ * Codex TUI. User hooks live in `~/.codex/hooks.json`, which Codex loads on
+ * every launch. The command does not bypass hook trust.
  */
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { durableAtomicWrite } from "../../shared/durable-write.ts";
+import { mergeHookEvents, readJsonObject, writeJson } from "./hook-config.ts";
 import type { CliRoots, PreparedCli } from "./types.ts";
 
 export const CODEX_LAUNCH = { bin: "codex", label: "Codex" };
@@ -24,7 +25,7 @@ const HOOK_EVENTS = [
 ] as const;
 
 export function codexLaunchArgs(): string[] {
-  return ["-p", PROFILE_NAME];
+  return [];
 }
 
 export function codexHome(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
@@ -33,38 +34,15 @@ export function codexHome(env: NodeJS.ProcessEnv = process.env, home = homedir()
   return join(home, ".codex");
 }
 
-function tomlBasic(value: string): string {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"`;
-}
-
-/** Profile text. The command prints `{}` and does not steer Codex. */
-export function codexProfileToml(command: string): string {
-  const lines = [
-    "# Termina observational hooks. Codex merges this profile with user hooks.",
-    "# Trust the command in Codex with /hooks. This file does not grant approvals.",
-  ];
-  for (const event of HOOK_EVENTS) {
-    lines.push(`[[hooks.${event}]]`);
-    lines.push(`[[hooks.${event}.hooks]]`);
-    lines.push(`type = "command"`);
-    lines.push(`command = ${tomlBasic(command)}`);
-    lines.push(`timeout = 5`);
-  }
-  lines.push("");
-  return lines.join("\n");
-}
-
-export async function writeCodexProfile(codexHomeDir: string, command: string): Promise<void> {
+export async function installCodexHooks(codexHomeDir: string, command: string): Promise<void> {
   await mkdir(codexHomeDir, { recursive: true });
-  const path = join(codexHomeDir, `${PROFILE_NAME}.config.toml`);
-  const next = codexProfileToml(command);
-  try {
-    if (await readFile(path, "utf8") === next) return;
-  } catch { /* create it */ }
-  await durableAtomicWrite(path, next);
+  const path = join(codexHomeDir, "hooks.json");
+  const current = await readJsonObject(path, "codex hooks are not a JSON object") ?? {};
+  await writeJson(path, { ...current, hooks: mergeHookEvents(current.hooks, HOOK_EVENTS, command, 5) });
+  await rm(join(codexHomeDir, `${PROFILE_NAME}.config.toml`), { force: true });
 }
 
 export async function prepareCodex(command: string, roots: CliRoots): Promise<PreparedCli> {
-  await writeCodexProfile(codexHome(roots.env, roots.home), command);
+  await installCodexHooks(codexHome(roots.env, roots.home), command);
   return { args: codexLaunchArgs(), env: {} };
 }

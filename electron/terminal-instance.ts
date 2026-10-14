@@ -34,6 +34,8 @@ export class AgentTerminalInstance {
   engine?: "core";
   /** Original external CLI in this PTY. Not a core engine and not a worldline. */
   externalCli?: ExternalCli;
+  /** Children of this PTY may report hook activity, including a CLI started in a shell. */
+  observesExternalHooks = false;
   externalActivitySeq = 0;
   /** Persist this tab in the project roster (user terminals, not dispatch or candidates). */
   persist = true;

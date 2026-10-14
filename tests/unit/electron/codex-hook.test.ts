@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { hookActivitySignals, hookFacts, observeHookWire } from "../../../electron/external-cli/activity.ts";
 import { HookServer, hookSocketPath } from "../../../electron/external-cli/hook-server.ts";
 import { hookCommand, resolveHookNode, writeHookScript } from "../../../electron/external-cli/hook-script.ts";
-import { codexHome, codexLaunchArgs, codexProfileToml, writeCodexProfile } from "../../../electron/external-cli/codex.ts";
+import { codexHome, codexLaunchArgs, installCodexHooks } from "../../../electron/external-cli/codex.ts";
 
 describe("Codex hook facts", () => {
   it("does not start work from a prompt or session open", () => {
@@ -47,29 +47,27 @@ describe("Codex hook facts", () => {
   });
 });
 
-describe("Codex launch profile", () => {
-  it("adds an observational profile without bypassing hook trust", () => {
-    expect(codexLaunchArgs()).toEqual(["-p", "termina"]);
+describe("Codex launch hooks", () => {
+  it("launches Codex without a profile flag or a hook-trust bypass", () => {
+    expect(codexLaunchArgs()).toEqual([]);
     expect(codexLaunchArgs().join(" ")).not.toContain("dangerously-bypass");
     const command = hookCommand(
       "/Users/a/Library/Application Support/node",
       "/Users/a/Library/Application Support/Termina/codex-hook.mjs",
     );
     expect(command).toBe("'/Users/a/Library/Application Support/node' '/Users/a/Library/Application Support/Termina/codex-hook.mjs'");
-    const toml = codexProfileToml(command);
-    expect(toml).toContain("Application Support");
-    expect(toml).toContain("[[hooks.Stop]]");
-    expect(toml).toContain("[[hooks.PermissionRequest]]");
-    expect(toml).toContain("[[hooks.SubagentStop]]");
-    expect(toml).not.toContain("decision");
-    expect(toml).not.toContain("bypass");
   });
 
-  it("writes only the Termina profile file", async () => {
+  it("writes user hooks and removes the old Termina profile", async () => {
     const dir = await mkdtemp(join(tmpdir(), "termina-codex-profile-"));
-    await writeCodexProfile(dir, "/opt/termina/codex-hook.mjs");
-    const text = await readFile(join(dir, "termina.config.toml"), "utf8");
-    expect(text).toContain("[[hooks.UserPromptSubmit]]");
+    await writeFile(join(dir, "termina.config.toml"), "old profile\n");
+    await writeFile(join(dir, "hooks.json"), JSON.stringify({ model: "kept" }));
+    await installCodexHooks(dir, "TERMINA_EXTERNAL_CLI=codex /opt/termina/codex-hook.mjs");
+    const hooks = JSON.parse(await readFile(join(dir, "hooks.json"), "utf8")) as { model: string; hooks: { Stop: unknown } };
+    expect(hooks.model).toBe("kept");
+    expect(JSON.stringify(hooks.hooks)).toContain("TERMINA_EXTERNAL_CLI=codex");
+    expect(JSON.stringify(hooks.hooks)).toContain("PermissionRequest");
+    await expect(readFile(join(dir, "termina.config.toml"), "utf8")).rejects.toThrow();
   });
 });
 
@@ -111,6 +109,12 @@ describe("Codex hook socket", () => {
     expect(server.accept(JSON.stringify({
       v: 1, token, terminalId: "term-1", generation: 3, payload: "{\"hook_event_name\":\"Stop\"}",
     }))?.payload).toContain("Stop");
+    expect(server.accept(JSON.stringify({
+      v: 1, token, terminalId: "term-1", generation: 3, cli: "gemini", payload: "{}",
+    }))?.cli).toBe("gemini");
+    expect(server.accept(JSON.stringify({
+      v: 1, token, terminalId: "term-1", generation: 3, cli: "not-a-cli", payload: "{}",
+    }))).toBeNull();
     server.revoke("term-1");
     expect(server.accept(JSON.stringify({
       v: 1, token, terminalId: "term-1", generation: 3, payload: "{}",
@@ -173,7 +177,7 @@ describe("Codex hook socket", () => {
     const script = join(dir, "hook.mjs");
     const sock = join(dir, "hook.sock");
     await writeHookScript(script);
-    const received: Array<{ payload?: string }> = [];
+    const received: Array<{ payload?: string; cli?: string }> = [];
     const server = new HookServer((message) => received.push(message));
     await server.listen(sock);
     const token = server.issue("term-1", 1);
@@ -197,6 +201,7 @@ describe("Codex hook socket", () => {
         child.stdin.end(`\n\n{"fullyIdle":true,"note":"${"x".repeat(500)} hook_event_name"}`);
       });
       expect(code).toBe(0);
+      expect(received[0]?.cli).toBe("gemini");
       expect(received[0]?.payload).toContain('"hook_event_name":"Stop"');
       expect(hookFacts("gemini", observeHookWire(received[0]!))).toEqual([{ t: "external_stop" }]);
     } finally {

@@ -8,6 +8,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isRecord } from "../../shared/guards.ts";
+import { EXTERNAL_CLIS, type ExternalCli } from "../../shared/types.ts";
 
 export const HOOK_MESSAGE_MAX_BYTES = 256 * 1024;
 const HOOK_HEAD_MAX_BYTES = 32 * 1024;
@@ -17,6 +18,7 @@ export type HookMessage = {
   token: string;
   terminalId: string;
   generation: number;
+  cli?: ExternalCli;
   payload?: string;
   head?: string;
   tail?: string;
@@ -29,6 +31,10 @@ export function hookSocketPath(userDataDir: string, pid = process.pid): string {
   const dir = join(tmpdir(), `termina-external-hook-${randomBytes(6).toString("hex")}`);
   mkdirSync(dir, { mode: 0o700 });
   return join(dir, "hook.sock");
+}
+
+function externalCliName(value: unknown): ExternalCli | undefined {
+  return typeof value === "string" && (EXTERNAL_CLIS as readonly string[]).includes(value) ? value as ExternalCli : undefined;
 }
 
 type BoundToken = { terminalId: string; generation: number };
@@ -82,6 +88,8 @@ export class HookServer {
     if (!isRecord(parsed) || parsed.v !== 1) return null;
     if (typeof parsed.token !== "string" || typeof parsed.terminalId !== "string") return null;
     if (typeof parsed.generation !== "number" || !Number.isSafeInteger(parsed.generation) || parsed.generation < 1) return null;
+    const cli = parsed.cli === undefined ? undefined : externalCliName(parsed.cli);
+    if (parsed.cli !== undefined && !cli) return null;
     const payload = typeof parsed.payload === "string" ? parsed.payload : undefined;
     const head = typeof parsed.head === "string" ? parsed.head : undefined;
     const tail = typeof parsed.tail === "string" ? parsed.tail : undefined;
@@ -95,6 +103,7 @@ export class HookServer {
       token: parsed.token,
       terminalId: parsed.terminalId,
       generation: parsed.generation,
+      ...(cli !== undefined ? { cli } : {}),
       ...(payload !== undefined ? { payload } : {}),
       ...(head !== undefined ? { head } : {}),
       ...(tail !== undefined ? { tail } : {}),

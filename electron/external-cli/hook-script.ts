@@ -49,6 +49,13 @@ function stampEvent(text) {
   return text.slice(0, at + 1) + '"hook_event_name":' + JSON.stringify(hint) + "," + text.slice(at + 1);
 }
 
+function hookCli() {
+  const named = process.env.TERMINA_EXTERNAL_CLI || "";
+  if (named) return named;
+  // Installed agy hooks set only the event. That prefix is agy's.
+  return process.env.TERMINA_HOOK_EVENT ? "gemini" : "";
+}
+
 try {
   const socketPath = process.env.TERMINA_EXTERNAL_HOOK_SOCKET ?? "";
   const token = process.env.TERMINA_EXTERNAL_HOOK_TOKEN ?? "";
@@ -57,6 +64,7 @@ try {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const input = Buffer.from(stampEvent(Buffer.concat(chunks).toString("utf8")));
+  const cli = hookCli();
   let wire;
   if (input.length <= HEAD) {
     wire = { v: 1, token, terminalId, generation, payload: input.toString("utf8") };
@@ -67,6 +75,7 @@ try {
       tail: input.subarray(input.length - TAIL).toString("utf8"),
     };
   }
+  if (cli) wire.cli = cli;
   if (!socketPath || !token || !terminalId || !Number.isInteger(generation)) {
     finish();
   } else {

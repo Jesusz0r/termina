@@ -81,7 +81,7 @@ import { filterAgentEnvironment } from "./agent-env.js";
 import { hookActivitySignals, observeHookWire } from "./external-cli/activity.js";
 import { HookServer, hookSocketPath, type HookMessage } from "./external-cli/hook-server.js";
 import { hookCommand, resolveHookNode, writeHookScript } from "./external-cli/hook-script.js";
-import { externalCliLaunch, prepareExternalCli } from "./external-cli/prepare.js";
+import { externalCliLaunch, prepareExternalCli, prepareInstalledExternalClis } from "./external-cli/prepare.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
 import { MAX_SESSION_SEARCH_QUERY } from "./session-search.js";
@@ -3275,13 +3275,24 @@ class TerminaApp {
       sessionFile = null;
     } else if (type === "shell") {
       const shells = await detectShells();
+      const hooks = await this.ensureExternalHooks();
+      const scriptPath = join(this.userDataDir, "external-hook.mjs");
+      await writeHookScript(scriptPath);
+      await this.paths.warmHostPath();
+      const nodePath = this.paths.findOnHostPath("node");
+      if (nodePath) {
+        await prepareInstalledExternalClis(hookCommand(nodePath, scriptPath), {
+          userData: this.userDataDir,
+          home: homedir(),
+        });
+      }
       opts?.spawnGuard?.();
       const chosen = opts?.shell && existsSync(opts.shell) ? { path: opts.shell, name: basename(opts.shell) } : shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       cmd = chosen.path;
       args = [];
       shellName = chosen.name;
       shellPath = chosen.path;
-      env = { ...process.env };
+      env = { ...process.env, TERMINA_EXTERNAL_HOOK_SOCKET: hooks.socketPath };
     } else if (type === "agent") {
       // In-house engine. Timeline and modified list consume its sidecar
       // contract. ELECTRON_RUN_AS_NODE cannot read inside the asar; spawn
@@ -3366,7 +3377,7 @@ class TerminaApp {
         rendererTarget,
         beforeSpawn: (target) => {
           opts?.spawnGuard?.();
-          if (externalCli && this.externalHooks) {
+          if (type === "shell" && this.externalHooks) {
             env.TERMINA_EXTERNAL_HOOK_TOKEN = this.externalHooks.server.issue(target.id, target.generation);
             env.TERMINA_TERMINAL_ID = target.id;
             env.TERMINA_TERMINAL_GENERATION = String(target.generation);
@@ -3388,6 +3399,7 @@ class TerminaApp {
           created.shellPath = shellPath;
           created.sessionId = sessionId;
           created.sessionFile = sessionFile;
+          if (type === "shell") created.observesExternalHooks = true;
           if (externalCli) created.externalCli = externalCli;
           if (type === "agent") created.engine = "core";
           if (type === "agent" && !opts?.launch) {
@@ -7059,10 +7071,11 @@ class TerminaApp {
   private ingestExternalHook(message: HookMessage): void {
     try {
       const inst = this.runtime.get(message.terminalId);
-      if (!inst?.externalCli || inst.generation !== message.generation || inst.closed || inst.pty.hasExited) return;
+      const cli = inst?.externalCli ?? message.cli;
+      if (!inst?.observesExternalHooks || !cli || inst.generation !== message.generation || inst.closed || inst.pty.hasExited) return;
       const at = Date.now();
       const observed = observeHookWire(message);
-      for (const signal of hookActivitySignals(inst.externalCli, observed, ++inst.externalActivitySeq, at)) {
+      for (const signal of hookActivitySignals(cli, observed, ++inst.externalActivitySeq, at)) {
         this.foldActivity(inst, signal);
       }
     } catch {
@@ -7075,7 +7088,7 @@ class TerminaApp {
     event: ActivitySignal,
     expected?: PtyRendererSendTarget | null,
   ): void {
-    if (inst.type !== "agent" && !inst.externalCli) return;
+    if (inst.type !== "agent" && !inst.observesExternalHooks) return;
     const next = applyActivityEvent(this.activityInputs.get(inst.id) ?? emptyActivityInput(), event);
     this.activityInputs.set(inst.id, next);
     const view = activityView(activityFor(next));
