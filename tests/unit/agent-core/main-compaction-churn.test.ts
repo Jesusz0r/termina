@@ -20,6 +20,24 @@ function rows(path: string): Row[] {
   return out;
 }
 
+/** Answer host requests in the same read that observes them.
+ *  A timer can miss the child's ack deadline when the suite is busy, and a
+ *  missed preflight never emits agent_settled. */
+function ackHostRequests(eventFile: string, eventsDir: string, terminal: string, acked: Set<string>): void {
+  for (const row of rows(eventFile)) {
+    if (!["preflight_request", "checkpoint_request"].includes(row.t) || typeof row.requestId !== "string" || acked.has(row.requestId)) continue;
+    writeFileSync(join(eventsDir, `ack-${terminal}-${row.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
+    acked.add(row.requestId);
+  }
+}
+
+function waitSettled(eventFile: string, eventsDir: string, terminal: string, acked: Set<string>, count: number, timeout: number): Promise<void> {
+  return expect.poll(() => {
+    ackHostRequests(eventFile, eventsDir, terminal, acked);
+    return rows(eventFile).filter(row => row.t === "agent_settled").length;
+  }, { timeout, interval: 20 }).toBe(count);
+}
+
 // Real multi-prompt kernel and durable receipts; only provider responses are
 // synthetic. HOME, sessions, events, files and children all belong to the test.
 describe("compaction churn in the main loop", () => {
@@ -75,18 +93,12 @@ describe("compaction churn in the main loop", () => {
     child.stderr.on("data", chunk => { output = (output + chunk).slice(-12_000); });
     const closed = new Promise<number | null>((resolve, reject) => { child.once("close", resolve); child.once("error", reject); });
     const acked = new Set<string>();
-    const ackTimer = setInterval(() => {
-      for (const row of rows(eventFile)) {
-        if (!["preflight_request", "checkpoint_request"].includes(row.t) || !row.requestId || acked.has(row.requestId)) continue;
-        writeFileSync(join(events, `ack-${terminal}-${row.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
-        acked.add(row.requestId);
-      }
-    }, 10);
+    const ackTimer = setInterval(() => ackHostRequests(eventFile, events, terminal, acked), 10);
     const timeout = setTimeout(() => child.kill("SIGKILL"), 25_000);
     try {
       for (let turn = 1; turn <= 3; turn++) {
         child.stdin.write(`fixture prompt ${turn}\n`);
-        await expect.poll(() => rows(eventFile).filter(row => row.t === "agent_settled").length, { timeout: 5_000 }).toBe(turn);
+        await waitSettled(eventFile, events, terminal, acked, turn, 5_000);
       }
       child.stdin.write("/exit\n");
       expect(await closed, output).toBe(0);
@@ -153,18 +165,12 @@ describe("compaction churn in the main loop", () => {
     child.stderr.on("data", chunk => { output = (output + chunk).slice(-12_000); });
     const closed = new Promise<number | null>((resolve, reject) => { child.once("close", resolve); child.once("error", reject); });
     const acked = new Set<string>();
-    const ackTimer = setInterval(() => {
-      for (const row of rows(eventFile)) {
-        if (!["preflight_request", "checkpoint_request"].includes(row.t) || !row.requestId || acked.has(row.requestId)) continue;
-        writeFileSync(join(events, `ack-${terminal}-${row.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
-        acked.add(row.requestId);
-      }
-    }, 10);
+    const ackTimer = setInterval(() => ackHostRequests(eventFile, events, terminal, acked), 10);
     const timeout = setTimeout(() => child.kill("SIGKILL"), 25_000);
     try {
       for (let turn = 1; turn <= 3; turn++) {
         child.stdin.write(`fixture prompt ${turn}\n`);
-        await expect.poll(() => rows(eventFile).filter(row => row.t === "agent_settled").length, { timeout: 5_000 }).toBe(turn);
+        await waitSettled(eventFile, events, terminal, acked, turn, 5_000);
       }
       child.stdin.write("/exit\n");
       expect(await closed, output).toBe(0);
@@ -258,13 +264,7 @@ describe("compaction churn in the main loop", () => {
     child.stderr.on("data", chunk => { output = (output + chunk).slice(-12_000); });
     const closed = new Promise<number | null>((resolve, reject) => { child.once("close", resolve); child.once("error", reject); });
     const acked = new Set<string>();
-    const ackTimer = setInterval(() => {
-      for (const row of rows(eventFile)) {
-        if (!["preflight_request", "checkpoint_request"].includes(row.t) || !row.requestId || acked.has(row.requestId)) continue;
-        writeFileSync(join(events, `ack-${terminal}-${row.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
-        acked.add(row.requestId);
-      }
-    }, 10);
+    const ackTimer = setInterval(() => ackHostRequests(eventFile, events, terminal, acked), 10);
     const timeout = setTimeout(() => child.kill("SIGKILL"), 60_000);
     try {
       // P1-P4 read f1-f4, P5 bills high to trip the gate, P6 prunes f1-era
@@ -272,7 +272,7 @@ describe("compaction churn in the main loop", () => {
       const prompts = ["read f1.txt", "read f2.txt", "read f3.txt", "read f4.txt", "go", "read f5.txt", "read f6.txt", "go", "go"];
       for (let turn = 1; turn <= prompts.length; turn++) {
         child.stdin.write(`${prompts[turn - 1]}\n`);
-        await expect.poll(() => rows(eventFile).filter(row => row.t === "agent_settled").length, { timeout: 15_000 }).toBe(turn);
+        await waitSettled(eventFile, events, terminal, acked, turn, 15_000);
       }
       child.stdin.write("/exit\n");
       expect(await closed, output).toBe(0);

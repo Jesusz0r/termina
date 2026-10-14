@@ -165,6 +165,8 @@ describe("createTerminal strict internal spawn fence", () => {
     const actual = loadMethods(["createTerminal"], {
       detectShells: async () => { if (stage === "shell-discovery") stale = true; return []; },
       fsRealpath: async (root: string) => root, basename, existsSync: () => true,
+      join: (...parts: string[]) => parts.join("/"),
+      writeHookScript: async () => {},
     });
     const f = fixture();
     const ptySpawn = vi.fn();
@@ -173,6 +175,9 @@ describe("createTerminal strict internal spawn fence", () => {
     Object.assign(actual, f.state, {
       createTerminal,
       allocateTerminalId: () => "term-10", projectOfWorkspace: () => f.project,
+      userDataDir: "/tmp/termina",
+      ensureExternalHooks: async () => ({ socketPath: "/tmp/hook.sock" }),
+      paths: { warmHostPath: async () => {}, findOnHostPath: () => null },
       sourceAdmissions: { admit, remove: vi.fn() },
       runtime: { has: () => false, spawn: (opts: { beforeSpawn(target: unknown): void }) => {
         if (stage === "before-spawn") stale = true;

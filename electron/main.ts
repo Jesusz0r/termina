@@ -3275,6 +3275,7 @@ class TerminaApp {
       sessionFile = null;
     } else if (type === "shell") {
       const shells = await detectShells();
+      opts?.spawnGuard?.();
       const hooks = await this.ensureExternalHooks();
       const scriptPath = join(this.userDataDir, "external-hook.mjs");
       await writeHookScript(scriptPath);
