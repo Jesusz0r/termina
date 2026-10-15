@@ -3135,8 +3135,7 @@ class TerminaApp {
     return { model: `${first.provider}/${first.model}`, thinkingLevel: null };
   }
 
-  /** Serialize admission and spawn so concurrent clicks cannot create two
-   * unrestricted writers on the same source. */
+  /** Serialize spawn so concurrent clicks cannot interleave roster writes. */
   private userTerminalCreation: Promise<void> = Promise.resolve();
 
   private async createUserTerminal(opts: Parameters<TerminaApp["createTerminal"]>[1], restoring = false): Promise<AgentTerminalInstance> {
@@ -3148,11 +3147,6 @@ class TerminaApp {
       if (opts?.projectId && !this.projects.has(opts.projectId)) throw new Error("unknown project");
       const project = (opts?.projectId ? this.projects.get(opts.projectId) : undefined) ?? this.project();
       if (this.disposed || (!restoring && project && this.projectIsSwitching(project.id))) throw new Error("the project is changing");
-      const root = project?.canonicalRoot;
-      const occupied = root && [...this.runtime.values()].some((inst) => {
-        const ws = this.workspaceOfTerminal(inst);
-        return !inst.closed && !inst.pty.hasExited && ws && sourceTreesOverlap(root, ws.canonicalRoot);
-      });
       const sourceSessionFile = project && opts?.resume?.sessionId
         ? await this.coreSessionFile(opts.resume.sessionId, project.cwd) : opts?.resume?.sessionFile;
       if (restoring && sourceSessionFile && project?.worldlines) {
@@ -3163,19 +3157,6 @@ class TerminaApp {
           if (!restored) throw new Error("the saved session closed during restore");
           return restored;
         }
-      }
-      if (project && occupied && opts?.type !== "shell") {
-        const source = opts?.fromTerminalId ? this.runtime.get(opts.fromTerminalId) : null;
-        const remembered = this.rememberedAgentSettings();
-        const result = await project.worldlines?.createIndependentSession({
-          model: opts?.model ?? source?.model ?? remembered?.model ?? null,
-          thinkingLevel: source?.thinkingLevel ?? null,
-          ...(sourceSessionFile ? { sourceSessionFile } : {}),
-        });
-        if (!result?.ok || !result.terminalId) throw new Error(result?.error ?? "isolated sessions are unavailable for this project");
-        const inst = this.runtime.get(result.terminalId);
-        if (!inst) throw new Error("the new session closed during preparation");
-        return inst;
       }
       return await this.createTerminal(project?.cwd, opts);
     } finally { release(); }
@@ -5354,7 +5335,8 @@ class TerminaApp {
       const workspace = project.workspaces.get(inst.workspaceId) ?? null;
       return [{
         id: inst.id, generation: inst.generation, type: inst.type, model: inst.model,
-        activity: activityView(activityFor(this.activityInputs.get(id) ?? emptyActivityInput())),
+        activity: inst.type === "agent" || (inst.observesExternalHooks && this.activityInputs.has(id))
+          ? activityView(activityFor(this.activityInputs.get(id) ?? emptyActivityInput())) : null,
         workspace, verify: inst.verify,
         dispatchAssignment: this.dispatchRuns.get(inst.id) ?? null,
         trackedChanges: inst.modified.size, plan: inst.plan,

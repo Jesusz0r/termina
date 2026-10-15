@@ -10,7 +10,8 @@ export interface WorkSummaryTerminalFacts {
   generation: number;
   type: "agent" | "shell";
   model: string | null;
-  activity: AgentActivityView;
+  /** Null for a shell until external CLI activity is observed. */
+  activity: AgentActivityView | null;
   workspace: { id: string; root: string; primary: boolean; comparisonId?: string } | null;
   verify: VerifyInfo;
   trackedChanges: number;
@@ -39,7 +40,7 @@ export function projectWorkSummary(
       kind, terminalId: terminal.id, generation: terminal.generation,
     });
     const verify = terminal.type === "agent" ? terminal.verify : null;
-    const activity = terminal.type === "agent" ? terminal.activity : null;
+    const activity = terminal.activity;
     const attention: WorkAttentionReason[] = [];
     if (activity?.state === "blocked") attention.push("blocked");
     if (verify?.state === "fail") attention.push("verify-failed");

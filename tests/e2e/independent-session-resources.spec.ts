@@ -1,7 +1,7 @@
 import { test as base, expect } from "./fixtures.ts";
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import type { Terminal } from "@xterm/xterm";
 import { parseSidecarRecord } from "../../electron/sidecar.ts";
@@ -106,7 +106,7 @@ test.describe("Independent session private resources", () => {
     }
   });
 
-  test("copies private auth and MCP bytes and gates MCP startup on source admission", async ({ page, runRoot, projectRoot }) => {
+  test("a second agent uses the shared project and its home auth", async ({ page, runRoot, projectRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const primary = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.type === "agent")!;
     expect(primary).toBeDefined();
@@ -116,50 +116,29 @@ test.describe("Independent session private resources", () => {
     expect(created).toMatchObject({ ok: true });
     expect(created.id).not.toBe(primary.id);
     const id = created.id!;
-    const candidate = (await page.evaluate((projectId) => window.termina.getWorldlines(projectId), primary.projectId!))
-      .find((worldline) => worldline.terminalId === id)!;
-    expect(candidate).toMatchObject({ role: "session", state: "ready" });
-    expect(realpathSync(candidate.root)).not.toBe(realpathSync(projectRoot));
-    const support = join(dirname(candidate.root), "A-support");
-    await waitForReady(join(support, "events", `${id}.jsonl`));
+    const second = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.id === id)!;
+    expect(realpathSync(second.cwd)).toBe(realpathSync(projectRoot));
+    await waitForReady(join(runRoot, "events", `${id}.jsonl`));
 
-    const resources = join(support, "home", ".termina", "agent");
+    const homeAgent = join(runRoot, "home", ".termina", "agent");
     for (const [name, bytes] of [["auth.json", AUTH_BYTES], ["mcp.json", MCP_BYTES]] as const) {
-      const destination = join(resources, name);
-      expect(readFileSync(destination)).toEqual(bytes);
-      expect(statSync(destination).mode & 0o077).toBe(0);
-      expect(readFileSync(join(runRoot, "home", ".termina", "agent", name))).toEqual(bytes);
+      expect(readFileSync(join(homeAgent, name))).toEqual(bytes);
       expect(existsSync(join(projectRoot, ".termina", "agent", name))).toBe(false);
-      expect(existsSync(join(candidate.root, ".termina", "agent", name))).toBe(false);
     }
-    expect(statSync(join(runRoot, "home", ".termina", "agent", "auth.json")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(homeAgent, "auth.json")).mode & 0o777).toBe(0o600);
 
-    const primaryMarker = join(projectRoot, "mcp-started");
-    const candidateMarker = join(candidate.root, "mcp-started");
-    expect(existsSync(primaryMarker)).toBe(false);
-    expect(existsSync(candidateMarker)).toBe(false);
-    const shell = await page.evaluate(() => window.termina.createTerminal({ type: "shell", shell: "/bin/bash" }));
-    expect(shell).toMatchObject({ ok: true });
-    const prompt = "Connect fixture-mcp, then reply with a short greeting; do not use tools.\r";
-    await page.evaluate(({ id, prompt }) => window.termina.writeTerminal(id, prompt), { id: primary.id, prompt });
-    await expect.poll(() => terminalText(page, primary.id), { timeout: 15_000 }).toContain("Shell activity is unknown while its terminal is live");
-    const deniedRecords = readFileSync(join(runRoot, "events", `${primary.id}.jsonl`), "utf8").split("\n").map(parseSidecarRecord);
-    expect(deniedRecords.some((record) => record?.t === "preflight_request" && record.readOnly === false)).toBe(true);
-    expect(deniedRecords.some((record) => record?.t === "agent_start")).toBe(false);
-    expect(existsSync(primaryMarker)).toBe(false);
-    expect(existsSync(candidateMarker)).toBe(false);
+    const marker = join(projectRoot, "mcp-started");
+    expect(existsSync(marker)).toBe(false);
     expect(credentials).toEqual([]);
 
-    // The same enabled configuration starts only in the admitted isolated tree.
+    const prompt = "Connect fixture-mcp, then reply with a short greeting; do not use tools.\r";
     await page.evaluate(({ id, prompt }) => window.termina.writeTerminal(id, prompt), { id, prompt });
     await expect.poll(() => terminalText(page, id), { timeout: 15_000 }).toContain(RESPONSE_TEXT);
     await expect.poll(() => terminalText(page, id)).toContain("mcp fixture-mcp connected");
-    expect(readFileSync(candidateMarker, "utf8")).toBe("started");
-    expect(existsSync(primaryMarker)).toBe(false);
+    expect(readFileSync(marker, "utf8")).toBe("started");
     expect(credentials).toEqual(["Bearer synthetic-independent-session-token"]);
     for (const [name, bytes] of [["auth.json", AUTH_BYTES], ["mcp.json", MCP_BYTES]] as const) {
-      expect(readFileSync(join(runRoot, "home", ".termina", "agent", name))).toEqual(bytes);
-      expect(readFileSync(join(resources, name))).toEqual(bytes);
+      expect(readFileSync(join(homeAgent, name))).toEqual(bytes);
     }
     expect(readFileSync(join(projectRoot, "hello.txt"), "utf8")).toBe("hello\n");
   });

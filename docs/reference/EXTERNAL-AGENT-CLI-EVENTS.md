@@ -4,6 +4,17 @@ Fecha de revisión: 7 de octubre de 2026.
 
 Estado: investigación del 7 de octubre de 2026. El menú lanza el TUI original de Codex, Claude Code, Grok, Antigravity CLI (`agy`) y Muse Code, con un hook observacional que alimenta el mismo reductor de actividad. No es soporte completo: no hay una prueba con un prompt real, y Termina no restaura ni bifurca esas sesiones. Los contratos consultados son [Codex](https://developers.openai.com/codex/hooks), [Claude Code](https://code.claude.com/docs/en/hooks), [Grok](https://docs.x.ai/build/features/hooks), [Antigravity CLI](https://antigravity.google/docs/hooks/) y [Muse Code](https://dev.meta.ai/docs/muse-code/extending). Esta nota no cambia las reglas de [AGENTS.md](../../AGENTS.md).
 
+## Diagnóstico de eventos (15 de octubre de 2026)
+
+Esta sección actualiza el diagnóstico de runtime; las secciones de investigación siguientes conservan el alcance de la revisión original.
+
+- Los hooks se instalan al abrir el CLI desde el menú de Termina o al crear una terminal shell de Termina. El proceso recibe la conexión y una identidad de terminal y generación por entorno. Un CLI iniciado fuera de Termina no recibe esa conexión. Una terminal creada sin ese entorno necesita una nueva sesión de terminal para recibirlo.
+- Codex requiere revisar y confiar en la definición exacta de los hooks mediante `/hooks`. Los hooks nuevos o modificados se omiten hasta recibir confianza. Termina no usa `--dangerously-bypass-hook-trust`. Véase [Review and trust hooks](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
+- Se corrigió una pérdida de actividad en el resumen de proyecto: los CLI externos son terminales de tipo shell, y el resumen descartaba su actividad incluso cuando el hook ya había llegado al reductor. Ahora conserva la actividad observada para los contadores de trabajo y atención. Una shell sin actividad observada sigue siendo desconocida; no obtiene capacidades de verificación o sesión del motor propio.
+- El transporte observacional actual alimenta actividad y permisos documentados, no entradas de herramientas en Session Timeline, snapshots ni atribución de ediciones en Change Review. Los cambios de archivos siguen pasando por el watcher. La ausencia de esas entradas no demuestra que falten hooks.
+
+La prueba [external-cli-events.spec.ts](../../tests/e2e/external-cli-events.spec.ts) ejecuta los comandos de hooks instalados por main para Codex, Claude, Grok, Antigravity y Muse desde un PTY real, con HOME y configuración aislados. Comprueba recepción en la terminal, contadores de proyecto y permisos donde están configurados. No ejecuta los CLI de terceros ni prompts con modelos, por lo que no certifica su emisión real, autenticación, confianza o cobertura de eventos. Los contratos de configuración y confianza consultados son [Codex](https://learn.chatgpt.com/docs/hooks) y [Antigravity](https://antigravity.google/docs/hooks/).
+
 ## Objetivo de producto
 
 Permitir que la gente use Gemini CLI, Grok Build, Claude Code, Codex y otros CLI de agentes dentro de Termina, con su interfaz de terminal original a la izquierda y Monaco, el explorador y la revisión de archivos a la derecha. El usuario debe poder elegir el CLI y conservar su autenticación, configuración e instrucciones propias.

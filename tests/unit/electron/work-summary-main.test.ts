@@ -42,6 +42,7 @@ interface Terminal {
   type: "agent" | "shell";
   closed: boolean;
   busy: boolean;
+  observesExternalHooks?: boolean;
   persist: boolean;
   pty: { hasExited: boolean };
   model: string | null;
@@ -157,6 +158,22 @@ describe("main project work-summary orchestration", () => {
     main.foldSidecarActivity(owner, { bridgeId: "bridge", seq: 1, t: "intervention_requested", requestId: "approval-1", kind: "permission", since: 1000 });
     expect(main.sendInstances).not.toHaveBeenCalled();
     expect(main.activityInputs.has(owner.id)).toBe(false);
+  });
+
+  it("projects hook-observed shell work and permissions without inventing activity for an unused shell", () => {
+    const { main, project, add } = fixture();
+    const shell = add("term-shell", { type: "shell", observesExternalHooks: true });
+    expect(main.workSummary(project.id)!.terminals[0]!.activity).toBeNull();
+    const working = applyActivityEvent(emptyActivityInput(), { t: "external_turn", seq: 1, at: 100 });
+    main.activityInputs.set(shell.id, working);
+    expect(main.workOverview().projects[0]).toMatchObject({ working: 1, attentionCount: 0,
+      terminals: [{ activity: { state: "working" }, model: null, verify: null }] });
+    const intervention = { requestId: "codex:Bash", kind: "permission" as const, since: 200 };
+    main.activityInputs.set(shell.id, applyActivityEvent(working, { t: "intervention_requested", seq: 2, at: 200, ...intervention }));
+    expect(main.workOverview().projects[0]).toMatchObject({ working: 0, attentionCount: 1,
+      terminals: [{ activity: { state: "blocked", intervention } }] });
+    expect(main.workOverview().items[0]).toMatchObject({ terminalId: shell.id, reason: "blocked",
+      action: { kind: "terminal", terminalId: shell.id, generation: shell.generation } });
   });
 
   it("projects canonical retained candidate recovery even without a terminal", () => {

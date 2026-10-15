@@ -78,26 +78,27 @@ describe("user terminal creation", () => {
     expect(app.createTerminal).toHaveBeenCalledWith("/requested", expect.anything());
   });
 
-  it("serializes simultaneous empty-project requests before testing occupancy", async () => {
+  it("serializes simultaneous requests onto the same project tree", async () => {
     const { app, project } = fixture();
     const results = await Promise.all([create.call(app, { projectId: project.id }), create.call(app, { projectId: project.id })]);
-    expect(results.map((r) => r.id)).toEqual(["primary", "isolated"]);
-    expect(app.createTerminal).toHaveBeenCalledTimes(1);
-    expect(project.worldlines.createIndependentSession).toHaveBeenCalledTimes(1);
+    expect(results.map((r) => r.id)).toEqual(["primary", "primary"]);
+    expect(app.createTerminal).toHaveBeenCalledTimes(2);
+    expect(project.worldlines.createIndependentSession).not.toHaveBeenCalled();
   });
 
-  it("keeps creating independent user agents past the experiment quota without replacing live sessions", async () => {
+  it("keeps creating agents on the same tree past the experiment quota", async () => {
     const { app, project, terminals } = fixture();
-    project.worldlines.createIndependentSession.mockImplementation(async () => {
-      const id = `isolated-${terminals.size}`;
-      terminals.set(id, { id, root: `/worlds/${id}/A`, persist: false, closed: false, pty: { hasExited: false } });
-      return { ok: true, terminalId: id };
+    app.createTerminal.mockImplementation(async (cwd: string) => {
+      const id = `term-${terminals.size + 1}`;
+      const inst = { id, root: cwd, persist: true, closed: false, pty: { hasExited: false } };
+      terminals.set(id, inst);
+      return inst;
     });
     const results = await Promise.all(Array.from({ length: 8 }, () => create.call(app, { projectId: project.id, type: "agent" })));
     expect(new Set(results.map((r) => r.id)).size).toBe(8);
     expect(terminals.size).toBe(8);
-    expect(app.createTerminal).toHaveBeenCalledTimes(1);
-    expect(project.worldlines.createIndependentSession).toHaveBeenCalledTimes(7);
+    expect(app.createTerminal).toHaveBeenCalledTimes(8);
+    expect(project.worldlines.createIndependentSession).not.toHaveBeenCalled();
   });
 
   it("creates requested shells beyond sixteen saved tabs without invoking agent isolation", async () => {
@@ -136,12 +137,12 @@ describe("user terminal creation", () => {
     expect(app.createTerminal).not.toHaveBeenCalled();
   });
 
-  it("isolates the default terminal of a newly opened overlapping project", async () => {
+  it("opens a default terminal on a newly opened overlapping project", async () => {
     const { app, project, terminals } = fixture();
     terminals.set("other", { id: "other", root: "/requested/nested", closed: false, pty: { hasExited: false } });
     app.runtime.loadRoster.mockResolvedValue({ exists: false, entries: [] });
     await restore.call(app, project);
-    expect(project.worldlines.createIndependentSession).toHaveBeenCalledTimes(1);
-    expect(app.createTerminal).not.toHaveBeenCalled();
+    expect(project.worldlines.createIndependentSession).not.toHaveBeenCalled();
+    expect(app.createTerminal).toHaveBeenCalledWith("/requested", expect.anything());
   });
 });

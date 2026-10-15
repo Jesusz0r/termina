@@ -6,7 +6,7 @@ const project = { id: "proj-1", cwd: "/projects/same-name" };
 function terminal(overrides: Partial<WorkSummaryTerminalFacts> = {}): WorkSummaryTerminalFacts {
   return {
     id: "term-1", generation: 3, type: "agent", model: "provider/model",
-    activity: { state: "idle", reason: null, intervention: null },
+    activity: overrides.type === "shell" ? null : { state: "idle", reason: null, intervention: null },
     workspace: { id: "ws-1", root: project.cwd, primary: true },
     verify: { state: "untested", command: null, summary: null },
     trackedChanges: 0, plan: [], dispatchAssignment: null, ...overrides,
@@ -46,9 +46,31 @@ describe("global factual attention", () => {
     const summaries = [projectWorkSummary(project, [
       terminal({ trackedChanges: 5 }),
       terminal({ id: "worker", activity: { state: "working", reason: null, intervention: null } }),
-      terminal({ id: "shell", type: "shell", activity: { state: "blocked", reason: "stalled", intervention: null }, verify: { state: "fail", command: "test", summary: "bad" } }),
+      terminal({ id: "shell", type: "shell", verify: { state: "fail", command: "test", summary: "bad" } }),
     ])];
     expect(workOverview(summaries)).toEqual({ projects: [{ ...summaries[0], working: 1, attentionCount: 0 }], items: [] });
+  });
+
+  it("retains observed external CLI activity without granting core-only capabilities", () => {
+    const activity = { state: "working", reason: null, intervention: null } as const;
+    const shell = terminal({ type: "shell", activity });
+    const summary = projectWorkSummary(project, [shell]);
+    expect(summary.terminals[0]).toMatchObject({ activity, verify: null, model: null });
+    expect(workOverview([summary]).projects[0]!.working).toBe(1);
+
+    const intervention = { requestId: "claude:Bash", kind: "permission", since: 123 } as const;
+    shell.activity = { state: "blocked", reason: "permission-required", intervention };
+    const waiting = workOverview([projectWorkSummary(project, [shell])]);
+    expect(waiting.projects[0]).toMatchObject({ working: 0, attentionCount: 1 });
+    expect(waiting.items[0]).toMatchObject({ terminalId: shell.id, reason: "blocked",
+      detail: "permission-required", action: { kind: "terminal", terminalId: shell.id, generation: shell.generation } });
+    expect(waiting.projects[0]!.terminals[0]!.activity?.intervention).toEqual(intervention);
+
+    shell.activity = { state: "idle", reason: "outcome-unknown", intervention: null };
+    const stopped = workOverview([projectWorkSummary(project, [shell])]);
+    expect(stopped.projects[0]).toMatchObject({ working: 0, attentionCount: 0 });
+    expect(stopped.items).toEqual([]);
+    expect(stopped.projects[0]!.terminals[0]!.activity?.reason).toBe("outcome-unknown");
   });
 
   it("retains pending tasks and completed results with canonical shell and candidate attribution", () => {
@@ -57,7 +79,7 @@ describe("global factual attention", () => {
     const summary = projectWorkSummary(project, [
       terminal({ plan: [pending, done] }),
       terminal({ id: "candidate", workspace: { id: "ws-candidate", root: "/worlds/candidate", primary: false, comparisonId: "cmp-1" } }),
-      terminal({ id: "shell", type: "shell", activity: { state: "working", reason: null, intervention: null } }),
+      terminal({ id: "shell", type: "shell" }),
     ]);
     const before = structuredClone(summary);
     const overview = workOverview([summary]);

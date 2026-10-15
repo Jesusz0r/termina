@@ -40,14 +40,6 @@ export class SourceAdmissions {
       || previous.claim.access !== claim.access)) {
       return { ok: false, conflict: previous.claim };
     }
-    for (const record of this.reservations.values()) {
-      if (record === previous) continue;
-      if (sourceTreesOverlap(record.claim.root, claim.root)
-        && record.claim.access !== "read" && claim.access !== "read"
-        && !(claim.groupId !== "" && record.claim.groupId === claim.groupId)) {
-        return { ok: false, conflict: record.claim };
-      }
-    }
     if (previous) clearTimeout(previous.timer);
     const record: Reservation = {
       claim,

@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures.ts";
 import { createServer, type Server } from "node:http";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { parseSidecarRecord } from "../../electron/sidecar.ts";
 
@@ -47,24 +47,23 @@ function records(path: string) {
   return existsSync(path) ? readFileSync(path, "utf8").split("\n").map(parseSidecarRecord).filter(Boolean) : [];
 }
 
-async function newSession(page: Page, projectId: string, previousIds: string[]) {
+async function newSession(page: Page, projectId: string, previousIds: string[], runRoot: string) {
   await expect.poll(() => page.evaluate(() => window.termina.getInstances().then((instances) => instances.length))).toBe(previousIds.length + 1);
   const instances = await page.evaluate(() => window.termina.getInstances());
   const created = instances.find((instance) => !previousIds.includes(instance.id))!;
   expect(created).toMatchObject({ projectId, type: "agent", busy: false });
-  await expect.poll(() => page.evaluate(({ projectId, id }) => window.termina.getWorldlines(projectId)
-    .then((entries) => entries.find((entry) => entry.terminalId === id)?.state), { projectId, id: created.id })).toBe("ready");
-  const candidate = (await page.evaluate((projectId) => window.termina.getWorldlines(projectId), projectId)).find((entry) => entry.terminalId === created.id)!;
-  expect(candidate).toMatchObject({ role: "session", state: "ready", root: created.cwd });
-  const sidecar = join(dirname(candidate.root), `${candidate.label}-support`, "events", `${created.id}.jsonl`);
+  const project = (await page.evaluate(() => window.termina.projectList())).find((entry) => entry.id === projectId)!;
+  expect(realpathSync(created.cwd)).toBe(realpathSync(project.cwd));
+  const sidecar = join(runRoot, "events", `${created.id}.jsonl`);
   await expect.poll(() => records(sidecar).some((record) => record?.t === "session_ready" && record.ok)).toBe(true);
   expect(records(sidecar).some((record) => record?.t === "agent_start")).toBe(false);
+  expect((await page.evaluate((id) => window.termina.getWorldlines(id), projectId)).find((entry) => entry.terminalId === created.id)).toBeUndefined();
   await expect.poll(() => page.evaluate((id) => {
     const panes = (window as unknown as { __panes: Map<string, { tabEl: HTMLElement }> }).__panes;
     return panes.get(id)?.tabEl.classList.contains("active");
   }, created.id)).toBe(true);
   await expect(page.locator(".terminal-menu")).toHaveCount(0);
-  return { created, candidate };
+  return { created };
 }
 
 for (const zoom of [1, 2]) {
@@ -87,8 +86,8 @@ for (const zoom of [1, 2]) {
     expect((await page.evaluate(() => window.termina.getInstances())).map((entry) => entry.id)).toEqual(original.map((entry) => entry.id));
     await expect(menu.getByRole("menuitem").first()).toContainText("Agent");
     await page.keyboard.press("Enter");
-    const first = await newSession(page, project.id, original.map((entry) => entry.id));
-    expect(first.created.cwd).not.toBe(project.cwd);
+    const first = await newSession(page, project.id, original.map((entry) => entry.id), runRoot);
+    expect(realpathSync(first.created.cwd)).toBe(realpathSync(project.cwd));
     expect(readFileSync(join(projectRoot, "hello.txt"), "utf8")).toBe(source);
     // The same shortcut opens the chooser again; Agent is an explicit choice.
     await expect(page.locator("#project-bar #attention-view")).toBeVisible();
@@ -97,8 +96,9 @@ for (const zoom of [1, 2]) {
     await expect(menu).toBeVisible();
     await page.keyboard.press("Enter");
     await expect(page.locator("#attention-view")).toBeVisible();
-    const second = await newSession(page, project.id, [...original.map((entry) => entry.id), first.created.id]);
-    expect(second.candidate.comparisonId).not.toBe(first.candidate.comparisonId);
+    const second = await newSession(page, project.id, [...original.map((entry) => entry.id), first.created.id], runRoot);
+    expect(second.created.id).not.toBe(first.created.id);
+    expect(realpathSync(second.created.cwd)).toBe(realpathSync(project.cwd));
     const ids = (await page.evaluate(() => window.termina.getInstances())).map((entry) => entry.id);
     await opener.focus(); await page.keyboard.press("Enter");
     await expect(menu).toBeVisible();
@@ -130,7 +130,7 @@ for (const zoom of [1, 2]) {
   });
 }
 
-test("choosing Agent admits a fourth independent session without replacing existing terminals or starting a run", async ({ page, electronApp, projectRoot, runRoot }) => {
+test("choosing Agent opens another tab on the same project without replacing terminals or starting a run", async ({ page, electronApp, projectRoot, runRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const project = (await page.evaluate(() => window.termina.projectList())).find((entry) => entry.active)!;
   const source = readFileSync(join(projectRoot, "hello.txt"), "utf8");
@@ -153,24 +153,23 @@ test("choosing Agent admits a fourth independent session without replacing exist
   };
   for (let index = 0; index < 3; index++) {
     await pickAgent(index < 2 ? "chord" : "menu");
-    await newSession(page, project.id, instances.map((entry) => entry.id));
+    await newSession(page, project.id, instances.map((entry) => entry.id), runRoot);
     instances = await page.evaluate(() => window.termina.getInstances());
   }
   const identities = instances.map(({ id, generation, cwd, type }) => ({ id, generation, cwd, type }));
   await pickAgent("chord");
-  const fourth = await newSession(page, project.id, instances.map((entry) => entry.id));
+  const fourth = await newSession(page, project.id, instances.map((entry) => entry.id), runRoot);
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
   const retained = (await page.evaluate(() => window.termina.getInstances())).filter((entry) => entry.id !== fourth.created.id);
   expect(retained.map(({ id, generation, cwd, type }) => ({ id, generation, cwd, type }))).toEqual(identities);
   await expect(page.locator(".toast-warning")).toHaveCount(0);
   await expect(page.locator(".terminal-menu")).toHaveCount(0);
   await expect(page.locator(".terminal-tab")).toHaveCount(instances.length + 1);
-  const sessions = (await page.evaluate((id) => window.termina.getWorldlines(id), project.id)).filter((entry) => entry.role === "session");
-  expect(sessions).toHaveLength(4);
-  const roots = sessions.map((entry) => realpathSync(entry.root));
-  expect(new Set(roots).size).toBe(4);
-  expect(roots).not.toContain(realpathSync(project.cwd));
-  for (const session of sessions) expect(session).toMatchObject({ state: "ready", error: null });
+  const agents = (await page.evaluate(() => window.termina.getInstances())).filter((entry) => entry.type === "agent");
+  expect(agents).toHaveLength(5);
+  expect(new Set(agents.map((entry) => realpathSync(entry.cwd))).size).toBe(1);
+  expect(realpathSync(agents[0]!.cwd)).toBe(realpathSync(project.cwd));
+  expect((await page.evaluate((id) => window.termina.getWorldlines(id), project.id)).filter((entry) => entry.terminalId && agents.some((agent) => agent.id === entry.terminalId))).toEqual([]);
   expect(readFileSync(join(projectRoot, "hello.txt"), "utf8")).toBe(source);
   expect(records(join(runRoot, "events", `${ownerId}.jsonl`)).some((record) => record?.t === "agent_start")).toBe(false);
 });

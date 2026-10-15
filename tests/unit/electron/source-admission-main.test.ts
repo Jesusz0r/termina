@@ -98,7 +98,7 @@ function harness() {
 }
 
 describe("main source admission wiring", () => {
-  it("resolves aliases physically and rejects independent nested roots", async () => {
+  it("resolves aliases physically and admits overlapping roots", async () => {
     const h = harness();
     const alias = join(h.dir, "alias");
     const nested = join(h.root, "nested");
@@ -108,8 +108,9 @@ describe("main source admission wiring", () => {
     expect(await h.main.admitSource(owner)).toEqual({ ok: true });
     for (const [id, root] of [["alias-writer", h.root], ["nested-writer", nested]]) {
       const other = await h.actor(id!, root!);
-      expect(await h.main.admitSource(other)).toMatchObject({ ok: false, error: expect.stringContaining("owner") });
+      expect(await h.main.admitSource(other)).toEqual({ ok: true });
     }
+    expect(h.main.sourceAdmissions.writerAt(h.root)?.id).toBe("owner");
   });
 
   it("does not reserve a stale terminal after filesystem preparation", async () => {
@@ -139,10 +140,10 @@ describe("main source admission wiring", () => {
     vi.advanceTimersByTime(60_000);
     expect(actor.pty.interrupt).toHaveBeenCalledOnce();
     expect(h.main.expirePreflight).toHaveBeenCalledWith("token", "timeout");
-    expect(h.main.sourceAdmissions.admit(h.competing()).ok).toBe(false);
+    expect(h.main.sourceAdmissions.writerAt(h.root)?.id).toBe(actor.id);
     actor.pty.hasExited = true;
     h.main.sourceAdmissions.finish(actor.id, actor.generation);
-    expect(h.main.sourceAdmissions.admit(h.competing())).toEqual({ ok: true });
+    expect(h.main.sourceAdmissions.writerAt(h.root)).toBeNull();
   });
 
   it("does not interrupt a prior live run when its new preparation expires", async () => {
@@ -155,6 +156,6 @@ describe("main source admission wiring", () => {
     await h.main.admitSource(actor);
     vi.advanceTimersByTime(60_000);
     expect(actor.pty.interrupt).not.toHaveBeenCalled();
-    expect(h.main.sourceAdmissions.admit(h.competing()).ok).toBe(false);
+    expect(h.main.sourceAdmissions.writerAt(h.root)?.id).toBe(actor.id);
   });
 });

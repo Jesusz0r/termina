@@ -34,11 +34,18 @@ describe("SourceAdmissions", () => {
     vi.useRealTimers();
   });
 
-  it("reserves synchronously: the first overlapping admit wins", () => {
+  it("admits overlapping agents and shells on the same tree", () => {
     const first = claim();
+    const shell = { ...claim("shell", 1, "/repo", "shell:/repo"), kind: "shell" as const };
     expect(admissions.admit(first)).toEqual({ ok: true });
-    expect(admissions.admit(claim("b", 1, "/repo/src"))).toEqual({ ok: false, conflict: first });
+    expect(admissions.admit(claim("b", 1, "/repo/src"))).toEqual({ ok: true });
+    expect(admissions.admit(shell)).toEqual({ ok: true });
     expect(admissions.admit(claim("c", 1, "/repo-other"))).toEqual({ ok: true });
+    expect(admissions.writerAt("/repo")).toEqual(first);
+    admissions.finish(first.id, first.generation);
+    admissions.finish("b", 1);
+    admissions.finish(shell.id, shell.generation);
+    expect(admissions.writerAt("/repo-other")?.id).toBe("c");
   });
 
   it("shares observational runs with writers but never upgrades a live reader", () => {
@@ -48,7 +55,7 @@ describe("SourceAdmissions", () => {
     expect(admissions.admit(reader)).toEqual({ ok: true });
     admissions.start(reader.id, reader.generation);
     expect(admissions.admit(claim("reader"))).toEqual({ ok: false, conflict: reader });
-    expect(admissions.admit(claim("rival"))).toEqual({ ok: false, conflict: writer });
+    expect(admissions.admit(claim("rival"))).toEqual({ ok: true });
   });
 
   it("attributes watcher results only to the admitted writer generation", () => {
@@ -64,16 +71,6 @@ describe("SourceAdmissions", () => {
     expect(admissions.ownsWrite("writer", 1, "/repo/file.txt")).toBe(false);
   });
 
-  it("allows equal and nested roots only for an explicit coordinated group", () => {
-    expect(admissions.admit(claim("a", 1, "/repo", "team"))).toEqual({ ok: true });
-    expect(admissions.admit({ ...claim("b", 1, "/repo/src", "team"), kind: "shell" })).toEqual({ ok: true });
-    expect(admissions.admit(claim("c", 1, "/repo", "team"))).toEqual({ ok: true });
-    admissions.dispose();
-    const anonymous = claim("a", 1, "/repo", "");
-    admissions.admit(anonymous);
-    expect(admissions.admit(claim("b", 1, "/repo", ""))).toEqual({ ok: false, conflict: anonymous });
-  });
-
   it("keeps generations independent and fences late finish and removal", () => {
     admissions.admit(claim("a", 1));
     admissions.admit(claim("a", 2));
@@ -82,9 +79,9 @@ describe("SourceAdmissions", () => {
     admissions.remove("a", 1);
     vi.advanceTimersByTime(60_000);
     expect(expired).not.toHaveBeenCalled();
-    expect(admissions.admit(claim("b"))).toEqual({ ok: false, conflict: claim("a", 2) });
+    expect(admissions.writerAt("/repo")).toEqual(claim("a", 2));
     admissions.finish("a", 2);
-    expect(admissions.admit(claim("b"))).toEqual({ ok: true });
+    expect(admissions.writerAt("/repo")).toBeNull();
   });
 
   it("expires pending reservations at exactly 60 seconds", () => {
@@ -104,12 +101,12 @@ describe("SourceAdmissions", () => {
     vi.advanceTimersByTime(60_000);
     expect(expired).toHaveBeenCalledExactlyOnceWith(pending);
     expect(vi.getTimerCount()).toBe(0);
-    expect(admissions.admit(claim("b"))).toEqual({ ok: false, conflict: pending });
+    expect(admissions.writerAt("/repo")).toEqual(pending);
     admissions.releaseRetained("a");
-    expect(admissions.admit(claim("b"))).toEqual({ ok: false, conflict: pending });
+    expect(admissions.writerAt("/repo")).toEqual(pending);
     children.delete("a");
     admissions.releaseRetained("a");
-    expect(admissions.admit(claim("b"))).toEqual({ ok: true });
+    expect(admissions.writerAt("/repo")).toBeNull();
   });
 
   it("start cancels expiry and finish releases live work", () => {
@@ -118,9 +115,9 @@ describe("SourceAdmissions", () => {
     expect(vi.getTimerCount()).toBe(0);
     vi.advanceTimersByTime(120_000);
     expect(expired).not.toHaveBeenCalled();
-    expect(admissions.admit(claim("b")).ok).toBe(false);
+    expect(admissions.writerAt("/repo")).toEqual(claim());
     admissions.finish("a", 1);
-    expect(admissions.admit(claim("b")).ok).toBe(true);
+    expect(admissions.writerAt("/repo")).toBeNull();
   });
 
   it.each([false, true])("late child completion cannot release new work (live=%s)", live => {
@@ -131,7 +128,7 @@ describe("SourceAdmissions", () => {
     if (live) admissions.start("a", 1);
     children.delete("a");
     admissions.releaseRetained("a");
-    expect(admissions.admit(claim("b")).ok).toBe(false);
+    expect(admissions.writerAt("/repo")).toEqual(claim());
   });
 
   it("re-admits retained ownership as pending with a new deadline", () => {
@@ -142,7 +139,7 @@ describe("SourceAdmissions", () => {
     admissions.admit(claim());
     vi.advanceTimersByTime(60_000);
     expect(expired).toHaveBeenCalledTimes(1);
-    expect(admissions.admit(claim("b")).ok).toBe(true);
+    expect(admissions.writerAt("/repo")).toBeNull();
   });
 
   it.each(["finish", "expiry"])("preserves live ownership after failed self preparation: %s", failure => {
@@ -152,9 +149,9 @@ describe("SourceAdmissions", () => {
     if (failure === "finish") admissions.finish("a", 1);
     else vi.advanceTimersByTime(60_000);
     expect(vi.getTimerCount()).toBe(0);
-    expect(admissions.admit(claim("b")).ok).toBe(false);
+    expect(admissions.writerAt("/repo")).toEqual(claim());
     admissions.finish("a", 1);
-    expect(admissions.admit(claim("b")).ok).toBe(true);
+    expect(admissions.writerAt("/repo")).toBeNull();
   });
 
   it("replaces only the exact self reservation and cancels its old deadline", () => {

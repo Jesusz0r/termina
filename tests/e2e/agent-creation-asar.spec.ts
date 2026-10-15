@@ -1,11 +1,11 @@
 import { test, expect } from "./fixtures.ts";
-import { copyFileSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { MARKER, UNCERTAIN_COMPARISON_USAGE_LEDGER } from "../../electron/worldlines/limits.ts";
+import { copyFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { MARKER } from "../../electron/worldlines/limits.ts";
 import { parseSidecarRecord } from "../../electron/sidecar.ts";
 
-// A failed or unopened area may contain Electron dependencies. Their .asar
-// files are physical archives, not directories in the retained source tree.
+// A retained area may contain an asar archive. Opening more agents on the
+// project must not need to walk that archive.
 test("creates another agent when retained work contains an asar archive", async ({ page, electronApp, runRoot, projectRoot }) => {
   await expect(page.locator("#splash")).toBeHidden();
   const owner = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.type === "agent")!;
@@ -22,28 +22,21 @@ test("creates another agent when retained work contains an asar archive", async 
   copyFileSync(join(resources, "default_app.asar"), archive);
   const before = readFileSync(archive);
 
-  const expectedBytes = [retained, join(retained, MARKER), join(retained, "manifest.json"), archive]
-    .reduce((bytes, path) => bytes + lstatSync(path).size, 0);
   const liveIds = [owner.id];
-  // The second creation also exercises the existing durable ledger, rather
-  // than only the first reconstruction of retained evidence.
   for (let index = 0; index < 2; index++) {
     const created = await page.evaluate((projectId) => window.termina.createTerminal({ projectId }), owner.projectId!);
     expect(created.ok, created.error).toBe(true);
     expect(created.id).toBeTruthy();
     liveIds.push(created.id!);
-    const candidate = (await page.evaluate((projectId) => window.termina.getWorldlines(projectId), owner.projectId!))
-      .find((item) => item.terminalId === created.id)!;
-    expect(candidate).toMatchObject({ role: "session", state: "ready", error: null });
-    expect(candidate.root).not.toBe(projectRoot);
-    const events = join(dirname(candidate.root), "A-support", "events", `${created.id}.jsonl`);
-    expect(readFileSync(events, "utf8").split("\n").map(parseSidecarRecord)
-      .some((record) => record?.t === "session_ready" && record.ok)).toBe(true);
-    const ledger = JSON.parse(readFileSync(join(runRoot, "worlds", UNCERTAIN_COMPARISON_USAGE_LEDGER), "utf8")) as {
-      entries: Array<{ name: string; bytes: number; entries: number; counted: boolean }>;
-    };
-    expect(ledger.entries.find((entry) => entry.name === "cmp-9000"))
-      .toMatchObject({ bytes: expectedBytes, entries: 4, counted: true });
+    const inst = (await page.evaluate(() => window.termina.getInstances())).find((item) => item.id === created.id)!;
+    expect(realpathSync(inst.cwd)).toBe(realpathSync(projectRoot));
+    const events = join(runRoot, "events", `${created.id}.jsonl`);
+    await expect.poll(() => {
+      try {
+        return readFileSync(events, "utf8").split("\n").map(parseSidecarRecord)
+          .some((record) => record?.t === "session_ready" && record.ok);
+      } catch { return false; }
+    }, { timeout: 15_000 }).toBe(true);
     expect(readFileSync(archive)).toEqual(before);
   }
   expect((await page.evaluate(() => window.termina.getInstances())).map((instance) => instance.id))

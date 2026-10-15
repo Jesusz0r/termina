@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures.ts";
 import type { Page } from "@playwright/test";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { parseSidecarRecord } from "../../electron/sidecar.ts";
 
 /**
@@ -200,12 +200,9 @@ test.describe("agent activity roster and timeline (issue #291)", () => {
     const projectId = first.projectId!;
     const created = await page.evaluate((projectId) => window.termina.createTerminal({ type: "agent", projectId }), projectId);
     expect(created.ok).toBe(true); const secondId = created.id!;
-    const candidate = (await page.evaluate((id) => window.termina.getWorldlines(id), projectId))
-      .find((worldline) => worldline.terminalId === secondId)!;
-    expect(candidate).toMatchObject({ role: "session", state: "ready" });
     const sidecarFiles = new Map([
       [firstId, join(runRoot, "events", `${firstId}.jsonl`)],
-      [secondId, join(dirname(candidate.root), `${candidate.label}-support`, "events", `${secondId}.jsonl`)],
+      [secondId, join(runRoot, "events", `${secondId}.jsonl`)],
     ]);
     type PaneWindow = Window & { __panes: Map<string, { tabEl: HTMLElement; container: HTMLElement }> };
     const selected = () => page.evaluate(() => [...(window as unknown as PaneWindow).__panes.entries()].find(([, pane]) => pane.tabEl.classList.contains("active"))?.[0]);
