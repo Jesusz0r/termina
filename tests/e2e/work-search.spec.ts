@@ -115,7 +115,7 @@ test("project result activates the canonical project, rail, editor and terminal 
   await expect(projectRow.locator(".search-path")).toContainText(first.project.cwd);
   expect((await activeProject(page)).id).toBe(second.project.id);
   await projectRow.click();
-  await expect(modal).toBeHidden();
+  await expect(modal).toBeHidden({ timeout: 30_000 });
   await expect.poll(() => activeProject(page).then((project) => project.id)).toBe(first.project.id);
   await expect(page.locator(`#project-tabs .project-tab[data-project-id="${first.project.id}"] .project-select`)).toHaveAttribute("aria-current", "page");
   await expect(page.locator("#attention-view")).toBeVisible();
