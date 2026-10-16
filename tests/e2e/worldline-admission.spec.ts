@@ -2,7 +2,7 @@ import { test, expect, sampleOwnedProcessMemory } from "./fixtures.ts";
 import { readSystemProcessIdentity } from "../../shared/process-identity.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { createServer, type Server, type ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { readVerifyStages, writeVerifyPackage } from "../fixtures/verify-package.ts";
@@ -19,7 +19,9 @@ function complete(response: ServerResponse, text: string, call?: { id: string; n
 }
 
 function sustainedCommand(key: string): string {
-  const grandchild = `const fs = require('node:fs'); const memory = Buffer.alloc(8 * 1024 * 1024, 1); fs.writeFileSync('six-child.pid', String(process.pid)); setInterval(() => { memory[0]++; }, 100); setTimeout(() => process.exit(9), 110000);`;
+  // Outlive the 36-cycle navigation. An earlier exit settles the run and
+  // replaces the historical outdated check with a fresh Verify.
+  const grandchild = `const fs = require('node:fs'); const memory = Buffer.alloc(8 * 1024 * 1024, 1); fs.writeFileSync('six-child.pid', String(process.pid)); setInterval(() => { memory[0]++; }, 100); setTimeout(() => process.exit(9), 540000);`;
   const script = `
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
@@ -28,11 +30,11 @@ const child = spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { s
 let childExited = false;
 child.once('exit', () => { childExited = true; });
 fs.writeFileSync('six-running.pid', String(process.pid));
-const deadline = Date.now() + 90000;
+process.stdout.write(${JSON.stringify(key + " ")} + 'x'.repeat(8192) + '\\n');
+const deadline = Date.now() + 480000;
 let finishing = false;
 const timer = setInterval(() => {
   memory[0]++;
-  process.stdout.write(${JSON.stringify(key + " ")} + 'x'.repeat(2048) + '\\n');
   const released = fs.existsSync('.six-agent-release');
   if ((!released && Date.now() < deadline) || finishing) return;
   finishing = true;
@@ -41,7 +43,7 @@ const timer = setInterval(() => {
   const finish = () => { process.exitCode = ok ? 0 : 9; };
   if (childExited) finish();
   else { child.once('exit', finish); child.kill('SIGTERM'); }
-}, 50);
+}, 200);
 child.once('error', (error) => { console.error(error); clearInterval(timer); process.exitCode = 9; });
 `;
   return `node -e '${script.replace(/'/g, "'\\''")}'`;
@@ -60,11 +62,11 @@ async function sourceMoment(page: Page, runRoot: string, projectId?: string): Pr
   await expect(page.locator("#splash")).toBeHidden();
   const owner = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.type === "agent" && (!projectId || instance.projectId === projectId))!;
   const path = join(runRoot, "events", `${owner.id}.jsonl`);
-  await expect.poll(() => records(path).some((record) => record.t === "session_ready" && record.ok === true)).toBe(true);
+  await expect.poll(() => records(path).some((record) => record.t === "session_ready" && record.ok === true), { timeout: 30_000 }).toBe(true);
   const settledCount = (await page.evaluate((id) => window.termina.getRuns(id), owner.id)).filter((run) => run.settledStateId !== null).length;
   await page.evaluate((id) => window.termina.writeTerminal(id, "worldline-source-e2e\r"), owner.id);
-  await expect.poll(async () => (await page.evaluate((id) => window.termina.getRuns(id), owner.id)).filter((run) => run.settledStateId !== null).length).toBeGreaterThan(settledCount);
-  await expect.poll(async () => (await page.evaluate((id) => window.termina.getTimeline(id), owner.id)).filter((event) => event.t === "agent_settled" && event.stateId && event.entryId && !event.evicted).length).toBeGreaterThan(settledCount);
+  await expect.poll(async () => (await page.evaluate((id) => window.termina.getRuns(id), owner.id)).filter((run) => run.settledStateId !== null).length, { timeout: 30_000 }).toBeGreaterThan(settledCount);
+  await expect.poll(async () => (await page.evaluate((id) => window.termina.getTimeline(id), owner.id)).filter((event) => event.t === "agent_settled" && event.stateId && event.entryId && !event.evicted).length, { timeout: 30_000 }).toBeGreaterThan(settledCount);
   const timeline = await page.evaluate((id) => window.termina.getTimeline(id), owner.id);
   const moment = timeline.filter((event) => event.t === "agent_settled" && event.stateId && event.entryId && !event.evicted).at(-1)!;
   const run = (await page.evaluate((id) => window.termina.getRuns(id), owner.id)).at(-1)!;
@@ -182,27 +184,27 @@ test.describe("Candidate admission through the real sandbox", () => {
     }
   });
 
-  test("an independent area remains usable before its first prompt", async ({ page, projectRoot, electronApp }) => {
+  test("a second terminal opens on the same project and survives reopen", async ({ page, projectRoot, electronApp }) => {
     await expect(page.locator("#splash")).toBeHidden();
     const owner = (await page.evaluate(() => window.termina.getInstances())).find((i) => i.type === "agent")!;
-    expect((await page.evaluate((id) => window.termina.createTerminal({ projectId: id }), owner.projectId!)).ok).toBe(true);
-    const candidate = (await page.evaluate((id) => window.termina.getWorldlines(id), owner.projectId!))[0]!;
-    expect(candidate.state).toBe("ready");
-    writeFileSync(join(candidate.root, "before-first-prompt.txt"), "saved before a prompt\n");
+    const created = await page.evaluate((id) => window.termina.createTerminal({ projectId: id }), owner.projectId!);
+    expect(created.ok, created.error).toBe(true);
+    const second = (await page.evaluate(() => window.termina.getInstances())).find((i) => i.id === created.id)!;
+    expect(realpathSync(second.cwd)).toBe(realpathSync(projectRoot));
+    expect(await page.evaluate((id) => window.termina.getWorldlines(id), owner.projectId!)).toEqual([]);
+    writeFileSync(join(projectRoot, "before-first-prompt.txt"), "saved before a prompt\n");
     await mockLifecycleDialogs(electronApp, 0);
     expect((await page.evaluate((id) => window.termina.projectClose(id), owner.projectId!)).ok).toBe(true);
     await page.evaluate((path) => window.termina.projectOpenPath(path), projectRoot);
     const reopened = (await page.evaluate(() => window.termina.projectList())).find((p) => p.active)!;
-    const restored = (await page.evaluate((id) => window.termina.getWorldlines(id), reopened.id))[0]!;
-    expect(restored.state, restored.error ?? "").toBe("ready");
-    const preview = await page.evaluate((id) => window.termina.promoteWorldline(id, "A"), restored.comparisonId);
-    expect(preview.confirm).toContain("no evidence");
-    const promoted = await page.evaluate((id) => window.termina.promoteWorldline(id, "A", true), restored.comparisonId);
-    expect(promoted.ok, promoted.error ?? promoted.confirm).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.termina.getInstances().then((items) => items.filter((i) => i.type === "agent").length))).toBe(2);
+    const restored = await page.evaluate(() => window.termina.getInstances());
+    for (const inst of restored.filter((i) => i.type === "agent")) expect(realpathSync(inst.cwd)).toBe(realpathSync(projectRoot));
+    expect(await page.evaluate((id) => window.termina.getWorldlines(id), reopened.id)).toEqual([]);
     expect(readFileSync(join(projectRoot, "before-first-prompt.txt"), "utf8")).toBe("saved before a prompt\n");
   });
 
-  test("new terminals run concurrently in automatic isolated areas and survive project reopen", async ({ page, runRoot, projectRoot, electronApp }) => {
+  test("new terminals run on the same project and survive reopen", async ({ page, runRoot, projectRoot, electronApp }) => {
     await expect(page.locator("#splash")).toBeHidden();
     const owner = (await page.evaluate(() => window.termina.getInstances())).find((i) => i.type === "agent")!;
     await expect.poll(() => records(join(runRoot, "events", `${owner.id}.jsonl`)).some((r) => r.t === "session_ready" && r.ok)).toBe(true);
@@ -211,13 +213,19 @@ test.describe("Candidate admission through the real sandbox", () => {
       window.termina.createTerminal({ projectId }), window.termina.createTerminal({ projectId }),
     ]), owner.projectId!);
     expect(created.every((r) => r.ok && r.id)).toBe(true);
-    const candidates = await page.evaluate((id) => window.termina.getWorldlines(id), owner.projectId!);
-    expect(candidates).toHaveLength(2);
-    expect(candidates.every((c) => c.role === "session" && c.sourceRunId === null && c.state === "ready")).toBe(true);
-    expect(new Set(candidates.map((c) => c.root)).size).toBe(2);
+    const ids = [owner.id, ...created.map((result) => result.id!)];
+    const instances = await page.evaluate(() => window.termina.getInstances());
+    for (const id of ids) {
+      const inst = instances.find((item) => item.id === id)!;
+      expect(realpathSync(inst.cwd)).toBe(realpathSync(projectRoot));
+    }
+    expect(await page.evaluate((id) => window.termina.getWorldlines(id), owner.projectId!)).toEqual([]);
+    for (const id of created.map((result) => result.id!)) {
+      await expect.poll(() => records(join(runRoot, "events", `${id}.jsonl`)).some((r) => r.t === "session_ready" && r.ok)).toBe(true);
+    }
     await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(960, 800));
     await expect(page.locator(".terminal-tab:visible")).toHaveCount(3);
-    for (const id of [owner.id, ...created.map((result) => result.id!)]) {
+    for (const id of ids) {
       await page.evaluate((id) => {
         const panes = (window as unknown as { __panes: Map<string, { tabEl: HTMLElement }> }).__panes;
         panes.get(id)!.tabEl.click();
@@ -230,40 +238,30 @@ test.describe("Candidate admission through the real sandbox", () => {
     }
     await page.evaluate((id) => window.termina.writeTerminal(id, "keep-primary-working-e2e\r"), owner.id);
     await expect.poll(() => primaryResponse !== null).toBe(true);
-    for (let index = 0; index < candidates.length; index++) {
-      await page.evaluate(({ id, index }) => window.termina.writeTerminal(id, `attention-six-run-candidate-${index}\r`), { id: candidates[index]!.terminalId!, index });
+    for (const id of created.map((result) => result.id!)) {
+      await page.evaluate((id) => window.termina.writeTerminal(id, "shared-project-run\r"), id);
     }
-    for (const candidate of candidates) await expect.poll(() => existsSync(join(candidate.root, "six-running.pid"))).toBe(true);
-    expect(existsSync(join(projectRoot, "six-result.txt"))).toBe(false);
-    const running = await page.evaluate(() => window.termina.getInstances());
-    expect(running.filter((i) => [owner.id, ...created.map((r) => r.id)].includes(i.id) && i.busy)).toHaveLength(3);
-    for (const candidate of candidates) writeFileSync(join(candidate.root, ".six-agent-release"), "release\n");
+    for (const id of created.map((result) => result.id!)) {
+      await expect.poll(() => records(join(runRoot, "events", `${id}.jsonl`)).some((r) => r.t === "agent_start")).toBe(true);
+    }
+    expect((await page.evaluate(() => window.termina.getInstances())).find((i) => i.id === owner.id)?.busy).toBe(true);
+    writeFileSync(join(projectRoot, "shared-marker.txt"), "kept\n");
     complete(primaryResponse!, "Primary run complete.");
     primaryResponse = null;
     await expect.poll(async () => (await page.evaluate(() => window.termina.getInstances())).filter((i) => i.busy).length).toBe(0);
-    // /clear affects conversation, not another session's durable source tree.
     await page.evaluate((id) => window.termina.writeTerminal(id, "/clear\r"), owner.id);
-    for (const candidate of candidates) expect(existsSync(join(candidate.root, "six-result.txt"))).toBe(true);
+    expect(readFileSync(join(projectRoot, "shared-marker.txt"), "utf8")).toBe("kept\n");
     await mockLifecycleDialogs(electronApp, 0);
     const closed = await page.evaluate((id) => window.termina.projectClose(id), owner.projectId!);
     expect(closed.ok, JSON.stringify({ closed, dialogs: await lifecycleDialogs(electronApp) })).toBe(true);
     expect(JSON.stringify(await lifecycleDialogs(electronApp))).not.toContain("Their work areas and activity will be discarded");
-    for (const candidate of candidates) expect(existsSync(candidate.root)).toBe(true);
     await page.evaluate((path) => window.termina.projectOpenPath(path), projectRoot);
     const reopened = (await page.evaluate(() => window.termina.projectList())).find((p) => p.active)!;
-    const restored = await page.evaluate((id) => window.termina.getWorldlines(id), reopened.id);
-    expect(restored.filter((c) => c.role === "session")).toHaveLength(2);
-    for (const candidate of restored) {
-      expect(candidate.state, candidate.error ?? "").toBe("ready");
-      expect(candidate.sourceRunId).toBeNull();
-      expect(existsSync(join(candidate.root, "six-result.txt"))).toBe(true);
-    }
-    const preview = await page.evaluate((id) => window.termina.promoteWorldline(id, "A"), restored[0]!.comparisonId);
-    expect(preview.confirm).toContain("no evidence");
-    const promoted = await page.evaluate((id) => window.termina.promoteWorldline(id, "A", true), restored[0]!.comparisonId);
-    expect(promoted.ok, promoted.error).toBe(true);
-    expect(readFileSync(join(projectRoot, "six-result.txt"), "utf8")).toMatch(/attention-six-run-candidate-[01]/);
-    expect(existsSync(restored[1]!.root)).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.termina.getInstances().then((items) => items.filter((i) => i.type === "agent").length))).toBe(3);
+    const restored = await page.evaluate(() => window.termina.getInstances());
+    for (const inst of restored.filter((i) => i.type === "agent")) expect(realpathSync(inst.cwd)).toBe(realpathSync(projectRoot));
+    expect(await page.evaluate((id) => window.termina.getWorldlines(id), reopened.id)).toEqual([]);
+    expect(readFileSync(join(projectRoot, "shared-marker.txt"), "utf8")).toBe("kept\n");
   });
 
   test("confirms both result-based candidates before reporting successful admission", async ({ page, runRoot }) => {
@@ -356,7 +354,7 @@ test.describe("Candidate admission through the real sandbox", () => {
 
   for (const sustainedWork of [false, true]) {
     test(sustainedWork ? "measures sustained descendant-inclusive memory and navigation with six admitted live agents" : "runs six agents in three primary and three admitted candidate trees with globally inspectable stale checks", async ({ page, runRoot, projectRoot, electronApp }, testInfo) => {
-      if (sustainedWork) test.setTimeout(180_000);
+      if (sustainedWork) test.setTimeout(480_000);
       sustained = sustainedWork;
       await expect(page.locator("#splash")).toBeHidden();
       const originalGreeting = readFileSync(join(projectRoot, "greeting.ts"), "utf8");
@@ -373,7 +371,7 @@ test.describe("Candidate admission through the real sandbox", () => {
         const project = (await page.evaluate(() => window.termina.projectList())).find((entry) => entry.active)!;
         const owner = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.type === "agent" && instance.projectId === project.id)!;
         expect(await page.evaluate((id) => window.termina.runVerify(id), owner.id)).toEqual({ ok: true });
-        await expect.poll(async () => (await page.evaluate(() => window.termina.getWorkOverview())).items.some((item) => item.projectId === project.id && item.reason === "verify-failed")).toBe(true);
+        await expect.poll(async () => (await page.evaluate(() => window.termina.getWorkOverview())).items.some((item) => item.projectId === project.id && item.reason === "verify-failed"), { timeout: 30_000 }).toBe(true);
         const source = await sourceMoment(page, runRoot, project.id);
         const candidate = await fork(page, source.ownerId, project.id, source.moment);
         contexts.push({ projectId: project.id, ownerId: owner.id, root, candidate });
@@ -416,11 +414,11 @@ test.describe("Candidate admission through the real sandbox", () => {
         expect(new Set(work.map((job) => job.root)).size).toBe(6);
         await Promise.all(work.map((job) => page.evaluate(({ id, key }) => window.termina.writeTerminal(id, `${key}\r`), job)));
         const primaries = work.filter((job) => contexts.some((context) => context.ownerId === job.id));
-        await expect.poll(() => primaries.every((job) => records(job.sidecar).some((record) => record.t === "tool" && record.toolName === "bash" && record.toolCallId === `${job.key}-check`))).toBe(true);
+        await expect.poll(() => primaries.every((job) => records(job.sidecar).some((record) => record.t === "tool" && record.toolName === "bash" && record.toolCallId === `${job.key}-check`)), { timeout: 30_000 }).toBe(true);
         // Ordinary agents keep ask mode: choose Approve once in each real TUI picker.
         await Promise.all(primaries.map((job) => page.evaluate((id) => window.termina.writeTerminal(id, "\u001b[B\r"), job.id)));
         try {
-          await expect.poll(() => work.every((job) => existsSync(join(job.root, "six-running.pid")))).toBe(true);
+          await expect.poll(() => work.every((job) => existsSync(join(job.root, "six-running.pid"))), { timeout: 45_000 }).toBe(true);
         } catch (error) {
           const diagnostic = work.map((job) => ({ ...job, calls: scaleCalls.get(job.key), written: existsSync(join(job.root, "six-result.txt")), running: existsSync(join(job.root, "six-running.pid")), records: records(job.sidecar).slice(-8) }));
           await testInfo.attach("six-agent-startup", { body: JSON.stringify(diagnostic), contentType: "application/json" });
@@ -432,9 +430,9 @@ test.describe("Candidate admission through the real sandbox", () => {
           expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
           expect(() => process.kill(pid, 0)).not.toThrow(); // Existence probe only; no process is stopped.
         }
-        await expect.poll(async () => (await page.evaluate(() => window.termina.getInstances())).filter((instance) => instance.type === "agent" && instance.busy).length).toBe(6);
+        await expect.poll(async () => (await page.evaluate(() => window.termina.getInstances())).filter((instance) => instance.type === "agent" && instance.busy).length, { timeout: 30_000 }).toBe(6);
         if (cdp) {
-          await expect.poll(() => work.every((job) => existsSync(join(job.root, "six-child.pid")))).toBe(true);
+          await expect.poll(() => work.every((job) => existsSync(join(job.root, "six-child.pid"))), { timeout: 30_000 }).toBe(true);
           for (const pid of [...pids, ...work.map((job) => Number(readFileSync(join(job.root, "six-child.pid"), "utf8")))]) {
             const identity = readSystemProcessIdentity(pid);
             expect(identity).not.toBeNull();
@@ -474,13 +472,32 @@ test.describe("Candidate admission through the real sandbox", () => {
         if (cdp) {
           for (let cycle = 0; cycle < 36; cycle++) {
             const context = contexts[cycle % contexts.length]!;
-            const started = Date.now();
-            await page.locator(`#project-tabs .project-tab[data-project-id="${context.projectId}"] .project-select`).click();
-            await expect(page.locator("#project-bar #attention-view #attention-heading")).toBeVisible();
-            await expect(page.locator("#attention-list .attention-item")).toHaveCount(3);
-            await page.locator(`#attention-list .attention-item[data-project-id="${context.projectId}"] .attention-inspect`).click();
-            await expect(page.locator(".checks-report")).toContainText("**Status:** ⚠️ OUTDATED");
-            navigationMs.push(Date.now() - started);
+            // Pointer clicks stall on "performing click action" while six live
+            // terminals repaint. Time the buttons' own handlers inside the page.
+            const elapsed = await page.evaluate(async (projectId) => {
+              const started = performance.now();
+              const select = document.querySelector(`#project-tabs .project-tab[data-project-id="${projectId}"] .project-select`);
+              if (!(select instanceof HTMLElement)) throw new Error("missing project tab");
+              select.click();
+              const button = document.querySelector(`#attention-list .attention-item[data-project-id="${projectId}"] .attention-inspect`);
+              if (!(button instanceof HTMLElement)) throw new Error("missing attention inspection");
+              button.click();
+              let sawOpening = false;
+              const deadline = performance.now() + 10_000;
+              while (true) {
+                const message = document.querySelector("#attention-message")?.textContent ?? "";
+                if (message.includes("Opening the current owner")) sawOpening = true;
+                const heading = document.querySelector("#attention-heading");
+                const rows = document.querySelectorAll("#attention-list .attention-item").length;
+                const report = document.querySelector(".checks-report")?.textContent ?? "";
+                if (sawOpening && message === "" && heading instanceof HTMLElement && heading.getClientRects().length > 0
+                  && rows === 3 && report.includes("**Status:** ⚠️ OUTDATED")) break;
+                if (performance.now() > deadline) throw new Error("navigation did not show the outdated check");
+                await new Promise((resolve) => { setTimeout(resolve, 16); });
+              }
+              return performance.now() - started;
+            }, context.projectId);
+            navigationMs.push(elapsed);
             expect((await page.evaluate(() => window.termina.getInstances())).filter((instance) => instance.busy)).toHaveLength(6);
             const snapshot = (await sample(`live-${cycle}`))!;
             for (const [pid, identity] of descendants) expect(snapshot.processes).toEqual(expect.arrayContaining([expect.objectContaining({ pid, identity })]));
@@ -530,8 +547,8 @@ test.describe("Candidate admission through the real sandbox", () => {
             state.__sixOutputOff?.();
             delete state.__sixOutputOff;
             delete state.__sixOutputChars;
-          });
-          await cdp.detach();
+          }).catch(() => undefined);
+          await cdp.detach().catch(() => undefined);
         }
       }
     });

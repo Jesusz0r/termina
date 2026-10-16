@@ -112,9 +112,9 @@ for (const theme of THEME_IDS) {
       // Wait for the current stale projection before traversing its controls.
       await expect(inspection.locator("..").locator("h3")).toHaveText("Verify is outdated");
       const focusInspection = async () => {
-        const refresh = region.getByRole("button", { name: "Refresh", exact: true });
-        await refresh.focus();
-        await expect(refresh).toBeFocused();
+        const heading = region.locator("#attention-heading");
+        await heading.focus();
+        await expect(heading).toBeFocused();
         await page.keyboard.press("Tab");
         await expect(region.locator(".attention-inspect").first()).toBeFocused();
         if (!(await inspection.evaluate((element) => element === document.activeElement))) await page.keyboard.press("Tab");

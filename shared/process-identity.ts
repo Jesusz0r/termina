@@ -23,17 +23,7 @@ export function readSystemProcessIdentity(pid: number): string | null {
 
   if (platform() === "darwin") {
     try {
-      const started = execFileSync(
-        "/bin/ps",
-        ["-o", "lstart=", "-p", String(pid)],
-        {
-          encoding: "utf8",
-          env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
-          maxBuffer: 1024,
-          stdio: ["ignore", "pipe", "ignore"],
-          timeout: 1_000,
-        },
-      ).trim().replace(/\s+/g, " ");
+      const started = darwinStart(pid);
       return started ? `darwin:${started}` : null;
     } catch {
       return null;
@@ -41,4 +31,28 @@ export function readSystemProcessIdentity(pid: number): string | null {
   }
 
   return null;
+}
+
+/** A slow `ps` is not a missing process. Retry only a timeout. */
+function darwinStart(pid: number): string {
+  let last: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return execFileSync(
+        "/bin/ps",
+        ["-o", "lstart=", "-p", String(pid)],
+        {
+          encoding: "utf8",
+          env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
+          maxBuffer: 1024,
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 3_000,
+        },
+      ).trim().replace(/\s+/g, " ");
+    } catch (error) {
+      last = error;
+      if ((error as NodeJS.ErrnoException).code !== "ETIMEDOUT" || attempt === 2) throw error;
+    }
+  }
+  throw last;
 }

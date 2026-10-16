@@ -93,9 +93,8 @@ for (const nested of [false, true]) {
     const terminalB = instances.find((instance) => instance.projectId === projectB.id)!;
     expect(terminalA).toBeTruthy();
     expect(terminalB).toBeTruthy();
-    // Nested sources overlap the first agent's tree, so their agent owns an isolated workspace.
     expect((await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), projectB.id))?.terminals
-      .find((terminal) => terminal.terminalId === terminalB.id)?.workArea?.kind).toBe(nested ? "candidate" : "project");
+      .find((terminal) => terminal.terminalId === terminalB.id)?.workArea?.kind).toBe("project");
 
     await page.evaluate((id) => window.termina.projectActivate(id, "entry"), projectA.id);
     await expect(page.locator(".project-tab.active .tab-name")).toHaveText("test-project");
@@ -107,7 +106,7 @@ for (const nested of [false, true]) {
     await expect(page.locator("#explorer-tree").getByText("linked-only.txt", { exact: true })).toBeVisible();
     await expect(page.locator("#explorer-tree").getByText("hello.txt", { exact: true })).toHaveCount(0);
     await expect(page.locator(`.project-editor[data-project="${projectB.id}"] .editor-tab`)).toContainText("linked-only.txt");
-    await expectFileOwnerTerminal(page, projectB.id, nested ? null : { id: terminalB.id, generation: terminalB.generation });
+    await expectFileOwnerTerminal(page, projectB.id, { id: terminalB.id, generation: terminalB.generation });
 
     const results = await page.evaluate(() => window.termina.searchFiles("linked-only"));
     expect(results.entries.some((entry) => entry.relPath === "linked-only.txt")).toBe(true);
@@ -190,7 +189,7 @@ for (const nested of [false, true]) {
       const projectB = (await page.evaluate(() => window.termina.projectList())).find((project) => project.active)!;
       const terminalB = (await page.evaluate(() => window.termina.getInstances())).find((instance) => instance.projectId === projectB.id)!;
       expect((await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), projectB.id))?.terminals
-        .find((terminal) => terminal.terminalId === terminalB.id)?.workArea?.kind).toBe(nested ? "candidate" : "project");
+        .find((terminal) => terminal.terminalId === terminalB.id)?.workArea?.kind).toBe("project");
       await page.locator(`#project-tabs .project-tab[data-project-id="${projectA.id}"] .project-select`).click();
       const shell = await page.evaluate((projectId) => window.termina.createTerminal({ type: "shell", shell: "/bin/bash", projectId }), projectA.id);
       expect(shell).toMatchObject({ ok: true });
@@ -252,7 +251,7 @@ for (const nested of [false, true]) {
         const editor = (window as unknown as { __editorMgr: { editor: import("monaco-editor").editor.IStandaloneCodeEditor } }).__editorMgr.editor;
         return { content: editor.getModel()?.getValue(), position: editor.getPosition() };
       })).toMatchObject({ content: "first line\nsecond line\nthird line\n", position: { lineNumber: 2, column: 3 } });
-      await expectFileOwnerTerminal(page, projectB.id, nested ? null : { id: terminalB.id, generation: terminalB.generation });
+      await expectFileOwnerTerminal(page, projectB.id, { id: terminalB.id, generation: terminalB.generation });
       expect((await page.evaluate(() => window.termina.searchFiles("linked-only"))).entries).toEqual(expect.arrayContaining([expect.objectContaining({ relPath: "linked-only.txt" })]));
       expect((await page.evaluate((id) => window.termina.getWorkOverview().then((overview) => overview.projects.find((project) => project.projectId === id) ?? null), projectB.id))?.root).toBe(projectB.cwd);
       expect((await page.evaluate(() => window.termina.getInstances())).some((instance) => instance.id === id)).toBe(true);

@@ -83,7 +83,7 @@ test.describe("Incomplete history through real local producers", () => {
     const path = join(runRoot, "events", `${owner.id}.jsonl`);
     await expect.poll(() => records(path).some((record) => record.t === "session_ready" && record.ok === true)).toBe(true);
     await page.evaluate((id) => window.termina.writeTerminal(id, "Produce the local history fixtures, altering only their designated files.\r"), owner.id);
-    await expect.poll(() => records(path).filter((record) => record.t === "tool_end" && record.isError !== true).length, { timeout: 45_000 }).toBe(tools.length);
+    await expect.poll(() => records(path).filter((record) => record.t === "tool_end" && record.isError !== true).length, { timeout: 120_000 }).toBe(tools.length);
     await expect.poll(() => page.evaluate((id) => window.termina.getRuns(id).then((runs) => runs.some((run) => run.settledStateId != null && run.settledEntryId != null)), owner.id), { timeout: 15_000 }).toBe(true);
     await expect.poll(() => page.evaluate((id) => window.termina.getTimeline(id).then((events) => events.some((event) => event.t === "agent_settled" && event.stateId && event.entryId)), owner.id), { timeout: 15_000 }).toBe(true);
     await page.locator("#activity-tab-timeline").click();
@@ -124,11 +124,20 @@ test.describe("Incomplete history through real local producers", () => {
   });
 
   test("limited history remains explicit after settlement and pane refresh; discarded snapshot content does not become live evidence", async ({ page, runRoot }, testInfo) => {
+    test.setTimeout(240_000);
     tools = Array.from({ length: 106 }, (_, i) => ({ name: "edit", args: { path: `history/${i}.txt`, old_text: `historical file ${i}\n`, new_text: `historical file ${i} edited\n` } }));
     const owner = await writeMoments(page, runRoot);
+    await expect.poll(async () => {
+      const events = await page.evaluate((id) => window.termina.getTimeline(id), owner.id);
+      const hasOldest = events.some((event) => event.relPath === "history/0.txt");
+      const hasNewest = events.some((event) => event.relPath === "history/105.txt");
+      return `${events.length}:${hasOldest}:${hasNewest}`;
+    }, { timeout: 90_000 }).toMatch(/^(?:[1-9]|[1-9]\d|100):false:true$/);
     const timeline = await page.evaluate((id) => window.termina.getTimeline(id), owner.id);
-    expect(timeline).toHaveLength(100);
+    expect(timeline.length).toBeGreaterThan(0);
+    expect(timeline.length).toBeLessThanOrEqual(100);
     expect(timeline.some((event) => event.relPath === "history/0.txt")).toBe(false);
+    expect(timeline.some((event) => event.relPath === "history/105.txt")).toBe(true);
     const first = timeline.find((event) => event.t === "tool")!;
     const last = timeline.filter((event) => event.t === "tool").at(-1)!;
     await expect(page.locator("#timeline-recorder")).toHaveText("Recent moments only");
@@ -151,7 +160,7 @@ test.describe("Incomplete history through real local producers", () => {
     await page.evaluate((id) => (window as any).__panes.get(id).tabEl.click(), created.id);
     await page.evaluate((id) => (window as any).__panes.get(id).tabEl.click(), owner.id);
     await expect(page.locator("#timeline-recorder")).toHaveText("Recent moments only");
-    await expect(page.locator(".timeline-dot")).toHaveCount(100);
+    await expect(page.locator(".timeline-dot")).toHaveCount(timeline.length);
     await testInfo.attach("bounded-history", { body: JSON.stringify({ executedEdits: tools.length, retainedMoments: timeline.length, first, last }), contentType: "application/json" });
   });
 

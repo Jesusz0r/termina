@@ -310,8 +310,10 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     const priorStarts = starts();
     const prompt = "Use fixture-mcp to inspect greeting.ts\r";
     await page.evaluate(({ id, prompt }) => window.termina.writeTerminal(id, prompt), { id: ownerId, prompt });
-    await expect.poll(() => terminalText(page, ownerId)).toContain("mcp fixture-mcp connected");
-    expect(starts()).toBe(priorStarts + 1);
+    await expect.poll(async () => {
+      const text = await terminalText(page, ownerId);
+      return starts() === priorStarts + 1 && text.includes("mcp fixture-mcp connected");
+    }, { timeout: 20_000 }).toBe(true);
     expect(await terminalText(page, ownerId)).not.toContain("Shell activity is unknown while its terminal is live");
     expect(readFileSync(marker, "utf8")).toBe("started");
     expect(workerCredentials).toEqual([]);

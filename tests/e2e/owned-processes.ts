@@ -12,12 +12,25 @@ function checkedIdentity(pid: number): string | null {
   throw new Error(`cannot revalidate live test descendant ${pid}; retaining test files`);
 }
 
+function runPs(args: string[], timeoutMs: number, maxBuffer: number): string {
+  let last: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return execFileSync("ps", args, {
+        encoding: "utf8", timeout: timeoutMs, maxBuffer,
+        env: { PATH: "/usr/bin:/bin", LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch (error) {
+      last = error;
+      if ((error as NodeJS.ErrnoException).code !== "ETIMEDOUT" || attempt === 2) throw error;
+    }
+  }
+  throw last;
+}
+
 function currentParent(pid: number): number | null {
   try {
-    return Number(execFileSync("ps", ["-p", String(pid), "-o", "ppid="], {
-      encoding: "utf8", timeout: 1_000, maxBuffer: 1024,
-      env: { PATH: "/usr/bin:/bin", LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"],
-    }).trim());
+    return Number(runPs(["-p", String(pid), "-o", "ppid="], 3_000, 1024).trim());
   } catch (error) {
     if ((error as { status?: number }).status === 1 && checkedIdentity(pid) === null) return null;
     throw error;
@@ -38,16 +51,16 @@ export class OwnedProcessTree {
     this.identities.set(rootPid, identity);
     this.capture();
     this.timer = setInterval(() => {
-      try { this.capture(); } catch (error) { this.scanError = error; }
+      try {
+        this.capture();
+        this.scanError = null;
+      } catch (error) { this.scanError = error; }
     }, 250);
     this.timer.unref();
   }
 
   capture(): void {
-    const text = execFileSync("ps", ["-axo", "pid=,ppid="], {
-      encoding: "utf8", timeout: 2_000, maxBuffer: 4 * 1024 * 1024,
-      env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
-    });
+    const text = runPs(["-axo", "pid=,ppid="], 8_000, 4 * 1024 * 1024);
     const children = new Map<number, number[]>();
     for (const line of text.trim().split("\n")) {
       const [pid, parent] = line.trim().split(/\s+/).map(Number);
@@ -84,10 +97,7 @@ export class OwnedProcessTree {
     const processes: Array<{ pid: number; identity: string; rssKiB: number }> = [];
     if (owned.length === 0) return { totalRssKiB: 0, processes };
     const requested = new Set(owned);
-    const output = execFileSync("ps", ["-p", owned.join(","), "-o", "pid=,rss="], {
-      encoding: "utf8", timeout: 2_000, maxBuffer: 1024 * 1024,
-      env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
-    });
+    const output = runPs(["-p", owned.join(","), "-o", "pid=,rss="], 8_000, 1024 * 1024);
     for (const line of output.trim().split("\n")) {
       if (!line.trim()) continue;
       const [pid, rssKiB] = line.trim().split(/\s+/).map(Number);

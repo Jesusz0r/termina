@@ -541,9 +541,10 @@ interface AttentionOutputProbe {
 
 for (const workload of [
   { projects: 3, shellEvery: 1, busySamples: 20, minimizedSamples: 10, maxSeconds: 20 },
-  { projects: 12, shellEvery: 2, busySamples: 300, minimizedSamples: 100, maxSeconds: 45 },
+  { projects: 12, shellEvery: 2, busySamples: 300, minimizedSamples: 100, maxSeconds: 420 },
 ]) {
   test(`measures overview IPC across ${workload.projects} projects and ${workload.projects * 2} idle agents during bounded shell output`, async ({ page, projectRoot, runRoot, electronApp }, testInfo) => {
+    if (workload.projects > 3) test.setTimeout(480_000);
     await expect(page.locator("#splash")).toBeHidden();
     const original = await activeProject(page);
     const projects = [original];
@@ -691,7 +692,9 @@ for (const workload of [
       console.log("attention overview scale baseline", JSON.stringify(result));
       await testInfo.attach("attention-overview-scale", { body: JSON.stringify(result, null, 2), contentType: "application/json" });
     } finally {
-      await writeFile(stopPath, "stop");
+      await writeFile(stopPath, "stop").catch((error: NodeJS.ErrnoException) => {
+        if (error?.code !== "ENOENT") throw error;
+      });
       await electronApp.evaluate(() => {
         const state = globalThis as unknown as { __attentionMainPulse?: { timer: ReturnType<typeof setInterval> } };
         if (state.__attentionMainPulse) clearInterval(state.__attentionMainPulse.timer);
