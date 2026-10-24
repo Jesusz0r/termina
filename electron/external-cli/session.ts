@@ -5,6 +5,8 @@
  * - claude: hook `session_id`, `claude --resume <id>` (code.claude.com/docs/en/hooks)
  * - codex: hook `session_id`, `codex resume <id>` (learn.chatgpt.com/docs/hooks)
  * - grok: hook `sessionId`, `grok --resume <id>` (docs.x.ai/build/features/hooks)
+ * - gemini (agy): hook `conversationId`, `agy --conversation <id>`
+ *   (antigravity.google/docs/hooks, `agy --help`)
  */
 import { isRecord } from "../../shared/guards.ts";
 import type { ExternalCli } from "../../shared/types.ts";
@@ -13,6 +15,7 @@ const RESUME: Partial<Record<ExternalCli, { field: string; args: (id: string) =>
   claude: { field: "session_id", args: (id) => ["--resume", id] },
   codex: { field: "session_id", args: (id) => ["resume", id] },
   grok: { field: "sessionId", args: (id) => ["--resume", id] },
+  gemini: { field: "conversationId", args: (id) => ["--conversation", id] },
 };
 
 /** A leading letter or digit keeps a saved id from ever parsing as a flag. */

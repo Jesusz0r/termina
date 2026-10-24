@@ -114,10 +114,12 @@ function normalizedHook(record: Record<string, unknown>): Record<string, unknown
   // Each CLI names its conversation differently; session.ts picks the field.
   const sessionId = textField(record, "session_id");
   const camelSessionId = textField(record, "sessionId");
+  const conversationId = textField(record, "conversationId");
   return {
     hook_event_name: event,
     ...(sessionId ? { session_id: sessionId } : {}),
     ...(camelSessionId ? { sessionId: camelSessionId } : {}),
+    ...(conversationId ? { conversationId } : {}),
     ...(name ? { tool_name: name } : {}),
     ...(id ? { tool_use_id: id } : {}),
     ...(type ? { type } : {}),
@@ -167,10 +169,12 @@ function scannedHook(head: string, tail: string): Record<string, unknown> | null
   const response = responseFrom(tail);
   const session_id = fieldAny(head, ["session_id"]) ?? fieldAny(tail, ["session_id"]);
   const sessionId = fieldAny(head, ["sessionId"]) ?? fieldAny(tail, ["sessionId"]);
+  const conversationId = fieldAny(head, ["conversationId"]) ?? fieldAny(tail, ["conversationId"]);
   return normalizedHook({
     hook_event_name: event,
     ...(session_id ? { session_id } : {}),
     ...(sessionId ? { sessionId } : {}),
+    ...(conversationId ? { conversationId } : {}),
     ...(tool_name ? { tool_name } : {}),
     ...(tool_use_id ? { tool_use_id } : {}),
     ...(stepIdx !== undefined ? { stepIdx } : {}),

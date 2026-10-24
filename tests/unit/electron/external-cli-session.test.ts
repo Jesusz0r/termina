@@ -11,6 +11,9 @@ describe("external CLI conversation resume", () => {
     expect(hookSessionId("codex", { hook_event_name: "SessionStart", session_id: "0199a-b2" })).toBe("0199a-b2");
     expect(hookSessionId("grok", { hookEventName: "SessionStart", sessionId: "g-7" })).toBe("g-7");
     expect(hookSessionId("grok", { session_id: "wrong-field" })).toBeNull();
+    expect(hookSessionId("gemini", { hook_event_name: "Stop", conversationId: "016171fe-3403-4f5c-b500-9ea33b3d9226" }))
+      .toBe("016171fe-3403-4f5c-b500-9ea33b3d9226");
+    expect(hookSessionId("gemini", { session_id: "wrong-field" })).toBeNull();
   });
 
   it("keeps the conversation id through hook wire normalization, whole or split", () => {
@@ -18,18 +21,23 @@ describe("external CLI conversation resume", () => {
     expect(hookSessionId("codex", observeHookWire({ payload: body }))).toBe("0199a-b2");
     const grok = JSON.stringify({ hookEventName: "PreToolUse", sessionId: "g-7", toolName: "bash", toolInput: { x: "y".repeat(10) } });
     expect(hookSessionId("grok", observeHookWire({ head: grok.slice(0, 60), tail: grok.slice(-20) }))).toBe("g-7");
+    const agy = JSON.stringify({ hook_event_name: "PreToolUse", conversationId: "0a433f30-bf2e-4c7c-b56f-f6e6516cf005",
+      toolCall: { name: "run_command", args: { x: "y".repeat(10) } } });
+    expect(hookSessionId("gemini", observeHookWire({ payload: agy }))).toBe("0a433f30-bf2e-4c7c-b56f-f6e6516cf005");
+    expect(hookSessionId("gemini", observeHookWire({ head: agy.slice(0, 100), tail: agy.slice(-20) })))
+      .toBe("0a433f30-bf2e-4c7c-b56f-f6e6516cf005");
   });
 
   it("does not guess for CLIs without a verified resume path", () => {
-    expect(hookSessionId("gemini", { session_id: "x1", conversationId: "x1" })).toBeNull();
     expect(hookSessionId("muse", { session_id: "x1" })).toBeNull();
-    expect(externalCliResumeArgs("gemini", "x1")).toEqual([]);
+    expect(externalCliResumeArgs("muse", "x1")).toEqual([]);
   });
 
   it("builds each CLI's resume args", () => {
     expect(externalCliResumeArgs("claude", "abc")).toEqual(["--resume", "abc"]);
     expect(externalCliResumeArgs("codex", "abc")).toEqual(["resume", "abc"]);
     expect(externalCliResumeArgs("grok", "abc")).toEqual(["--resume", "abc"]);
+    expect(externalCliResumeArgs("gemini", "abc")).toEqual(["--conversation", "abc"]);
     expect(externalCliResumeArgs("codex", undefined)).toEqual([]);
   });
 
