@@ -239,12 +239,6 @@ export type PromotionArtifactManifest =
 
 export type BoundPromotionDirectory = { path: string; dev: string; ino: string; capability?: string };
 
-export type PromotionRootProvenance = {
-  version: 1;
-  path: string;
-  parent: { dev: string; ino: string };
-  root: { dev: string; ino: string };
-};
 export type PromotionDirectoryPlan = {
   path: string;
   components: string[];

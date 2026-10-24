@@ -4,11 +4,11 @@
  * Owns bound root ensure/probe/materialize and provenance. Split from
  * promotion-recovery.ts (issue #38).
  */
-import { boundPromotionCopyFile, boundPromotionCreateDirectory, boundPromotionEnsureDirectory, boundPromotionInspectPrivateFile, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, type PromotionFsIdentity } from "../../worldline-git.js";
+import { boundPromotionCopyFile, boundPromotionCreateDirectory, boundPromotionEnsureDirectory, boundPromotionInspectPrivateFile, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, type PromotionFsIdentity } from "../../worldline-git.js";
 import { promotionIdentityOf, refreshBoundPromotionDirectory } from "../bindings.js";
 import { errorCode } from "../../../shared/guards.js";
 import { MAX_PROMOTION_SCAN_DEPTH, MAX_PROMOTION_SCAN_WORK_BYTES } from "../limits.js";
-import { type BoundPromotionDirectory, type ComparisonState, type PromotionDirectoryPlan, type PromotionRootProvenance } from "../types.js";
+import { type BoundPromotionDirectory, type ComparisonState, type PromotionDirectoryPlan } from "../types.js";
 import { createHash } from "node:crypto";
 import { diskFs, diskFsSync } from "../../disk-fs.js";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -18,11 +18,7 @@ const { lstatSync } = diskFsSync;
 const { lstat: lstatPath, realpath } = diskFs;
 
 
-const PROMOTION_ROOT_PROVENANCE_VERSION = 1;
-
 const PROMOTION_ROOT_PROVENANCE_PREFIX = ".termina-promotion-root-";
-
-const PROMOTION_ROOT_PROVENANCE_MAX_BYTES = 4096;
 
 
 /** Rebind every retained comparison root after a native core restart. */
@@ -167,71 +163,6 @@ function promotionRootProvenancePath(path: string, provenanceDirectory?: BoundPr
 }
 
 
-function promotionRootProvenanceIdentity(value: unknown, field: string): { dev: string; ino: string } {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`invalid ${field}`);
-  const record = value as Record<string, unknown>;
-  if (
-    Object.keys(record).length !== 2
-    || typeof record.dev !== "string"
-    || !/^\d+$/.test(record.dev)
-    || typeof record.ino !== "string"
-    || !/^\d+$/.test(record.ino)
-  ) throw new Error(`invalid ${field}`);
-  return { dev: record.dev, ino: record.ino };
-}
-
-
-async function readPromotionRootProvenance(
-  absolute: string,
-  parent: { path: string; identity: PromotionFsIdentity; name: string },
-  field: string,
-  provenanceDirectory?: BoundPromotionDirectory,
-): Promise<PromotionRootProvenance | null> {
-  const provenancePath = promotionRootProvenancePath(absolute, provenanceDirectory);
-  let info;
-  try {
-    info = await lstatPath(provenancePath, { bigint: true });
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return null;
-    throw error;
-  }
-  if (!info.isFile() || info.isSymbolicLink() || info.size <= 0n || info.size > BigInt(PROMOTION_ROOT_PROVENANCE_MAX_BYTES)) {
-    throw new Error(`${field} root provenance is not a bounded regular file`);
-  }
-  const provenanceParent = provenanceDirectory ?? parent;
-  const provenanceParentIdentity = provenanceDirectory
-    ? promotionIdentityOf(provenanceDirectory)
-    : parent.identity;
-  const read = await boundPromotionReadFile({
-    root: provenanceParent.path,
-    rootIdentity: provenanceParentIdentity,
-    components: [basename(provenancePath)],
-    parentIdentity: provenanceParentIdentity,
-    expectedIdentity: { dev: String(info.dev), ino: String(info.ino) },
-    maxBytes: PROMOTION_ROOT_PROVENANCE_MAX_BYTES,
-  });
-  let value: unknown;
-  try {
-    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(read.content)) as unknown;
-  } catch {
-    throw new Error(`${field} root provenance is malformed`);
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${field} root provenance is malformed`);
-  const record = value as Record<string, unknown>;
-  if (
-    Object.keys(record).length !== 4
-    || record.version !== PROMOTION_ROOT_PROVENANCE_VERSION
-    || record.path !== absolute
-  ) throw new Error(`${field} root provenance is malformed`);
-  const parentIdentity = promotionRootProvenanceIdentity(record.parent, `${field} root provenance parent`);
-  const rootIdentity = promotionRootProvenanceIdentity(record.root, `${field} root provenance root`);
-  if (parentIdentity.dev !== parent.identity.dev || parentIdentity.ino !== parent.identity.ino) {
-    throw new Error(`${field} root provenance parent identity changed`);
-  }
-  return { version: 1, path: absolute, parent: parentIdentity, root: rootIdentity };
-}
-
-
 /** Create a directory component through the native descriptor boundary. */
 export async function ensureBoundChildDirectory(parent: BoundPromotionDirectory, name: string, requireMissing = false): Promise<BoundPromotionDirectory> {
   const identity = await boundPromotionCreateDirectory({
@@ -306,24 +237,12 @@ export async function ensureBoundDirectory(
   const rootProvenanceDirectory = provenanceDirectory && resolve(provenanceDirectory.path) !== absolute
     ? provenanceDirectory
     : undefined;
-  const provenance = await readPromotionRootProvenance(absolute, trustedParent, field, rootProvenanceDirectory);
-  if (provenance) {
-    const identity = await boundPromotionEnsureDirectory({
-      path: absolute,
-      expectedIdentity: provenance.root,
-    }).catch((error) => {
-      throw new Error(`${field} could not be rebound natively: ${error instanceof Error ? error.message : String(error)}`);
-    });
-    if (identity.dev !== provenance.root.dev || identity.ino !== provenance.root.ino) {
-      throw new Error(`${field} root identity changed during rebind`);
-    }
-    return { path: absolute, dev: identity.dev, ino: identity.ino, capability: identity.capability };
-  }
   const provenancePath = promotionRootProvenancePath(absolute, rootProvenanceDirectory);
   const provenanceParent = rootProvenanceDirectory ?? trustedParent;
   const provenanceParentIdentity = rootProvenanceDirectory
     ? promotionIdentityOf(rootProvenanceDirectory)
     : trustedParent.identity;
+  // Native binding authenticates durable provenance and resumes format migration.
   const identity = await boundPromotionEnsureDirectory({
     path: absolute,
     ...(options.initialIdentity ? { expectedIdentity: options.initialIdentity } : {}),
@@ -374,10 +293,9 @@ export async function ensureBoundRetainedRoot(
   const absolute = join(parentBinding.path, leafName);
   if (!isAbsolute(absolute)) throw new Error(`${field} must be absolute`);
   const provenancePath = promotionRootProvenancePath(absolute);
-  const provenance = await readPromotionRootProvenance(absolute, trustedParent, field);
+  // Native binding authenticates durable provenance and resumes format migration.
   const identity = await boundPromotionEnsureDirectory({
     path: absolute,
-    ...(provenance ? { expectedIdentity: provenance.root } : {}),
     trustedParent,
     provenance: {
       name: basename(provenancePath),
@@ -391,9 +309,6 @@ export async function ensureBoundRetainedRoot(
   }).catch((error) => {
     throw new Error(`${field} could not be bound natively: ${error instanceof Error ? error.message : String(error)}`);
   });
-  if (provenance && (identity.dev !== provenance.root.dev || identity.ino !== provenance.root.ino)) {
-    throw new Error(`${field} root identity changed during rebind`);
-  }
   return { path: absolute, dev: identity.dev, ino: identity.ino, capability: identity.capability };
 }
 

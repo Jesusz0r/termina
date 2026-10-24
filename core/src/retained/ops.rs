@@ -15,14 +15,15 @@ use crate::promote_fs::{
 };
 use crate::util::{missing_path, open_at, s, stat_at};
 
+use super::durable_identity::{durable_directory_identity, resolve_root_record};
 use super::private_files::{
     promotion_create_bound_file, promotion_persist_root_provenance,
-    promotion_read_private_bounded_file,
+    promotion_read_private_bounded_file, promotion_read_private_bounded_if_present,
+    promotion_replace_root_metadata,
 };
 use super::root_state::{
     PromotionRootStateKind, promotion_persist_root_state, promotion_read_root_state,
-    promotion_read_root_state_temporary, promotion_replace_root_state,
-    promotion_root_state_content, promotion_root_state_name,
+    promotion_read_root_state_temporary, promotion_root_state_content, promotion_root_state_name,
 };
 use super::validate::{
     RetainedRootScan, promotion_owned_directory, promotion_validate_marker,
@@ -218,6 +219,28 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
         .get("expectedIdentity")
         .map(|value| promotion_identity_from_value(value, "expectedIdentity"))
         .transpose()?;
+    let existing_provenance = promotion_read_private_bounded_if_present(
+        &provenance_parent_file,
+        &provenance_c_name,
+        RETAINED_ROOT_PROVENANCE_MAX_BYTES,
+        "promotion root provenance",
+    )?;
+    if let Some((_, bytes)) = &existing_provenance {
+        let record: Value = serde_json::from_slice(bytes)
+            .map_err(|e| format!("promotion root provenance is malformed: {e}"))?;
+        if record["path"].as_str() != Some(path.as_str()) {
+            return Err("promotion root provenance path changed".into());
+        }
+        let (record_path, record_parent, record_root) =
+            resolve_root_record(&record, "promotion root provenance", false)?;
+        if record_path != path || record_parent != parent_identity {
+            return Err("promotion root provenance is bound to a different parent or path".into());
+        }
+        if expected.is_some_and(|identity| identity != record_root) {
+            return Err("promotion root provenance identity mismatch".into());
+        }
+        expected = Some(record_root);
+    }
     let mut existing_state = promotion_read_root_state(&provenance_parent_file, &state_c_name)?;
     let mut state_recovery_from_temporary = false;
     if existing_state.is_none() {
@@ -342,14 +365,8 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
         let pending_content = promotion_root_state_content(
             PromotionRootStateKind::Pending,
             &path,
-            PromotionIdentity {
-                dev: parent_actual.dev,
-                ino: parent_actual.ino,
-            },
-            PromotionIdentity {
-                dev: root_identity.dev,
-                ino: root_identity.ino,
-            },
+            &parent,
+            &directory,
         )?;
         state_identity = Some(promotion_persist_root_state(
             &provenance_parent_file,
@@ -411,19 +428,38 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
     };
 
     let provenance_content = serde_json::to_vec(&json!({
-        "version": 1,
+        "version": 2,
         "path": path,
-        "parent": { "dev": parent_actual.dev.to_string(), "ino": parent_actual.ino.to_string() },
-        "root": { "dev": root_identity.dev.to_string(), "ino": root_identity.ino.to_string() },
+        "parent": durable_directory_identity(&parent)?,
+        "root": durable_directory_identity(&directory)?,
     }))
     .map_err(|error| format!("serialize promotion root provenance failed: {error}"))?;
     promotion_test_pause(req, "retained-root-before-provenance")?;
-    let provenance_identity = promotion_persist_root_provenance(
-        &provenance_parent_file,
-        &provenance_c_name,
-        &provenance_content,
-        Some((req, "retained-root-before-provenance-rename")),
-    )?;
+    let provenance_identity = if let Some((identity, bytes)) = &existing_provenance {
+        if *bytes == provenance_content {
+            *identity
+        } else {
+            // Only a fully authenticated v1 record may change representation.
+            let value: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+            if value["version"] != 1 {
+                return Err("promotion root provenance content changed".into());
+            }
+            promotion_replace_root_metadata(
+                &provenance_parent_file,
+                &provenance_c_name,
+                *identity,
+                &provenance_content,
+                req,
+            )?
+        }
+    } else {
+        promotion_persist_root_provenance(
+            &provenance_parent_file,
+            &provenance_c_name,
+            &provenance_content,
+            Some((req, "retained-root-before-provenance-rename")),
+        )?
+    };
     promotion_test_pause(req, "retained-root-provenance-persisted")?;
     parent
         .sync_all()
@@ -435,18 +471,8 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
         .sync_all()
         .map_err(|error| format!("sync promotion provenance parent failed: {error}"))?;
 
-    let bound_state_content = promotion_root_state_content(
-        PromotionRootStateKind::Bound,
-        &path,
-        PromotionIdentity {
-            dev: parent_actual.dev,
-            ino: parent_actual.ino,
-        },
-        PromotionIdentity {
-            dev: root_identity.dev,
-            ino: root_identity.ino,
-        },
-    )?;
+    let bound_state_content =
+        promotion_root_state_content(PromotionRootStateKind::Bound, &path, &parent, &directory)?;
     let current_state_identity =
         state_identity.ok_or("promotion root state was not durably initialized")?;
     let final_state_identity = match existing_state.as_ref().map(|state| state.kind) {
@@ -457,12 +483,26 @@ pub(crate) fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, 
                 RETAINED_ROOT_PROVENANCE_MAX_BYTES,
                 "promotion root state",
             )?;
-            if identity != current_state_identity || observed != bound_state_content {
+            if identity != current_state_identity {
                 return Err("promotion root bound state changed during commit".to_string());
             }
-            identity
+            if observed == bound_state_content {
+                identity
+            } else {
+                let value: Value = serde_json::from_slice(&observed).map_err(|e| e.to_string())?;
+                if value["version"] != 1 {
+                    return Err("promotion root bound state content changed".into());
+                }
+                promotion_replace_root_metadata(
+                    &provenance_parent_file,
+                    &state_c_name,
+                    identity,
+                    &bound_state_content,
+                    req,
+                )?
+            }
         }
-        _ => promotion_replace_root_state(
+        _ => promotion_replace_root_metadata(
             &provenance_parent_file,
             &state_c_name,
             current_state_identity,
