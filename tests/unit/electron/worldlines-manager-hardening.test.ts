@@ -20,6 +20,21 @@ describe("manager hardening (issue #202)", () => {
     expect(fieldStores).toEqual([]);
   });
 
+  it("restores no independent session after a failed bootstrap and lets the project open", async () => {
+    const ready = Promise.reject(new Error("primary root identity changed"));
+    ready.catch(() => undefined);
+    let opened = 0;
+    const restore = (WorldlineManager.prototype as unknown as {
+      restoreIndependentSessions(this: unknown): Promise<void>;
+    }).restoreIndependentSessions;
+    await expect(restore.call({
+      ready,
+      comparisons: new Map([["c1", { sourceRunId: null, phase: "running" }]]),
+      openTerminal: async () => { opened += 1; return { ok: true }; },
+    })).resolves.toBeUndefined();
+    expect(opened).toBe(0);
+  });
+
   it("(d) counts draining comparisons against the live budget", () => {
     const comparisons = new Map<string, ComparisonState>([
       ["live", { phase: "running", teardownPromise: null, candidates: new Map([["A", {}], ["B", {}]]) } as ComparisonState],

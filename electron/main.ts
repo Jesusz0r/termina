@@ -7750,6 +7750,11 @@ class TerminaApp {
       if (!primaryRootInfo.isDirectory() || primaryRootInfo.isSymbolicLink()) {
         throw new Error("project root is not a real directory");
       }
+      // Finish or roll back any pending promotion journal BEFORE the project
+      // is registered or its primary watcher starts: a refused journal leaves
+      // no half-open tab, and the restored bytes must not attribute to a user
+      // edit.
+      await recoverPromotionJournals(this.worldsRoot, { primaryRoot: canonicalRoot });
       const project: ProjectState = {
         id,
         cwd,
@@ -7775,12 +7780,6 @@ class TerminaApp {
         this.activeProjectId = id;
         project.activationGeneration = activationGeneration;
       }
-      // Finish or roll back any pending promotion journal BEFORE the
-      // primary watcher starts: the restored bytes must not attribute to
-      // a user edit.
-      await recoverPromotionJournals(this.worldsRoot, {
-        primaryRoot: project.canonicalRoot,
-      });
       this.createWorkspace(project, cwd, true);
       await this.loadMineFiles(project);
       await this.initWorldlines(project);

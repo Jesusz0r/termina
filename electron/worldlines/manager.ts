@@ -2686,7 +2686,9 @@ export class WorldlineManager {
 
   /** Restore user sessions through the same candidate reopen handshake. */
   async restoreIndependentSessions(): Promise<void> {
-    await this.ready;
+    // A failed bootstrap already fails worldline reads closed. The project
+    // itself still opens; its terminals are live by now.
+    if (!(await this.ready.then(() => true, () => false))) return;
     for (const cmp of this.comparisons.values()) {
       if (cmp.sourceRunId !== null || cmp.phase === "error") continue;
       const result = await this.openTerminal(cmp.id, "A");

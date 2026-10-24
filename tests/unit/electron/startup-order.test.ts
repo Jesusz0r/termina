@@ -156,3 +156,39 @@ describe("initial restoration barrier", () => {
     expect(app.sendInstances).toHaveBeenCalledOnce();
   });
 });
+
+const openMethod = main.match(/  private async openProject\([\s\S]*?\n  \}/)?.[0];
+if (!openMethod) throw new Error("project open method not found");
+const openCode = ts.transpileModule(`return ({ ${openMethod.replace("private async", "async")} }).openProject;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText;
+
+describe("project open", () => {
+  it("leaves no registered or active project when promotion recovery refuses the root", async () => {
+    const openProject = new Function("nextProjectId", "lstat", "recoverPromotionJournals", openCode)(
+      () => "p-new",
+      async () => ({ isDirectory: () => true, isSymbolicLink: () => false, dev: 1n, ino: 2n }),
+      async () => { throw new Error("promotion journal root is unproven"); },
+    );
+    const app = {
+      projects: new Map([["p-old", { id: "p-old" }]]),
+      switchingProjects: new Set<string>(),
+      activeProjectId: "p-old",
+      projectSelectionAction: 1,
+      projectActivationGeneration: 4,
+      worldsRoot: "/worlds",
+      beginProjectSelectionAction: () => 1,
+      captureRendererSendTarget: () => null,
+      canonicalPath: async (path: string) => path,
+      nextProjectActivationGeneration: vi.fn(() => 5),
+      createWorkspace: vi.fn(),
+      persistOpenProjects: vi.fn(),
+    };
+    await expect(openProject.call(app, "/project")).rejects.toThrow("unproven");
+    expect([...app.projects.keys()]).toEqual(["p-old"]);
+    expect(app.activeProjectId).toBe("p-old");
+    expect(app.nextProjectActivationGeneration).not.toHaveBeenCalled();
+    expect(app.createWorkspace).not.toHaveBeenCalled();
+    expect(app.switchingProjects.size).toBe(0);
+  });
+});
