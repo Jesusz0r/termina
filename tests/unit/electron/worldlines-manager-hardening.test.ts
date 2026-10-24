@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { lstat, mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WorldlineManager, ensurePromotionRoots } from "../../../electron/worldlines/index.ts";
+import { WorldlineManager, WorldlinesUnavailableError, ensurePromotionRoots } from "../../../electron/worldlines/index.ts";
 import { MARKER } from "../../../electron/worldlines/limits.ts";
 import { readProcessStart } from "../../../electron/worldlines/promotion-recovery.js";
 import type { ComparisonState, RunRecord } from "../../../electron/worldlines/types.ts";
@@ -33,6 +33,18 @@ describe("manager hardening (issue #202)", () => {
       openTerminal: async () => { opened += 1; return { ok: true }; },
     })).resolves.toBeUndefined();
     expect(opened).toBe(0);
+  });
+
+  it("reports a saved session as unavailable, not unmigrated, after a failed bootstrap", async () => {
+    const readyError = new Error("primary root identity changed");
+    const ready = Promise.reject(readyError);
+    ready.catch(() => undefined);
+    const open = (WorldlineManager.prototype as unknown as {
+      openMigratedSession(this: unknown, file: string): Promise<unknown>;
+    }).openMigratedSession;
+    const result = open.call({ ready, readyError, comparisons: new Map() }, "/saved/active.jsonl");
+    await expect(result).rejects.toBeInstanceOf(WorldlinesUnavailableError);
+    await expect(result).rejects.toThrow("primary root identity changed");
   });
 
   it("(d) counts draining comparisons against the live budget", () => {

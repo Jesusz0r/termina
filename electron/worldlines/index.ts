@@ -4,7 +4,7 @@
  * Public API of the worldline owner (`electron/worldlines/`). One owner,
  * one public surface; lifecycle units live in the sibling modules.
  */
-export { WorldlineManager } from "./manager.js";
+export { WorldlineManager, WorldlinesUnavailableError } from "./manager.js";
 export type { WorldlineDeps } from "./manager.js";
 export type { RunRecord } from "./types.js";
 export { UNCERTAIN_COMPARISON_USAGE_LEDGER } from "./limits.js";

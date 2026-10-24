@@ -4,6 +4,7 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { sourceTreesOverlap } from "../../../electron/main/source-admission.ts";
 import { sanitizeSessionDir } from "../../../electron/main/project-workspace.ts";
+import { WorldlinesUnavailableError } from "../../../electron/worldlines/index.ts";
 
 // Exercise the actual orchestration methods without booting the Electron app.
 const source = ts.createSourceFile("main.ts", readFileSync(join(process.cwd(), "electron/main.ts"), "utf8"), ts.ScriptTarget.Latest, true);
@@ -16,9 +17,9 @@ function method(name: string): (...args: any[]) => Promise<any> {
   find(source);
   if (!node) throw new Error(`missing ${name}`);
   const body = node.getText(source).replace(/^private /, "");
-  return new Function("sourceTreesOverlap", "rosterFilePath", "sanitizeSessionDir", "parsePlanModelMarker", "invalidateVerify", "join",
+  return new Function("sourceTreesOverlap", "rosterFilePath", "sanitizeSessionDir", "parsePlanModelMarker", "invalidateVerify", "join", "WorldlinesUnavailableError",
     ts.transpileModule(`return ({ ${body} }).${name};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)(
-    sourceTreesOverlap, () => "roster", sanitizeSessionDir, () => null, (value: unknown) => value, join);
+    sourceTreesOverlap, () => "roster", sanitizeSessionDir, () => null, (value: unknown) => value, join, WorldlinesUnavailableError);
 }
 const create = method("createUserTerminal");
 const restore = method("restoreProjectTerminals");
@@ -134,8 +135,21 @@ describe("user terminal creation", () => {
     try { await restore.call(app, project); }
     finally { warning.mockRestore(); }
     expect(project.unrestoredTerminals).toHaveLength(1);
-    expect(app.noteRosterRestoreProblem).toHaveBeenCalledWith(project, project.unrestoredTerminals, ["saved area unavailable"]);
+    expect(app.noteRosterRestoreProblem).toHaveBeenCalledWith(project, project.unrestoredTerminals, ["saved area unavailable"], { held: [] });
     expect(project.worldlines.createIndependentSession).not.toHaveBeenCalled();
+    expect(app.createTerminal).not.toHaveBeenCalled();
+  });
+
+  it("holds a saved session while worldlines are unavailable instead of offering it for discard", async () => {
+    const { app, project } = fixture();
+    project.worldlines.openMigratedSession.mockRejectedValue(new WorldlinesUnavailableError(new Error("primary root identity changed")));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try { await restore.call(app, project); }
+    finally { warning.mockRestore(); }
+    expect(project.unrestoredTerminals).toHaveLength(1);
+    expect(app.saveTerminalRoster).toHaveBeenCalledWith(project);
+    expect(app.noteRosterRestoreProblem).toHaveBeenCalledWith(project, project.unrestoredTerminals,
+      ["worldlines are unavailable: primary root identity changed"], { held: project.unrestoredTerminals });
     expect(app.createTerminal).not.toHaveBeenCalled();
   });
 

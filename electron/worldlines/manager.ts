@@ -287,6 +287,15 @@ export interface WorldlineDeps {
 
 const EVIDENCE_QUEUE_HIGH_WATER = 64;
 
+/** Worldline bootstrap failed, so a saved session's migration state is unknown. */
+export class WorldlinesUnavailableError extends Error {
+  constructor(cause: Error) {
+    super(`worldlines are unavailable: ${cause.message}`);
+    this.name = "WorldlinesUnavailableError";
+    this.cause = cause;
+  }
+}
+
 
 export class WorldlineManager {
   private comparisons = new Map<string, ComparisonState>();
@@ -3129,7 +3138,8 @@ export class WorldlineManager {
   }
 
   async openMigratedSession(sourceSessionFile: string): Promise<{ ok: boolean; terminalId?: string; error?: string } | null> {
-    await this.ready;
+    // Without bootstrap the session may live in a candidate: never treat it as unmigrated.
+    if (!(await this.ready.then(() => true, () => false))) throw new WorldlinesUnavailableError(this.readyError!);
     const cmp = [...this.comparisons.values()].find((c) => c.sourceRunId === null && c.sourceSessionFile === sourceSessionFile);
     return cmp ? this.openTerminal(cmp.id, "A") : null;
   }

@@ -26,7 +26,7 @@ function fixture(response: number) {
     projectOfTerminal: () => project, closeTerminal: vi.fn(), sendInstances: vi.fn(),
   };
   return { dialog, project, failed, app,
-    notice: (reasons: string[], setAside?: string) => notice.call(app, project, failed, reasons, setAside) as Promise<void>,
+    notice: (reasons: string[], opts?: { setAside?: string; held?: unknown[] }) => notice.call(app, project, failed, reasons, opts) as Promise<void>,
     close: (id: string) => close.call(app, id) };
 }
 
@@ -48,9 +48,25 @@ describe("restore notice", () => {
 
   it("names the kept copy of a damaged roster and discards nothing", async () => {
     const f = fixture(1);
-    await f.notice([], "/data/terminal-rosters/key.json.corrupt-1");
+    await f.notice([], { setAside: "/data/terminal-rosters/key.json.corrupt-1" });
     expect(f.dialog.showMessageBox.mock.calls[0]![0]).toMatchObject({ detail: expect.stringContaining("key.json.corrupt-1") });
     expect(f.project.unrestoredTerminals).toEqual(f.failed);
+  });
+
+  it("offers no discard when every failed tab is waiting for worldlines", async () => {
+    const f = fixture(1);
+    await f.notice(["worldlines are unavailable: root changed"], { held: f.failed });
+    expect(f.dialog.showMessageBox.mock.calls[0]![0]).not.toHaveProperty("buttons");
+    expect(f.project.unrestoredTerminals).toEqual(f.failed);
+    expect(f.app.saveTerminalRoster).not.toHaveBeenCalled();
+  });
+
+  it("discards only the broken tabs and keeps those waiting for worldlines", async () => {
+    const f = fixture(1);
+    await f.notice(["worldlines are unavailable: root changed", "codex is not installed"], { held: [f.failed[0]] });
+    expect(f.dialog.showMessageBox.mock.calls[0]![0]).toMatchObject({ buttons: ["Keep for Next Launch", "Discard"] });
+    expect(f.project.unrestoredTerminals).toEqual([f.failed[0]]);
+    expect(f.app.saveTerminalRoster).toHaveBeenCalledWith(f.project);
   });
 
   it("closing the last live tab keeps tabs that failed to restore", () => {

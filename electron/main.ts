@@ -48,7 +48,7 @@ import { IGNORED_SEGMENTS, ProjectWatcher, watchContentIdentity } from "./watche
 import { SnapshotStore, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionReadFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, gitCommonDir, gitHead, gitObjectFormat, gitTrackedFiles, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
 import { EvidenceHomeStore } from "./evidence-home.js";
 import { benchmarkConfigFrom, detectTestCommand, detectTestFromState } from "./verify-detect.js";
-import { WorldlineManager, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
+import { WorldlineManager, WorldlinesUnavailableError, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
 import { classifyOpenedGitRoot, worldlineAppReadPaths, worldlineCaptureHead, worldlineCapturePrimary, worldlinePreflight } from "./worldlines/bootstrap.js";
 import {
   candidateSandboxLaunch,
@@ -2919,7 +2919,7 @@ class TerminaApp {
 
   private async restoreProjectTerminals(project: ProjectState): Promise<void> {
     const loaded = await this.runtime.loadRoster(rosterFilePath(this.userDataDir, project.sessionKey));
-    if (loaded.setAside) void this.noteRosterRestoreProblem(project, [], [], loaded.setAside);
+    if (loaded.setAside) void this.noteRosterRestoreProblem(project, [], [], { setAside: loaded.setAside });
     if (loaded.entries.length === 0) {
       // Only a genuinely new project gets a default terminal. An existing
       // empty roster is the durable result of closing the project's last tab.
@@ -2937,6 +2937,8 @@ class TerminaApp {
     }
     const unrestored: TerminalRosterEntry[] = [];
     const reasons: string[] = [];
+    // Waiting on worldlines is not a broken tab: the notice never offers to discard these.
+    const held: TerminalRosterEntry[] = [];
     const spawned: { rec: TerminalRosterEntry; id: string }[] = [];
     for (const rec of loaded.entries) {
       this.noteTerminalId(rec.id);
@@ -2986,6 +2988,7 @@ class TerminaApp {
       } catch (err) {
         unrestored.push(rec);
         reasons.push((err as Error).message);
+        if (err instanceof WorldlinesUnavailableError) held.push(rec);
         console.warn(`[main] could not restore terminal ${rec.id}: ${(err as Error).message}`);
       }
     }
@@ -2999,32 +3002,36 @@ class TerminaApp {
     // a phantom if it becomes launchable on a later restart.
     project.unrestoredTerminals = unrestored;
     this.saveTerminalRoster(project);
-    if (reasons.length > 0) void this.noteRosterRestoreProblem(project, unrestored, reasons);
+    if (reasons.length > 0) void this.noteRosterRestoreProblem(project, unrestored, reasons, { held });
   }
 
   /**
    * Tell the user which saved tabs did not come back. Failed tabs have no
    * pane, so this notice is the only place to discard them; keeping them
-   * retries on the next launch.
+   * retries on the next launch. `held` tabs are always kept.
    */
   private async noteRosterRestoreProblem(
     project: ProjectState,
     entries: TerminalRosterEntry[],
     reasons: string[],
-    setAside?: string,
+    notice: { setAside?: string; held?: TerminalRosterEntry[] } = {},
   ): Promise<void> {
     if (this.disposed) return;
-    const failed = entries.filter((entry) => project.unrestoredTerminals.includes(entry));
+    const { setAside, held = [] } = notice;
+    const kept = entries.filter((entry) => project.unrestoredTerminals.includes(entry));
+    const discardable = kept.filter((entry) => !held.includes(entry));
     const detail = setAside
       ? `The saved terminal list for ${project.cwd} was damaged. A copy was kept at:\n${setAside}`
-      : `${failed.length} saved tab${failed.length === 1 ? "" : "s"} in ${project.cwd} could not reopen:\n`
+      : `${kept.length} saved tab${kept.length === 1 ? "" : "s"} in ${project.cwd} could not reopen:\n`
         + [...new Set(reasons)].slice(0, 5).map((reason) => `• ${reason}`).join("\n");
-    const options: MessageBoxOptions = setAside
-      ? { type: "warning", message: "Some terminals could not be restored", detail }
+    const options: MessageBoxOptions = setAside || discardable.length === 0
+      ? { type: "warning", message: "Some terminals could not be restored",
+        detail: setAside ? detail : `${detail}\n\nThey will try again on the next launch.` }
       : {
         type: "warning",
         message: "Some terminals could not be restored",
-        detail: `${detail}\n\nKeep them to try again on the next launch.`,
+        detail: `${detail}\n\nKeep them to try again on the next launch.`
+          + (held.length > 0 ? ` Tabs waiting for worldlines are always kept.` : ""),
         buttons: ["Keep for Next Launch", "Discard"],
         defaultId: 0,
         cancelId: 0,
@@ -3033,9 +3040,9 @@ class TerminaApp {
       const win = this.win;
       this.revealWindowForSheet();
       const result = await (win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options));
-      if (setAside || result.response !== 1 || this.projects.get(project.id) !== project) return;
+      if (!options.buttons || result.response !== 1 || this.projects.get(project.id) !== project) return;
       if (this.projectIsSwitching(project.id)) return;
-      project.unrestoredTerminals = project.unrestoredTerminals.filter((entry) => !failed.includes(entry));
+      project.unrestoredTerminals = project.unrestoredTerminals.filter((entry) => !discardable.includes(entry));
       this.saveTerminalRoster(project);
     } catch (error) {
       console.warn(`[main] could not show the restore notice: ${(error as Error).message}`);
