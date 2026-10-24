@@ -15,6 +15,7 @@ export interface TerminaE2EFixtures {
   runRoot: string;
   terminalEngine: "core";
   closeElectron: () => Promise<void>;
+  hostClipboard: void;
 }
 
 // Capture process handles while the Playwright connection is alive. Early
@@ -227,6 +228,15 @@ export async function launchOwnedElectron(
 
 export const test = base.extend<TerminaE2EFixtures>({
   terminalEngine: ["core", { option: true }],
+  // The app writes the real system pasteboard (copy, paste, native editor
+  // commands). Keep the user's text clipboard: restore it after every test,
+  // so an interrupted run loses at most one test's worth. Text only.
+  hostClipboard: [async ({}, use) => {
+    const saved = process.platform === "darwin" ? execFileSync("/usr/bin/pbpaste", { encoding: "utf8" }) : null;
+    await use();
+    if (saved === null) return;
+    if (execFileSync("/usr/bin/pbpaste", { encoding: "utf8" }) !== saved) execFileSync("/usr/bin/pbcopy", { input: saved });
+  }, { auto: true }],
   runRoot: async ({}, use) => {
     const runRoot = mkdtempSync(join(e2eTempDir(), "termina-playwright-"));
     await use(runRoot);
