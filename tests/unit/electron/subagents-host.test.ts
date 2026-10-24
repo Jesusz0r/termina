@@ -799,6 +799,33 @@ describe("SubagentHost", () => {
     expect(s.notes.at(-1)!.note).toContain("Continued from bg-1");
   });
 
+  it("rejects a continuation whose session another run in its chain is writing", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    materializeLaunchedSession(s.launches[0]!.env);
+    s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"done"}\n`);
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(s.resultFile));
+    const resume = async (runId: string, from: string): Promise<void> => {
+      const name = `subagent-term-7-${runId}.task.json`;
+      writeFileSync(join(s.dir, name), JSON.stringify({ ...validTask({ runId }), resumeRunId: from }));
+      await s.host.handleSpawn("term-7", runId, name);
+    };
+    await resume("bg-2", "bg-1");
+    s.procs[1]!.out(`SUBAGENT_RESULT {"ok":true,"result":"continued"}\n`);
+    s.procs[1]!.exit(0);
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-2.result.json")));
+    // bg-2 continued bg-1, so both name one bundle.
+    await resume("bg-3", "bg-2");
+    await resume("bg-4", "bg-1");
+    expect(s.procs.length).toBe(3);
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-4.result.json")));
+    const body = JSON.parse(readFileSync(join(s.dir, "subagent-term-7-bg-4.result.json"), "utf8"));
+    expect(body.outcome).toBe("failed");
+    expect(s.notes.at(-1)!.note).toMatch(/session is already being continued by bg-3/);
+  });
+
   it("admits only one of two concurrent continuations of the same run", async () => {
     const s = setup();
     s.writeTask();

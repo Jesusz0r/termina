@@ -363,6 +363,13 @@ export class SubagentHost {
     return `${parentTerminalId}/${runId}`;
   }
 
+  /** The bundle a live run writes: its own, or before launch, the one it resumes. */
+  private runBundle(run: HostRun): string | null {
+    if (run.sessionFile) return run.sessionFile;
+    if (!run.task.resumeRunId) return null;
+    return this.pastSessions.get(this.runKey(run.parentTerminalId, run.task.resumeRunId)) ?? null;
+  }
+
   private attachParentSession(run: HostRun): void {
     try {
       this.sinks.attachSession(run.parentTerminalId, subagentViewerId(run.runId));
@@ -550,15 +557,22 @@ export class SubagentHost {
     // returning; the check-to-insert path itself never yields.
     if (this.runs.has(key)) return;
     if (task.resumeRunId) {
-      const rival = [...this.runs.values()].find(
-        (other) => other.parentTerminalId === sourceTerminalId && other.task.resumeRunId === task.resumeRunId,
-      );
+      // A continuation reuses its source's bundle, so one chain shares one
+      // file: continuing bg-1 and bg-2 (itself continuing bg-1) is one writer
+      // too many, and two writers duplicate storage sequences.
+      const bundle = this.pastSessions.get(this.runKey(sourceTerminalId, task.resumeRunId)) ?? null;
+      const rival = [...this.runs.values()].find((other) => {
+        if (other.parentTerminalId !== sourceTerminalId) return false;
+        if (other.task.resumeRunId === task.resumeRunId) return true;
+        const otherBundle = this.runBundle(other);
+        return bundle !== null && otherBundle !== null && sameUserPath(otherBundle, bundle);
+      });
       if (rival) {
         await this.finishFailed(
           sourceTerminalId,
           runId,
           task,
-          `${task.resumeRunId} is already being continued by ${rival.runId}`,
+          `${task.resumeRunId}'s session is already being continued by ${rival.runId}`,
         );
         return;
       }
