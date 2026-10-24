@@ -2,10 +2,10 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
-import { readdir, readdir as fsReaddir, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { readdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { isErrno } from "../../../shared/guards.ts";
+import { reapWriteTemps } from "../../../shared/durable-write.ts";
 import { normalizeAppPreferences } from "../../../shared/preferences.ts";
 import { emptyActivityInput } from "../../../electron/agent-activity.ts";
 import { decodeEditorText, readEditorFile } from "../../../electron/main/editor-file.ts";
@@ -322,12 +322,7 @@ describe("main hardening batch (refs #219)", () => {
   });
 
   it("item 8: successful writes reap dead-pid temps and keep everything else", async () => {
-    const sweep = loadMethod(
-      "sweepReplaceTemps",
-      "private async sweepReplaceTemps(",
-      ["dirname", "basename", "readdir", "rm", "join", "isErrno"],
-      [dirname, basename, fsReaddir, rm, join, isErrno],
-    ) as (path: string) => Promise<void>;
+    const sweep = reapWriteTemps;
     const dir = mkdtempSync(join(tmpdir(), "termina-sweep-"));
     try {
       const deadPid = spawnSync("true").pid!;

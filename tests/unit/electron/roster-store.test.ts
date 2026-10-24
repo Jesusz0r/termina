@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { TerminalRosterStore, loadRosterFile, type RosterTerminal } from "../../../electron/roster-store.ts";
@@ -128,6 +130,21 @@ describe("TerminalRosterStore durable save", () => {
     store.save(path, [{ ...agent("term-2"), type: "shell", externalCli: "claude", externalSessionId: "8f2c-41", shellPath: "/bin/claude" }], []);
     await store.drain();
     expect((await loadRosterFile(path)).entries).toEqual([{ id: "term-2", type: "shell", cli: "claude", cliSession: "8f2c-41", cwd: "/tmp" }]);
+  });
+
+  it("clears a crashed save's temp on load and keeps live writers' temps", async () => {
+    const path = await preparePath();
+    const store = openStore();
+    store.save(path, [agent("term-1")], []);
+    await store.drain();
+    const dead = `${path}.${spawnSync("true").pid}.${randomUUID()}.tmp`;
+    const live = `${path}.${process.ppid}.${randomUUID()}.tmp`;
+    await writeFile(dead, "{\"terminals\": [");
+    await writeFile(live, "{}");
+    expect((await loadRosterFile(path)).entries.map((entry) => entry.id)).toEqual(["term-1"]);
+    const names = readdirSync(dirname(path));
+    expect(names).not.toContain(dead.slice(dirname(path).length + 1));
+    expect(names).toContain(live.slice(dirname(path).length + 1));
   });
 
   it("refuses an oversized malformed on-disk file as present and sets it aside", async () => {

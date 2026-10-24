@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, rename as fsRename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { syncParentDir } from "../shared/fsync.js";
+import { reapWriteTemps } from "../shared/durable-write.js";
 import type { ExternalCli, PlanTask, VerifyInfo } from "../shared/types.js";
 import {
   MAX_ROSTER_FILE_BYTES,
@@ -70,6 +71,8 @@ async function setAside(path: string): Promise<LoadedRoster> {
 /** Load one roster file. A present but unreadable roster reports exists so a
  * corrupt file is never mistaken for first launch. */
 export async function loadRosterFile(path: string): Promise<LoadedRoster> {
+  // Saves leave temps only on a crash; one sweep per load clears them.
+  await reapWriteTemps(path);
   let info;
   try {
     info = await stat(path);

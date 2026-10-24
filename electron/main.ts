@@ -164,6 +164,7 @@ import { evictOldest } from "../shared/evict-oldest.js";
 import { orderByStrip, reorderPermutation } from "../shared/tab-order.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
 import { syncParentDir } from "../shared/fsync.js";
+import { reapWriteTemps } from "../shared/durable-write.js";
 import { isErrno } from "../shared/guards.js";
 import {
   DEFAULT_SHORTCUTS,
@@ -9669,7 +9670,7 @@ class TerminaApp {
       // A crash between temp creation and rename orphans a
       // `<file>.<pid>.<uuid>.tmp` sibling: reap crash litter for this file
       // on every successful write (best-effort, never fails the write).
-      await this.sweepReplaceTemps(path).catch(() => undefined);
+      await reapWriteTemps(path).catch(() => undefined);
     } catch (error) {
       try {
         await handle?.close();
@@ -9678,45 +9679,6 @@ class TerminaApp {
       }
       await rm(temp, { force: true }).catch(() => undefined);
       throw error;
-    }
-  }
-
-  /**
-   * Best-effort reaper for durableReplaceFile crash litter: sibling
-   * `<base>.<pid>.<uuid>.tmp` files whose pid tag is not alive. The shape
-   * match is strict (numeric pid plus a UUID) so user files can never
-   * qualify, and live pids — including our own — are never reaped, so a
-   * concurrent writer's in-flight temp is never touched.
-   */
-  private async sweepReplaceTemps(path: string): Promise<void> {
-    const dir = dirname(path);
-    const base = basename(path);
-    let entries: string[];
-    try {
-      entries = await readdir(dir);
-    } catch {
-      return;
-    }
-    for (const name of entries) {
-      if (!name.startsWith(`${base}.`) || !name.endsWith(".tmp")) continue;
-      const middle = name.slice(base.length + 1, -".tmp".length);
-      const dot = middle.indexOf(".");
-      if (dot <= 0) continue;
-      const pid = Number(middle.slice(0, dot));
-      const uuid = middle.slice(dot + 1);
-      if (!Number.isInteger(pid) || pid <= 0) continue;
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uuid)) continue;
-      if (pid === process.pid) continue;
-      let alive = true;
-      try {
-        process.kill(pid, 0);
-      } catch (err) {
-        // ESRCH means a dead pid (safe to reap); any other failure —
-        // notably EPERM for a live process we cannot signal — keeps it.
-        alive = !isErrno(err, "ESRCH");
-      }
-      if (alive) continue;
-      await rm(join(dir, name), { force: true }).catch(() => undefined);
     }
   }
 

@@ -129,7 +129,6 @@ interface FakeApp {
   leaseWaiters: Map<string, Array<{ requesterId: string; settled: boolean; timer: ReturnType<typeof setTimeout> }>>;
   durableReplaceFile: (path: string, data: string | Buffer, mode?: number) => Promise<void>;
   writeLeasedEditorFile: (path: string, content: string, restore: boolean) => Promise<{ ok: boolean; error?: string }>;
-  sweepReplaceTemps: (path: string) => Promise<void>;
   projectOfWorkspace: (id: string) => null;
   projectIsSwitching: (id: string | undefined) => boolean;
   terminalsOnWorkspace: (ws: FakeWorkspace) => unknown[];
@@ -163,8 +162,8 @@ const realRelease = loadMethod("releaseWriteLease", "private releaseWriteLease("
 const realDurableReplace = loadMethod(
   "durableReplaceFile",
   "private async durableReplaceFile(",
-  ["open", "fsRename", "rm", "randomUUID", "syncParentDir"],
-  [open, fsRename, rm, randomUUID, syncParentDir],
+  ["open", "fsRename", "rm", "randomUUID", "syncParentDir", "reapWriteTemps"],
+  [open, fsRename, rm, randomUUID, syncParentDir, async () => undefined],
 ) as (path: string, data: string | Buffer, mode?: number) => Promise<void>;
 const realWriteLeased = loadMethod(
   "writeLeasedEditorFile",
@@ -205,7 +204,6 @@ function makeHarness(opts: { durableReplace?: (path: string, data: string | Buff
       realDurableReplace.call(app, path, data, mode)),
     writeLeasedEditorFile: (path: string, content: string, restore: boolean) =>
       realWriteLeased.call(app, path, content, restore),
-    sweepReplaceTemps: async (_path: string) => undefined,
     projectOfWorkspace: (_id: string): null => null,
     projectIsSwitching: (_id: string | undefined): boolean => false,
     terminalsOnWorkspace: (_ws: FakeWorkspace): unknown[] => [],
