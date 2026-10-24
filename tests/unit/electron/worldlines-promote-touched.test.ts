@@ -11,17 +11,19 @@ vi.mock("../../../electron/worldline-git.ts", async (importOriginal) => {
     ...actual,
     boundPromotionWriteFile: vi.fn((args: Parameters<typeof actual.boundPromotionWriteFile>[0]) => actual.boundPromotionWriteFile(args)),
     boundPromotionCopyFile: vi.fn((args: Parameters<typeof actual.boundPromotionCopyFile>[0]) => actual.boundPromotionCopyFile(args)),
+    boundPromotionTransition: vi.fn((args: Parameters<typeof actual.boundPromotionTransition>[0]) => actual.boundPromotionTransition(args)),
   };
 });
 
 import { WorldlineManager, ensurePromotionRoots } from "../../../electron/worldlines/index.ts";
 import { MARKER } from "../../../electron/worldlines/limits.ts";
 import type { ComparisonState, CandidateState } from "../../../electron/worldlines/types.ts";
-import { boundPromotionCopyFile, boundPromotionWriteFile, type SnapshotStore } from "../../../electron/worldline-git.ts";
+import { boundPromotionCopyFile, boundPromotionTransition, boundPromotionWriteFile, type SnapshotStore } from "../../../electron/worldline-git.ts";
 import type { RunRecord } from "../../../electron/worldlines/types.ts";
 
 const mockWriteFile = vi.mocked(boundPromotionWriteFile);
 const mockCopyFile = vi.mocked(boundPromotionCopyFile);
+const mockTransition = vi.mocked(boundPromotionTransition);
 
 function git(cwd: string, ...args: string[]): void {
   execFileSync("git", ["-c", "user.email=test@termina.local", "-c", "user.name=test", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "pipe" });
@@ -465,6 +467,38 @@ describe("promotion journal cleanup paths (issue #202)", () => {
       expect(await readFile(join(fx.primaryRoot, "touched.txt"), "utf8")).toBe("old\n");
       expect(await journalsOf(fx)).toEqual([]);
     } finally {
+      await fx.manager.dispose();
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("reports a rollback that keeps a file changed during the apply", async () => {
+    const fx = await makeFixture({
+      changes: [{ relPath: "other.txt", status: "modified" }, { relPath: "touched.txt", status: "modified" }],
+      primaryPaths: ["touched.txt", "other.txt"],
+      mergedPaths: ["touched.txt", "other.txt"],
+      materialize: async (dir) => {
+        await writeFile(join(dir, "other.txt"), "merged other\n");
+        await writeFile(join(dir, "touched.txt"), "new\n");
+      },
+    });
+    const baseImpl = mockTransition.getMockImplementation()!;
+    let installs = 0;
+    mockTransition.mockImplementation(async (args) => {
+      if (++installs === 1) return baseImpl(args);
+      // other.txt was applied; an editor changes it before touched.txt installs.
+      await writeFile(join(fx.primaryRoot, "other.txt"), "user edit\n");
+      throw new Error("promotion install conflict at touched.txt");
+    });
+    try {
+      const result = await fx.manager.promote(fx.comparisonId, "A", true);
+      expect(result.ok).toBe(false);
+      expect(result.error ?? "").toMatch(/^promotion install conflict at touched\.txt; the rollback left files that changed/);
+      expect(await readFile(join(fx.primaryRoot, "other.txt"), "utf8")).toBe("user edit\n");
+      expect(await readFile(join(fx.primaryRoot, "touched.txt"), "utf8")).toBe("old\n");
+      expect(await journalsOf(fx)).toHaveLength(1);
+    } finally {
+      mockTransition.mockImplementation(baseImpl);
       await fx.manager.dispose();
       await rm(fx.root, { recursive: true, force: true });
     }

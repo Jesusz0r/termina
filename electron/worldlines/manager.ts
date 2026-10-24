@@ -2658,8 +2658,13 @@ export class WorldlineManager {
       const sessionUntouched = journal.installedSession === null
         && Array.isArray(journal.uncertainSessionArtifacts) && journal.uncertainSessionArtifacts.length === 0;
       if (rolledBack && sessionUntouched) await removeJournal();
-      await this.finishPromotion(comparisonId, false, message);
-      return { ok: false, error: message };
+      // Rollback never overwrites a file that changed since the apply, so a
+      // conflict leaves part of the promotion on disk: say so and where.
+      const error = rolledBack
+        ? message
+        : `${message}; the rollback left files that changed during the promotion as they are — evidence kept at ${journalDir}`;
+      await this.finishPromotion(comparisonId, false, error);
+      return { ok: false, error };
     }
     } finally {
       await journalAdmission.lease.release().catch(() => undefined);
