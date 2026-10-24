@@ -13,6 +13,8 @@ import {
   parseSubagentResultFile,
   parseSubagentResultFrame,
   parseSubagentTaskFile,
+  appendSubagentInboxMessage,
+  appendSubagentOutboxMessage,
   consumeSubagentResultFile,
   readSubagentResultFile,
   reconcileSubagentRuns,
@@ -639,8 +641,13 @@ describe("subagents Phase 2 handoff contract", () => {
     const { existsSync } = await import("node:fs");
     const resultPath = join(dir, "subagent-term-7-bg-1.result.json");
     expect(existsSync(resultPath)).toBe(true);
+    appendSubagentInboxMessage(dir, "term-7", spawned.run.id, "redirect");
+    appendSubagentOutboxMessage(dir, "term-7", spawned.run.id, "turn");
+    const queues = ["inbox", "outbox"].map((q) => join(dir, `subagent-term-7-bg-1.${q}.json`));
+    expect(queues.map((q) => existsSync(q))).toEqual([true, true]);
     consumeSubagentResultFile(dir, "term-7", spawned.run.id);
     expect(existsSync(resultPath)).toBe(false);
+    expect(queues.map((q) => existsSync(q))).toEqual([false, false]);
     // A second reconcile cannot re-settle.
     expect(reconcileSubagentRuns(dir, "term-7", reg)).toEqual([]);
   });

@@ -20,6 +20,7 @@ import { utf8TextPrefix } from "./tool-output.ts";
 
 export { utf8TextPrefix as truncateUtf8, utf8TextSuffix } from "./tool-output.ts";
 import { readBoundedRegularFile } from "./main/files.ts";
+import { subagentInboxFileName, subagentOutboxFileName } from "./subagents/approval.ts";
 import { LIVE_OWNER_WAIT_MS } from "../shared/session-retention-lock.ts";
 import {
   isSupportedProvider,
@@ -537,7 +538,11 @@ export function consumeSubagentResultFile(eventsDir: string, parentTerminalId: s
   } catch {
     /* A leftover is re-read; delivery is idempotent once resultDelivered is set. */
   }
+  // The child has exited, so its message queues are finished. Its last outbox
+  // turn is its final reply, which the result already carries.
   for (const marker of [
+    subagentInboxFileName(parentTerminalId, runId),
+    subagentOutboxFileName(parentTerminalId, runId),
     subagentDecisionFileName(parentTerminalId, runId),
     subagentLiveFileName(parentTerminalId, runId),
     subagentCancelFileName(parentTerminalId, runId),
