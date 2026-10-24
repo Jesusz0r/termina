@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PathLookup } from "../../../electron/path-lookup.ts";
 import { worldlineAppReadPaths } from "../../../electron/worldlines/bootstrap.ts";
-import { candidateSandboxLaunch, filterCandidateEnvironment, terminateSandboxProcessGroup, writeSandboxProfile } from "../../../electron/sandbox.ts";
+import { candidateSandboxLaunch, filterCandidateEnvironment, sandboxScratchDirs, terminateSandboxProcessGroup, writeSandboxProfile } from "../../../electron/sandbox.ts";
 import { readVerifyStages, writeVerifyPackage } from "../../fixtures/verify-package.ts";
 
 function toolPaths(node: string, npm: string, npmCli: string): PathLookup {
@@ -94,7 +94,7 @@ ${packageRun ? "" : `process.argv = [process.execPath, ${JSON.stringify(npmCli)}
           templateDir: join(comparison, "template"), worldsRoot: join(root, "user-data", "worlds"),
           primaryRoot: primary, sourceObjectsDir: join(primary, ".git", "objects"),
           realHome: home, storeDir: join(root, "store"), primaryEventsDir: join(root, "events"),
-          userData: join(root, "user-data"), agentHomeDir: join(support, "agent"), denyNetwork: true,
+          userData: join(root, "user-data"), agentHomeDir: join(support, "agent"), denyNetwork: true, scratchDirs: sandboxScratchDirs(),
           appReadPaths: worldlineAppReadPaths(process.execPath, toolPaths(join(bin, "node"), join(bin, "npm"), npmCli)),
         });
         const command = packageRun ? ["/bin/sh", "-c", "npm run test"] : [process.execPath, join(candidate, "check-isolation.cjs")];

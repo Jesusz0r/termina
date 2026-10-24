@@ -1,9 +1,10 @@
 /**
  * Candidate sandbox (WORLDLINES §6.6).
  *
- * Builds the macOS sandbox-exec deny-list profile for one candidate:
- * the candidate may write only inside its own tree and support dirs.
- * The profile denies writes and reads of the primary project (except the
+ * Builds the macOS sandbox-exec profile for one candidate: writes are
+ * denied everywhere except the candidate's own tree and support dirs and
+ * the host scratch dirs that macOS tools use regardless of TMPDIR. The
+ * profile also denies writes and reads of the primary project (except the
  * read-only source object directory), the real home, the app snapshot
  * store, the sibling candidate, and the app-owned worlds root. The copied
  * core resources are write-denied except the auth file (token refresh).
@@ -313,6 +314,27 @@ export interface SandboxPaths {
   agentHomeDir: string;
   /** True for evidence and Verify processes: network fully denied. */
   denyNetwork: boolean;
+  /** Host scratch dirs left writable (see sandboxScratchDirs). */
+  scratchDirs: string[];
+}
+
+let scratchDirs: string[] | null = null;
+
+/**
+ * Shared and per-user scratch roots macOS tools write regardless of TMPDIR:
+ * /tmp plus the user's temp and cache dirs. None is an executable search
+ * path or a project tree. Read once: getconf is a short synchronous spawn.
+ */
+export function sandboxScratchDirs(): string[] {
+  if (scratchDirs) return scratchDirs;
+  const dirs = ["/private/tmp"];
+  for (const name of ["DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR"]) {
+    const result = spawnSync("/usr/bin/getconf", [name], { encoding: "utf8", timeout: 2000 });
+    const dir = result.status === 0 ? result.stdout.trim() : "";
+    if (dir && isAbsolute(dir) && !/[\0\r\n]/.test(dir)) dirs.push(dir);
+  }
+  scratchDirs = dirs;
+  return dirs;
 }
 
 /** Escape a path for the sandbox profile language. */
@@ -474,6 +496,14 @@ export function buildSandboxProfile(p: SandboxPaths): string {
   const lines: string[] = [
     "(version 1)",
     "(allow default)",
+    // Writes are denied everywhere unless re-opened below. A deny-list let a
+    // candidate write any user-writable path outside home, such as
+    // /opt/homebrew/bin or /Applications.
+    "(deny file-write*)",
+    // Scratch dirs that mktemp, compilers, and caches use regardless of
+    // TMPDIR. Opened before the denies below, which win inside them (a
+    // project or app data under /tmp stays protected).
+    ...p.scratchDirs.map((dir) => allow("file-write*", sandboxPath(dir))),
     // The primary project: no writes, no reads except its Git objects.
     deny("file-write*", sandboxPath(p.primaryRoot)),
     deny("file-read*", sandboxPath(p.primaryRoot)),

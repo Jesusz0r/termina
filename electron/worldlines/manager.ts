@@ -10,7 +10,7 @@ import type { BigIntStats } from "node:fs";
 import { lstat as lstatPath, readFile, realpath, stat } from "node:fs/promises";
 import { diskFs } from "../disk-fs.js";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { buildSandboxProfile, candidateSandboxLaunch, type SandboxPaths } from "../sandbox.js";
+import { buildSandboxProfile, candidateSandboxLaunch, sandboxScratchDirs, type SandboxPaths } from "../sandbox.js";
 import {
   SnapshotStore,
   boundPromotionCopyTree,
@@ -1709,6 +1709,7 @@ export class WorldlineManager {
       appReadPaths: this.deps.appReadPaths(),
       agentHomeDir: join(cand.homeDir, ".termina", "agent"),
       denyNetwork: false,
+      scratchDirs: sandboxScratchDirs(),
     };
     const profiles = cmp.profilesBinding;
     if (!profiles) throw new Error("comparison profiles directory is not natively bound");

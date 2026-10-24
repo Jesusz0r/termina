@@ -133,6 +133,7 @@ const paths = {
   appReadPaths: ["/bin", "/usr"],
   agentHomeDir,
   denyNetwork: false,
+  scratchDirs: [],
 };
 const profile = buildSandboxProfile(paths);
 const canonicalWorldsRoot = realpathSync(worldsRoot);
@@ -454,6 +455,23 @@ if (process.platform === "darwin") {
     const supportOwn = join(candidateSupport, "own.txt");
     const writeSupport = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/zsh", "-c", `echo support > ${JSON.stringify(supportOwn)}`], { encoding: "utf8" });
     check("macOS sandbox permits candidate support writes", writeSupport.status === 0 && readFileSync(supportOwn, "utf8").trim() === "support", writeSupport.stderr);
+    // Writes are denied by default: a user-writable path outside every
+    // listed root (like /opt/homebrew/bin) is not writable.
+    const unlisted = join(externalFixture, "unlisted");
+    mkdirSync(unlisted, { recursive: true });
+    const unlistedWrite = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/usr/bin/touch", join(unlisted, "candidate-write")], { encoding: "utf8" });
+    check("macOS sandbox blocks writes outside every listed root", unlistedWrite.status !== 0 && !existsSync(join(unlisted, "candidate-write")), `status=${unlistedWrite.status}`);
+    // Scratch dirs reopen writes, but the protected roots inside them stay denied.
+    const scratchProfile = buildSandboxProfile({ ...paths, scratchDirs: [fixture, externalFixture] });
+    const scratchWrite = spawnSync(SANDBOX_EXEC, ["-p", scratchProfile, "/usr/bin/touch", join(unlisted, "scratch-write")], { encoding: "utf8" });
+    const scratchPrimaryWrite = spawnSync(SANDBOX_EXEC, ["-p", scratchProfile, "/usr/bin/touch", primarySentinel], { encoding: "utf8" });
+    const scratchEventsWrite = spawnSync(SANDBOX_EXEC, ["-p", scratchProfile, "/usr/bin/touch", join(primaryEventsDir, "scratch-write")], { encoding: "utf8" });
+    check(
+      "macOS sandbox scratch dirs stay writable without reopening protected roots inside them",
+      scratchWrite.status === 0 && scratchPrimaryWrite.status !== 0 && scratchEventsWrite.status !== 0
+        && readFileSync(primarySentinel, "utf8") === "primary source\n",
+      `scratch=${scratchWrite.status} primary=${scratchPrimaryWrite.status} events=${scratchEventsWrite.status}`,
+    );
     // Production supports worlds outside user-data/HOME. Broad metadata
     // traversal in those roots must not accidentally mask the worlds policy.
     const externalWorlds = join(externalFixture, "worlds");
