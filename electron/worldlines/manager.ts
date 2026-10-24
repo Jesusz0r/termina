@@ -2640,8 +2640,9 @@ export class WorldlineManager {
           : ` the new session did not open: ${message}`;
         return { ok: false, error: `the source was promoted, but${suffix}` };
       }
+      let rolledBack = false;
       try {
-        await rollbackPromotion(journalDir, journal, this.deps.primaryRoot, this.deps.canonicalPath, journalBinding ?? undefined, primaryRootBinding);
+        rolledBack = await rollbackPromotion(journalDir, journal, this.deps.primaryRoot, this.deps.canonicalPath, journalBinding ?? undefined, primaryRootBinding);
         // Session artifacts are intentionally retained on a failed promotion.
         // A journal manifest is recovery evidence, not proof that a currently
         // matching agent session still belongs to this operation. In
@@ -2651,6 +2652,12 @@ export class WorldlineManager {
         console.warn(`[worldline] promotion rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
       }
       releaseLeases();
+      // A verified rollback before any session artifact left the journal
+      // leaves nothing to recover: drop it like fail() does, or every such
+      // failure holds an admission slot forever.
+      const sessionUntouched = journal.installedSession === null
+        && Array.isArray(journal.uncertainSessionArtifacts) && journal.uncertainSessionArtifacts.length === 0;
+      if (rolledBack && sessionUntouched) await removeJournal();
       await this.finishPromotion(comparisonId, false, message);
       return { ok: false, error: message };
     }

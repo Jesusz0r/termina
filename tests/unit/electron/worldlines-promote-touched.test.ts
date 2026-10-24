@@ -302,11 +302,8 @@ describe("promote iterates the touched set (issue #196)", () => {
       expect(result.ok).toBe(false);
       expect(result.error ?? "").toMatch(/too many paths/);
       expect(mockCopyFile).not.toHaveBeenCalled();
-      // The retained journal holds no before-image inputs at all.
-      const journals = await readdir(join(fx.worldsRoot, "promotion-journal"));
-      expect(journals.length).toBe(1);
-      const entries = await readdir(join(fx.worldsRoot, "promotion-journal", journals[0]!));
-      expect(entries).not.toContain("before");
+      // Nothing was applied, so the verified rollback drops the journal.
+      expect(await readdir(join(fx.worldsRoot, "promotion-journal"))).toEqual([]);
       // The pair stays usable.
       const cmp = (fx.manager as unknown as { comparisons: Map<string, ComparisonState> }).comparisons.get(fx.comparisonId)!;
       expect(cmp.candidates.get("A")!.state).toBe("ready");
@@ -449,6 +446,29 @@ describe("promotion journal cleanup paths (issue #202)", () => {
       return [];
     }
   }
+
+  it("a rolled-back failure removes its journal so it holds no admission slot", async () => {
+    const fx = await makeFixture({
+      changes: [{ relPath: "touched.txt", status: "modified" }, { relPath: "gone.txt", status: "modified" }],
+      primaryPaths: ["touched.txt", "other.txt", "gone.txt"],
+      mergedPaths: ["touched.txt", "other.txt", "gone.txt"],
+      // gone.txt is never materialized, so gather fails before any apply.
+      materialize: async (dir) => {
+        await writeFile(join(dir, "touched.txt"), "new\n");
+      },
+    });
+    try {
+      await writeFile(join(fx.primaryRoot, "gone.txt"), "old\n");
+      const result = await fx.manager.promote(fx.comparisonId, "A", true);
+      expect(result.ok).toBe(false);
+      expect(result.error ?? "").toMatch(/unsupported filesystem object/);
+      expect(await readFile(join(fx.primaryRoot, "touched.txt"), "utf8")).toBe("old\n");
+      expect(await journalsOf(fx)).toEqual([]);
+    } finally {
+      await fx.manager.dispose();
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it("askConfirm removes its journal and leaves the pair usable", async () => {
     const fx = await makeFixture({
