@@ -9756,53 +9756,71 @@ class TerminaApp {
   // ---------------------------------------------------------------- boot ----
 
   async start(): Promise<void> {
-    // An e2e run must not take over the Dock either; the window stays hidden.
-    if (E2E_HIDDEN_WINDOW) app.dock?.hide();
-    // Core session admission is descriptor-bound and intentionally refuses to
-    // create its own root. Establish the app-owned root before any restored
-    // core terminal or session fork can inspect it.
-    await mkdir(this.coreSessionRoot(), { recursive: true, mode: 0o700 });
-    // Candidate workspace scopes inherit this canonical app-owned ancestor.
-    this.worldsRoot = await this.canonicalPath(this.worldsRoot);
-    this.preferences = await this.preferencesStore.load();
-    this.shortcutMap = { ...this.preferences.shortcuts };
-    this.appUpdater = createAppUpdater({
-      send: (state) => {
-        this.send("update:state", state);
-        this.applyUpdateMenu();
-      },
-    });
-    this.registerIpc();
-    this.registerMediaProtocol();
-    this.startLoginHintWatch();
-    void detectShells();
-    // The launch scratch cleanup is native-bound and asynchronous.  A
-    // changed events root/ancestor is retained until provenance is repaired.
-    await this.prepareEventsDir();
-    await this.cleanupStaleDispatchFiles();
-    // Check if a directory was passed via CLI (`termina .`), open-file, or test fixture.
-    const cliTarget = this.parseTargetCwdFromArgv(process.argv);
-    const initial = cliTarget ?? pendingOpenPath ?? process.env.TERMINA_INITIAL_CWD;
-    pendingOpenPath = null;
-    const initialCwd = initial && existsSync(initial) ? initial : null;
-    this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
-    this.bindSidecarHold(this.tailer);
-    this.tailer.start();
-    this.schedules.start();
-    // Publish the restoration barrier before yielding to the renderer's
-    // project:list / terminals:list requests during window loading. The
-    // window still opens immediately; only hydration waits for restoration.
-    const windowReady = this.createWindow().then(() => { this.appUpdater?.start(); });
-    this.initialRestorePromise = windowReady.then(() => this.restoreInitialProjects(initialCwd, cliTarget));
-    await windowReady;
+    // Publish the restoration barrier before the first await. open-file,
+    // second-instance and the renderer's project:list can all arrive while
+    // boot I/O runs, and must wait instead of opening beside the restore.
+    let beginRestore!: (restore: Promise<void>) => void;
+    this.initialRestorePromise = new Promise<void>((resolve) => { beginRestore = resolve; });
+    try {
+      // An e2e run must not take over the Dock either; the window stays hidden.
+      if (E2E_HIDDEN_WINDOW) app.dock?.hide();
+      // Core session admission is descriptor-bound and intentionally refuses to
+      // create its own root. Establish the app-owned root before any restored
+      // core terminal or session fork can inspect it.
+      await mkdir(this.coreSessionRoot(), { recursive: true, mode: 0o700 });
+      // Candidate workspace scopes inherit this canonical app-owned ancestor.
+      this.worldsRoot = await this.canonicalPath(this.worldsRoot);
+      this.preferences = await this.preferencesStore.load();
+      this.shortcutMap = { ...this.preferences.shortcuts };
+      this.appUpdater = createAppUpdater({
+        send: (state) => {
+          this.send("update:state", state);
+          this.applyUpdateMenu();
+        },
+      });
+      this.registerIpc();
+      this.registerMediaProtocol();
+      this.startLoginHintWatch();
+      void detectShells();
+      // The launch scratch cleanup is native-bound and asynchronous.  A
+      // changed events root/ancestor is retained until provenance is repaired.
+      await this.prepareEventsDir();
+      await this.cleanupStaleDispatchFiles();
+      // Check if a directory was passed via CLI (`termina .`), open-file, or test fixture.
+      const cliTarget = this.parseTargetCwdFromArgv(process.argv);
+      const initial = cliTarget ?? pendingOpenPath ?? process.env.TERMINA_INITIAL_CWD;
+      pendingOpenPath = null;
+      const initialCwd = initial && existsSync(initial) ? initial : null;
+      this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
+      this.bindSidecarHold(this.tailer);
+      this.tailer.start();
+      this.schedules.start();
+      // The window still opens immediately; only hydration waits for restoration.
+      const windowReady = this.createWindow().then(() => { this.appUpdater?.start(); });
+      beginRestore(windowReady.then(() => this.restoreInitialProjects(initialCwd, cliTarget)));
+      await windowReady;
+    } catch (err) {
+      // A failed boot must not leave quit and gated IPC waiting forever.
+      beginRestore(Promise.resolve());
+      throw err;
+    }
   }
 
   /** Asynchronously restore open projects and their terminals on boot. */
   private async restoreInitialProjects(initialCwd: string | null, cliTarget: string | null): Promise<void> {
+    // Every gated IPC awaits this restore. One project that cannot open must
+    // not reject it, or Open and project:list fail for the whole session.
+    const open = async (root: string): Promise<void> => {
+      try {
+        await this.openProject(root);
+      } catch (err) {
+        console.warn(`[main] could not restore project ${root}: ${(err as Error).message}`);
+      }
+    };
     try {
       if (initialCwd) {
         if (process.env.TERMINA_INITIAL_CWD && !cliTarget) {
-          await this.openProject(initialCwd);
+          await open(initialCwd);
         } else {
           const canonicalInitial = await this.canonicalPath(initialCwd);
           const stored: { root: string; canonical: string }[] = [];
@@ -9816,13 +9834,7 @@ class TerminaApp {
           }
           if (stored.some((s) => s.canonical === canonicalInitial)) {
             // Reopen in stored order so tab order survives, then refocus the target.
-            for (const s of stored) {
-              try {
-                await this.openProject(s.root);
-              } catch {
-                continue;
-              }
-            }
+            for (const s of stored) await open(s.root);
             const focus = [...this.projects.values()].find((p) => p.canonicalRoot === canonicalInitial);
             if (focus && focus.id !== this.activeProjectId) {
               try {
@@ -9832,14 +9844,8 @@ class TerminaApp {
               }
             }
           } else {
-            for (const s of stored) {
-              try {
-                await this.openProject(s.root);
-              } catch {
-                continue;
-              }
-            }
-            await this.openProject(initialCwd);
+            for (const s of stored) await open(s.root);
+            await open(initialCwd);
           }
         }
       } else {
@@ -9853,11 +9859,7 @@ class TerminaApp {
           } catch {
             continue;
           }
-          try {
-            await this.openProject(root);
-          } catch (err) {
-            console.warn(`[main] could not restore project ${root}: ${(err as Error).message}`);
-          }
+          await open(root);
         }
         const focusRoot = this.preferences.activeProject;
         if (focusRoot) {
@@ -9871,6 +9873,8 @@ class TerminaApp {
           }
         }
       }
+    } catch (err) {
+      console.warn(`[main] project restore stopped: ${(err as Error).message}`);
     } finally {
       this.sendInstances();
     }

@@ -57,6 +57,9 @@ describe("initial project restoration", () => {
     };
 
     const started = start.call(app);
+    // open-file / second-instance can land during boot I/O: the barrier
+    // exists before start() first yields.
+    expect(app.initialRestorePromise).toBeInstanceOf(Promise);
     try {
       await windowShown.promise;
       // project:list / terminals:list must already have a barrier to await
@@ -82,5 +85,74 @@ describe("initial project restoration", () => {
       await started;
       await app.initialRestorePromise;
     }
+  });
+});
+
+describe("failed boot", () => {
+  it("settles the restoration barrier so quit and gated IPC do not wait forever", async () => {
+    const start = new Function("mkdir", "createAppUpdater", "detectShells", "process", "existsSync", "pendingOpenPath", "E2E_HIDDEN_WINDOW", "app", code)(
+      async () => { throw new Error("EACCES"); },
+      () => ({ start: () => {} }),
+      () => {},
+      { argv: [], env: {} },
+      () => false,
+      null,
+      true,
+      { dock: { hide: () => {} } },
+    );
+    const app = { initialRestorePromise: null as Promise<void> | null, coreSessionRoot: () => "/fixture/core" };
+    await expect(start.call(app)).rejects.toThrow("EACCES");
+    await expect(app.initialRestorePromise).resolves.toBeUndefined();
+  });
+});
+
+const restoreMethod = main.match(/  private async restoreInitialProjects\([\s\S]*?\n  \}/)?.[0];
+if (!restoreMethod) throw new Error("initial restore method not found");
+const restoreCode = ts.transpileModule(`return ({ ${restoreMethod.replace("private async", "async")} }).restoreInitialProjects;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText;
+
+describe("initial restoration barrier", () => {
+  function harness(env: Record<string, string>, fail: (root: string) => boolean, canonicalFails = false) {
+    const restore = new Function("process", "stat", restoreCode)(
+      { env },
+      async () => ({ isDirectory: () => true }),
+    );
+    const opened: string[] = [];
+    const app = {
+      preferences: { openProjects: ["/stored/a"], activeProject: null },
+      projects: new Map(),
+      activeProjectId: null,
+      canonicalPath: async (path: string) => {
+        if (canonicalFails) throw new Error("ENOENT");
+        return path;
+      },
+      openProject: vi.fn(async (root: string) => {
+        if (fail(root)) throw new Error("journal is unreadable");
+        opened.push(root);
+      }),
+      activateProject: vi.fn(),
+      sendInstances: vi.fn(),
+    };
+    return { app, opened, run: (cwd: string, cli: string | null) => restore.call(app, cwd, cli) as Promise<void> };
+  }
+
+  it("resolves when the fixture project cannot open", async () => {
+    const { app, run } = harness({ TERMINA_INITIAL_CWD: "/broken" }, () => true);
+    await expect(run("/broken", null)).resolves.toBeUndefined();
+    expect(app.sendInstances).toHaveBeenCalledOnce();
+  });
+
+  it("resolves and keeps stored projects when the CLI target cannot open", async () => {
+    const { app, opened, run } = harness({}, (root) => root === "/broken");
+    await expect(run("/broken", "/broken")).resolves.toBeUndefined();
+    expect(opened).toEqual(["/stored/a"]);
+    expect(app.sendInstances).toHaveBeenCalledOnce();
+  });
+
+  it("resolves when the CLI target disappears before canonicalization", async () => {
+    const { app, run } = harness({}, () => false, true);
+    await expect(run("/gone", "/gone")).resolves.toBeUndefined();
+    expect(app.sendInstances).toHaveBeenCalledOnce();
   });
 });
