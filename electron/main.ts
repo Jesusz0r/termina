@@ -8652,6 +8652,24 @@ class TerminaApp {
     return path;
   }
 
+  /**
+   * The entry itself for delete, rename, and move: the parent resolves, the
+   * leaf does not. Resolving a final symlink acted on its target instead, so
+   * deleting a link removed the directory it pointed to.
+   */
+  private async projectEntryAbs(workspace: WorkspaceState, relPath: string): Promise<string> {
+    const abs = isAbsolute(relPath) ? relPath : join(workspace.root, relPath);
+    const name = basename(abs);
+    if (await this.hasDanglingSymlink(dirname(abs))) throw new Error(`path outside project: ${relPath}`);
+    const [root, parent] = await Promise.all([this.canonicalPath(workspace.root), this.canonicalPath(dirname(abs))]);
+    const path = join(parent, name);
+    const rel = relative(root, path);
+    if (!name || !rel || rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(`path outside project: ${relPath}`);
+    }
+    return path;
+  }
+
   /** Path under dirAbs that does not exist. Collisions use " copy" then " copy N". */
   private unusedCopyDest(dirAbs: string, name: string): string | null {
     const first = join(dirAbs, name);
@@ -9447,16 +9465,16 @@ class TerminaApp {
         return { ok: false, error: "invalid name" };
       }
       return this.mutateExplorer(owner, async (workspace, live) => {
-        const abs = await this.projectAbs(workspace, relPath);
+        const abs = await this.projectEntryAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
-        await renameBoundEntry(workspace.root, abs, join(dirname(abs), newName));
+        await renameBoundEntry(await this.canonicalPath(workspace.root), abs, join(dirname(abs), newName));
         return { ok: true };
       }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
     ipcMain.handle("explorer:delete", async (_e, owner: unknown, relPath: unknown) => {
       if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
       return this.mutateExplorer(owner, async (workspace, live) => {
-        const abs = await this.projectAbs(workspace, relPath);
+        const abs = await this.projectEntryAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
         await rm(abs, { recursive: true, force: true });
         return { ok: true };
@@ -9478,7 +9496,7 @@ class TerminaApp {
       }
       if (!srcRel || srcRel === ".") return { ok: false, error: "invalid source" };
       return this.mutateExplorer(owner, async (workspace, live) => {
-        const src = await this.projectAbs(workspace, srcRel);
+        const src = await this.projectEntryAbs(workspace, srcRel);
         let dirAbs: string;
         if (targetDirRel === "" || targetDirRel === ".") {
           dirAbs = await this.canonicalPath(workspace.root);
@@ -9499,7 +9517,7 @@ class TerminaApp {
         if (!dest) return { ok: false, error: "destination already exists" };
         if (!live()) return { ok: false, error: "project is not open" };
         try {
-          if (move) await renameBoundEntry(workspace.root, src, dest);
+          if (move) await renameBoundEntry(await this.canonicalPath(workspace.root), src, dest);
           else await cp(src, dest, { recursive: true, errorOnExist: true, force: false });
         } catch (err) {
           if (isErrno(err, "EEXIST")) return { ok: false, error: "destination already exists" };

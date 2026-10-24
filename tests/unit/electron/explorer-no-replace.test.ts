@@ -96,7 +96,7 @@ describe("explorer no-replace mutations (refs #167)", () => {
     expect(create).toContain("mkdir(abs)");
     expect(create).not.toContain("mkdir(abs, { recursive: true })");
     const rename = handlerSpan("explorer:rename", "explorer:delete");
-    expect(rename).toContain("renameBoundEntry(workspace.root,");
+    expect(rename).toContain("renameBoundEntry(await this.canonicalPath(workspace.root),");
     expect(rename).not.toContain("fsRename(abs, join(");
   });
 

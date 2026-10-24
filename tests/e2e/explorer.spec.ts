@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures.ts";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { e2eTempDir } from "./tmpdir.ts";
 
@@ -538,5 +538,39 @@ test.describe("Explorer symlink safety (list-dir)", () => {
       expect(entry.path.startsWith(canonicalRoot)).toBe(true);
       expect(entry.relPath.startsWith("..")).toBe(false);
     }
+  });
+
+  test("delete, rename, and move act on a link, never its target", async ({ page, projectRoot }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    mkdirSync(join(projectRoot, "real-dir"));
+    writeFileSync(join(projectRoot, "real-dir", "keep.ts"), "keep\n");
+    symlinkSync(join(projectRoot, "real-dir"), join(projectRoot, "link-dir"));
+    symlinkSync(join(projectRoot, "greeting.ts"), join(projectRoot, "link.ts"));
+    symlinkSync(join(projectRoot, "greeting.ts"), join(projectRoot, "moved-link.ts"));
+    const call = (method: "deleteEntry" | "renameEntry" | "pasteEntry", args: unknown[]) => page.evaluate(async ({ method, args }) => {
+      const projects = await window.termina.projectList();
+      const active = projects.find((p) => p.active) ?? projects[0];
+      const owner = { projectId: active.id, workspaceId: active.workspaceId };
+      return (window.termina[method] as (...a: unknown[]) => Promise<{ ok: boolean; error?: string }>)(owner, ...args);
+    }, { method, args });
+    const isLink = (rel: string): boolean => {
+      try {
+        return lstatSync(join(projectRoot, rel)).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    };
+
+    expect(await call("deleteEntry", ["link-dir"])).toEqual({ ok: true });
+    expect(isLink("link-dir")).toBe(false);
+    expect(existsSync(join(projectRoot, "real-dir", "keep.ts"))).toBe(true);
+
+    expect(await call("renameEntry", ["link.ts", "renamed.ts"])).toEqual({ ok: true });
+    expect(isLink("renamed.ts")).toBe(true);
+    expect(existsSync(join(projectRoot, "greeting.ts"))).toBe(true);
+
+    expect((await call("pasteEntry", ["src", "moved-link.ts", true])).ok).toBe(true);
+    expect(isLink(join("src", "moved-link.ts"))).toBe(true);
+    expect(lstatSync(join(projectRoot, "greeting.ts")).isFile()).toBe(true);
   });
 });
