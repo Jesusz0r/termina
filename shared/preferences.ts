@@ -78,7 +78,7 @@ function sanitizeFontFamily(value: unknown, fallback: CodeFontFamily): CodeFontF
   return CODE_FONT_FAMILIES.includes(value as CodeFontFamily) ? value as CodeFontFamily : fallback;
 }
 
-const MAX_OPEN_PROJECTS = 12;
+export const MAX_OPEN_PROJECTS = 12;
 
 /** Canonical roots of the projects to reopen on launch. Main owns writes;
  *  validation still guards the file against a hand-edited entry. */

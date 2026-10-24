@@ -89,7 +89,7 @@ import { DiagnosticsRunner } from "./diagnostics.js";
 import { ScheduleRunner, type ScheduleTickTask } from "./schedule.js";
 import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { formatProjectSnapshot, MAX_PROJECT_SNAPSHOT_BYTES } from "./main/project-snapshot.js";
-import { chooseProjectTerminal } from "./main/project-entry.js";
+import { chooseProjectTerminal, storedProjectOrder } from "./main/project-entry.js";
 import { projectWorkSummary, workOverview } from "./main/work-summary.js";
 import { planOwnerError, samePlanTaskSnapshot } from "./plan-board.js";
 import { formatVerifyContext, invalidateVerify, isVerifySourceCurrent, verifyOutputTail } from "./main/verify-source.js";
@@ -157,7 +157,7 @@ import { decodeEditorText, readEditorFile } from "./main/editor-file.js";
 import { reviewBaseline } from "./main/change-review.js";
 import { EditorDraftStore } from "./editor-drafts.js";
 import { EditorDraftSession } from "./main/editor-draft-session.js";
-import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
+import { MAX_OPEN_PROJECTS, normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { evictOldest } from "../shared/evict-oldest.js";
 import { orderByStrip, reorderPermutation } from "../shared/tab-order.js";
@@ -877,6 +877,10 @@ class TerminaApp {
   /** One close confirmation/teardown transaction per project. */
   private projectClosePromises = new Map<string, Promise<{ ok: boolean; error?: string; cancelled?: boolean }>>();
   private folderOpenPromise: Promise<{ cwd: string } | { cancelled: true }> | null = null;
+  /** Saved project list read at boot, and the roots in it not open yet. An
+   *  unmounted volume keeps its slot until it opens again. */
+  private bootProjectRoots: readonly string[] = [];
+  private absentProjectRoots = new Set<string>();
   /** Monotonic project-selection epoch carried by folder/close pushes. */
   private projectActivationGeneration = 0;
   /** Latest action that is allowed to claim the active-project slot. */
@@ -9819,6 +9823,8 @@ class TerminaApp {
     // Each open persists the then-open list and focus. Read the stored
     // session once, before the first open rewrites it.
     const { openProjects, activeProject } = this.preferences;
+    this.bootProjectRoots = openProjects;
+    this.absentProjectRoots = new Set(openProjects);
     try {
       if (initialCwd) {
         if (process.env.TERMINA_INITIAL_CWD && !cliTarget) {
@@ -9852,8 +9858,8 @@ class TerminaApp {
         }
       } else {
         // Restore the projects from the last session before the window loads.
-        // Missing or non-directory paths are skipped: they may be unmounted
-        // volumes or hand-edited entries. Tabs reopen in stored order; the
+        // Missing or non-directory paths are skipped for this launch and keep
+        // their stored slot: they may be unmounted volumes. Tabs reopen in stored order; the
         // stored focus is applied afterwards so order and focus stay stable.
         for (const root of openProjects) {
           try {
@@ -9915,7 +9921,9 @@ class TerminaApp {
   private persistOpenProjects(): Promise<void> {
     // Stored in tab order; focus rides separately so a relaunch keeps both.
     const activeRoot = this.activeProjectId ? this.projects.get(this.activeProjectId)?.canonicalRoot ?? null : null;
-    const ordered = [...this.projects.values()].map((p) => p.canonicalRoot);
+    const open = [...this.projects.values()].map((p) => p.canonicalRoot);
+    for (const root of open) this.absentProjectRoots.delete(root);
+    const ordered = storedProjectOrder(open, this.absentProjectRoots, this.bootProjectRoots, MAX_OPEN_PROJECTS);
     if (JSON.stringify(ordered) === JSON.stringify(this.preferences.openProjects)
       && activeRoot === this.preferences.activeProject) return Promise.resolve();
     return this.commitPreferencePatch({ openProjects: ordered, activeProject: activeRoot }, false).then(

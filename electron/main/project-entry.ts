@@ -23,3 +23,33 @@ export function chooseProjectTerminal(
   return terminals.find((terminal) => terminal.id === remembered?.id && terminal.generation === remembered.generation)
     ?? terminals[0] ?? null;
 }
+
+/**
+ * Stored project list: open tabs in tab order, plus saved roots that did not
+ * open this launch (an unmounted volume) back in their saved slots. Open tabs
+ * win the capped list.
+ */
+export function storedProjectOrder(
+  open: readonly string[],
+  absent: Iterable<string>,
+  stored: readonly string[],
+  cap: number,
+): string[] {
+  const out = [...open];
+  for (const root of absent) {
+    if (out.includes(root)) continue;
+    let at = 0;
+    for (let k = stored.indexOf(root) - 1; k >= 0; k--) {
+      const j = out.indexOf(stored[k]!);
+      if (j >= 0) {
+        at = j + 1;
+        break;
+      }
+    }
+    out.splice(at, 0, root);
+  }
+  for (let i = out.length - 1; i >= 0 && out.length > cap; i--) {
+    if (!open.includes(out[i]!)) out.splice(i, 1);
+  }
+  return out;
+}
