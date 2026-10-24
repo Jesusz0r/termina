@@ -5,10 +5,9 @@
  * piped stdio (never node-pty), framed-result capture, retry with backoff,
  * kill, durable result files, and the owner mailbox note. The parent core
  * process owns spawn validation and registry truth; this host owns
- * everything from the `subagent_spawn` sidecar record onward.
- *
- * Out of scope here (slice 2b): tailing bg-N streams for timeline dots,
- * toasts, `/clear` kills, and startup sweeps of orphaned handoff files.
+ * everything from the `subagent_spawn` sidecar record onward. Main wires
+ * child stream tailing, `/clear` and terminal-close kills, and the startup
+ * sweep of leftover subagent files (`isSubagentManagedFile`).
  */
 
 import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
