@@ -18,6 +18,13 @@ describe("terminal roster model pin", () => {
     expect(dropped?.id).toBe("term-2");
   });
 
+  it("restores recognized CLIs and refuses unknown CLI launch identities", () => {
+    expect(parseTerminalRoster([
+      { id: "term-1", type: "shell", cli: "claude", cwd: "/work" },
+      { id: "term-2", type: "shell", cli: "unknown-command" },
+    ])).toEqual([{ id: "term-1", type: "shell", cli: "claude", cwd: "/work" }]);
+  });
+
   it("drops malformed models but keeps the entry", () => {
     for (const model of ["", "no-slash", "/leading", "trailing/", "has space/x", "a\nb/x", "x".repeat(201)]) {
       const [entry] = parseTerminalRoster([{ id: "term-1", type: "agent", engine: "core", model }]);

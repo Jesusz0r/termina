@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, rename as fsRename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { syncParentDir } from "../shared/fsync.js";
-import type { PlanTask, VerifyInfo } from "../shared/types.js";
+import type { ExternalCli, PlanTask, VerifyInfo } from "../shared/types.js";
 import {
   MAX_ROSTER_FILE_BYTES,
   MAX_ROSTER_PLAN_TASKS,
@@ -28,6 +28,7 @@ export interface RosterTerminal {
   readonly id: string;
   readonly type: "agent" | "shell";
   readonly shellPath?: string;
+  readonly externalCli?: ExternalCli;
   readonly cwd: string;
   readonly sessionId: string | null;
   readonly sessionFile: string | null;
@@ -98,7 +99,10 @@ export class TerminalRosterStore {
   entryFor(inst: RosterTerminal): TerminalRosterEntry {
     const entry: TerminalRosterEntry = { id: inst.id, type: inst.type };
     if (inst.type === "agent") entry.engine = "core";
-    if (inst.type === "shell" && inst.shellPath) entry.shell = inst.shellPath;
+    if (inst.type === "shell" && inst.externalCli) {
+      entry.cli = inst.externalCli;
+    }
+    else if (inst.type === "shell" && inst.shellPath) entry.shell = inst.shellPath;
     if (inst.type === "shell" && isRosterShellCwd(inst.cwd)) entry.cwd = inst.cwd;
     if (inst.sessionId) entry.sessionId = inst.sessionId;
     if (inst.sessionFile) entry.sessionFile = inst.sessionFile;

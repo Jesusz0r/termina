@@ -2947,6 +2947,7 @@ class TerminaApp {
           type: rec.type,
           engine: "core",
           shell: rec.shell,
+          cli: rec.cli,
           projectId: project.id,
           workspaceId: this.primaryWorkspace(project)?.id,
           persist: true,
@@ -3197,8 +3198,7 @@ class TerminaApp {
     const rendererTarget = this.captureRendererSendTarget();
     const externalCli: ExternalCli | undefined = opts?.cli;
     const type = externalCli ? "shell" : (opts?.type ?? "agent");
-    // Codex conversations stay in Codex. A roster shell resume would drop the hook.
-    const persist = externalCli ? false : (opts?.persist ?? (!opts?.launch && !opts?.id));
+    const persist = opts?.persist ?? (!opts?.launch && !opts?.id);
     const requestedProject = opts?.projectId ? this.projects.get(opts.projectId) ?? null : null;
     const workspaceId =
       opts?.workspaceId ?? requestedProject?.workspaces.values().next().value?.id ?? this.primaryWorkspace(requestedProject ?? undefined)?.id ?? this.primaryWorkspace()?.id ?? "";

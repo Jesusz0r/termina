@@ -114,6 +114,14 @@ describe("TerminalRosterStore durable save", () => {
     expect(await loadRosterFile(path)).toEqual({ exists: true, entries });
   });
 
+  it("round trips an external CLI tab without treating its binary as a shell", async () => {
+    const path = await preparePath();
+    const store = openStore();
+    store.save(path, [{ ...agent("term-2"), type: "shell", externalCli: "codex", shellPath: "/bin/codex" }], []);
+    await store.drain();
+    expect((await loadRosterFile(path)).entries).toEqual([{ id: "term-2", type: "shell", cli: "codex", cwd: "/tmp" }]);
+  });
+
   it("refuses an oversized malformed on-disk file as present", async () => {
     const path = await preparePath();
     await mkdir(dirname(path), { recursive: true });

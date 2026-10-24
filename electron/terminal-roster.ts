@@ -5,7 +5,7 @@
 // Use .ts so the source harness can load this module with strip-types.
 import { isCoreSessionId } from "../agent-core/session.ts";
 import { isRecord } from "../shared/guards.ts";
-import { DISPATCH_OUTCOMES, type PlanTask, type VerifyInfo } from "../shared/types.ts";
+import { DISPATCH_OUTCOMES, EXTERNAL_CLIS, type ExternalCli, type PlanTask, type VerifyInfo } from "../shared/types.ts";
 import { parseStoredVerify, parseStoredVerifyOutput } from "./main/verify-source.ts";
 import { parsePlanTaskCandidate } from "./plan-board.ts";
 
@@ -25,6 +25,8 @@ export type TerminalRosterEntry = {
   type: "agent" | "shell";
   engine?: "core";
   shell?: string;
+  /** User-launched CLI, reopened through its hook-aware launch path. */
+  cli?: ExternalCli;
   /** Directory the shell was in when the roster was saved. */
   cwd?: string;
   sessionId?: string | null;
@@ -104,6 +106,11 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
     const entry: TerminalRosterEntry = { id: rec.id, type: rec.type };
     // Agent tabs are always core. A stale engine field on disk is ignored.
     if (rec.type === "agent") entry.engine = "core";
+    if (rec.type === "shell" && rec.cli !== undefined) {
+      const cli = EXTERNAL_CLIS.find((cli) => cli === rec.cli);
+      if (!cli) continue;
+      entry.cli = cli;
+    }
     if (rec.type === "shell" && typeof rec.shell === "string" && isAbsPath(rec.shell)) entry.shell = rec.shell;
     if (rec.type === "shell" && typeof rec.cwd === "string" && isAbsPath(rec.cwd)) entry.cwd = rec.cwd;
     if (typeof rec.sessionId === "string" && isCoreSessionId(rec.sessionId)) {
