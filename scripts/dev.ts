@@ -34,18 +34,26 @@ const run = async () => {
   const url = `http://localhost:${port}`;
   console.log(`✓ vite dev server at ${url}`);
 
+  let electron = null;
+  let relaunchTimer = null;
+  let stopping = false;
+
   const launch = () => {
+    if (stopping) return;
     const startedAt = Date.now();
     const child = spawn(electronPath, ["."], {
       stdio: "inherit",
       env: { ...process.env, VITE_DEV_SERVER_URL: url },
     });
+    electron = child;
     child.on("exit", (code) => {
+      if (electron === child) electron = null;
       console.log(`electron exited (${code})`);
+      if (stopping) return;
       // Only auto-relaunch if it actually ran for a bit; avoids a crash-loop
       // when Electron does not start (missing binary, bad config).
       if (Date.now() - startedAt > 3000) {
-        setTimeout(launch, 500);
+        relaunchTimer = setTimeout(launch, 500);
       } else {
         console.log("electron exited too quickly — not relaunching. Ctrl+C to stop.");
       }
@@ -53,11 +61,41 @@ const run = async () => {
   };
   launch();
 
-  process.on("SIGINT", async () => {
+  // Electron is a GUI process. Ctrl+C stops this script and Vite; the app
+  // otherwise stays in the Dock. Ask it to quit, then kill it if quit hangs.
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    if (relaunchTimer) clearTimeout(relaunchTimer);
+    const child = electron;
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const termExit = waitForExit(child, 2000);
+      try { child.kill("SIGTERM"); } catch { /* already gone */ }
+      await termExit;
+      if (child.exitCode === null && child.signalCode === null) {
+        const killExit = waitForExit(child, 2000);
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        await killExit;
+      }
+    }
     await server.close();
     process.exit(0);
-  });
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+  if (process.platform !== "win32") process.on("SIGHUP", () => void shutdown());
 };
+
+function waitForExit(child, ms) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
 
 run().catch((err) => {
   console.error(err);

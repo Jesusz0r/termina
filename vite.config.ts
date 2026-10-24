@@ -40,7 +40,7 @@ export default defineConfig({
   base: "./",
   plugins: [monacoDomPurifyPlugin],
   server: {
-    port: 5173,
+    port: 5175,
     strictPort: true,
   },
   build: {
