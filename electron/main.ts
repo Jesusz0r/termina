@@ -877,6 +877,8 @@ class TerminaApp {
   /** One close confirmation/teardown transaction per project. */
   private projectClosePromises = new Map<string, Promise<{ ok: boolean; error?: string; cancelled?: boolean }>>();
   private folderOpenPromise: Promise<{ cwd: string } | { cancelled: true }> | null = null;
+  /** Opens in flight, by canonical root. */
+  private projectOpens = new Map<string, Promise<ProjectState | null>>();
   /** Saved project list read at boot, and the roots in it not open yet. An
    *  unmounted volume keeps its slot until it opens again. */
   private bootProjectRoots: readonly string[] = [];
@@ -7705,20 +7707,10 @@ class TerminaApp {
       properties: ["openDirectory", "createDirectory"],
     });
     if (result.canceled || result.filePaths.length === 0) return { cancelled: true };
-    const cwd = result.filePaths[0];
     // Claim the selection slot as soon as the user chooses a folder. Path
     // canonicalization can yield; a later activation/close must fence this
     // request rather than allowing it to reclaim the active project.
-    const selectionAction = this.beginProjectSelectionAction();
-    // One tab per folder: reactivate an already-open project.
-    const canonical = await this.canonicalPath(cwd);
-    for (const existing of this.projects.values()) {
-      if (existing.canonicalRoot === canonical) {
-        return (await this.activateProject(existing.id, rendererTarget, selectionAction)) ? { cwd } : { cancelled: true };
-      }
-    }
-    const project = await this.openProject(cwd, selectionAction, rendererTarget);
-    return project ? { cwd } : { cancelled: true };
+    return this.openOrActivateProject(result.filePaths[0], this.beginProjectSelectionAction(), rendererTarget);
   }
 
   /** Open or reactivate the project at a path (the dialog-free path). */
@@ -7728,15 +7720,33 @@ class TerminaApp {
     // Reserve the selection slot before any path I/O. A later open/activate
     // action therefore fences this request even when canonicalPath resolves
     // in the opposite order.
-    const selectionAction = this.beginProjectSelectionAction();
+    return this.openOrActivateProject(cwd, this.beginProjectSelectionAction(), rendererTarget);
+  }
+
+  /** One tab per folder: reactivate an open project, or join an open still in flight. */
+  private async openOrActivateProject(
+    cwd: string,
+    selectionAction: number,
+    rendererTarget: PtyRendererSendTarget | null,
+  ): Promise<{ cwd: string } | { cancelled: true }> {
     const canonical = await this.canonicalPath(cwd);
+    // A second request for the same folder (termina . twice, open-file beside
+    // the dialog) must not build a second project on the same roster.
+    // Check and register without yielding between them.
+    const pending = this.projectOpens.get(canonical);
+    if (pending) await pending.catch(() => null);
     for (const existing of this.projects.values()) {
       if (existing.canonicalRoot === canonical) {
         return (await this.activateProject(existing.id, rendererTarget, selectionAction)) ? { cwd } : { cancelled: true };
       }
     }
-    const project = await this.openProject(cwd, selectionAction, rendererTarget);
-    return project ? { cwd } : { cancelled: true };
+    const opening = this.openProject(cwd, selectionAction, rendererTarget);
+    this.projectOpens.set(canonical, opening);
+    try {
+      return (await opening) ? { cwd } : { cancelled: true };
+    } finally {
+      if (this.projectOpens.get(canonical) === opening) this.projectOpens.delete(canonical);
+    }
   }
 
   /** Create a project, start its watcher and store, and activate it. */

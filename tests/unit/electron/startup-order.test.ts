@@ -219,3 +219,38 @@ describe("initial restoration focus", () => {
     expect(app.activeProjectId).toBe("p1");
   });
 });
+
+const openOrActivateMethod = main.match(/  private async openOrActivateProject\([\s\S]*?\n  \}/)?.[0];
+if (!openOrActivateMethod) throw new Error("open-or-activate method not found");
+const openOrActivateCode = ts.transpileModule(`return ({ ${openOrActivateMethod.replace("private async", "async")} }).openOrActivateProject;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText;
+
+describe("concurrent opens of one folder", () => {
+  it("builds one project and activates it for the second request", async () => {
+    const openOrActivate = new Function(openOrActivateCode)();
+    const opening = deferred();
+    const app = {
+      projects: new Map<string, { id: string; canonicalRoot: string }>(),
+      projectOpens: new Map(),
+      // The second spelling resolves to the same folder.
+      canonicalPath: async () => "/real/project",
+      openProject: vi.fn(async () => {
+        await opening.promise;
+        const project = { id: "p1", canonicalRoot: "/real/project" };
+        app.projects.set(project.id, project);
+        return project;
+      }),
+      activateProject: vi.fn(async () => ({})),
+    };
+    const first = openOrActivate.call(app, "/real/project", 1, null);
+    const second = openOrActivate.call(app, "/link/project", 2, null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    opening.resolve();
+    await expect(first).resolves.toEqual({ cwd: "/real/project" });
+    await expect(second).resolves.toEqual({ cwd: "/link/project" });
+    expect(app.openProject).toHaveBeenCalledOnce();
+    expect(app.activateProject).toHaveBeenCalledWith("p1", null, 2);
+    expect(app.projectOpens.size).toBe(0);
+  });
+});
