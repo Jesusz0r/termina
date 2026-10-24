@@ -10,7 +10,7 @@ import {
   type SubagentChild,
   type SubagentLauncher,
 } from "../../../electron/subagents.ts";
-import { parseSubagentResultFile, withSubagentCommitLock } from "../../../agent-core/subagents.ts";
+import { formatSubagentResultFrame, parseSubagentResultFile, withSubagentCommitLock } from "../../../agent-core/subagents.ts";
 import { acquireSessionRetentionLock, releaseSessionRetentionLock } from "../../../shared/session-retention-lock.ts";
 import { admitSessionBundle } from "../../../agent-core/session.ts";
 
@@ -589,6 +589,11 @@ describe("SubagentHost", () => {
     const two = `SUBAGENT_RESULT {"ok":true,"result":"first"}\nlog\nSUBAGENT_RESULT {"ok":false,"error":"last"}\n`;
     expect(lastResultFrame(two)).toEqual({ ok: false, error: "last" });
     expect(lastResultFrame(`SUBAGENT_RESULT {broken\n`)).toBeNull();
+  });
+
+  it("reads a frame whose result mentions the frame prefix", () => {
+    const result = "lastResultFrame now finds SUBAGENT_RESULT lines";
+    expect(lastResultFrame(`log\n${formatSubagentResultFrame({ ok: true, result })}\n`)).toEqual({ ok: true, result });
   });
 
   it("keeps the last result frame when stdout exceeds the byte cap", async () => {

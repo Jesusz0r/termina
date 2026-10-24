@@ -1078,9 +1078,11 @@ function mustParseTask(raw: unknown): SubagentTaskFile {
   return checked.file;
 }
 
-/** Last framed stdout line; null when the child never framed a result. */
+/** Last framed stdout line; null when the child never framed a result.
+ *  The frame starts a line; the prefix text may also appear inside its JSON. */
 export function lastResultFrame(stdout: string): { ok: boolean; result?: string; error?: string } | null {
-  const start = stdout.lastIndexOf(SUBAGENT_RESULT_PREFIX);
+  const newline = stdout.lastIndexOf(`\n${SUBAGENT_RESULT_PREFIX}`);
+  const start = newline >= 0 ? newline + 1 : stdout.startsWith(SUBAGENT_RESULT_PREFIX) ? 0 : -1;
   if (start < 0) return null;
   const lineEnd = stdout.indexOf("\n", start);
   const line = lineEnd < 0 ? stdout.slice(start) : stdout.slice(start, lineEnd);
