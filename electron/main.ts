@@ -2916,17 +2916,9 @@ class TerminaApp {
     }
   }
 
-  private persistLive(project: ProjectState): AgentTerminalInstance[] {
-    const out: AgentTerminalInstance[] = [];
-    for (const id of project.terminalIds) {
-      const inst = this.runtime.get(id);
-      if (inst?.persist && !inst.closed) out.push(inst);
-    }
-    return out;
-  }
-
   private async restoreProjectTerminals(project: ProjectState): Promise<void> {
     const loaded = await this.runtime.loadRoster(rosterFilePath(this.userDataDir, project.sessionKey));
+    if (loaded.setAside) void this.noteRosterRestoreProblem(project, [], [], loaded.setAside);
     if (loaded.entries.length === 0) {
       // Only a genuinely new project gets a default terminal. An existing
       // empty roster is the durable result of closing the project's last tab.
@@ -2943,6 +2935,7 @@ class TerminaApp {
       return;
     }
     const unrestored: TerminalRosterEntry[] = [];
+    const reasons: string[] = [];
     const spawned: { rec: TerminalRosterEntry; id: string }[] = [];
     for (const rec of loaded.entries) {
       this.noteTerminalId(rec.id);
@@ -2990,6 +2983,7 @@ class TerminaApp {
         spawned.push({ rec, id: inst.id });
       } catch (err) {
         unrestored.push(rec);
+        reasons.push((err as Error).message);
         console.warn(`[main] could not restore terminal ${rec.id}: ${(err as Error).message}`);
       }
     }
@@ -3003,6 +2997,47 @@ class TerminaApp {
     // a phantom if it becomes launchable on a later restart.
     project.unrestoredTerminals = unrestored;
     this.saveTerminalRoster(project);
+    if (reasons.length > 0) void this.noteRosterRestoreProblem(project, unrestored, reasons);
+  }
+
+  /**
+   * Tell the user which saved tabs did not come back. Failed tabs have no
+   * pane, so this notice is the only place to discard them; keeping them
+   * retries on the next launch.
+   */
+  private async noteRosterRestoreProblem(
+    project: ProjectState,
+    entries: TerminalRosterEntry[],
+    reasons: string[],
+    setAside?: string,
+  ): Promise<void> {
+    if (this.disposed) return;
+    const failed = entries.filter((entry) => project.unrestoredTerminals.includes(entry));
+    const detail = setAside
+      ? `The saved terminal list for ${project.cwd} was damaged. A copy was kept at:\n${setAside}`
+      : `${failed.length} saved tab${failed.length === 1 ? "" : "s"} in ${project.cwd} could not reopen:\n`
+        + [...new Set(reasons)].slice(0, 5).map((reason) => `• ${reason}`).join("\n");
+    const options: MessageBoxOptions = setAside
+      ? { type: "warning", message: "Some terminals could not be restored", detail }
+      : {
+        type: "warning",
+        message: "Some terminals could not be restored",
+        detail: `${detail}\n\nKeep them to try again on the next launch.`,
+        buttons: ["Keep for Next Launch", "Discard"],
+        defaultId: 0,
+        cancelId: 0,
+      };
+    try {
+      const win = this.win;
+      this.revealWindowForSheet();
+      const result = await (win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options));
+      if (setAside || result.response !== 1 || this.projects.get(project.id) !== project) return;
+      if (this.projectIsSwitching(project.id)) return;
+      project.unrestoredTerminals = project.unrestoredTerminals.filter((entry) => !failed.includes(entry));
+      this.saveTerminalRoster(project);
+    } catch (error) {
+      console.warn(`[main] could not show the restore notice: ${(error as Error).message}`);
+    }
   }
 
   /** Provider-qualified model of a core tab, for TERMINA_CORE_* env. */
@@ -5140,12 +5175,9 @@ class TerminaApp {
     // exit callback loses it when the app quits while PTY teardown is still
     // in flight. saveTerminalRoster excludes the now-closed live instance.
     if (inst.persist && owner && !this.projectIsSwitching(owner.id)) {
-      // Failed restores have no visible pane to close. Closing the last live
-      // tab is therefore also the only explicit way to clear those hidden
-      // retry entries and persist a genuinely empty project roster.
-      owner.unrestoredTerminals = this.persistLive(owner).length === 0
-        ? []
-        : owner.unrestoredTerminals.filter((entry) => entry.id !== id);
+      // Tabs that failed to restore stay saved: only the restore notice
+      // discards them, never an unrelated close.
+      owner.unrestoredTerminals = owner.unrestoredTerminals.filter((entry) => entry.id !== id);
       this.saveTerminalRoster(owner);
     }
     // Closed terminals remain in the process map until ordered PTY output

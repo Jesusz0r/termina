@@ -279,7 +279,7 @@ check("shared project contracts expose activation generations", types.includes("
 // An existing empty roster means the user closed the project's last terminal;
 // only a missing roster gets a first-launch default. Every restore is bound to
 // its project before createTerminal crosses asynchronous setup.
-check("empty terminal rosters survive restart", rosterStore.includes("{ exists: boolean; entries: TerminalRosterEntry[] }")
+check("empty terminal rosters survive restart", rosterStore.includes("{ exists: boolean; entries: TerminalRosterEntry[]; setAside?: string }")
   && main.includes("if (!loaded.exists)")
   && main.includes("empty roster is the durable result"));
 check("restored terminals bind to their source project", main.includes("projectId: project.id")

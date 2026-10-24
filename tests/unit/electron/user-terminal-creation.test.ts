@@ -49,7 +49,7 @@ function fixture() {
       return inst;
     }),
     createUserTerminal: (...args: any[]) => create.call(app, ...args),
-    noteTerminalId: vi.fn(), saveTerminalRoster: vi.fn(),
+    noteTerminalId: vi.fn(), saveTerminalRoster: vi.fn(), noteRosterRestoreProblem: vi.fn(async () => {}),
   };
   return { project, terminals, app };
 }
@@ -134,6 +134,7 @@ describe("user terminal creation", () => {
     try { await restore.call(app, project); }
     finally { warning.mockRestore(); }
     expect(project.unrestoredTerminals).toHaveLength(1);
+    expect(app.noteRosterRestoreProblem).toHaveBeenCalledWith(project, project.unrestoredTerminals, ["saved area unavailable"]);
     expect(project.worldlines.createIndependentSession).not.toHaveBeenCalled();
     expect(app.createTerminal).not.toHaveBeenCalled();
   });

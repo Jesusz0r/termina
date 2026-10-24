@@ -43,7 +43,6 @@ function creationHarness() {
     reclaimUnusedEmptyCoreSessions: vi.fn(async () => {}),
     coreSessionFile: vi.fn(async (_id: string, root: string) => `${root}/sessions/current.jsonl`),
     sessionFileInUse: () => false,
-    persistLive: () => [],
     tailer: {},
   });
   return { host, workspace, spawn, stoppedAtSpawn };

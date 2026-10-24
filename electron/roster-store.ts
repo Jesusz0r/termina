@@ -50,9 +50,25 @@ export function rosterFilePath(userDataDir: string, sessionKey: string): string 
   return join(userDataDir, "terminal-rosters", `${sessionKey}.json`);
 }
 
+/** Roster load result. `setAside` names the copy of a damaged file. */
+export type LoadedRoster = { exists: boolean; entries: TerminalRosterEntry[]; setAside?: string };
+
+/** Move a damaged roster out of the save path so the next save cannot destroy it. */
+async function setAside(path: string): Promise<LoadedRoster> {
+  const aside = `${path}.corrupt-${Date.now()}`;
+  try {
+    await fsRename(path, aside);
+    syncParentDir(path);
+    return { exists: true, entries: [], setAside: aside };
+  } catch (error) {
+    console.warn(`[main] could not set aside damaged roster: ${(error as Error).message}`);
+    return { exists: true, entries: [] };
+  }
+}
+
 /** Load one roster file. A present but unreadable roster reports exists so a
  * corrupt file is never mistaken for first launch. */
-export async function loadRosterFile(path: string): Promise<{ exists: boolean; entries: TerminalRosterEntry[] }> {
+export async function loadRosterFile(path: string): Promise<LoadedRoster> {
   let info;
   try {
     info = await stat(path);
@@ -61,13 +77,15 @@ export async function loadRosterFile(path: string): Promise<{ exists: boolean; e
     // oversized handled below) must not spawn an unrequested terminal.
     return { exists: (error as NodeJS.ErrnoException)?.code !== "ENOENT", entries: [] };
   }
+  if (!info.isFile()) return { exists: true, entries: [] };
+  if (info.size > MAX_ROSTER_FILE_BYTES) return setAside(path);
+  let text: string;
   try {
-    if (!info.isFile() || info.size > MAX_ROSTER_FILE_BYTES) return { exists: true, entries: [] };
     const handle = await open(path, "r");
-    let text: string;
     try {
       const current = await handle.stat();
-      if (!current.isFile() || current.size > MAX_ROSTER_FILE_BYTES) return { exists: true, entries: [] };
+      if (!current.isFile()) return { exists: true, entries: [] };
+      if (current.size > MAX_ROSTER_FILE_BYTES) return await setAside(path);
       // Read at most one extra byte. A growing file cannot bypass the guard.
       const bytes = Buffer.alloc(current.size + 1);
       let length = 0;
@@ -76,18 +94,23 @@ export async function loadRosterFile(path: string): Promise<{ exists: boolean; e
         if (read.bytesRead === 0) break;
         length += read.bytesRead;
       }
-      if (length > current.size) return { exists: true, entries: [] };
+      if (length > current.size) return await setAside(path);
       text = bytes.toString("utf8", 0, length);
     } finally {
       await handle.close();
     }
-    const raw = JSON.parse(text) as unknown;
-    return { exists: true, entries: parseTerminalRoster(raw) };
   } catch {
     // A present but unreadable roster must not be mistaken for first launch:
     // doing so would create and persist a terminal the user did not request.
     return { exists: true, entries: [] };
   }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text) as unknown;
+  } catch {
+    return setAside(path);
+  }
+  return { exists: true, entries: parseTerminalRoster(raw) };
 }
 
 export class TerminalRosterStore {

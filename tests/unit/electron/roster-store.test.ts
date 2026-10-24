@@ -122,11 +122,26 @@ describe("TerminalRosterStore durable save", () => {
     expect((await loadRosterFile(path)).entries).toEqual([{ id: "term-2", type: "shell", cli: "codex", cwd: "/tmp" }]);
   });
 
-  it("refuses an oversized malformed on-disk file as present", async () => {
+  it("refuses an oversized malformed on-disk file as present and sets it aside", async () => {
     const path = await preparePath();
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, "x".repeat(MAX_ROSTER_FILE_BYTES + 1));
-    expect(await loadRosterFile(path)).toEqual({ exists: true, entries: [] });
+    const loaded = await loadRosterFile(path);
+    expect(loaded).toMatchObject({ exists: true, entries: [] });
+    expect(statSync(loaded.setAside!).size).toBe(MAX_ROSTER_FILE_BYTES + 1);
+    expect(readdirSync(dirname(path))).not.toContain("session.json");
+  });
+
+  it("keeps a damaged roster out of the next save's path", async () => {
+    const path = await preparePath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, "{\"terminals\": [ truncated");
+    const loaded = await loadRosterFile(path);
+    expect(loaded).toMatchObject({ exists: true, entries: [] });
+    const store = openStore();
+    store.save(path, [agent("term-9")], []);
+    await store.drain();
+    expect(await readFile(loaded.setAside!, "utf8")).toBe("{\"terminals\": [ truncated");
   });
 
   it("reports oversized identities asynchronously and preserves the last durable roster", async () => {

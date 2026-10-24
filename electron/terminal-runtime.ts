@@ -19,6 +19,7 @@ import {
 import {
   TerminalRosterStore,
   loadRosterFile,
+  type LoadedRoster,
   type RosterTerminal,
   type TerminalRosterHost,
 } from "./roster-store.js";
@@ -413,7 +414,7 @@ export class TerminalRuntime {
     this.rosterStore.save(path, terminals, unrestored);
   }
 
-  loadRoster(path: string): Promise<{ exists: boolean; entries: TerminalRosterEntry[] }> {
+  loadRoster(path: string): Promise<LoadedRoster> {
     return loadRosterFile(path);
   }
 
