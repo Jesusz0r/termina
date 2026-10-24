@@ -95,7 +95,9 @@ export function cachePolicyFromBody(
   const effectiveMode = requestedMode;
   let requestedTtlMs: number | null = null;
   if (hasExplicitOptions && (options as Record<string, unknown>).ttl === "30m") requestedTtlMs = 30 * 60 * 1000;
-  else if (identity.provider === "anthropic" && markers.count > 0) requestedTtlMs = markers.ttlMs ?? 5 * 60 * 1000;
+  // An unset Messages cache_control TTL is the protocol's five minutes, on
+  // relays too; how long a relay actually retains it stays unknown below.
+  else if (identity.protocol === "anthropic-messages" && markers.count > 0) requestedTtlMs = markers.ttlMs ?? 5 * 60 * 1000;
   else if (markers.ttlMs !== null) requestedTtlMs = markers.ttlMs;
   const effectiveTtlMs = fallbackReason ? null : requestedTtlMs;
   const retentionKnown =

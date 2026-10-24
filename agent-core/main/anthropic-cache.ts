@@ -4,8 +4,8 @@
  * Pure request-prefix helpers: default ephemeral mark, system/tool
  * breakpoints (max four), and last-stable-history stamp inside the
  * documented 20-block lookback. Does not decide route capability —
- * auth/cache-policy.ts owns that, and main.ts only stamps when the
- * capability gate says so.
+ * auth/cache-policy.ts owns the documented matrix, and main.ts stamps
+ * unless the route has rejected the markers.
  * Extracted from agent-core/main.ts (issue #324).
  *
  * https://platform.claude.com/docs/en/build-with-claude/prompt-caching
@@ -50,6 +50,27 @@ export function buildCachedPrefix(
     system: [{ type: "text", text: system, cache_control: mark }],
     tools: copied,
   };
+}
+
+/** The same request without cache_control on system blocks, tools, or
+ *  message content blocks. Used when a relay rejects the markers. */
+export function stripAnthropicCacheMarkers(body: Record<string, unknown>): Record<string, unknown> {
+  const strip = (blocks: unknown): unknown => Array.isArray(blocks)
+    ? blocks.map((block) => {
+      if (!block || typeof block !== "object" || !Object.prototype.hasOwnProperty.call(block, "cache_control")) return block;
+      const { cache_control: _cacheControl, ...rest } = block as Record<string, unknown>;
+      return rest;
+    })
+    : blocks;
+  const next: Record<string, unknown> = { ...body, system: strip(body.system), tools: strip(body.tools) };
+  if (Array.isArray(body.messages)) {
+    next.messages = body.messages.map((message: unknown) => {
+      if (!message || typeof message !== "object") return message;
+      const m = message as Record<string, unknown>;
+      return Array.isArray(m.content) ? { ...m, content: strip(m.content) } : m;
+    });
+  }
+  return next;
 }
 
 const HISTORY_CACHE_BLOCKS = new Set(["text", "tool_result", "image"]);

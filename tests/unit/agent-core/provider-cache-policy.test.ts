@@ -175,7 +175,43 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
             if (process.env.TERMINA_PROVIDER_TEST_SCENARIO === "fallback" && call === 0) {
               return new Response(JSON.stringify({ error: { message: "prompt_cache_options is unsupported" } }), { status: 400, headers: { "content-type": "application/json" } });
             }
-            if (process.env.TERMINA_PROVIDER_TEST_SCENARIO === "anthropic") {
+            const scenario = process.env.TERMINA_PROVIDER_TEST_SCENARIO;
+            const anthropicSse = (blocks, usage, stop) => new Response([
+              "data: " + JSON.stringify({ type: "message_start", message: { id: "msg_" + call, type: "message", role: "assistant", content: [], usage } }),
+              "",
+              ...blocks.flatMap((block, index) => [
+                "data: " + JSON.stringify({ type: "content_block_start", index, content_block: block.type === "tool_use" ? { ...block, input: {} } : { type: "text", text: "" } }),
+                "",
+                "data: " + JSON.stringify({ type: "content_block_delta", index, delta: block.type === "tool_use"
+                  ? { type: "input_json_delta", partial_json: JSON.stringify(block.input) }
+                  : { type: "text_delta", text: block.text } }),
+                "",
+                "data: " + JSON.stringify({ type: "content_block_stop", index }),
+                "",
+              ]),
+              "data: " + JSON.stringify({ type: "message_delta", delta: { stop_reason: stop }, usage: { output_tokens: 3 } }),
+              "",
+              "data: " + JSON.stringify({ type: "message_stop" }),
+              "",
+            ].join("\\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
+            const hasAnyCacheControl = JSON.stringify(body ?? {}).includes("cache_control");
+            if (scenario === "anthropic-relay-reject") {
+              if (hasAnyCacheControl) {
+                return new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "system.0.cache_control: Extra inputs are not permitted" } }), { status: 400, headers: { "content-type": "application/json" } });
+              }
+              // One tool round trip proves the next request also omits the markers.
+              return call === 1
+                ? anthropicSse([{ type: "tool_use", id: "toolu_1", name: "glob", input: { pattern: "*.no-such-file" } }], { input_tokens: 12 }, "tool_use")
+                : anthropicSse([{ type: "text", text: "ok" }], { input_tokens: 12 }, "end_turn");
+            }
+            if (scenario === "anthropic-unrelated-400" || (scenario === "anthropic-direct-reject" && hasAnyCacheControl)) {
+              const message = scenario === "anthropic-unrelated-400" ? "max_tokens: must be at most 8192" : "system.0.cache_control: Extra inputs are not permitted";
+              return new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } }), { status: 400, headers: { "content-type": "application/json" } });
+            }
+            if (scenario === "anthropic-cache-write") {
+              return anthropicSse([{ type: "text", text: "ok" }], { input_tokens: 12, cache_creation_input_tokens: 2048, cache_read_input_tokens: 0 }, "end_turn");
+            }
+            if (scenario === "anthropic") {
               const lines = [
                 "data: " + JSON.stringify({ type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", content: [], usage: { input_tokens: 12 } } }),
                 "",
@@ -918,6 +954,59 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(reasoningField(usage), null);
     });
     
+    const zen = {
+      provider: "opencode-zen",
+      model: "claude-sonnet-5",
+      baseEnv: { key: "OPENCODE_BASE_URL", token: "OPENCODE_API_KEY" },
+      providerBaseUrl: "https://opencode.ai/zen/v1",
+    };
+    const hasCacheControl = (body: unknown) => JSON.stringify(body).includes("cache_control");
+
+    await test("Claude through an undocumented relay sends Messages cache markers with their five-minute TTL", async () => {
+      const result = await runLocalProvider({ ...zen, terminalId: "term-zen-markers", scenario: "anthropic-cache-write" });
+      assert.equal(result.code, 0, result.stderr || result.stdout);
+      assert.equal(result.requests.length, 1);
+      const body = result.requests[0].body;
+      assert.equal(body.system?.[0]?.cache_control?.type, "ephemeral");
+      assert.equal(body.tools?.filter((tool: { cache_control?: unknown }) => tool.cache_control).length, 1);
+      const trace = result.traces.find((entry) => entry.recordType === "attempt") ?? result.traces[0];
+      assert.equal(trace.usage.cacheWrite, 2048);
+      // The write is billed at the five-minute class, not an unknown TTL.
+      assert.equal(trace.cache?.effective?.ttlMs, 5 * 60 * 1000);
+    });
+
+    await test("a relay that rejects cache_control gets one marker-free retry and no markers afterwards", async () => {
+      const result = await runLocalProvider({ ...zen, terminalId: "term-zen-reject", scenario: "anthropic-relay-reject" });
+      assert.equal(result.code, 0, result.stderr || result.stdout);
+      assert.equal(result.requests.length, 3, `${result.stdout}\n${result.stderr}`);
+      assert.equal(hasCacheControl(result.requests[0].body), true);
+      assert.equal(hasCacheControl(result.requests[1].body), false);
+      assert.deepEqual(result.requests[1].body.messages, JSON.parse(JSON.stringify(result.requests[0].body.messages).replaceAll(',"cache_control":{"type":"ephemeral"}', "")));
+      assert.equal(hasCacheControl(result.requests[2].body), false);
+      const attempts = result.traces.filter((trace) => trace.recordType === "attempt");
+      assert.ok(attempts.some((trace) => trace.cache?.requested?.rejected === true), "the rejected markers must stay observable");
+    });
+
+    await test("an unrelated 400 from a relay surfaces without a retry", async () => {
+      const result = await runLocalProvider({ ...zen, terminalId: "term-zen-400", scenario: "anthropic-unrelated-400" });
+      assert.equal(result.requests.length, 1);
+      assert.match(result.stdout + result.stderr, /max_tokens: must be at most 8192/);
+    });
+
+    await test("direct Anthropic keeps its markers and surfaces a cache_control rejection", async () => {
+      const result = await runLocalProvider({
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        terminalId: "term-anthropic-direct-reject",
+        baseEnv: { key: "ANTHROPIC_BASE_URL", token: "ANTHROPIC_API_KEY" },
+        providerBaseUrl: "https://api.anthropic.com",
+        scenario: "anthropic-direct-reject",
+      });
+      assert.equal(result.requests.length, 1);
+      assert.equal(hasCacheControl(result.requests[0].body), true);
+      assert.match(result.stdout + result.stderr, /cache_control: Extra inputs are not permitted/);
+    });
+
     if (failures.length > 0) {
       throw new AggregateError(
         failures.map(({ name, error }) => new Error(name, { cause: error })),

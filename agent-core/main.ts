@@ -226,7 +226,7 @@ import {
 import { createFrontMatter } from "./main/front-matter.ts";
 import { renderHistoryTranscript, type ContentBlock } from "./main/history-view.ts";
 import { shouldAutoOpenLogin } from "./main/login-hint.ts";
-import { buildCachedPrefix, stampHistoryCache } from "./main/anthropic-cache.ts";
+import { buildCachedPrefix, stampHistoryCache, stripAnthropicCacheMarkers } from "./main/anthropic-cache.ts";
 import { cacheRouteForProvider, createCacheCapabilityGate } from "./main/cache-capabilities.ts";
 import {
   buildCacheRequestDiagnostics,
@@ -3294,7 +3294,14 @@ async function callModel(
   });
   const sys = frontMatter.systemPrompt();
   const proto = providerProtocol(route.provider, route.model);
-  const anthropicCacheSupported = cacheCapabilitySupported(route.provider, route.model, CACHE_CAPABILITY_FEATURE.anthropicCacheControl);
+  // cache_control is part of the Messages protocol, and Anthropic caches
+  // nothing without it. An undocumented relay (Zen, Copilot, a custom base)
+  // gets the markers until it rejects them; the rejection is remembered.
+  const anthropicMarkers = proto === "anthropic-messages"
+    ? cacheGate.observe(route.provider, route.model, CACHE_CAPABILITY_FEATURE.anthropicCacheControl)
+    : null;
+  const anthropicCacheSupported = anthropicMarkers !== null && anthropicMarkers.status !== "rejected";
+  const anthropicMarkersProbed = anthropicCacheSupported && anthropicMarkers.supported !== true;
   const prefix = anthropicCacheSupported
     ? buildCachedPrefix(sys, clientTools)
     : { system: [{ type: "text", text: sys }], tools: clientTools.map((tool) => ({ ...tool })) };
@@ -3401,18 +3408,20 @@ async function callModel(
   let res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true, cacheIdentity, onRetry);
   if (!res.ok || !res.body) {
     const detail = (await readBoundedResponseBody(res, { maxBytes: PROVIDER_ERROR_BODY_CAP_BYTES })).text.slice(0, 300);
-    const fallbackCandidate = res.status === 400 && /prompt_cache_(?:breakpoint|options)/i.test(detail);
-    const optionalFieldsRequested = sendExplicitCache || sendPromptCacheOptions;
-    if (
-      fallbackCandidate &&
-      optionalFieldsRequested &&
-      usesResponsesApi(route.provider, route.model)
-    ) {
-      recordRejectedCacheFields(route.provider, route.model, {
-        promptCacheOptions: sendPromptCacheOptions,
-        promptCacheBreakpoint: sendExplicitCache,
-        promptCacheKey: sendCacheKey,
-      }, detail);
+    const responsesFieldsRejected = res.status === 400 && /prompt_cache_(?:breakpoint|options)/i.test(detail) &&
+      (sendExplicitCache || sendPromptCacheOptions) && usesResponsesApi(route.provider, route.model);
+    // A documented route that rejects its markers is a request bug: surface it.
+    const relayMarkersRejected = res.status === 400 && /cache_control/i.test(detail) && anthropicMarkersProbed;
+    if (responsesFieldsRejected || relayMarkersRejected) {
+      if (relayMarkersRejected) {
+        cacheGate.recordRejected(route.provider, route.model, CACHE_CAPABILITY_FEATURE.anthropicCacheControl, detail);
+      } else {
+        recordRejectedCacheFields(route.provider, route.model, {
+          promptCacheOptions: sendPromptCacheOptions,
+          promptCacheBreakpoint: sendExplicitCache,
+          promptCacheKey: sendCacheKey,
+        }, detail);
+      }
       const rejectedCacheDiagnostics = cacheDiagnosticsForRequest(
         body,
         { provider: route.provider, protocol: proto, model: route.model },
@@ -3443,7 +3452,7 @@ async function callModel(
         fallbackReason: "unsupported-cache-field",
         retryCount: (traceAttempt?.retryCount ?? 0) + 1,
       });
-      body = stripResponsesBreakpoints(body);
+      body = relayMarkersRejected ? stripAnthropicCacheMarkers(body) : stripResponsesBreakpoints(body);
       cacheDiagnostics = cacheDiagnosticsForRequest(
         body,
         { provider: route.provider, protocol: proto, model: route.model },
