@@ -3211,18 +3211,21 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       [],
       { explicitCacheBreakpoint: true, includeEncryptedReasoning: false },
     );
+    // The host overlay precedes its prompt, so the tail is a persisted prompt.
+    // With no earlier input text to mark, the prompt carries the breakpoint:
+    // explicit-only mode caches nothing without one.
     check(
-      "gpt-5.6 breakpoint does not mark assistant output_text",
+      "gpt-5.6 breakpoint skips assistant output_text and marks the prompt",
       inputBreakpoint(bodyGpt56Assistant.input, 0) === undefined &&
-        inputBreakpoint(bodyGpt56Assistant.input, -1) === undefined,
+        breakpointMode(inputBreakpoint(bodyGpt56Assistant.input, -1)) === "explicit",
     );
-    const bodyGpt56Solo = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user", content: "only overlay" }], [], {
+    const bodyGpt56Solo = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user", content: "first prompt" }], [], {
       explicitCacheBreakpoint: true,
       includeEncryptedReasoning: false,
     });
     check(
-      "gpt-5.6 breakpoint does not mark a lone overlay",
-      inputBreakpoint(bodyGpt56Solo.input, 0) === undefined,
+      "gpt-5.6 breakpoint marks a session's lone first prompt",
+      breakpointMode(inputBreakpoint(bodyGpt56Solo.input, 0)) === "explicit",
     );
     const stripped = compat.stripResponsesBreakpoints(bodyGpt56Explicit);
     check(

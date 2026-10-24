@@ -881,6 +881,23 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       const body = result.requests[0].body;
       assert.equal(body.prompt_cache_options?.mode, "explicit");
       assert.equal(body.prompt_cache_options?.ttl, undefined);
+      // Explicit-only mode caches nothing without a breakpoint, so the first
+      // prompt of a session must carry one.
+      assert.equal(JSON.stringify(body.input).split("prompt_cache_breakpoint").length - 1, 1);
+    });
+
+    await test("explicit breakpoints mark the earlier prefix, or the first prompt when nothing precedes it", () => {
+      const opts = { provider: "openai", explicitCacheBreakpoint: true, promptCacheMode: "explicit" as const };
+      const marks = (messages: Array<{ role: "user" | "assistant"; content: string }>) =>
+        responsesInputItems(compat.responsesBody("gpt-5.6-sol", "sys", messages, [], opts))
+          .map((item) => Boolean(item.content?.some((part) => part.prompt_cache_breakpoint)));
+      assert.deepEqual(marks([{ role: "user", content: "first prompt" }]), [true]);
+      assert.deepEqual(marks([{ role: "user", content: "host context" }, { role: "user", content: "first prompt" }]), [true, false]);
+      assert.deepEqual(marks([
+        { role: "user", content: "first prompt" },
+        { role: "assistant", content: "answer" },
+        { role: "user", content: "second prompt" },
+      ]), [true, false, false]);
     });
     
     await test("custom relay route does not receive undocumented explicit cache controls", async () => {
@@ -914,7 +931,9 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       const second = result.requests[1].body;
       assert.equal(first.prompt_cache_options?.mode, "explicit");
       assert.equal(second.prompt_cache_options, undefined);
-      assert.deepEqual(second.input, first.input);
+      assert.ok(JSON.stringify(first.input).includes("prompt_cache_breakpoint"));
+      // Identical except for the rejected cache fields.
+      assert.deepEqual(second.input, compat.stripResponsesBreakpoints(first).input);
       const attempts = result.traces.filter((trace) => trace.recordType === "attempt");
       assert.ok(attempts.length >= 2, "fallback must leave one trace record per provider attempt");
       assert.equal(new Set(attempts.map((trace) => trace.attemptId)).size, attempts.length);

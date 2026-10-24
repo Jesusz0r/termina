@@ -60,11 +60,14 @@ function markPrefixThenTail(
   extra: Record<string, unknown>,
   limit = 1,
 ): Array<Record<string, unknown>> {
-  if (input.length < 2) return input;
   if (input[input.length - 1]?.type === "function_call_output") {
     return markLatestInputTexts(input, extra, limit);
   }
-  return [...markLatestInputTexts(input.slice(0, -1), extra, limit), input[input.length - 1]!];
+  const head = input.slice(0, -1);
+  const marked = markLatestInputTexts(head, extra, limit);
+  // Explicit-only mode caches nothing without a breakpoint. With no earlier
+  // text to mark (a session's first prompt), mark the prompt itself.
+  return marked === head ? markLatestInputTexts(input, extra, limit) : [...marked, input[input.length - 1]!];
 }
 
 
