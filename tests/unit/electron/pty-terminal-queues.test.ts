@@ -63,6 +63,30 @@ function hollow(): { term: PtyTerminal; view: HollowView; written: string[]; pau
 }
 
 describe("pty-terminal queues (refs #195)", () => {
+  it("cancelling delivery resumes the native reader and drops late data until real exit", () => {
+    const fixture = hollow();
+    const { term, view } = fixture;
+    const delivered = vi.fn(() => false);
+    const exited = vi.fn();
+    term.onData = delivered;
+    term.onExit = exited;
+    view.pendingOutput.push({ data: "pending output", offset: 0 });
+    view.flushOutput();
+    expect(fixture.pauses).toBe(1);
+    term.cancelOutput();
+    expect(fixture.resumes).toBe(1);
+    expect(term.hasExited).toBe(false);
+    expect(exited).not.toHaveBeenCalled();
+    view.pendingOutput.push({ data: "late native output", offset: 0 });
+    view.flushOutput();
+    expect(delivered).toHaveBeenCalledTimes(1);
+    expect(view.pendingOutput).toHaveLength(0);
+    view.exited = true;
+    view.pendingExitCode = 0;
+    view.flushOutput();
+    expect(exited).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
   it.each([false, true])("bounds source-tail and renderer drain together (late renderer: %s)", async (lateRenderer) => {
     const { term, view } = hollow();
     const exits: boolean[] = [];

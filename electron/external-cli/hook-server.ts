@@ -42,6 +42,7 @@ type BoundToken = { terminalId: string; generation: number };
 export class HookServer {
   private server: Server | null = null;
   private socketPath: string | null = null;
+  private readonly connections = new Set<Socket>();
   private readonly tokens = new Map<string, BoundToken>();
 
   constructor(private readonly onMessage: (message: HookMessage) => void) {}
@@ -120,10 +121,17 @@ export class HookServer {
       try { unlinkSync(socketPath); } catch { /* already gone */ }
     }
     if (!server) return;
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    for (const socket of this.connections) socket.destroy();
+    await closed;
   }
 
   private take(socket: Socket): void {
+    // close() stops accepting before destroying existing clients. A connection
+    // event already queued by Node must obey that same shutdown boundary.
+    if (!this.server) { socket.destroy(); return; }
+    this.connections.add(socket);
+    socket.once("close", () => this.connections.delete(socket));
     const chunks: Buffer[] = [];
     let bytes = 0;
     let settled = false;

@@ -343,6 +343,7 @@ export class TerminalRuntime {
     inst.closed = true;
     this.host.onPtyStopping?.(inst);
     this.egress.cancel(id, inst.generation);
+    inst.pty.cancelOutput();
     return inst;
   }
 
@@ -435,6 +436,7 @@ export class TerminalRuntime {
     this.egressDisposed = true;
     this.egress.dispose();
     for (const cancelTail of this.pendingSourceDrains.values()) cancelTail();
+    for (const inst of this.terminals.values()) inst.pty.cancelOutput();
   }
 
   enqueueSidecar(terminalId: string, event: SidecarEvent): SidecarEventDelivery {

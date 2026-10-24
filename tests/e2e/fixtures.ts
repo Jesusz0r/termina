@@ -178,10 +178,15 @@ async function acquireFirstWindow(app: ElectronApplication): Promise<Page> {
 }
 
 /** Launch or sequentially restart an Electron using the same isolated roots. */
-export async function launchOwnedElectron(env: Record<string, string>, runRoot: string): Promise<ElectronApplication> {
+export async function launchOwnedElectron(
+  env: Record<string, string>, runRoot: string, launchOptions: { executablePath?: string } = {},
+): Promise<ElectronApplication> {
   preservedRunRoots.add(runRoot);
+  const executablePath = launchOptions.executablePath ?? process.env.TERMINA_E2E_PACKAGED_EXECUTABLE;
   const app = await electron.launch({
-    args: [resolve("."), `--user-data-dir=${env.TERMINA_USER_DATA_DIR}`, "--disable-gpu",
+    ...launchOptions,
+    ...(executablePath ? { executablePath } : {}),
+    args: [...(executablePath ? [] : [resolve(".")]), `--user-data-dir=${env.TERMINA_USER_DATA_DIR}`, "--disable-gpu",
       // AppKit persistence is bundle-scoped, not Electron-user-data-scoped.
       // Ignore that external saved state without changing host preferences.
       ...(process.platform === "darwin" ? ["-ApplePersistenceIgnoreState", "YES"] : []),

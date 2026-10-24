@@ -1,5 +1,7 @@
+import { once } from "node:events";
+import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -97,6 +99,29 @@ describe("Codex hook wire", () => {
 });
 
 describe("Codex hook socket", () => {
+  it("closes idle and partial clients without waiting for them to disconnect", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "th-close-"));
+    const socketPath = join(dir, "hook.sock");
+    const received: unknown[] = [];
+    const server = new HookServer((message) => received.push(message));
+    await server.listen(socketPath);
+    const token = server.issue("term-1", 1);
+    const clients = [createConnection(socketPath), createConnection(socketPath)];
+    try {
+      await Promise.all(clients.map((client) => once(client, "connect")));
+      clients[1]!.write('{"v":1');
+      const disconnected = clients.map((client) => once(client, "close", { signal: AbortSignal.timeout(1000) }));
+      await Promise.all([server.close(), ...disconnected]);
+      expect(received).toEqual([]);
+      expect(server.accept(JSON.stringify({ v: 1, token, terminalId: "term-1", generation: 1, payload: "{}" }))).toBeNull();
+      await server.close();
+    } finally {
+      for (const client of clients) client.destroy();
+      await server.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("drops a message whose token belongs to another terminal", () => {
     const server = new HookServer(() => undefined);
     const token = server.issue("term-1", 3);

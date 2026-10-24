@@ -26,6 +26,7 @@ export class PtyTerminal {
   private pty: IPty | null = null;
   private exited = false;
   private flushingOutput = false;
+  private outputCancelled = false;
   private pendingOutput: Array<{ data: string; offset: number }> = [];
   private pendingExitCode: number | null = null;
   private exitDelivered = false;
@@ -74,6 +75,7 @@ export class PtyTerminal {
     // the egress owner so one callback cannot bypass its byte/chunk high-water
     // marks. The native source is paused by that owner between quanta.
     this.pty.onData((data) => {
+      if (this.outputCancelled) return;
       this.pendingOutput.push({ data, offset: 0 });
       this.flushOutput();
     });
@@ -95,6 +97,11 @@ export class PtyTerminal {
 
   /** Feed source data in bounded quanta, retaining only an unadmitted tail. */
   private flushOutput(): void {
+    if (this.outputCancelled) {
+      this.pendingOutput.length = 0;
+      this.emitExitIfDrained();
+      return;
+    }
     if (this.flushingOutput || this.pendingOutput.length === 0) {
       this.emitExitIfDrained();
       return;
@@ -133,7 +140,13 @@ export class PtyTerminal {
 
   /** Discard source data only for an intentional user/app close. */
   cancelOutput(): void {
+    this.outputCancelled = true;
     this.pendingOutput.length = 0;
+    // Delivery has been cancelled, so backpressure no longer has a consumer.
+    // Let node-pty read to EOF and report the real native exit.
+    if (!this.exited && this.pty) {
+      try { this.pty.resume(); } catch { /* the native stream already closed */ }
+    }
     this.emitExitIfDrained();
   }
 

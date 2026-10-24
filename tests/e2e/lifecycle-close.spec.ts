@@ -158,6 +158,24 @@ test("discarding dirty buffers then cancelling close retains text and recovery c
   expect(readFileSync(path, "utf8")).toBe(original);
 });
 
+test("app quit closes an unfinished hook connection before stopping its terminal", async ({ page, electronApp, projectRoot }) => {
+  await firstAgent(page);
+  const created = await page.evaluate(() => window.termina.createTerminal({ type: "shell" }));
+  expect(created.ok).toBe(true);
+  const pidFile = join(projectRoot, "unfinished-hook.pid");
+  const script = `const socket=require('node:net').connect(process.env.TERMINA_EXTERNAL_HOOK_SOCKET);socket.on('connect',()=>{socket.write('{"v":1');require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));});setInterval(()=>{},1000);`;
+  await page.evaluate(({ id, command }) => window.termina.writeTerminal(id, command), {
+    id: created.id!, command: `node -e ${quoteShellArg(script)}\r`,
+  });
+  await expect.poll(() => existsSync(pidFile)).toBe(true);
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  await mockLifecycleDialogs(electronApp, 0);
+  const closed = electronApp.waitForEvent("close");
+  await electronApp.evaluate(({ app }) => { process.env.NODE_ENV = "production"; app.quit(); });
+  await closed;
+  await expect.poll(() => alive(pid)).toBe(false);
+});
+
 test("normal app quit discloses all projects; Cancel preserves work and acceptance exits", async ({ page, electronApp, projectRoot, runRoot }) => {
   await firstAgent(page);
   const { instance, pid } = await shellCommand(page, projectRoot);

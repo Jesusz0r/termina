@@ -880,21 +880,21 @@ export class WorldlineManager {
       if (cmp.sourceRunId === null) continue;
       for (const cand of cmp.candidates.values()) {
         if (cand.state === "discarded" || cand.state === "error" || cand.state === "promoted") continue;
-        try {
-          const changes = await gitWorkingChanges(cand.dir);
-          if (changes.length > 0) {
-            active++;
-            continue;
-          }
-        } catch {
-          /* unreachable — count as active */
+        // A missing or grown session is already active. Core status cannot
+        // change that count, and the request would wait behind the one
+        // in-flight capture.
+        const bytes = cand.sessionFile ? sessionBundleBytes(cand.sessionFile) : null;
+        if (bytes === null || bytes > 1024) {
           active++;
           continue;
         }
-        // Session activity beyond the fork: the session file has entries
-        // past the initial control marker.
-        const bytes = cand.sessionFile ? sessionBundleBytes(cand.sessionFile) : null;
-        if (bytes === null || bytes > 1024) active++;
+        try {
+          const changes = await gitWorkingChanges(cand.dir);
+          if (changes.length > 0) active++;
+        } catch {
+          /* unreachable — count as active */
+          active++;
+        }
       }
     }
     return active;

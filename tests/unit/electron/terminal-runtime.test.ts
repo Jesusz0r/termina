@@ -69,6 +69,7 @@ function fakeTerminal(id: string, generation: number): {
       paused: false,
       pause() { this.paused = true; },
       resume() { this.paused = false; },
+      cancelOutput() { this.paused = false; },
       pid: 42,
     },
     notePtyOutput(data: string) { noted.push(data); },

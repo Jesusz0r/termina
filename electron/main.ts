@@ -8262,6 +8262,9 @@ class TerminaApp {
     }
     // Logical forced cleanup is not node-pty completion. Keep the JS
     // environment and core alive until native callbacks and exit hooks finish.
+    // A forced exit releases the logical terminal and still leaves this watch:
+    // the native callback fences a recycled term-N. Dropping it here would
+    // let that callback land on the replacement.
     while (anyAlive()) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
