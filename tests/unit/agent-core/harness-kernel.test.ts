@@ -3140,7 +3140,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         { role: "user", content: "overlay" },
       ],
       [],
-      { provider: "openrouter", cacheKey: "sess-1", sessionId: "sess-1", cacheControl: true, includeEncryptedReasoning: false },
+      { provider: "openrouter", cacheKey: "sess-1", sessionId: "sess-1", explicitCacheBreakpoint: true, includeEncryptedReasoning: false },
     );
     check(
       "openrouter claude responses pin session and documented breakpoint",
@@ -3177,7 +3177,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       [],
       {
         explicitCacheBreakpoint: true,
-        explicitCacheSkipTail: true,
         promptCacheMode: "explicit",
         includeEncryptedReasoning: false,
       },
@@ -3193,7 +3192,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     const bodyGpt56NoOverlay = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user", content: "stable history" }], [], {
       explicitCacheBreakpoint: true,
-      explicitCacheSkipTail: false,
       promptCacheMode: "explicit",
       includeEncryptedReasoning: false,
     });

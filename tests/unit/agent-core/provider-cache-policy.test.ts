@@ -627,8 +627,6 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
           provider: "opencode-zen",
           promptCacheMode: "explicit",
           explicitCacheBreakpoint: true,
-          explicitCacheSkipTail: false,
-          cacheControl: true,
         },
       );
       assert.equal(responses.prompt_cache_key, "derived-private-key");
@@ -645,8 +643,6 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         sessionId: "openrouter-session",
         promptCacheMode: "explicit",
         explicitCacheBreakpoint: true,
-        explicitCacheSkipTail: false,
-        cacheControl: true,
       } as const;
       const openai = compat.responsesBody(
         "gpt-5.6-sol",
@@ -658,20 +654,9 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(openai.prompt_cache_key, opts.cacheKey);
       assert.equal(openai.session_id, opts.sessionId);
       assert.deepEqual(openai.prompt_cache_options, { mode: "explicit" });
+      // The latest four texts before the current prompt.
       assert.deepEqual(
         responsesInputItems(openai).map((item) => item.content?.[0]?.prompt_cache_breakpoint?.mode ?? null),
-        [null, "explicit", "explicit", "explicit", "explicit"],
-      );
-
-      const stableHistory = compat.responsesBody(
-        "gpt-5.6-sol",
-        "sys",
-        ["one", "two", "three", "four", "volatile-current-prompt"].map((content) => ({ role: "user" as const, content })),
-        [],
-        { ...opts, provider: "openai", explicitCacheSkipTail: true },
-      );
-      assert.deepEqual(
-        responsesInputItems(stableHistory).map((item) => item.content?.[0]?.prompt_cache_breakpoint?.mode ?? null),
         ["explicit", "explicit", "explicit", "explicit", null],
       );
 
@@ -687,8 +672,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.deepEqual(xai.prompt_cache_options, { mode: "explicit" });
       const xaiInput = responsesInputItems(xai);
       assert.equal(xaiInput[0]?.content?.[0]?.prompt_cache_breakpoint?.mode, "explicit");
-      // explicitCacheSkipTail: false is caller-supplied above: mark both texts.
-      assert.equal(xaiInput[1]?.content?.[0]?.prompt_cache_breakpoint?.mode, "explicit");
+      assert.equal(xaiInput[1]?.content?.[0]?.prompt_cache_breakpoint, undefined);
       assert.equal(xaiInput[0]?.content?.[0]?.cache_control, undefined);
 
       const xaiKeyOnly = compat.responsesBody(
@@ -737,7 +721,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
           provider: "openrouter",
           cacheKey: "derived-private-key",
           sessionId: "openrouter-session",
-          cacheControl: true,
+          explicitCacheBreakpoint: true,
         },
       );
       const output = responsesInputItems(body).find((item) => item.type === "function_call_output");

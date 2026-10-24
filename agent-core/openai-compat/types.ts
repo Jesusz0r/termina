@@ -68,7 +68,6 @@ export type CompletionsOpts = {
   sessionId?: string;
   /** Provider id for route-specific optional-field safety. */
   provider?: string;
-  cacheControl?: boolean;
   explicitCacheBreakpoint?: boolean;
   maxTokens?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -77,5 +76,4 @@ export type CompletionsOpts = {
   googleThinking?: boolean;
   includeEncryptedReasoning?: boolean;
   promptCacheMode?: "explicit";
-  explicitCacheSkipTail?: boolean;
 };

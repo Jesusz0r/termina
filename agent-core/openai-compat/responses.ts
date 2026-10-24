@@ -246,15 +246,7 @@ export function responsesBody(
   const input = body.input as Array<Record<string, unknown>>;
   if (opts?.explicitCacheBreakpoint) {
     const extra = { prompt_cache_breakpoint: { mode: "explicit" as const } };
-    body.input =
-      opts.explicitCacheSkipTail === false
-        ? markLatestInputTexts(input, extra, OPENAI_MAX_EXPLICIT_BREAKPOINTS)
-        : markPrefixThenTail(input, extra, OPENAI_MAX_EXPLICIT_BREAKPOINTS);
-  } else if (opts?.cacheControl && opts.provider === "openrouter") {
-    // OpenRouter's Responses API exposes prompt_cache_breakpoint and
-    // translates it to a provider-specific breakpoint when needed. The
-    // Anthropic cache_control shape is not exposed inside Responses input.
-    body.input = markPrefixThenTail(input, { prompt_cache_breakpoint: { mode: "explicit" as const } });
+    body.input = markPrefixThenTail(input, extra, OPENAI_MAX_EXPLICIT_BREAKPOINTS);
   }
   if (opts?.reasoningEffort || opts?.reasoningContext) {
     body.reasoning = {
