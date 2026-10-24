@@ -122,6 +122,14 @@ describe("TerminalRosterStore durable save", () => {
     expect((await loadRosterFile(path)).entries).toEqual([{ id: "term-2", type: "shell", cli: "codex", cwd: "/tmp" }]);
   });
 
+  it("round trips an external CLI tab's conversation id", async () => {
+    const path = await preparePath();
+    const store = openStore();
+    store.save(path, [{ ...agent("term-2"), type: "shell", externalCli: "claude", externalSessionId: "8f2c-41", shellPath: "/bin/claude" }], []);
+    await store.drain();
+    expect((await loadRosterFile(path)).entries).toEqual([{ id: "term-2", type: "shell", cli: "claude", cliSession: "8f2c-41", cwd: "/tmp" }]);
+  });
+
   it("refuses an oversized malformed on-disk file as present and sets it aside", async () => {
     const path = await preparePath();
     await mkdir(dirname(path), { recursive: true });

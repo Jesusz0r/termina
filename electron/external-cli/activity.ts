@@ -111,8 +111,13 @@ function normalizedHook(record: Record<string, unknown>): Record<string, unknown
   const type = textField(record, "type", "notification_type", "notificationType");
   const response = record.tool_response ?? record.toolResponse ?? record.result;
   const error = typeof record.error === "string" ? record.error : undefined;
+  // Each CLI names its conversation differently; session.ts picks the field.
+  const sessionId = textField(record, "session_id");
+  const camelSessionId = textField(record, "sessionId");
   return {
     hook_event_name: event,
+    ...(sessionId ? { session_id: sessionId } : {}),
+    ...(camelSessionId ? { sessionId: camelSessionId } : {}),
     ...(name ? { tool_name: name } : {}),
     ...(id ? { tool_use_id: id } : {}),
     ...(type ? { type } : {}),
@@ -160,8 +165,12 @@ function scannedHook(head: string, tail: string): Record<string, unknown> | null
   const error = fieldAny(tail, ["error"]) ?? fieldAny(head, ["error"]);
   const stepIdx = stepIndex(head) ?? stepIndex(tail);
   const response = responseFrom(tail);
+  const session_id = fieldAny(head, ["session_id"]) ?? fieldAny(tail, ["session_id"]);
+  const sessionId = fieldAny(head, ["sessionId"]) ?? fieldAny(tail, ["sessionId"]);
   return normalizedHook({
     hook_event_name: event,
+    ...(session_id ? { session_id } : {}),
+    ...(sessionId ? { sessionId } : {}),
     ...(tool_name ? { tool_name } : {}),
     ...(tool_use_id ? { tool_use_id } : {}),
     ...(stepIdx !== undefined ? { stepIdx } : {}),

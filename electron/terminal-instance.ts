@@ -36,6 +36,8 @@ export class AgentTerminalInstance {
   externalCli?: ExternalCli;
   /** Children of this PTY may report hook activity, including a CLI started in a shell. */
   observesExternalHooks = false;
+  /** The external CLI's own conversation id, from its hooks. Restore resumes it. */
+  externalSessionId: string | null = null;
   externalActivitySeq = 0;
   /** Persist this tab in the project roster (user terminals, not dispatch or candidates). */
   persist = true;

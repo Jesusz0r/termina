@@ -5,6 +5,7 @@
 // Use .ts so the source harness can load this module with strip-types.
 import { isCoreSessionId } from "../agent-core/session.ts";
 import { isRecord } from "../shared/guards.ts";
+import { isExternalSessionId } from "./external-cli/session.ts";
 import { DISPATCH_OUTCOMES, EXTERNAL_CLIS, type ExternalCli, type PlanTask, type VerifyInfo } from "../shared/types.ts";
 import { parseStoredVerify, parseStoredVerifyOutput } from "./main/verify-source.ts";
 import { parsePlanTaskCandidate } from "./plan-board.ts";
@@ -27,6 +28,8 @@ export type TerminalRosterEntry = {
   shell?: string;
   /** User-launched CLI, reopened through its hook-aware launch path. */
   cli?: ExternalCli;
+  /** That CLI's conversation id, resumed on restore. */
+  cliSession?: string;
   /** Directory the shell was in when the roster was saved. */
   cwd?: string;
   sessionId?: string | null;
@@ -110,6 +113,7 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
       const cli = EXTERNAL_CLIS.find((cli) => cli === rec.cli);
       if (!cli) continue;
       entry.cli = cli;
+      if (isExternalSessionId(rec.cliSession)) entry.cliSession = rec.cliSession;
     }
     if (rec.type === "shell" && typeof rec.shell === "string" && isAbsPath(rec.shell)) entry.shell = rec.shell;
     if (rec.type === "shell" && typeof rec.cwd === "string" && isAbsPath(rec.cwd)) entry.cwd = rec.cwd;

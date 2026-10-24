@@ -29,6 +29,7 @@ export interface RosterTerminal {
   readonly type: "agent" | "shell";
   readonly shellPath?: string;
   readonly externalCli?: ExternalCli;
+  readonly externalSessionId?: string | null;
   readonly cwd: string;
   readonly sessionId: string | null;
   readonly sessionFile: string | null;
@@ -124,6 +125,7 @@ export class TerminalRosterStore {
     if (inst.type === "agent") entry.engine = "core";
     if (inst.type === "shell" && inst.externalCli) {
       entry.cli = inst.externalCli;
+      if (inst.externalSessionId) entry.cliSession = inst.externalSessionId;
     }
     else if (inst.type === "shell" && inst.shellPath) entry.shell = inst.shellPath;
     if (inst.type === "shell" && isRosterShellCwd(inst.cwd)) entry.cwd = inst.cwd;

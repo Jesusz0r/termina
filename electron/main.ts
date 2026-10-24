@@ -79,6 +79,7 @@ import {
 import { AppPreferencesStore } from "./preferences.js";
 import { filterAgentEnvironment } from "./agent-env.js";
 import { hookActivitySignals, observeHookWire } from "./external-cli/activity.js";
+import { externalCliResumeArgs, hookSessionId } from "./external-cli/session.js";
 import { HookServer, hookSocketPath, type HookMessage } from "./external-cli/hook-server.js";
 import { hookCommand, resolveHookNode, writeHookScript } from "./external-cli/hook-script.js";
 import { externalCliLaunch, prepareExternalCli, prepareInstalledExternalClis } from "./external-cli/prepare.js";
@@ -2950,6 +2951,7 @@ class TerminaApp {
           engine: "core",
           shell: rec.shell,
           cli: rec.cli,
+          cliSession: rec.cliSession,
           projectId: project.id,
           workspaceId: this.primaryWorkspace(project)?.id,
           persist: true,
@@ -3231,6 +3233,8 @@ class TerminaApp {
       model?: string | null;
       /** Original Codex TUI. Not the core engine. */
       cli?: ExternalCli;
+      /** That CLI's saved conversation, resumed when the CLI supports it. */
+      cliSession?: string;
       /** Internal strict dispatch fence, checked again immediately before PTY spawn. */
       spawnGuard?: () => void;
     },
@@ -3268,6 +3272,7 @@ class TerminaApp {
     let env: Record<string, string | undefined>;
     let sessionId = persist ? opts?.resume?.sessionId ?? null : null;
     let sessionFile = persist ? opts?.resume?.sessionFile ?? null : null;
+    let externalSessionId: string | null = null;
     if (opts?.launch) {
       // A worldline candidate: the sandbox wraps the core binary.
       cmd = opts.launch.cmd;
@@ -3286,8 +3291,10 @@ class TerminaApp {
       const command = hookCommand(nodePath, scriptPath);
       const prepared = await prepareExternalCli(externalCli, command, { userData: this.userDataDir });
       opts?.spawnGuard?.();
+      const resumeArgs = externalCliResumeArgs(externalCli, opts?.cliSession);
+      if (resumeArgs.length > 0) externalSessionId = opts!.cliSession!;
       cmd = bin;
-      args = prepared.args;
+      args = [...prepared.args, ...resumeArgs];
       shellName = spec.label;
       shellPath = bin;
       env = {
@@ -3427,6 +3434,7 @@ class TerminaApp {
           created.sessionFile = sessionFile;
           if (type === "shell") created.observesExternalHooks = true;
           if (externalCli) created.externalCli = externalCli;
+          created.externalSessionId = externalSessionId;
           if (type === "agent") created.engine = "core";
           if (type === "agent" && !opts?.launch) {
             const provider = env.TERMINA_CORE_PROVIDER?.trim() ?? "";
@@ -7103,6 +7111,16 @@ class TerminaApp {
       const observed = observeHookWire(message);
       for (const signal of hookActivitySignals(cli, observed, ++inst.externalActivitySeq, at)) {
         this.foldActivity(inst, signal);
+      }
+      // Only a tab launched as this CLI reopens it; a CLI typed into a shell
+      // stays a shell on restore, and another CLI run as a tool inside the tab
+      // reports its own conversation. /clear or a resume picker can switch ids.
+      const sessionId = inst.externalCli && message.cli === inst.externalCli
+        ? hookSessionId(inst.externalCli, observed) : null;
+      if (sessionId && sessionId !== inst.externalSessionId) {
+        inst.externalSessionId = sessionId;
+        const owner = this.projectOfTerminal(inst.id);
+        if (inst.persist && owner && !this.projectIsSwitching(owner.id)) this.saveTerminalRoster(owner);
       }
     } catch {
       /* A bad hook must not throw out of the socket server. */
