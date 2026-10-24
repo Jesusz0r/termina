@@ -116,6 +116,7 @@ import {
 } from "./terminal-drop.js";
 import type { TerminalRosterEntry } from "./terminal-roster.js";
 import { rosterFilePath, type RosterTerminal } from "./roster-store.js";
+import { ProjectKeyRegistry } from "./project-keys.js";
 import { processCwd } from "./process-cwd.js";
 import { terminalWebUrl } from "../shared/terminal-link.js";
 import { AgentTerminalInstance } from "./terminal-instance.js";
@@ -150,7 +151,6 @@ import {
   pathInside,
   primaryWorkspaceOf,
   sameUserPath,
-  sanitizeSessionDir,
 } from "./main/project-workspace.js";
 import { isPdfPreviewUrl, previewContentType, previewKind } from "../shared/preview-media.js";
 import { decodeEditorText, readEditorFile } from "./main/editor-file.js";
@@ -466,6 +466,8 @@ interface ProjectState {
   activationGeneration: number;
   /** Roster entries that failed to spawn this session. Keep them on disk so a later launch can retry. */
   unrestoredTerminals: TerminalRosterEntry[];
+  /** Roster, session-dir and mine-file name (ProjectKeyRegistry). */
+  sessionKey: string;
 }
 
 /** Env vars the agent treats as a provider credential (see agent-core providers). */
@@ -805,6 +807,7 @@ class TerminaApp {
   private retainedSessionRoot = join(this.userDataDir, "retained-sessions");
   private sessionRetention = new SessionRetentionOwner(this.retainedSessionRoot);
   private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
+  private projectKeys = new ProjectKeyRegistry(join(this.userDataDir, "project-keys.json"));
   private editorDrafts = new EditorDraftStore(join(this.userDataDir, "editor-drafts"));
   private editorDraftSession = new EditorDraftSession(this.editorDrafts);
   private preferences: AppPreferences = defaultAppPreferences();
@@ -2817,7 +2820,7 @@ class TerminaApp {
 
   private async coreProjectSessionDir(cwd: string): Promise<string> {
     const [root, project] = await Promise.all([this.canonicalPath(this.coreSessionRoot()), this.canonicalPath(cwd)]);
-    return join(root, sanitizeSessionDir(project));
+    return join(root, await this.projectKeys.keyFor(project));
   }
 
   private async coreSessionFile(sessionId: string, cwd: string): Promise<string> {
@@ -2857,7 +2860,7 @@ class TerminaApp {
       live.push(inst);
     }
     this.runtime.saveRoster(
-      rosterFilePath(this.userDataDir, sanitizeSessionDir(project.canonicalRoot)),
+      rosterFilePath(this.userDataDir, project.sessionKey),
       live,
       project.unrestoredTerminals,
     );
@@ -2923,7 +2926,7 @@ class TerminaApp {
   }
 
   private async restoreProjectTerminals(project: ProjectState): Promise<void> {
-    const loaded = await this.runtime.loadRoster(rosterFilePath(this.userDataDir, sanitizeSessionDir(project.canonicalRoot)));
+    const loaded = await this.runtime.loadRoster(rosterFilePath(this.userDataDir, project.sessionKey));
     if (loaded.entries.length === 0) {
       // Only a genuinely new project gets a default terminal. An existing
       // empty roster is the durable result of closing the project's last tab.
@@ -4102,7 +4105,7 @@ class TerminaApp {
     const query = rawQuery.trim().slice(0, MAX_SESSION_SEARCH_QUERY);
     if (!project || !cwd || query.length < 2) return { hits: [] };
     const projectCwd = await this.canonicalPath(cwd);
-    const key = sanitizeSessionDir(projectCwd);
+    const key = await this.projectKeys.keyFor(projectCwd);
     const coreDir = join(this.coreSessionRoot(), key);
     const seq = ++this.searchSessionsSeq;
     const stale = (): boolean => seq !== this.searchSessionsSeq || this.disposed;
@@ -4910,7 +4913,7 @@ class TerminaApp {
   /** The persisted marks file for one project. */
   private async mineFilePath(project: ProjectState): Promise<string> {
     const cwd = await this.canonicalPath(project.cwd);
-    return join(this.eventsDir, `mine-${sanitizeSessionDir(cwd)}.json`);
+    return join(this.eventsDir, `mine-${await this.projectKeys.keyFor(cwd)}.json`);
   }
 
   /** Load the marks saved for one project (restart persistence). */
@@ -7769,6 +7772,7 @@ class TerminaApp {
       // no half-open tab, and the restored bytes must not attribute to a user
       // edit.
       await recoverPromotionJournals(this.worldsRoot, { primaryRoot: canonicalRoot });
+      const sessionKey = await this.projectKeys.keyFor(canonicalRoot);
       const project: ProjectState = {
         id,
         cwd,
@@ -7782,6 +7786,7 @@ class TerminaApp {
         worldlines: null,
         terminalIds: new Set(),
         unrestoredTerminals: [],
+        sessionKey,
         activationGeneration: 0,
       };
       this.projects.set(id, project);

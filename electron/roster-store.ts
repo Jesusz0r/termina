@@ -45,7 +45,7 @@ export interface TerminalRosterHost {
   rosterSaveFailed?(message: string): void;
 }
 
-/** Roster file for a project session key (see sanitizeSessionDir in main). */
+/** Roster file for a project session key (see ProjectKeyRegistry). */
 export function rosterFilePath(userDataDir: string, sessionKey: string): string {
   return join(userDataDir, "terminal-rosters", `${sessionKey}.json`);
 }

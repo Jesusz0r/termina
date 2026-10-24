@@ -57,7 +57,8 @@ function fixture() {
 describe("user terminal creation", () => {
   it("uses the same canonical session root for aliases and native promotion", async () => {
     const context = { coreSessionRoot: () => "/var/app/agent-sessions",
-      canonicalPath: async (path: string) => path.replace(/^\/var\//, "/private/var/") };
+      canonicalPath: async (path: string) => path.replace(/^\/var\//, "/private/var/"),
+      projectKeys: { keyFor: async (root: string) => sanitizeSessionDir(root) } };
     expect(await sessionDirectory.call(context, "/var/project")).toBe(
       join("/private/var/app/agent-sessions", sanitizeSessionDir("/private/var/project")));
   });
