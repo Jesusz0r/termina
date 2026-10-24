@@ -9816,6 +9816,9 @@ class TerminaApp {
         console.warn(`[main] could not restore project ${root}: ${(err as Error).message}`);
       }
     };
+    // Each open persists the then-open list and focus. Read the stored
+    // session once, before the first open rewrites it.
+    const { openProjects, activeProject } = this.preferences;
     try {
       if (initialCwd) {
         if (process.env.TERMINA_INITIAL_CWD && !cliTarget) {
@@ -9823,7 +9826,7 @@ class TerminaApp {
         } else {
           const canonicalInitial = await this.canonicalPath(initialCwd);
           const stored: { root: string; canonical: string }[] = [];
-          for (const root of this.preferences.openProjects) {
+          for (const root of openProjects) {
             try {
               if (!(await stat(root)).isDirectory()) continue;
               stored.push({ root, canonical: await this.canonicalPath(root) });
@@ -9852,7 +9855,7 @@ class TerminaApp {
         // Missing or non-directory paths are skipped: they may be unmounted
         // volumes or hand-edited entries. Tabs reopen in stored order; the
         // stored focus is applied afterwards so order and focus stay stable.
-        for (const root of this.preferences.openProjects) {
+        for (const root of openProjects) {
           try {
             if (!(await stat(root)).isDirectory()) continue;
           } catch {
@@ -9860,7 +9863,7 @@ class TerminaApp {
           }
           await open(root);
         }
-        const focusRoot = this.preferences.activeProject;
+        const focusRoot = activeProject;
         if (focusRoot) {
           const focus = [...this.projects.values()].find((p) => p.canonicalRoot === focusRoot);
           if (focus && focus.id !== this.activeProjectId) {

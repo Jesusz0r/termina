@@ -192,3 +192,30 @@ describe("project open", () => {
     expect(app.switchingProjects.size).toBe(0);
   });
 });
+
+describe("initial restoration focus", () => {
+  it("refocuses the stored project after each open rewrote the saved focus", async () => {
+    const restore = new Function("process", "stat", restoreCode)(
+      { env: {} },
+      async () => ({ isDirectory: () => true }),
+    );
+    const app = {
+      preferences: { openProjects: ["/a", "/b", "/c"], activeProject: "/a" },
+      projects: new Map<string, { id: string; canonicalRoot: string }>(),
+      activeProjectId: null as string | null,
+      canonicalPath: async (path: string) => path,
+      // Like persistOpenProjects, every open stores itself as the focus.
+      openProject: async (root: string) => {
+        const id = `p${app.projects.size + 1}`;
+        app.projects.set(id, { id, canonicalRoot: root });
+        app.activeProjectId = id;
+        app.preferences = { openProjects: [...app.projects.values()].map((p) => p.canonicalRoot), activeProject: root };
+      },
+      activateProject: vi.fn(async (id: string) => { app.activeProjectId = id; }),
+      sendInstances: vi.fn(),
+    };
+    await restore.call(app, null, null);
+    expect(app.activateProject).toHaveBeenCalledWith("p1");
+    expect(app.activeProjectId).toBe("p1");
+  });
+});
