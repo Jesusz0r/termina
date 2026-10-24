@@ -110,7 +110,16 @@ describe("Codex hook socket", () => {
     try {
       await Promise.all(clients.map((client) => once(client, "connect")));
       clients[1]!.write('{"v":1');
-      const disconnected = clients.map((client) => once(client, "close", { signal: AbortSignal.timeout(1000) }));
+      // Linux resets a socket closed with unread input: the partial client
+      // sees ECONNRESET before close. Either way it is disconnected.
+      for (const client of clients) client.on("error", () => undefined);
+      const disconnected = clients.map((client) => new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("client stayed connected")), 1000);
+        client.once("close", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      }));
       await Promise.all([server.close(), ...disconnected]);
       expect(received).toEqual([]);
       expect(server.accept(JSON.stringify({ v: 1, token, terminalId: "term-1", generation: 1, payload: "{}" }))).toBeNull();
