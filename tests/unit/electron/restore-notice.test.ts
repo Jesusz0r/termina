@@ -13,7 +13,7 @@ function method(name: string): string {
 }
 
 function fixture(response: number) {
-  const dialog = { showMessageBox: vi.fn(async () => ({ response })) };
+  const dialog = { showMessageBox: vi.fn(async (_options: Record<string, unknown>) => ({ response })) };
   const notice = new Function("dialog", method("noteRosterRestoreProblem"))(dialog);
   const close = new Function(method("closeUserTerminal"))();
   const failed = [{ id: "term-3", type: "agent" }, { id: "term-4", type: "shell" }];
