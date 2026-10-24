@@ -64,6 +64,7 @@ function harness() {
     requestTerminalInterrupt: method("requestTerminalInterrupt", bindings),
     confirmUnsavedEditorBuffers: vi.fn(async () => ({ ok: true, discardDraftTokens: ["draft-token"] })),
     discardEditorDrafts: vi.fn(async () => undefined),
+    revealWindowForSheet: () => {},
   };
   return { app, first, second, terminals, projects, children, showMessageBox };
 }

@@ -5227,6 +5227,7 @@ class TerminaApp {
       const win = this.win;
       if (!win || win.isDestroyed()) return { ok: false, error: "confirmation is unavailable" };
       try {
+        this.revealWindowForSheet();
         const result = await dialog.showMessageBox(win, options);
         if (result.response !== 0) return { ok: false, cancelled: true };
       } catch (error) {
@@ -5272,6 +5273,7 @@ class TerminaApp {
       const win = this.win;
       if (!win || win.isDestroyed()) return { ok: false, error: "confirmation is unavailable" };
       try {
+        this.revealWindowForSheet();
         const result = await dialog.showMessageBox(win, options);
         if (result.response !== 0) return { ok: false, cancelled: true };
       } catch (error) {
@@ -7640,6 +7642,7 @@ class TerminaApp {
       const options = closeConfirmation(scope, impact.terminals, impact.candidates);
       if (!options) return true;
       if (win?.isDestroyed()) return false;
+      this.revealWindowForSheet();
       const result = await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options));
       if (result.response !== 0 || !current()) return false;
       const latest = await collect();
@@ -7660,7 +7663,22 @@ class TerminaApp {
     }
   }
 
+  /** AppKit attaches a sheet only while this window is ordered front on its space. */
+  revealWindowForSheet(): void {
+    if (E2E_HIDDEN_WINDOW) return;
+    const win = this.win;
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  }
+
   private openFolder(): Promise<{ cwd: string } | { cancelled: true }> {
+    // A fullscreen window that is not the active space starts the open panel
+    // and never presents the sheet, and that promise then swallows later
+    // Open clicks. Order the window front first; a repeat Open reveals the
+    // sheet already in flight.
+    this.revealWindowForSheet();
     if (this.folderOpenPromise) return this.folderOpenPromise;
     const promise = this.performOpenFolder();
     this.folderOpenPromise = promise;
@@ -10248,7 +10266,12 @@ app.on("activate", () => {
 app.on("before-quit", (event) => {
   if (cleanupComplete) return;
   event.preventDefault();
-  if (cleanupStarted) return;
+  if (cleanupStarted) {
+    // The first Command+Q is still confirming. Order the window front so
+    // its sheet is visible instead of swallowing this attempt.
+    if (!quitConfirmed) appState.revealWindowForSheet();
+    return;
+  }
   // Fixture shutdown skips interaction, not native-resource disposal.
   if (quitConfirmed || process.env.NODE_ENV === "test") {
     cleanupStarted = true;
@@ -10264,6 +10287,7 @@ app.on("before-quit", (event) => {
     return;
   }
   cleanupStarted = true;
+  appState.revealWindowForSheet();
   void appState
     .confirmClose()
     .catch(() => false)
