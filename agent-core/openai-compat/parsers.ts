@@ -63,8 +63,9 @@ export function parseCompletionStreamEvent(value: unknown): CompletionStreamEven
     if (typeof content === "string" && content) { thinking = content; break; }
   }
   const rawCalls = delta.tool_calls;
+  // Relays serialize the absent optional field as null on text/reasoning deltas.
   const toolCalls: ToolDeltaResult[] = Array.isArray(rawCalls) ? rawCalls.map(parseCompletionToolDelta)
-    : rawCalls === undefined ? [] : [{ error: TOOL_CALL_SHAPE_ERROR }];
+    : rawCalls === undefined || rawCalls === null ? [] : [{ error: TOOL_CALL_SHAPE_ERROR }];
   return {
     text, thinking, finishReason: typeof finish === "string" && finish ? finish : null,
     usage: isRecord(rawUsage) ? rawUsage : undefined, toolCalls,

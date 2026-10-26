@@ -17,6 +17,27 @@ describe("provider JSON parsers", () => {
     }
   });
 
+  it("treats a null tool_calls delta as absent and rejects other non-array shapes", () => {
+    // opencode-go/deepseek-v4.1-flash relay shape on reasoning/text deltas.
+    const nullCalls = { choices: [{ index: 0, finish_reason: null, delta: { role: null, content: "", reasoning_content: "We", tool_calls: null } }] };
+    expect(parseCompletionStreamEvent(nullCalls).toolCalls).toEqual([]);
+    for (const calls of [{}, "call", 0, false]) {
+      const parsed = parseCompletionStreamEvent({ choices: [{ delta: { tool_calls: calls } }] });
+      expect(parsed.toolCalls).toEqual([{ error: "provider protocol error: malformed tool call" }]);
+    }
+    const result = completionResultFromEvents([
+      nullCalls,
+      { choices: [{ delta: { content: "", tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "bash", arguments: "" } }] } }] },
+      { choices: [{ delta: { content: "", tool_calls: [{ index: 0, function: { arguments: "{\"command\":\"ls\"}" } }] } }] },
+      { choices: [{ finish_reason: "tool_calls", delta: { content: "", reasoning_content: null, tool_calls: null } }] },
+    ], () => {}, 0);
+    expect(result.error).toBeUndefined();
+    expect(result.blocks).toEqual([
+      { type: "thinking", thinking: "We" },
+      { type: "tool_use", id: "call-1", name: "bash", input: { command: "ls" } },
+    ]);
+  });
+
   it("rejects malformed JSON and non-object arguments in the argument parser", () => {
     for (const raw of ["{", "[]", "null", '"text"', "42"]) {
       expect(decodeToolCallArguments(raw, true)).toEqual({ error: "provider protocol error: tool call arguments must be a JSON object" });
