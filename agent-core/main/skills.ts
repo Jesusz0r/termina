@@ -177,14 +177,14 @@ function capParagraph(md: string, max: number): { text: string; omitted: number 
   return { text, omitted: md.length - text.length };
 }
 
-export function formatProjectInstructions(md: string): string {
+export function formatProjectInstructions(md: string): { text: string; omitted: number } {
   const { text, omitted } = capParagraph(md, PROJECT_AGENTS_CAP);
   let body = text;
   if (omitted > 0) body += `\n<!-- AGENTS.md truncated; ${omitted} chars remain; read AGENTS.md with read_file -->`;
-  return `<project-instructions>\n${body}\n</project-instructions>`;
+  return { text: `<project-instructions>\n${body}\n</project-instructions>`, omitted };
 }
 
-export function formatUserInstructions(md: string, absPath: string): string {
+export function formatUserInstructions(md: string, absPath: string): { text: string; omitted: number } {
   const { text, omitted } = capParagraph(md, USER_AGENTS_CAP);
   let body = text;
   if (omitted > 0) {
@@ -192,5 +192,5 @@ export function formatUserInstructions(md: string, absPath: string): string {
     // "--" would otherwise close the comment early.
     body += `\n<!-- AGENTS.md truncated; ${omitted} chars remain -->\nread_file ${JSON.stringify(absPath)}`;
   }
-  return `<user-instructions>\n${body}\n</user-instructions>`;
+  return { text: `<user-instructions>\n${body}\n</user-instructions>`, omitted };
 }

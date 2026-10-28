@@ -1241,7 +1241,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       roots: skillDirs,
       capBytes: SKILL_XML_CAP,
       capped: scanned.capped,
-    });
+    }).text;
     check("XML-special name escaped", xml.includes("a&amp;b") && xml.includes("x&lt;y"));
     const projectSkillDir = join(root, ".agents", "skills");
     const projectSkillPath = realpathSync(projectSkillDir);
@@ -1265,13 +1265,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     symlinkSync(join(outside, "AGENTS.md"), join(root, "pkg", "escaped.md"));
     check("nested pointer skip at cwd file", nestedAgentsPointer(root, join(root, "ok.txt")) === null);
     
-    check("project AGENTS.md under cap has no overflow", !formatProjectInstructions("# hi\n").includes("truncated"));
+    check("project AGENTS.md under cap has no overflow", !formatProjectInstructions("# hi\n").text.includes("truncated"));
     const longMd = `${"para\n\n".repeat(5)}${"x".repeat(30_000)}`;
-    const longAgents = formatProjectInstructions(longMd);
+    const longAgents = formatProjectInstructions(longMd).text;
     check("project AGENTS.md over cap overflow note", longAgents.includes("truncated") && longAgents.includes("read AGENTS.md with read_file"));
     check("project over cap does not claim omitted tail", !longAgents.includes("x".repeat(1000)));
-    check("user-global over cap names absolute path", formatUserInstructions("y".repeat(10_000), "/abs/AGENTS.md").includes("/abs/AGENTS.md"));
-    check("user-global under cap no overflow", !formatUserInstructions("short", "/abs/AGENTS.md").includes("truncated"));
+    check("user-global over cap names absolute path", formatUserInstructions("y".repeat(10_000), "/abs/AGENTS.md").text.includes("/abs/AGENTS.md"));
+    check("user-global under cap no overflow", !formatUserInstructions("short", "/abs/AGENTS.md").text.includes("truncated"));
     
     check("nested pointer on pkg file", (nestedAgentsPointer(root, join(root, "pkg", "src", "a.ts")) ?? "").includes("pkg/AGENTS.md"));
     check("nested pointer skip on AGENTS.md itself", nestedAgentsPointer(root, join(root, "pkg", "AGENTS.md")) === null);
@@ -1868,7 +1868,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     
     const dashPath = "/tmp/foo--bar/AGENTS.md";
-    const dashNote = formatUserInstructions("y".repeat(10_000), dashPath);
+    const dashNote = formatUserInstructions("y".repeat(10_000), dashPath).text;
     check("user overflow with -- in path stays comment-safe", dashNote.includes(JSON.stringify(dashPath)) && !dashNote.includes("foo--bar/AGENTS.md -->"));
     
     const listRoot = mkdtempSync(join(tmpdir(), "agent-core-list-"));

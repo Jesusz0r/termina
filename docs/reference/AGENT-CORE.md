@@ -473,6 +473,11 @@ usage row shows cumulative input/output tokens, cumulative
 cache-read share, estimated current context-window use, and the last priced
 main-model call. Typing `/` lists commands;
 Tab completes; arrows move the highlight. `/help` prints the same list.
+`/doctor` renders the frozen loaders' skill-index omission count, scan cap,
+and user/project instruction load/truncation state, plus the MCP client's
+latest connection failures. Failures expose only server names and bounded
+error codes, never connection notes, credentials, or environment values.
+The command does not rebuild the prefix, connect a server, or start a turn.
 Path-scoped rules use the same skill index. Add a `paths` field to a
 `SKILL.md` front matter, for example `paths: ["src/**/*.ts", "tests/**"]`.
 Use a single-line JSON array of up to 16 project-relative glob strings,

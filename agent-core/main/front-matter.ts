@@ -29,6 +29,13 @@ function readOptional(path: string): string | null {
   }
 }
 
+type InstructionLoad = "not loaded" | "loaded" | "truncated";
+
+export interface FrontMatterDiagnostics {
+  skills: { discovered: number; omitted: number; scanCapped: boolean };
+  instructions: { user: InstructionLoad; project: InstructionLoad };
+}
+
 /** Zone 1 identity. Do not ask in chat to edit ordinary project files.
  *  Host notes that name a file not to touch (Mine, sibling claims) still bind.
  *  Match text and tool-specific retry live on the tool
@@ -59,7 +66,7 @@ export function buildFrozenSystem(opts: {
   userAgentsPath: string | null;
   userSkillDir: string | null;
   probes?: boolean;
-}): { system: string; allow: Set<string>; skills: SkillIndexSkill[]; sectionBytes: Record<string, number> } {
+}): { system: string; allow: Set<string>; skills: SkillIndexSkill[]; sectionBytes: Record<string, number>; diagnostics: FrontMatterDiagnostics } {
   const root = freezeCwd(opts.cwd);
   const skillDirs: string[] = [];
   if (opts.userSkillDir) skillDirs.push(opts.userSkillDir);
@@ -84,6 +91,7 @@ export function buildFrozenSystem(opts: {
   // Count at the assembly boundary; parsing the final prompt would mistake
   // tag-like text inside user/project instructions for harness sections.
   const sectionBytes: Record<string, number> = {};
+  const instructions: FrontMatterDiagnostics["instructions"] = { user: "not loaded", project: "not loaded" };
   const append = (name: string, text: string): void => {
     parts.push(text);
     sectionBytes[name] = Buffer.byteLength(text, "utf8");
@@ -99,7 +107,9 @@ export function buildFrozenSystem(opts: {
       } catch {
         /* keep unresolved path */
       }
-      append("userInstructions", formatUserInstructions(userMd, abs));
+      const user = formatUserInstructions(userMd, abs);
+      append("userInstructions", user.text);
+      instructions.user = user.omitted > 0 ? "truncated" : "loaded";
     }
   }
   const skillXml = formatCompactSkillIndex(scanned.skills, {
@@ -107,51 +117,53 @@ export function buildFrozenSystem(opts: {
     capBytes: SKILL_XML_CAP,
     capped: scanned.capped,
   });
-  if (skillXml) append("skillIndex", skillXml);
+  if (skillXml.text) append("skillIndex", skillXml.text);
   const projPath = join(root, "AGENTS.md");
   try {
     if (existsSync(projPath) && underRoot(realpathSync(projPath), root)) {
       const proj = readOptional(projPath);
-      if (proj !== null) append("projectInstructions", formatProjectInstructions(proj));
+      if (proj !== null) {
+        const project = formatProjectInstructions(proj);
+        append("projectInstructions", project.text);
+        instructions.project = project.omitted > 0 ? "truncated" : "loaded";
+      }
     }
   } catch {
     /* omit escaped project instructions */
   }
   sectionBytes.separators = Math.max(0, parts.length - 1) * 2;
-  return { system: parts.join("\n\n"), allow, skills: scanned.skills, sectionBytes };
+  return { system: parts.join("\n\n"), allow, skills: scanned.skills, sectionBytes,
+    diagnostics: { instructions, skills: { discovered: scanned.skills.length, omitted: skillXml.omitted, scanCapped: scanned.capped } } };
 }
 
 interface FrontMatter {
   systemPrompt: () => string;
   readonly allowPaths: Set<string>;
   readonly skills: readonly SkillIndexSkill[];
+  readonly diagnostics: FrontMatterDiagnostics;
 }
 
 export function createFrontMatter(opts: { canonicalCwd: string }): FrontMatter {
-  let frozenSystem: string | null = null;
-  let allowPaths = new Set<string>();
-  let frozenSkills: readonly SkillIndexSkill[] = [];
-  function freezeFrontMatter(): string {
-    if (frozenSystem !== null) return frozenSystem;
-    const built = buildFrozenSystem({
+  let frozen: ReturnType<typeof buildFrozenSystem> | null = null;
+  function freezeFrontMatter(): ReturnType<typeof buildFrozenSystem> {
+    frozen ??= buildFrozenSystem({
       cwd: opts.canonicalCwd,
       userAgentsPath: join(homedir(), ".agents", "AGENTS.md"),
       userSkillDir: join(homedir(), ".agents", "skills"),
       probes: true,
     });
-    allowPaths = built.allow;
-    frozenSkills = built.skills;
-    frozenSystem = built.system;
-    return frozenSystem;
+    return frozen;
   }
   return {
-    systemPrompt: () => freezeFrontMatter(),
+    systemPrompt: () => freezeFrontMatter().system,
     get allowPaths() {
-      return allowPaths;
+      return freezeFrontMatter().allow;
     },
     get skills() {
-      freezeFrontMatter();
-      return frozenSkills;
+      return freezeFrontMatter().skills;
+    },
+    get diagnostics() {
+      return freezeFrontMatter().diagnostics;
     },
   };
 }

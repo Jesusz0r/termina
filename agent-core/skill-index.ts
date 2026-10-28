@@ -239,11 +239,11 @@ function largestFittingTriggerIndex(
 export function formatSkillIndex(
   skills: readonly SkillIndexSkill[],
   opts: SkillIndexOptions = {},
-): string {
+): { text: string; omitted: number } {
   const maxBytes = capBytes(opts.capBytes);
-  if (maxBytes === 0) return "";
+  if (maxBytes === 0) return { text: "", omitted: skills.length };
   const groups = groupedSkills(skills, rootsFor(opts.roots ?? []));
-  if (groups.length === 0 && !opts.capped) return "";
+  if (groups.length === 0 && !opts.capped) return { text: "", omitted: 0 };
   const maxTriggerChars = Number.isFinite(opts.maxTriggerChars)
     ? Math.max(0, Math.floor(Number(opts.maxTriggerChars)))
     : DEFAULT_SKILL_TRIGGER_CHARS;
@@ -255,9 +255,9 @@ export function formatSkillIndex(
     renderCompactRoots(groups, false, Boolean(opts.capped)),
   ];
   for (const candidate of candidates) {
-    if (utf8Bytes(candidate) <= maxBytes) return candidate;
+    if (utf8Bytes(candidate) <= maxBytes) return { text: candidate, omitted: 0 };
   }
 
   const minimal = "<skill-index/>";
-  return utf8Bytes(minimal) <= maxBytes ? minimal : "";
+  return { text: utf8Bytes(minimal) <= maxBytes ? minimal : "", omitted: skills.length };
 }

@@ -14,6 +14,7 @@ import { createMcpContinuation, mcpErrorResult, normalizeMcpCallResult } from ".
 import type { McpCallResult, McpCancellationScope } from "./results.ts";
 import { normalizeMcpDiscovery, selectMcpTools } from "./tools.ts";
 import type { McpClientTool } from "./tools.ts";
+import { errorCode } from "../../shared/guards.ts";
 
 export class McpTransportError extends Error {
   readonly why: "timeout" | "interrupted";
@@ -37,12 +38,24 @@ export class McpHttpStatusError extends Error {
 
 export type McpServerState = "connected" | "failed" | "needs-authentication";
 
+const MCP_NODE_ERROR_CODES = ["ENOENT", "EACCES", "EPERM", "ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EPIPE"] as const;
+type McpFailureCode = typeof MCP_NODE_ERROR_CODES[number] | `HTTP_${number}`
+  | "MCP_TIMEOUT" | "MCP_INTERRUPTED" | "MCP_INVALID_URL" | "MCP_HOST_UNAVAILABLE" | "MCP_CWD_OUTSIDE_PROJECT" | "MCP_CONNECT_FAILED";
+type McpConnectionStatus = { state: "connected" }
+  | { state: Exclude<McpServerState, "connected">; errorCode: McpFailureCode };
+
+/** Messages, stderr and arbitrary error codes can contain credentials. */
+function connectionFailureCode(error: unknown): McpFailureCode {
+  if (error instanceof McpHttpStatusError) return `HTTP_${error.status}`;
+  if (error instanceof McpTransportError) return error.why === "timeout" ? "MCP_TIMEOUT" : "MCP_INTERRUPTED";
+  const code = errorCode(error);
+  return MCP_NODE_ERROR_CODES.find(known => known === code) ?? "MCP_CONNECT_FAILED";
+}
 
 export type McpServerReport = {
   name: string;
-  state: McpServerState;
   tools: number;
-};
+} & McpConnectionStatus;
 
 
 export type McpSession = {
@@ -512,24 +525,23 @@ export async function startMcp(
     proc: McpConn | null;
     tools: McpClientTool[];
     note: string;
-    state: McpServerState;
-  }> => {
+  } & McpConnectionStatus> => {
     if (cfg.url) {
       const bad = mcpHttpUrlError(cfg.url);
       if (bad) {
-        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${bad}`, state: "failed" };
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${bad}`, state: "failed", errorCode: "MCP_INVALID_URL" };
       }
       let hopHost: string;
       try {
         hopHost = new URL(cfg.url).hostname;
       } catch {
-        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: error: invalid URL`, state: "failed" };
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: error: invalid URL`, state: "failed", errorCode: "MCP_INVALID_URL" };
       }
       // Startup shares the handshake deadline: a stuck resolver must not
       // delay MCP setup past it, and late answers are ignored (#159).
       const resolved = await resolvedHostError(hopHost, { signal: AbortSignal.timeout(MCP_HANDSHAKE_MS) });
       if (resolved) {
-        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${resolved}`, state: "failed" };
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${resolved}`, state: "failed", errorCode: "MCP_HOST_UNAVAILABLE" };
       }
       const proc = new McpHttp(cfg.name, cfg.url, cfg.headers ?? {});
       try {
@@ -539,11 +551,11 @@ export async function startMcp(
         proc.kill();
         const why = err instanceof Error ? err.message : String(err);
         const state = err instanceof McpHttpStatusError && err.status === 401 ? "needs-authentication" : "failed";
-        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}`, state };
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}`, state, errorCode: connectionFailureCode(err) };
       }
     }
     const cwd = opts.confineCwd(cfg.cwd);
-    if (!cwd) return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: cwd is outside the project`, state: "failed" };
+    if (!cwd) return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: cwd is outside the project`, state: "failed", errorCode: "MCP_CWD_OUTSIDE_PROJECT" };
     const proc = new McpProcess(cfg.name);
     try {
       proc.start(cfg, cwd, mcpEnv(cfg.env));
@@ -553,13 +565,21 @@ export async function startMcp(
       proc.kill();
       const extra = proc.stderrTail();
       const why = err instanceof Error ? err.message : String(err);
-      return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}${extra ? ` (${extra.slice(0, 200)})` : ""}`, state: "failed" };
+      return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}${extra ? ` (${extra.slice(0, 200)})` : ""}`, state: "failed", errorCode: connectionFailureCode(err) };
     }
   };
 
   const servers: McpServerReport[] = [];
   const byPrefixed = new Map<string, { server: string; original: string }>();
   let tools: McpClientTool[] = [];
+
+  const recordServerReport = (row: Awaited<ReturnType<typeof connectOne>>): void => {
+    const index = servers.findIndex(item => item.name === row.cfg.name);
+    if (index >= 0) servers.splice(index, 1);
+    const report = { name: row.cfg.name, tools: row.tools.length };
+    servers.push(row.state === "connected" ? { ...report, state: row.state }
+      : { ...report, state: row.state, errorCode: row.errorCode });
+  };
 
   const refreshCatalog = (): void => {
     const normalized = normalizeMcpDiscovery(discovered);
@@ -588,6 +608,7 @@ export async function startMcp(
           fresh.proc?.kill();
           return null;
         }
+        recordServerReport(fresh);
         if (!fresh.proc) return null;
         const old = liveByServer.get(server);
         liveByServer.set(server, fresh.proc);
@@ -683,9 +704,7 @@ export async function startMcp(
         for (let i = discovered.length - 1; i >= 0; i -= 1) {
           if (discovered[i]?.server === cfg.name) discovered.splice(i, 1);
         }
-        const report = servers.findIndex((item) => item.name === cfg.name);
-        if (report >= 0) servers.splice(report, 1);
-        servers.push({ name: row.cfg.name, state: row.state, tools: row.tools.length });
+        recordServerReport(row);
         if (row.note) notes.push(row.note);
         if (row.proc) {
           procs.push(row.proc);

@@ -189,6 +189,11 @@ choice sticks: new tabs reopen on it (clamped to what each model supports). Type
 to pick a discovered skill (`~/.agents/skills`, then `.agents/skills` in the project);
 selecting one starts a turn that reads that skill and follows it. Ctrl+J inserts
 a newline; Enter submits. Paste keeps newlines. `/help` lists keys.
+`/doctor` reports how many skills were omitted from the frozen index, whether
+the skill scan was capped, whether user/project `AGENTS.md` was truncated, and
+the latest MCP connection failures by server name and error code. It reads the
+existing loader results without reconnecting or starting a model turn. It does
+not print instruction bodies, credentials, MCP environment values, or raw errors.
 Paste a screenshot (Cmd/Ctrl+V) to attach it to the next prompt — up to
 four images, about 4 MB each. The composer keeps that count above whatever
 you have already typed, and the status line shows it too.

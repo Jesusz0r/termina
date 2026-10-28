@@ -240,6 +240,7 @@ import { formatNetworkError, isRetryableNetworkError, retryAfter, retryNetworkAf
 import { planSidecarText, planSlashSubmit } from "./main/plan-slash.ts";
 import { planListPresent } from "../shared/plan-task.ts";
 import { parseSkillCommand, skillSlashSubmit } from "./main/skill-slash.ts";
+import { formatDoctor } from "./main/doctor.ts";
 import {
   SubagentRegistry,
   MAX_SUBAGENT_MESSAGE_CHARS,
@@ -5854,6 +5855,11 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
   }
   if (line === "/help") {
     printSlashHelp();
+    showPrompt();
+    return;
+  }
+  if (line === "/doctor") {
+    out(`${formatDoctor(frontMatter.diagnostics, mcpSession)}\n`);
     showPrompt();
     return;
   }

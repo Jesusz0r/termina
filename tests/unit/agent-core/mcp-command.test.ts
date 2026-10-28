@@ -18,7 +18,7 @@ describe("/mcp config", () => {
         off: { command: "npx", disabled: true },
       },
     }), [
-      { name: "docs", state: "needs-authentication", tools: 0 },
+      { name: "docs", state: "needs-authentication", tools: 0, errorCode: "HTTP_401" },
       { name: "local", state: "connected", tools: 2 },
     ]);
     expect(text).toContain("docs  needs authentication  http example.com  auth header");
