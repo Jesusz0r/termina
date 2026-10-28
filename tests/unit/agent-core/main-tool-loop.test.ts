@@ -133,6 +133,35 @@ function expectPaired(messages: Row[]): void {
 }
 
 describe("real tool loop regressions", () => {
+  it("attaches scoped rules only to matching file results and preserves the frozen request prefix", async () => {
+    await scenario(`
+      if (turn === 1) return [{ name: "read_file", input: { path: "other.txt" } }];
+      if (turn === 2) return [{ name: "read_file", input: { path: "file.txt" } }];
+      if (turn === 3) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "updated" } }];
+      if (turn === 4) return [{ name: "read_files", input: { paths: ["file.txt", "other.txt"] } }];
+      if (turn === 5) return [{ name: "write_file", input: { path: "new.txt", content: "new" } }];
+      if (turn === 6) return [{ name: "bash", input: { command: "test $(cat file.txt) = updated && test $(cat new.txt) = new" } }];
+      return [];
+    `, ({ messages, requests }) => {
+      const results = toolResults(messages);
+      expect(results).toHaveLength(6);
+      for (const index of [1, 2, 3, 4]) expect(results[index]!.content).toContain("SCOPED_RULE_BODY");
+      for (const index of [0, 5]) expect(results[index]!.content).not.toContain("SCOPED_RULE_BODY");
+      expect(results.every(result => result.is_error !== true)).toBe(true);
+      expect(requests).toHaveLength(7);
+      for (const request of requests) {
+        expect(request.instructions).toBe(requests[0]!.instructions);
+        expect(request.instructions).not.toContain("SCOPED_RULE_BODY");
+        expect(request.tools).toEqual(requests[0]!.tools);
+      }
+      expectPaired(messages);
+    }, 40_000, { "other.txt": "other" }, 'return "The edits were verified.";', ({ project }) => {
+      const directory = join(project, ".agents", "skills", "scoped");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "SKILL.md"), '---\nname: scoped\npaths: ["file.txt", "new.txt"]\n---\nSCOPED_RULE_BODY');
+    });
+  });
+
   it("addresses tool moments through persisted, paired results rather than unanswered assistant calls", async () => {
     await scenario(`
       if (turn === 1) return [{ name: "edit", id: "edit-moment", input: { path: "file.txt", old_text: "original", new_text: "updated" } }];

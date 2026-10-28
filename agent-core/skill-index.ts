@@ -14,6 +14,8 @@ export type SkillIndexSkill = {
   name: string;
   description: string;
   abs: string;
+  /** Project-relative globs for rule bodies attached to matching file-tool results. */
+  paths?: readonly string[];
 };
 
 type SkillIndexOptions = {

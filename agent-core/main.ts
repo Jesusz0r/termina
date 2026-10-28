@@ -171,6 +171,7 @@ import {
 } from "./host.ts";
 import {
   BoundedTextAccumulator,
+  genericToolText,
   logicalToolText,
   readBoundedResponseBody,
   utf8TextPrefix,
@@ -224,6 +225,7 @@ import {
   type ToolUse,
 } from "./main/tools.ts";
 import { createFrontMatter } from "./main/front-matter.ts";
+import { attachPathRules } from "./main/skills.ts";
 import { renderHistoryTranscript, type ContentBlock } from "./main/history-view.ts";
 import { shouldAutoOpenLogin } from "./main/login-hint.ts";
 import { buildCachedPrefix, stampHistoryCache, stripAnthropicCacheMarkers } from "./main/anthropic-cache.ts";
@@ -1691,11 +1693,12 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   }
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
-    return done(use, got);
+    return done(use, attachPathRules(canonicalCwd, frontMatter.skills, [use.input.path ?? ""], got));
   }
   if (use.name === "read_files") {
     const got = readProjectFiles(canonicalCwd, use.input, frontMatter.allowPaths);
-    return done(use, got);
+    const paths = Array.isArray(use.input.paths) ? use.input.paths.filter((path): path is string => typeof path === "string") : [];
+    return done(use, attachPathRules(canonicalCwd, frontMatter.skills, paths, got));
   }
   if (use.name === "write_file") {
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
@@ -1707,7 +1710,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
         if (blocked) return notExecuted(blocked);
       }
       const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
-      return done(use, got.content, got.isError);
+      return done(use, attachPathRules(canonicalCwd, frontMatter.skills, [use.input.path ?? ""], { ...genericToolText(got.content, got.isError), repro: reproFor(use) ?? null }));
     });
   }
   if (use.name === "edit") {
@@ -1726,7 +1729,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
         use.input.new_text ?? "",
         isReplaceAll(use.input.replace_all),
       );
-      return done(use, got.content, got.isError);
+      return done(use, attachPathRules(canonicalCwd, frontMatter.skills, [use.input.path ?? ""], { ...genericToolText(got.content, got.isError), repro: reproFor(use) ?? null }));
     });
   }
   if (use.name === "grep") {

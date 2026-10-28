@@ -3,24 +3,25 @@
  * AGENTS.md wrappers. The skill index itself is rendered by skill-index.ts.
  * Stateless between calls.
  */
-import { existsSync, readdirSync, realpathSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import type { SkillIndexSkill } from "../skill-index.ts";
-import { GREP_VISIT_CAP, classifyWalkPath, fileHasNul, readBoundedRegularFile, sortUtf8 } from "./files.ts";
+import { BoundedTextAccumulator, type ToolTextResult } from "../tool-output.ts";
+import { GREP_VISIT_CAP, classifyWalkPath, confinePath, fileHasNul, freezeCwd, matchGlob, posixRel, readBoundedRegularFile, sortUtf8 } from "./files.ts";
 
 type Skill = SkillIndexSkill;
 
 const USER_AGENTS_CAP = 8_192;
 const PROJECT_AGENTS_CAP = 24_576;
 export const SKILL_XML_CAP = 8_192;
+export const PATH_RULE_BYTES = 8_192;
+const MAX_PATH_RULE_PATTERNS = 16;
 
-function parseFrontmatter(text: string): Record<string, string> {
+function parseFrontmatter(text: string): { values: Record<string, string>; body: string } {
   const normalized = text.replace(/\r\n/g, "\n");
-  if (!normalized.startsWith("---")) return {};
-  const rest = normalized.startsWith("---\n") ? normalized.slice(normalized.indexOf("\n") + 1) : normalized.slice(3);
-  const end = rest.search(/\n---(?:\n|$)/);
-  if (end < 0) return {};
-  const block = rest.slice(0, end);
+  const match = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(normalized);
+  if (!match) return { values: {}, body: normalized };
+  const block = match[1]!;
   const out: Record<string, string> = {};
   for (const line of block.split("\n")) {
     const m = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
@@ -29,7 +30,21 @@ function parseFrontmatter(text: string): Record<string, string> {
     if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
     out[m[1]!] = v;
   }
-  return out;
+  return { values: out, body: normalized.slice(match[0].length) };
+}
+
+function skillPaths(raw: string | undefined): string[] | undefined {
+  if (raw === undefined) return undefined;
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return undefined; }
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PATH_RULE_PATTERNS) return undefined;
+  const paths: string[] = [];
+  for (const path of value) {
+    if (typeof path !== "string" || path.length === 0 || path.length > 256 || isAbsolute(path)
+      || /[\\\x00-\x1f\x7f\[\]{}]/.test(path) || path.split("/").some(part => !part || part === "." || part === "..")) return undefined;
+    paths.push(path);
+  }
+  return paths;
 }
 
 function walkSkillFiles(scanRoot: string): { files: string[]; capped: boolean } {
@@ -88,11 +103,12 @@ export function scanSkills(dirs: string[]): { skills: Skill[]; capped: boolean }
       const head = readBoundedRegularFile(abs, 8192);
       if ("error" in head) continue;
       const text = head.text;
-      const fm = parseFrontmatter(text);
+      const fm = parseFrontmatter(text).values;
       if (fm["disable-model-invocation"] === "true") continue;
       const name = (fm.name || basename(dirname(abs))).trim();
       if (!name) continue;
-      byName.set(name, { name, description: fm.description ?? "", abs });
+      const paths = skillPaths(fm.paths);
+      byName.set(name, { name, description: fm.description ?? "", abs, ...(paths ? { paths } : {}) });
     }
   }
   const skills = [...byName.values()].sort((a, b) => {
@@ -101,6 +117,56 @@ export function scanSkills(dirs: string[]): { skills: Skill[]; capped: boolean }
     return Buffer.compare(Buffer.from(a.abs, "utf8"), Buffer.from(b.abs, "utf8"));
   });
   return { skills, capped };
+}
+
+/** Load only indexed rules matching canonical files in this project. Never scan ancestors. */
+export function attachPathRules(
+  cwd: string,
+  skills: readonly SkillIndexSkill[],
+  paths: readonly string[],
+  output: ToolTextResult,
+): ToolTextResult {
+  if (!skills.some(skill => skill.paths)) return output;
+  const root = freezeCwd(cwd);
+  const targets: string[] = [];
+  for (const path of paths) {
+    const target = confinePath(root, path, { mustExist: true });
+    if (!target.ok) continue;
+    try {
+      if (statSync(target.abs).isFile()) targets.push(posixRel(root, target.abs));
+    } catch { /* A vanished target cannot load a rule. */ }
+  }
+  if (targets.length === 0) return output;
+  const rules = new BoundedTextAccumulator({ maxBytes: PATH_RULE_BYTES, marker: "[path rules truncated; read the matching SKILL.md files for the rest]" });
+  let attachedBytes = 0;
+  for (const skill of skills) {
+    if (!skill.paths?.some(pattern => targets.some(path => matchGlob(pattern, path)))) continue;
+    try {
+      // A source swapped to a symlink after indexing is no longer the indexed file.
+      if (realpathSync(skill.abs) !== skill.abs) continue;
+    } catch { continue; }
+    const got = readBoundedRegularFile(skill.abs, SKILL_XML_CAP + PATH_RULE_BYTES);
+    if ("error" in got || got.text.includes("\0")) continue;
+    const body = parseFrontmatter(got.text).body.trim();
+    if (!body) continue;
+    const section = `\n\nPath rules from ${JSON.stringify(skill.abs)} for ${JSON.stringify(skill.paths)}:\n${body}`;
+    rules.push(section);
+    attachedBytes += Buffer.byteLength(section, "utf8");
+    if (attachedBytes > PATH_RULE_BYTES) break;
+  }
+  if (attachedBytes === 0) return output;
+  const suffix = rules.finish();
+  return Object.freeze({
+    ...output,
+    text: output.text + suffix.text,
+    content: output.content + suffix.text,
+    limitBytes: output.limitBytes + PATH_RULE_BYTES,
+    inputBytes: output.inputBytes + suffix.inputBytes,
+    retainedBytes: output.retainedBytes + suffix.retainedBytes,
+    omittedBytes: output.omittedBytes + suffix.omittedBytes,
+    outputBytes: output.outputBytes + suffix.outputBytes,
+    truncated: output.truncated || suffix.truncated,
+  });
 }
 
 function capParagraph(md: string, max: number): { text: string; omitted: number } {

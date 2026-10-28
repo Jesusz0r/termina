@@ -473,6 +473,21 @@ usage row shows cumulative input/output tokens, cumulative
 cache-read share, estimated current context-window use, and the last priced
 main-model call. Typing `/` lists commands;
 Tab completes; arrows move the highlight. `/help` prints the same list.
+Path-scoped rules use the same skill index. Add a `paths` field to a
+`SKILL.md` front matter, for example `paths: ["src/**/*.ts", "tests/**"]`.
+Use a single-line JSON array of up to 16 project-relative glob strings,
+each at most 256 characters. The existing glob matcher supports `*`, `**`,
+and `?`; parent segments, absolute paths, braces, and character classes are
+not supported. Skills disabled for model invocation remain excluded.
+
+`read_file`, `read_files`, `edit`, and `write_file` attach matching rule
+bodies to their own results. All attached rules share an 8 KiB UTF-8 limit;
+truncated results point back to the indexed `SKILL.md` files. File content,
+errors, and read continuation metadata remain intact. Matches use canonical
+files inside the current project. Parent-directory skills are not discovered,
+and symlinks leaving the project do not activate a rule. Rule bodies are read
+on demand, never placed in the system prefix or a second catalog.
+
 `/skills` lists discovered skills from the frozen index; selecting one
 (or `/skills <name>`) starts a turn that reads that `SKILL.md` with `read_file`.
 `/login` opens a provider picker. OAuth is the provider name (`OpenAI`);
