@@ -44,6 +44,7 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
     effort: "off",
     paths: [],
     permissionMode: "ask",
+    readOnly: false,
     parentTerminalId: "term-7",
     cwd: tmp(),
     depth: 1,
@@ -211,6 +212,15 @@ describe("Issue #39: candidate sandbox escape via host-spawned subagent", () => 
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
     expect(s.launches.length).toBe(1);
     expect(s.launches[0]!.env.TERMINA_CORE_APPROVE).toBe("all");
+  });
+
+  it("does not auto-approve a read-only child even when its parent permits writes", async () => {
+    const s = setup({ autoApproveAllowedFor: () => true });
+    writeFileSync(join(s.dir, "subagent-term-7-bg-1.task.json"), JSON.stringify(validTask({ permissionMode: "always", readOnly: true })), { mode: 0o600 });
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.launches).toHaveLength(1);
+    expect(s.launches[0]!.env.TERMINA_CORE_APPROVE).toBeUndefined();
+    expect(JSON.parse(readFileSync(s.launches[0]!.args.at(-1)!, "utf8")).readOnly).toBe(true);
   });
 
   it("detects the worldline candidate marker", () => {

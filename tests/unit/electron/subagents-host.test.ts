@@ -82,6 +82,7 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
     effort: "off",
     paths: [],
     permissionMode: "ask",
+    readOnly: false,
     parentTerminalId: "term-7",
     cwd: tmp(),
     depth: 1,

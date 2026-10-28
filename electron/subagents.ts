@@ -695,7 +695,7 @@ export class SubagentHost {
     // only when the host confirms the parent is live-always (or launched with
     // TERMINA_CORE_APPROVE=all). A forged task file claiming `always` from an
     // `ask` parent stays denied. Every other mode fails closed headless.
-    if (run.task.permissionMode === "always" && this.sinks.autoApproveAllowedFor(run.parentTerminalId)) {
+    if (!run.task.readOnly && run.task.permissionMode === "always" && this.sinks.autoApproveAllowedFor(run.parentTerminalId)) {
       env.TERMINA_CORE_APPROVE = "all";
     } else {
       delete env.TERMINA_CORE_APPROVE;

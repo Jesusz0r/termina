@@ -126,7 +126,7 @@ import {
   trackToolLoopTurn,
 } from "./stall.ts";
 import { providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
-import { planTurnRejectsTool, sessionOmitsTool } from "./tool-eligibility.ts";
+import { planTurnRejectsTool, readOnlySubagentRejectsTool, sessionOmitsTool } from "./tool-eligibility.ts";
 import { READ_TOOL_DEFS } from "./main/read-tools.ts";
 import {
   HIGH_WATER,
@@ -1671,6 +1671,9 @@ async function confirmProtectedMutation(inputPath: string | undefined): Promise<
 async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolOutcome> {
   const notExecuted = (text: string): ToolOutcome => ({ ...done(use, text, true), executed: false });
   if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
+  if (activeSubagent?.task.readOnly && readOnlySubagentRejectsTool(use.name)) {
+    return notExecuted(`error: ${use.name} is not executed by a read-only subagent. Only local reads and search are allowed.`);
+  }
   if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
   // MCP annotations, bash commands, and child briefs cannot establish read-only
   // behavior. Admit only the existing built-in observational tools.
@@ -1771,6 +1774,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
       ...(use.input.model === undefined ? {} : { model: String(use.input.model) }),
       ...(use.input.effort === undefined ? {} : { effort: String(use.input.effort) }),
       ...(use.input.paths === undefined ? {} : { paths: use.input.paths }),
+      ...(use.input.read_only === undefined ? {} : { readOnly: use.input.read_only }),
       ...(use.input.resume === undefined ? {} : { resume: use.input.resume }),
       ...(use.input.user_requested === undefined ? {} : { userRequested: use.input.user_requested }),
       parent: {
@@ -2043,6 +2047,7 @@ async function connectMcp(configs = loadMcpConfigs(userMcpPath(homedir()))): Pro
 
 /** Connect servers a prompt names. Leaves other servers down, and leaves an already-connected server up. */
 async function ensureNamedMcp(text: string): Promise<void> {
+  if (activeSubagent?.task.readOnly) return;
   const all = loadMcpConfigs(userMcpPath(homedir()));
   const named = new Set(mcpServersNamedIn(text, all.map((cfg) => cfg.name)));
   if (named.size === 0) return;
@@ -2168,6 +2173,7 @@ export function requestTools(
   provider: string = "anthropic",
   model: string = "",
 ): Array<Record<string, unknown>> {
+  if (activeSubagent?.task.readOnly) return cachedClientTools;
   if (provider !== "anthropic") return cachedClientTools;
   const type = claudeThinkingApi(model) === "adaptive" ? WEB_SEARCH_TOOL.type : "web_search_20250305";
   return [...cachedClientTools, { type, name: "web_search", max_uses: 5 }];
@@ -4207,6 +4213,9 @@ async function runSubagentTask(taskPath: string): Promise<never> {
     summaryRoute = parseModelRef(DEFAULT_MODELS[task.provider].summary, task.provider);
   }
   activeSubagent = { task, inboxSeq: 0 };
+  if (task.readOnly) {
+    clientTools = TOOLS.filter(tool => typeof tool.name === "string" && !readOnlySubagentRejectsTool(tool.name));
+  }
   lastRunOutcome = null;
   const roleLine = task.resumeRunId
     ? `[Subagent ${task.runId}: continuing ${task.resumeRunId}. Its session history is replayed above; treat the brief below as a follow-up, not a fresh task. Your final reply is delivered to your parent as the run result.`
@@ -4246,7 +4255,10 @@ async function runSubagentTask(taskPath: string): Promise<never> {
       result: utf8TextPrefix(lastAssistantText(), MAX_SUBAGENT_RESULT_CHARS),
     }
     : { ok: false as const, error: outcome?.failure ?? "no settlement" };
-  process.stdout.write(`${formatSubagentResultFrame(frame)}\n`);
+  // Start a framed line after the prompt and drain the pipe before exit.
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write(`\n${formatSubagentResultFrame(frame)}\n`, error => error ? reject(error) : resolve());
+  });
   await shutdownAgentCore({ reason: "subagent" });
   process.exit(frame.ok ? 0 : 1);
 }

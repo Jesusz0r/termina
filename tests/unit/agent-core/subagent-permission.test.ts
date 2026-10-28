@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { resolveSubagentPermissionMode } from "../../../agent-core/subagents.ts";
+import { MAX_SUBAGENT_RESULT_CHARS, parseSubagentResultFrame, resolveSubagentPermissionMode } from "../../../agent-core/subagents.ts";
 
 describe("subagent permission resolution (#206)", () => {
   it("applies ask and dangerous from the validated task file", () => {
@@ -47,13 +47,25 @@ async function runChild(opts: {
   command: string;
   timeoutMs?: number;
   taskFileBody?: string;
-}): Promise<{ code: number | null; output: string; approvals: string[]; frameOk: boolean }> {
+  readOnly?: boolean;
+  calls?: Array<{ name: string; input: Record<string, unknown> }>;
+  mcp?: boolean;
+  reply?: string;
+}): Promise<{ code: number | null; output: string; approvals: string[]; frameOk: boolean; result: string | null; requests: Row[]; target: string | null; mcpStarted: boolean }> {
   const root = mkdtempSync(join(tmpdir(), "termina-subagent-perm-"));
   const project = join(root, "project");
   const home = join(root, "home");
   const events = join(root, "events");
   for (const dir of [project, home, events]) mkdirSync(dir, { recursive: true });
   writeFileSync(join(project, "child-target"), "delete me\n");
+  const mcpMarker = join(project, "mcp-started");
+  if (opts.mcp) {
+    const config = join(home, ".termina", "agent");
+    mkdirSync(config, { recursive: true });
+    const server = join(root, "mcp-server.mjs");
+    writeFileSync(server, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(mcpMarker)}, "started"); process.stdin.resume();`);
+    writeFileSync(join(config, "mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: [server] } } }));
+  }
   const parentTid = "term-parent";
   const runId = "bg-1";
   const childTid = `sub-${parentTid}-${runId}`;
@@ -64,7 +76,7 @@ async function runChild(opts: {
       version: 1,
       runId,
       task: "run one command",
-      brief: "Run the command and report.",
+      brief: opts.mcp ? "Use fixture to inspect the project and report." : "Run the command and report.",
       resumeRunId: null,
       provider: "openai",
       model: "gpt-5.6-sol",
@@ -72,6 +84,7 @@ async function runChild(opts: {
       effort: "medium",
       paths: [],
       permissionMode: opts.taskMode,
+      readOnly: opts.readOnly ?? false,
       parentTerminalId: parentTid,
       cwd: project,
       depth: 1,
@@ -81,19 +94,21 @@ async function runChild(opts: {
   );
   const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
   const commandJson = JSON.stringify(opts.command);
+  const requestsFile = join(root, "requests.jsonl");
   const script = `
     import { appendFileSync } from "node:fs";
     let turn = 0;
     globalThis.fetch = async (input, init) => {
       if (String(input) === "https://models.dev/api.json") return new Response("{}", { status: 200 });
+      appendFileSync(${JSON.stringify(requestsFile)}, JSON.stringify(JSON.parse(init.body)) + "\\n");
       turn += 1;
       const tools = turn === 1
-        ? [{ name: "bash", input: { command: ${commandJson} } }]
+        ? ${opts.calls ? JSON.stringify(opts.calls) : `[{ name: "bash", input: { command: ${commandJson} } }]`}
         : [];
       const items = tools.map((tool, i) => ({ type: "function_call", id: "item-" + turn + "-" + i,
         call_id: "call-" + turn + "-" + i, name: tool.name, arguments: JSON.stringify(tool.input) }));
       const events = items.map((item) => ({ type: "response.output_item.done", item }));
-      if (!items.length) events.push({ type: "response.output_text.delta", delta: "finished" });
+      if (!items.length) events.push({ type: "response.output_text.delta", delta: ${JSON.stringify(opts.reply ?? "finished")} });
       events.push({ type: "response.completed", response: { status: "completed", output: items,
         usage: { input_tokens: 3000 + turn, output_tokens: 5, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } } } });
       return new Response(events.map((event) => "data: " + JSON.stringify(event) + "\\n\\n").join(""),
@@ -164,8 +179,10 @@ async function runChild(opts: {
     const code = await closed;
     expect(timedOut, output).toBe(false);
     const approvals = readdirSync(events).filter((n) => n.includes(".approval-"));
-    const frameOk = output.split("\n").some((line) => line.includes("SUBAGENT_RESULT ") && line.includes('"ok":true'));
-    return { code, output, approvals, frameOk };
+    const frame = output.split("\n").map(parseSubagentResultFrame).find(frame => frame !== null);
+    return { code, output, approvals, frameOk: frame?.ok === true, result: frame?.result ?? null, requests: jsonLines(requestsFile),
+      target: existsSync(join(project, "child-target")) ? readFileSync(join(project, "child-target"), "utf8") : null,
+      mcpStarted: existsSync(mcpMarker) };
   } finally {
     clearTimeout(timeout);
     clearInterval(ackTimer);
@@ -176,6 +193,45 @@ async function runChild(opts: {
 }
 
 describe("headless child permission mode (#206)", () => {
+  it("flushes the complete capped result before the headless child exits", async () => {
+    const reply = `Observed evidence ${"x".repeat(40_000)}`;
+    const result = await runChild({ taskMode: "ask", readOnly: true, command: "", calls: [{ name: "read_file", input: { path: "child-target" } }], reply });
+    expect(result.code).toBe(0);
+    expect(result.result).toBe(reply.slice(0, MAX_SUBAGENT_RESULT_CHARS));
+  });
+
+  it("refuses every action in a read-only child even with full approval, and preserves paired read evidence", async () => {
+    const reads = [
+      { name: "read_file", input: { path: "child-target" } },
+      { name: "read_files", input: { paths: ["child-target"] } },
+      { name: "grep", input: { pattern: "delete me", path: "child-target" } },
+      { name: "glob", input: { pattern: "child-*" } },
+    ];
+    const actions = [
+      { name: "write_file", input: { path: "child-target", content: "wrong" } },
+      { name: "edit", input: { path: "child-target", old_text: "delete me", new_text: "wrong" } },
+      { name: "bash", input: { command: "rm child-target" } },
+      { name: "fetch", input: { url: "https://example.com" } },
+      { name: "browser", input: { action: "open" } },
+      { name: "spawn_subagent", input: { task: "write child-target" } },
+      { name: "message_subagent", input: { run_id: "bg-1", text: "write child-target" } },
+      { name: "search_mcp_tools", input: { query: "write" } },
+      { name: "call_mcp_tool", input: { name: "mcp_fixture_write", arguments: {} } },
+    ];
+    const result = await runChild({ taskMode: "always", approveEnv: "all", readOnly: true, command: "", calls: [...reads, ...actions], mcp: true });
+    expect(result.code, result.output).toBe(0);
+    expect(result.frameOk, result.output).toBe(true);
+    expect(result.target).toBe("delete me\n");
+    expect(result.mcpStarted).toBe(false);
+    expect(result.approvals).toEqual([]);
+    expect(result.requests).toHaveLength(2);
+    expect(result.requests[0].tools.map((tool: Row) => tool.name)).toEqual(reads.map(tool => tool.name));
+    const outputs = result.requests[1].input.filter((item: Row) => item.type === "function_call_output");
+    expect(outputs).toHaveLength(reads.length + actions.length);
+    expect(JSON.stringify(outputs[0].output)).toContain("delete me");
+    for (const output of outputs.slice(reads.length)) expect(JSON.stringify(output.output)).toContain("not executed by a read-only subagent");
+  });
+
   it("runs safe commands unasked in dangerous mode", async () => {
     const result = await runChild({ taskMode: "dangerous", command: "echo hi" });
     expect(result.output).not.toContain("timed out");

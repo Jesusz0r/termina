@@ -63,6 +63,7 @@ describe("Subagent Approval Engine Contract", () => {
     toolArgs: Record<string, unknown>;
     answerApproval: boolean;
     approvalTimeoutMs: number;
+    readOnly?: boolean;
     inbox?: string[];
     /** Written by the child during its first model call, after the turn-start drain. */
     lateInbox?: string;
@@ -94,6 +95,7 @@ describe("Subagent Approval Engine Contract", () => {
         effort: "off",
         paths: [],
         permissionMode: "ask",
+        readOnly: opts.readOnly ?? false,
         parentTerminalId: parentTid,
         cwd: dir,
         depth: 1,
@@ -115,10 +117,12 @@ describe("Subagent Approval Engine Contract", () => {
         }`
       : "";
     const childScript = `
-      globalThis.fetch = async (input) => {
+      import { appendFileSync } from "node:fs";
+      globalThis.fetch = async (input, init) => {
         if (String(input) === "https://models.dev/api.json") {
           return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
         }
+        appendFileSync(${JSON.stringify(join(dir, "requests.jsonl"))}, init.body + "\\n");
         globalThis.__calls = (globalThis.__calls ?? 0) + 1;
         ${lateWrite}
         const text = globalThis.__calls === 1 ? ${JSON.stringify(firstBody)} : ${JSON.stringify(restBody)};
@@ -215,6 +219,16 @@ describe("Subagent Approval Engine Contract", () => {
     const sessionFile = join(r.dir, "sub-term-rt-bg-1-session", "current", "session.jsonl");
     expect(existsSync(sessionFile)).toBe(true);
     expect(readFileSync(sessionFile, "utf8")).toContain("Parent message (seq 1): steer left");
+  });
+
+  it("omits provider-executed web search and refuses fetch in an Anthropic research child", async () => {
+    const result = await runChild({ name: "read-only-search", toolName: "fetch", toolArgs: { url: "https://example.com" },
+      readOnly: true, answerApproval: true, approvalTimeoutMs: 4000 });
+    expect(result.exit, result.output).toBe(0);
+    expect(result.output).toContain("not executed by a read-only subagent");
+    const requests = readFileSync(join(result.dir, "requests.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    expect(requests).toHaveLength(2);
+    for (const request of requests) expect(request.tools.map((tool: { name: string }) => tool.name)).toEqual(["read_file", "read_files", "grep", "glob"]);
   });
 
   it("reads a parent message that arrives during the final generation", async () => {

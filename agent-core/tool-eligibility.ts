@@ -28,6 +28,11 @@ export function planTurnRejectsTool(name: string): boolean {
   return !READ_TOOLS.has(name);
 }
 
+/** Research children may inspect local files, but cannot access the browser or MCP. */
+export function readOnlySubagentRejectsTool(name: string): boolean {
+  return planTurnRejectsTool(name) || name === "fetch";
+}
+
 /** Discovery adapters are declared only while a catalog exists. */
 export function mcpDiscoveryDeclared(catalogSize: number): boolean {
   return catalogSize > 0;

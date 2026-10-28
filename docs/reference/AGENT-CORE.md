@@ -421,6 +421,12 @@ safety guarantees above:
 - One subagent is a normal delegation. More children are useful only for
   independent work; there is no minimum fan-out or rollback when only one
   sibling is admitted. The four-run cap and one-level depth limit still apply.
+- `spawn_subagent` accepts `read_only: true` for research. The child can use
+  `read_file`, `read_files`, `grep`, and `glob`. It refuses edits, bash,
+  browsing, MCP, and child spawning, including with full parent approval.
+  Resuming that run preserves the restriction. Dispatch workers keep their
+  existing write claims. Results use the existing bounded delivery; no extra
+  summarizer replaces the child's result.
 - Child assistant comments can reach the parent while the child works. Tool-name
   summaries and intermediate tool traces are not injected into the parent.
   The final result is delivered when the run settles.

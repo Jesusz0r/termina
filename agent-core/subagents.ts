@@ -93,6 +93,7 @@ export interface SubagentParent {
 
 export interface SubagentSpawnRequest {
   task: string;
+  readOnly?: unknown;
   model?: string;
   effort?: string;
   /** Raw provider JSON: validated here so a malformed claim errors instead of silently dropping lease protection. */
@@ -118,6 +119,7 @@ export interface SubagentRun {
   effort: EffortLevel;
   /** Inherited at spawn; the registry offers no API to widen it. */
   permissionMode: SubagentPermissionMode;
+  readOnly: boolean;
   depth: number;
   paths: string[];
   /** Settled sibling run this run continues, if any. */
@@ -145,12 +147,13 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
   {
     name: "spawn_subagent",
     description:
-      "Spawn a background subagent for one independent subtask. One child is enough; spawn more in the same turn only when the work is actually parallel. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id only after the host admits the child; a rejection is an error, not a run id. At most 4 runs at once; this tool cannot raise that cap. This run stays open while children are active. Use message_subagent to redirect a live run. Intermediate tool traces are not injected. When the child settles, the result is delivered into this session. Summarize that result and never poll the finished run. Siblings never share a subtask; pass paths to reserve them. Writes to a sibling claim are refused. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up.",
+      "Spawn a background subagent for one independent subtask. Set read_only for research: only local reads and search are allowed; edits, bash, browsing, MCP, and nested spawn are refused. Resume preserves this restriction. One child is enough; spawn more in the same turn only when the work is actually parallel. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id only after the host admits the child; a rejection is an error, not a run id. At most 4 runs at once; this tool cannot raise that cap. This run stays open while children are active. Use message_subagent to redirect a live run. Intermediate tool traces are not injected. When the child settles, the result is delivered into this session. Summarize that result and never poll the finished run. Siblings never share a subtask; pass paths to reserve them. Writes to a sibling claim are refused. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up.",
     input_schema: {
       type: "object",
       additionalProperties: false,
       properties: {
         task: { type: "string" },
+        read_only: { type: "boolean" },
         model: { type: "string" },
         effort: { type: "string" },
         resume: { type: "string" },
@@ -250,6 +253,7 @@ export interface SubagentTaskFile {
   effort: EffortLevel;
   paths: string[];
   permissionMode: SubagentPermissionMode;
+  readOnly: boolean;
   parentTerminalId: string;
   cwd: string;
   depth: number;
@@ -325,6 +329,7 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
   if (v.permissionMode !== "always" && v.permissionMode !== "dangerous" && v.permissionMode !== "ask") {
     return { ok: false, error: "subagent task file has a bad permission mode" };
   }
+  if (typeof v.readOnly !== "boolean") return { ok: false, error: "subagent task file has a bad readOnly flag" };
   if (typeof v.parentTerminalId !== "string" || !v.parentTerminalId) {
     return { ok: false, error: "subagent task file has a bad parent terminal" };
   }
@@ -349,6 +354,7 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
       effort: v.effort as EffortLevel,
       paths,
       permissionMode: v.permissionMode,
+      readOnly: v.readOnly,
       parentTerminalId: v.parentTerminalId,
       cwd: v.cwd,
       depth: v.depth as number,
@@ -398,6 +404,7 @@ export function writeSubagentTaskFile(
     effort: run.effort,
     paths: run.paths,
     permissionMode: run.permissionMode,
+    readOnly: run.readOnly,
     parentTerminalId: opts.parentTerminalId,
     cwd: opts.cwd,
     depth: run.depth,
@@ -948,6 +955,10 @@ export class SubagentRegistry {
     if (req.userRequested !== undefined && typeof req.userRequested !== "boolean") {
       return { ok: false, error: "spawn_subagent user_requested must be a boolean" };
     }
+    if (req.readOnly !== undefined && typeof req.readOnly !== "boolean") {
+      return { ok: false, error: "spawn_subagent read_only must be a boolean" };
+    }
+    let readOnly = req.readOnly === true;
     if (task.length > MAX_SUBAGENT_TASK_CHARS) {
       return { ok: false, error: `spawn_subagent task exceeds ${MAX_SUBAGENT_TASK_CHARS} chars` };
     }
@@ -963,6 +974,7 @@ export class SubagentRegistry {
       const prior = this.runs.get(resumeRaw);
       if (!prior) return { ok: false, error: `unknown subagent run: ${resumeRaw}` };
       if (prior.state === "active") return { ok: false, error: `subagent run ${resumeRaw} is still active` };
+      readOnly ||= prior.readOnly;
       if (prior.state === "failed" && !prior.result?.trim() && prior.task === task) {
         return { ok: false, error: `identical brief already failed as ${prior.id} with an empty result — rewrite the task instead of respawning it unchanged` };
       }
@@ -1050,6 +1062,7 @@ export class SubagentRegistry {
       protocol,
       effort,
       permissionMode: parent.permissionMode,
+      readOnly,
       depth: parent.depth + 1,
       paths,
       state: "active",

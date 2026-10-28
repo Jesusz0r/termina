@@ -72,6 +72,24 @@ describe("subagents Phase 1 registry", () => {
     expect((await reg.spawn({ task: "do the thing", parent })).ok).toBe(true);
   });
 
+  it("validates read_only, defaults writers, and preserves read-only resumes", async () => {
+    const reg = registry();
+    for (const readOnly of [null, "true", 1, {}]) {
+      expect(await reg.spawn({ task: "inspect", readOnly, parent })).toMatchObject({ ok: false });
+    }
+    const writer = await reg.spawn({ task: "implement", parent });
+    expect(writer).toMatchObject({ ok: true, run: { readOnly: false } });
+    const reader = await reg.spawn({ task: "inspect", readOnly: true, parent });
+    expect(reader).toMatchObject({ ok: true, run: { readOnly: true } });
+    if (!reader.ok) return;
+    reg.settleRun(reader.run.id, "observed file contents");
+    for (const readOnly of [undefined, false, true]) {
+      const resumed = await reg.spawn({ task: "inspect again", resume: reader.run.id, readOnly, parent });
+      expect(resumed).toMatchObject({ ok: true, run: { readOnly: true } });
+      if (resumed.ok) reg.settleRun(resumed.run.id, "observed file contents");
+    }
+  });
+
   it("rejects unknown effort and clamps to the child route", async () => {
     const reg = registry();
     const bad = await reg.spawn({ task: "t", effort: "turbo", parent });
@@ -446,7 +464,7 @@ describe("subagents Phase 2 handoff contract", () => {
 
   it("round-trips the brief through the task file", async () => {
     const reg = registry();
-    const spawned = await reg.spawn({ task: "do it", paths: ["src/a.ts"], parent });
+    const spawned = await reg.spawn({ task: "do it", paths: ["src/a.ts"], readOnly: true, parent });
     expect(spawned.ok).toBe(true);
     if (!spawned.ok) return;
     const dir = events();
@@ -463,6 +481,10 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(parsedBrief.file.paths).toEqual(["src/a.ts"]);
     expect(parsedBrief.file.parentTerminalId).toBe("term-7");
     expect(parsedBrief.file.permissionMode).toBe("ask");
+    expect(parsedBrief.file.readOnly).toBe(true);
+    for (const readOnly of [undefined, null, "true", 1]) {
+      expect(parseSubagentTaskFile({ ...parsedBrief.file, readOnly }).ok).toBe(false);
+    }
     expect(parsedBrief.file.resumeRunId).toBe(null);
   });
 
@@ -498,6 +520,7 @@ describe("subagents Phase 2 handoff contract", () => {
       effort: "off",
       paths: [],
       permissionMode: "ask",
+      readOnly: false,
       parentTerminalId: "term-7",
       cwd: "/proj",
       depth: 1,
@@ -676,6 +699,7 @@ describe("subagents Phase 2 handoff contract", () => {
       effort: "off",
       paths: [],
       permissionMode: "ask",
+      readOnly: false,
       parentTerminalId: "term-7",
       cwd: "/proj",
       depth: 1,
