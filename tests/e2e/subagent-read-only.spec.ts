@@ -140,7 +140,7 @@ test.describe("Read-only research and writable Dispatch", () => {
     phase = "dispatch";
     expect(await page.evaluate(({ id, text }) => window.termina.dispatchRun(id, text), { id: owner.id, text: taskText })).toMatchObject({ ok: true });
     await expect.poll(() => readFileSync(join(projectRoot, "hello.txt"), "utf8"), { timeout: 30_000 }).toBe("dispatched\n");
-    await expect.poll(() => page.evaluate(id => window.termina.getPlan(id), owner.id)).toMatchObject([{ state: "done", dispatchResult: { outcome: "completed" } }]);
+    await expect.poll(() => page.evaluate(id => window.termina.getPlan(id), owner.id)).toMatchObject([{ state: "pending", dispatchResult: { outcome: "completed", paths: ["hello.txt"] } }]);
     expect(workerCalls).toBe(3);
   });
 });

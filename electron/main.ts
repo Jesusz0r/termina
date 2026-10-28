@@ -3582,12 +3582,12 @@ class TerminaApp {
   // ------------------------------------------------------------- verify ----
 
   /**
-   * Start one automatic verify after a dispatch worker settled with its task
-   * done. Only when the owner is idle and no sibling worker is still running:
+   * Start one automatic verify after a dispatch worker completed its paths.
+   * Only when the owner is idle and no sibling worker is still running:
    * a running agent must not have tests execute under its edits. One shot per
    * settle; never retried, cancellable through the normal verify path. A task
-   * that settles while siblings run is still marked done on the board; the
-   * last settling worker triggers the single verify covering all of them.
+   * that settles while siblings run retains its path evidence; the last
+   * settling worker triggers the single verify covering all of them.
    */
   private maybeAutoVerify(owner: AgentTerminalInstance, taskText: string | null): void {
     if (!taskText || owner.busy || owner.closed) return;
@@ -3852,6 +3852,7 @@ class TerminaApp {
           this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
           return;
         }
+        this.finalizePlan(owner, rendererTarget);
         if (autoTask && how !== "cancelled") {
           const verdict = how === "pass" ? "✅ auto-verify passed" : how === "timeout" ? "⏰ auto-verify timed out" : "❌ auto-verify failed";
           this.appendMailboxNote(ownerId, `## Auto-verify\n\nTask: ${autoTask}\nResult: ${verdict} — \`${summary}\``);
@@ -4130,10 +4131,20 @@ class TerminaApp {
   }
 
   private finalizePlan(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
-    if (inst.plan.length === 0) return;
-    finalizePlanTasks(inst.plan, inst.touched, inst.toolOutcomes);
-    this.savePlanRoster(inst);
-    this.sendPlan(inst, expected);
+    if (finalizePlanTasks(inst.plan, inst.touched, inst.toolOutcomes, inst.verify)) {
+      this.savePlanRoster(inst);
+      this.sendPlan(inst, expected);
+    }
+    const workspace = this.workspaceOfTerminal(inst);
+    if (!workspace || workspace.primary) return;
+    for (const owner of this.runtime.values()) {
+      if (owner.closed || owner.projectId !== inst.projectId || owner === inst) continue;
+      const tasks = owner.plan.filter(task => task.candidate?.comparisonId === workspace.comparisonId
+        && task.dispatchResult?.workerId === inst.id);
+      if (!finalizePlanTasks(tasks, inst.touched, inst.toolOutcomes, inst.verify, inst.id)) continue;
+      this.savePlanRoster(owner);
+      this.sendPlan(owner, expected);
+    }
   }
 
   // ------------------------------------------------------ session search ----
@@ -5677,7 +5688,6 @@ class TerminaApp {
           inst.currentRun = null;
           this.send("worldline:runs-changed", { terminalId: inst.id }, rendererTarget);
         }
-        this.finalizePlan(inst, rendererTarget);
         // Settlement releases execution ownership even when paths are incomplete.
         const dispatchEnd = this.dispatchRuns.get(inst.id);
         if (dispatchEnd) {
@@ -5691,7 +5701,7 @@ class TerminaApp {
             this.savePlanRoster(ownerInst);
             this.sendPlan(ownerInst, rendererTarget);
             this.collectWorker(inst, ownerInst, rendererTarget);
-            this.maybeAutoVerify(inst.workspaceId === ownerInst.workspaceId ? ownerInst : inst, task?.state === "done" ? task.text : null);
+            this.maybeAutoVerify(inst.workspaceId === ownerInst.workspaceId ? ownerInst : inst, outcome === "completed" ? task?.text ?? null : null);
           }
           // The run entry goes; the tab label stays until the terminal exits.
           this.dispatchRuns.delete(inst.id);

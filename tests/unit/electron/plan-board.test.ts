@@ -18,7 +18,7 @@ describe("Plan Board Task Parser Contract", () => {
 
     const summary = parsedSyntaxes.map((task) => `${task.text}:${task.state}`).join("|");
     expect(summary).toBe(
-      "dash:pending|star:pending|plus:pending|numbered dot:pending|numbered paren:pending|unchecked:pending|checked lower:done|checked upper:done",
+      "dash:pending|star:pending|plus:pending|numbered dot:pending|numbered paren:pending|unchecked:pending|checked lower:pending|checked upper:pending",
     );
   });
 
@@ -68,7 +68,7 @@ describe("Plan Board Task Parser Contract", () => {
 
     expect(tasks.length).toBe(2);
     expect(tasks[0].state).toBe("pending");
-    expect(tasks[1].state).toBe("done");
+    expect(tasks[1].state).toBe("pending");
   });
 });
 

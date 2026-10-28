@@ -373,14 +373,14 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     await expect(first.locator(".plan-text")).toHaveText("Create utils.ts with an add function");
     await expect(last.locator(".plan-text")).toHaveText("Edit greeting.ts so greeting is hi there");
     await expect(first).toHaveClass(/state-pending/);
-    await expect(last).toHaveClass(/state-done/);
+    await expect(last).toHaveClass(/state-pending/);
     await expect(first.locator(".plan-mark")).toHaveText("○");
-    await expect(last.locator(".plan-mark")).toHaveText("✓");
+    await expect(last.locator(".plan-mark")).toHaveText("○");
     await expect(first.locator(".plan-model")).toHaveCount(1);
-    await expect(last.locator(".plan-model")).toHaveCount(0);
-    // Only the pending row offers the dispatch action.
+    await expect(last.locator(".plan-model")).toHaveCount(1);
+    // Model checkboxes are claims; both rows still offer dispatch.
     await expect(first).toHaveClass(/dispatchable/);
-    await expect(last).not.toHaveClass(/dispatchable/);
+    await expect(last).toHaveClass(/dispatchable/);
 
     // 2. A subsequent plan push updates the production rows in place.
     const pending = ownerResponse!;
@@ -388,8 +388,8 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     complete(pending, "Plan:\n- [x] Create utils.ts with an add function\n- [x] Edit greeting.ts so greeting is hi there\n- [ ] Write tests for the add function\n", { id: "owner-read-2", name: "read_file", args: { path: "hello.txt" } });
     await expect.poll(() => ownerResponse !== null).toBe(true);
     await expect(tasks).toHaveCount(3, { timeout: 15_000 });
-    await expect(tasks.first()).toHaveClass(/state-done/);
-    await expect(tasks.first().locator(".plan-mark")).toHaveText("✓");
+    await expect(tasks.first()).toHaveClass(/state-pending/);
+    await expect(tasks.first().locator(".plan-mark")).toHaveText("○");
     await expect(tasks.last().locator(".plan-text")).toHaveText("Write tests for the add function");
     await expect(tasks.last()).toHaveClass(/dispatchable/);
     await expect(tasks.last().locator(".plan-model")).toHaveCount(1);
@@ -399,13 +399,14 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     //    preload bridge is immutable from the page, so the outbound call is
     //    asserted by its real effect: the dispatch worker tab.)
     test.setTimeout(180_000);
+    holdWorkerAfterRead = true;
     await tasks.last().locator(".plan-text").click();
     const dispatchTab = page.locator(".terminal-tab .tab-name", { hasText: "dispatch" });
     await expect(dispatchTab).toBeVisible({ timeout: 60_000 });
 
-    // Clicking a done row dispatches nothing: still exactly one worker tab
-    // after the click settles (negative assertion).
-    await tasks.first().click();
+    // Clicking an assigned row navigates to its existing worker.
+    await expect.poll(() => workerResponse !== null).toBe(true);
+    await tasks.last().locator(".plan-text").click();
     await page.waitForTimeout(1_000);
     await expect(page.locator(".terminal-tab .tab-name", { hasText: "dispatch" })).toHaveCount(1);
   });
@@ -656,9 +657,9 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
           await page.locator(`#attention-list .attention-item[data-id="${attention.id}"] .attention-inspect`).click();
           await expect(page.locator("#plan-list .plan-task").filter({ hasText: taskText })).toContainText(`last failed · ${workerId}`);
         } else {
-          // A failed checkpoint does not rewrite a successful, tested file tool
-          // into a failed task. It denies replay and reports missing recording.
-          expect(task).toMatchObject({ state: "done", dispatchResult: { workerId, outcome: "completed" } });
+          // A failed checkpoint preserves successful file-tool evidence for Verify.
+          // It denies replay and reports missing recording.
+          expect(task).toMatchObject({ state: "pending", dispatchResult: { workerId, outcome: "completed", paths: ["hello.txt"] } });
           expect(records().find((record) => record.t === "agent_settled")).toMatchObject({ error: null });
           await expect.poll(() => records().some((record) => record.t === "checkpoint_result" && record.ok === false)).toBe(true);
           expect(failedRun.reason).toMatch(/^settled checkpoint failed: /);
@@ -690,7 +691,7 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
         // the same terminal proves its previous failed recording released ownership.
         await page.evaluate((id) => window.termina.writeTerminal(id, "Inspect recovered hello.txt without changing it.\r"), workerId);
         await expect.poll(async () => (await page.evaluate((id) => window.termina.getRuns(id), workerId)).at(-1)?.id).not.toBe(run.id);
-        expect((await page.evaluate((id) => window.termina.getPlan(id), ownerId))[0]).toMatchObject({ state: "done", dispatchResult: { workerId, outcome: "completed" } });
+        expect((await page.evaluate((id) => window.termina.getPlan(id), ownerId))[0]).toMatchObject({ state: "pending", dispatchResult: { workerId, outcome: "completed" } });
       }
       await expect.poll(async () => (await page.evaluate((id) => window.termina.getRuns(id), retryWorkerId)).at(-1)?.settledStateId).toMatch(/^[a-f0-9]{40}$/);
       await expect.poll(async () => (await page.evaluate((id) => window.termina.getRuns(id), retryWorkerId)).at(-1)?.sessionBranchFile).toEqual(expect.any(String));

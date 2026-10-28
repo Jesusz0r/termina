@@ -15,7 +15,7 @@ const worker = (paths: string[], errors: string[] = []) => ({
 
 describe("dispatch attempt settlement", () => {
   it.each([
-    { paths: ["a.ts", "b.ts"], errors: [], end: "settled" as const, outcome: "completed", state: "done" },
+    { paths: ["a.ts", "b.ts"], errors: [], end: "settled" as const, outcome: "completed", state: "pending" },
     { paths: ["a.ts"], errors: [], end: "settled" as const, outcome: "incomplete", state: "pending" },
     { paths: ["a.ts", "b.ts"], errors: ["b.ts"], end: "settled" as const, outcome: "failed", state: "pending" },
     { paths: ["a.ts", "b.ts"], errors: [], end: "failed" as const, outcome: "failed", state: "pending" },
@@ -27,7 +27,7 @@ describe("dispatch attempt settlement", () => {
     expect(task.state).toBe(state);
     expect(task.workerId).toBeUndefined();
     expect(task.claimed).toBeUndefined();
-    expect(task.dispatchResult).toEqual({ workerId: attempt.id, outcome });
+    expect(task.dispatchResult).toEqual({ workerId: attempt.id, outcome, ...(outcome === "completed" ? { paths: task.paths } : {}) });
     expect([...attempt.touched]).toEqual(paths);
   });
 

@@ -4,7 +4,8 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import ts from "typescript";
 import { invalidateVerify, isVerifySourceCurrent, verifyOutputTail } from "../../../electron/main/verify-source.ts";
-import type { VerifyInfo, VerifySource } from "../../../shared/types.ts";
+import { finalizePlanTasks } from "../../../electron/plan-board.ts";
+import type { PlanTask, VerifyInfo, VerifySource } from "../../../shared/types.ts";
 
 // Execute main's actual orchestration with a controlled capture-cleanup await.
 // No Electron, shell, git process, timer sleep, or production test hook is needed.
@@ -13,13 +14,13 @@ const methods = new Map<string, string>();
 let outputLimit = "";
 function visit(node: ts.Node): void {
   if (ts.isVariableDeclaration(node) && node.name.getText(sourceFile) === "MAX_VERIFY_OUTPUT") outputLimit = node.getText(sourceFile);
-  if (ts.isMethodDeclaration(node) && ["runVerify", "releaseVerifyAdmission"].includes(node.name.getText(sourceFile))) {
+  if (ts.isMethodDeclaration(node) && ["runVerify", "releaseVerifyAdmission", "finalizePlan"].includes(node.name.getText(sourceFile))) {
     methods.set(node.name.getText(sourceFile), node.getText(sourceFile));
   }
   ts.forEachChild(node, visit);
 }
 visit(sourceFile);
-if (methods.size !== 2 || !outputLimit) throw new Error("main Verify orchestration is missing");
+if (methods.size !== 3 || !outputLimit) throw new Error("main Verify orchestration is missing");
 const compiled = ts.transpile(`const ${outputLimit};\nclass TerminaApp { ${[...methods.values()].join("\n")} }\nreturn new TerminaApp();`, { target: ts.ScriptTarget.ES2022 });
 
 function deferred<T>() {
@@ -32,20 +33,26 @@ function fixture() {
   const captured: VerifySource = { root: "/project", workspaceId: "ws-1", tree: "a".repeat(40), revision: 3, observationEpoch: 1, generation: 4 };
   let version: { revision: number; observationEpoch: number } | null = { revision: 3, observationEpoch: 1 };
   const watcher = { sourceVersion: () => version };
-  const workspace = { id: "ws-1", root: "/project", generation: 4, watcher };
+  const workspace = { id: "ws-1", root: "/project", generation: 4, watcher, primary: true };
   let liveWorkspace = workspace;
-  const owner = { id: "term-1", cwd: "/project", closed: false, verify: { state: "untested", command: null, summary: null } as VerifyInfo, verifyOutput: null as string | null };
+  const plan: PlanTask[] = [
+    { text: "Fix a.ts", paths: ["a.ts"], state: "active" },
+    { text: "Fix b.ts", paths: ["b.ts"], state: "pending" },
+  ];
+  const owner = { id: "term-1", projectId: "project-1", cwd: "/project", closed: false, plan, touched: new Set(["a.ts"]),
+    toolOutcomes: new Map<string, "ok" | "error">([["a.ts", "ok"]]),
+    verify: { state: "untested", command: null, summary: null } as VerifyInfo, verifyOutput: null as string | null };
   const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
   const cleanupStarted = deferred<void>();
   const releaseCleanup = deferred<void>();
   const settled = deferred<VerifyInfo>();
   const main = new Function(
     "detectTestCommand", "detectShells", "quoteShellArg", "verifyEnv", "spawn", "terminateSandboxProcessGroup",
-    "invalidateVerify", "isVerifySourceCurrent", "verifyOutputTail", compiled,
+    "invalidateVerify", "isVerifySourceCurrent", "verifyOutputTail", "finalizePlanTasks", compiled,
   )(
     async () => ({ command: "runner", args: [], label: "runner" }), async () => [{ path: "/bin/sh", name: "sh" }],
     (arg: string) => arg, () => ({}), () => child, async () => true,
-    invalidateVerify, isVerifySourceCurrent, verifyOutputTail,
+    invalidateVerify, isVerifySourceCurrent, verifyOutputTail, finalizePlanTasks,
   );
   let captures = 0;
   Object.assign(main, {
@@ -63,7 +70,7 @@ function fixture() {
       return descriptor;
     },
     trackRecordingTask: (task: Promise<unknown>) => { void task.catch((error) => { throw error; }); },
-    savePlanRoster: () => {}, writeVerifyContext: () => {}, appendMailboxNote: () => {},
+    savePlanRoster: () => {}, sendPlan: () => {}, writeVerifyContext: () => {}, appendMailboxNote: () => {},
     send: (_channel: string, payload: { verify: VerifyInfo }) => {
       if (payload.verify.state !== "running") settled.resolve(payload.verify);
     },
@@ -76,6 +83,30 @@ function fixture() {
 }
 
 describe("Verify completion publication fence", () => {
+  it("marks an independent task only from its own candidate's current check", async () => {
+    const f = fixture();
+    Object.assign(f.workspace, { primary: false, comparisonId: "cmp-1" });
+    const matching: PlanTask = { text: "Fix candidate a.ts", paths: ["a.ts"], state: "pending",
+      candidate: { comparisonId: "cmp-1", label: "A" }, dispatchResult: { workerId: f.owner.id, outcome: "completed", paths: ["a.ts"] } };
+    const other: PlanTask = { ...matching, text: "Another candidate", candidate: { comparisonId: "cmp-2", label: "A" } };
+    const board = { ...f.owner, id: "term-0", plan: [matching, other] };
+    f.main.runtime.set(board.id, board);
+    try {
+      expect(await f.main.runVerify(f.owner.id)).toEqual({ ok: true });
+      f.child.emit("close", 0);
+      await f.cleanupStarted.promise;
+      f.releaseCleanup.resolve();
+      expect((await f.settled.promise).state).toBe("pass");
+      expect(matching.state).toBe("done");
+      expect(other.state).toBe("pending");
+    } finally {
+      f.releaseCleanup.resolve();
+      f.child.emit("close", 0);
+      f.child.stdout.destroy();
+      f.child.stderr.destroy();
+    }
+  });
+
   for (const change of ["source revision", "observation loss", "observation epoch", "workspace generation", "watcher replacement", "workspace replacement"] as const) {
     it(`retains a historical pass as stale when ${change} occurs during final capture cleanup`, async () => {
       const f = fixture();
@@ -100,6 +131,7 @@ describe("Verify completion publication fence", () => {
         expect(verdict.result).toMatchObject({ state: "pass", exitCode: 0 });
         expect(verdict.source).toEqual(f.captured);
         expect(f.owner.verifyOutput).toBe("historical output");
+        expect(f.owner.plan.map(task => task.state)).toEqual(["active", "pending"]);
       } finally {
         f.releaseCleanup.resolve();
         f.child.emit("close", 0);
@@ -119,6 +151,7 @@ describe("Verify completion publication fence", () => {
       await f.cleanupStarted.promise;
       f.releaseCleanup.resolve();
       expect((await f.settled.promise).state).toBe("pass");
+      expect(f.owner.plan.map(task => task.state)).toEqual(["done", "pending"]);
       expect(f.owner.verifyOutput).toMatch(/final execution output$/);
       expect(Buffer.byteLength(f.owner.verifyOutput!)).toBeLessThanOrEqual(6000);
     } finally {

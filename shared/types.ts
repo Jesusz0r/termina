@@ -128,7 +128,12 @@ export interface PlanTask {
   /** Files this worker claimed. Empty when the task is not dispatched. */
   claimed?: string[];
   /** Last finished attempt; separate from a currently running assignment. */
-  dispatchResult?: { workerId: string; outcome: DispatchOutcome };
+  dispatchResult?: {
+    workerId: string;
+    outcome: DispatchOutcome;
+    /** Observed completed paths, retained for a later Verify. */
+    paths?: string[];
+  };
   /** Current/last independent attempt. Retained across settlement and restart; retries stay independent. */
   candidate?: { comparisonId: string; label: "A" | "B" };
   /** Worker model from an `@model provider/id` marker. Omit to inherit the owner tab. */

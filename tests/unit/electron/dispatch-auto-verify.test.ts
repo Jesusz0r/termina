@@ -20,7 +20,7 @@ describe("Dispatch Auto-Verify Invariants", () => {
 
     // Settle path offers auto-verify only for completed tasks.
     check("settle verifies completed tasks on the actual source or independent workspace",
-      main.includes("this.maybeAutoVerify(inst.workspaceId === ownerInst.workspaceId ? ownerInst : inst, task?.state === \"done\" ? task.text : null)"));
+      main.includes("this.maybeAutoVerify(inst.workspaceId === ownerInst.workspaceId ? ownerInst : inst, outcome === \"completed\" ? task?.text ?? null : null)"));
     // Guards: idle owner only, no duplicate or overlapping verify.
     check("auto-verify requires an idle open owner",
       main.includes("if (!taskText || owner.busy || owner.closed) return;"));

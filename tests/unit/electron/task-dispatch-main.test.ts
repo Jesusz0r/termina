@@ -246,7 +246,11 @@ describe("isolated task durable execution provenance", () => {
   it("does not infer isolated task completion from shared-source progress", () => {
     const isolated: PlanTask = { text: "Fix file.ts", paths: ["file.ts"], state: "pending", candidate: { comparisonId: "cmp-4", label: "A" } };
     expect(markPlanProgress([isolated], "file.ts")).toBe(false);
-    finalizePlanTasks([isolated], new Set(["file.ts"]), new Map([["file.ts", "ok"]]));
+    finalizePlanTasks([isolated], new Set(["file.ts"]), new Map([["file.ts", "ok"]]), {
+      state: "pass", command: "test", summary: "green",
+      source: { workspaceId: "primary", root: "/project", tree: "a".repeat(40), revision: 1, observationEpoch: 1, generation: 1 },
+      result: { state: "pass", exitCode: 0, startedAt: 1, finishedAt: 2 },
+    });
     expect(isolated.state).toBe("pending");
   });
 });

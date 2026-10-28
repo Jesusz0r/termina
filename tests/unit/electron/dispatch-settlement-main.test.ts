@@ -71,8 +71,8 @@ describe("main dispatch settlement classification", () => {
   ])("retains $expected for error=$error, explicit interruption=$interrupted", ({ error, interrupted, touched, expected }) => {
     const { task, worker, main } = fixture(interrupted, touched);
     settle.call(main, worker, { t: "agent_settled", error }, null);
-    expect(task.dispatchResult).toEqual({ workerId: worker.id, outcome: expected });
-    expect(task.state).toBe(expected === "completed" ? "done" : "pending");
+    expect(task.dispatchResult).toEqual({ workerId: worker.id, outcome: expected, ...(expected === "completed" ? { paths: task.paths } : {}) });
+    expect(task.state).toBe("pending");
     expect(task.workerId).toBeUndefined();
     expect(task.claimed).toBeUndefined();
     expect(main.dispatchRuns.has(worker.id)).toBe(false);

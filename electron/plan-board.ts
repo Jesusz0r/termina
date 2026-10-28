@@ -9,7 +9,7 @@
 import { isAbsolute, relative } from "node:path";
 import { planListEntries } from "../shared/plan-task.ts";
 import { isRecord } from "../shared/guards.ts";
-import type { CanonicalizePath, DispatchOutcome, PlanTask } from "../shared/types.ts";
+import type { CanonicalizePath, DispatchOutcome, PlanTask, VerifyInfo } from "../shared/types.ts";
 
 export function parsePlanTaskCandidate(value: unknown): PlanTask["candidate"] | undefined {
   if (!isRecord(value) || typeof value.comparisonId !== "string" || value.comparisonId.length > 64
@@ -98,7 +98,7 @@ export async function parsePlanTasks(text: string, cwd: string | null, canonical
     tasks.push({
       text: line.body,
       paths: await planTaskPaths(line.body, cwd, canonicalize),
-      state: line.checked ? "done" : "pending",
+      state: "pending",
       ...(model ? { model } : {}),
     });
   }
@@ -128,7 +128,8 @@ export function samePlanTaskSnapshot(task: PlanTask, snapshot: PlanTask): boolea
     && JSON.stringify(task.paths) === JSON.stringify(snapshot.paths)
     && JSON.stringify(task.claimed) === JSON.stringify(snapshot.claimed)
     && task.dispatchResult?.workerId === snapshot.dispatchResult?.workerId
-    && task.dispatchResult?.outcome === snapshot.dispatchResult?.outcome;
+    && task.dispatchResult?.outcome === snapshot.dispatchResult?.outcome
+    && JSON.stringify(task.dispatchResult?.paths) === JSON.stringify(snapshot.dispatchResult?.paths);
 }
 
 export function markPlanProgress(plan: PlanTask[], relPath: string): boolean {
@@ -146,11 +147,14 @@ export function markPlanProgress(plan: PlanTask[], relPath: string): boolean {
 
 export function taskIsComplete(
   paths: string[],
-  touched: ReadonlySet<string>,
-  outcomes: ReadonlyMap<string, "ok" | "error">,
+  successfulPaths: ReadonlySet<string>,
 ): boolean {
   if (paths.length === 0) return false;
-  return paths.every((p) => touched.has(p) && outcomes.get(p) === "ok");
+  return paths.every((p) => successfulPaths.has(p));
+}
+
+function successfulPlanPaths(touched: ReadonlySet<string>, outcomes: ReadonlyMap<string, "ok" | "error">): Set<string> {
+  return new Set([...touched].filter(path => outcomes.get(path) === "ok"));
 }
 
 /** Finish one attempt without discarding its edits, provenance, or retryability. */
@@ -159,11 +163,12 @@ export function settleDispatchTask(
   worker: { id: string; touched: ReadonlySet<string>; toolOutcomes: ReadonlyMap<string, "ok" | "error"> },
   end: "settled" | "failed" | "interrupted",
 ): DispatchOutcome {
+  const successfulPaths = successfulPlanPaths(worker.touched, worker.toolOutcomes);
   const outcome: DispatchOutcome = end !== "settled" ? end
-    : taskIsComplete(task.paths, worker.touched, worker.toolOutcomes) ? "completed"
+    : taskIsComplete(task.paths, successfulPaths) ? "completed"
     : task.paths.some((path) => worker.toolOutcomes.get(path) === "error") ? "failed" : "incomplete";
-  task.state = outcome === "completed" ? "done" : "pending";
-  task.dispatchResult = { workerId: worker.id, outcome };
+  task.state = "pending";
+  task.dispatchResult = { workerId: worker.id, outcome, ...(outcome === "completed" ? { paths: [...task.paths] } : {}) };
   delete task.workerId;
   delete task.claimed;
   return outcome;
@@ -173,10 +178,22 @@ export function finalizePlanTasks(
   plan: PlanTask[],
   touched: ReadonlySet<string>,
   outcomes: ReadonlyMap<string, "ok" | "error">,
-): void {
+  verify: VerifyInfo,
+  workerId?: string,
+): boolean {
+  if (verify.state !== "pass" || verify.result?.state !== "pass" || verify.result.exitCode !== 0 || !verify.source) return false;
+  const successfulPaths = successfulPlanPaths(touched, outcomes);
+  let changed = false;
   for (const task of plan) {
-    if (!task.candidate && taskIsComplete(task.paths, touched, outcomes)) task.state = "done";
+    if (task.state === "done" || task.workerId || (task.candidate && !workerId)) continue;
+    if (workerId && task.dispatchResult?.workerId !== workerId) continue;
+    const recordedPaths = task.dispatchResult?.outcome === "completed" && task.dispatchResult.paths;
+    if (!taskIsComplete(task.paths, successfulPaths)
+      && !(recordedPaths && taskIsComplete(task.paths, new Set(recordedPaths)))) continue;
+    task.state = "done";
+    changed = true;
   }
+  return changed;
 }
 
 export function findTaskByText(plan: PlanTask[], taskText: string): PlanTask | undefined {
@@ -192,6 +209,7 @@ export function reattachDispatchAssignments(
     const previous = findTaskByText(previousPlan, task.text);
     if (previous?.dispatchResult) task.dispatchResult = previous.dispatchResult;
     if (previous?.candidate) task.candidate = { ...previous.candidate };
+    if (previous?.state === "done" && JSON.stringify(previous.paths) === JSON.stringify(task.paths)) task.state = "done";
   }
   for (const entry of assignments) {
     const task = findTaskByText(plan, entry.taskText);

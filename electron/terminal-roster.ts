@@ -82,7 +82,9 @@ function parseRosterPlan(value: unknown): TerminalRosterEntry["plan"] {
     const result = isRecord(rec.dispatchResult) ? rec.dispatchResult : null;
     const outcome = DISPATCH_OUTCOMES.find((value) => value === result?.outcome);
     const dispatchResult = result && typeof result.workerId === "string" && TERM_ID.test(result.workerId) && outcome
-      ? { workerId: result.workerId, outcome } : undefined;
+      ? { workerId: result.workerId, outcome, ...(Array.isArray(result.paths) && result.paths.length <= MAX_PLAN_PATHS
+        && result.paths.every((path: unknown) => typeof path === "string" && path.length > 0 && path.length <= MAX_PLAN_PATH && !/[\x00-\x1f]/.test(path))
+        ? { paths: result.paths as string[] } : {}) } : undefined;
     const candidate = parsePlanTaskCandidate(rec.candidate);
     // Losing an invalid independent-area reference must not turn Retry into a shared-source write.
     if (rec.candidate !== undefined && !candidate) continue;

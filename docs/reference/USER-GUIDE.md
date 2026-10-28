@@ -459,6 +459,13 @@ not fill the board. A `/plan` turn publishes its reply; if that reply only
 asks what to plan, later replies keep publishing until one contains the
 list. The list stays until the next `/plan` or `/clear`.
 
+An agent's checked box or claim that tests passed does not complete a task.
+Tasks become done after a current, passing Verify and successful file-tool
+outcomes for every declared task path. A passing check does not complete
+unrelated or pathless tasks. Failed, cancelled, timed-out, and outdated checks
+leave unfinished tasks open. Existing completed marks survive repeated plan
+replies only while the task's paths remain the same.
+
 A `/plan` request can read files, search, fetch a URL, and discover available
 MCP tools. It cannot edit files, run shell commands, call MCP tools, or spawn
 or redirect a worker. Producing a task list
@@ -488,11 +495,15 @@ to the agent's tools, not manual editor changes or clicking Dispatch.
 Dispatched tasks show their worker and claimed files on the board. Clicking a
 dispatched task jumps to that worker's terminal (tabs are named `dispatch`).
 Workers receive a mailbox briefing with their task, and settle notes flow back
-to siblings so they stay aware of each other's results. When a worker settles
-with its task done, the owner is idle, and no sibling worker is still running,
+to siblings so they stay aware of each other's results. A completed worker
+attempt retains its successful paths, but the task waits for Verify. When
+the owner is idle and no sibling worker is still running,
 Termina automatically runs Verify once (when the project has a detectable test
 command) and reports the verdict to your next turn — cancellable like any
-verify run. A failing verify — manual or automatic — re-runs automatically
+verify run. Shared-file tasks use the owner's check; independent tasks use
+their own candidate's check. For shared-file attempts, retained paths allow
+a later check to complete the task after its worker closes.
+A failing verify — manual or automatic — re-runs automatically
 when your next run settles, up to 3 consecutive failed attempts; then it stops
 and asks for attention instead of burning more test runs. Timed-out suites never
 auto-retry: a hang would just burn three 10-minute runs.
