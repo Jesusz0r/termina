@@ -302,6 +302,11 @@ h1, h2, h3 {
 /* ---------- app mockup ---------- */
 
 .mockup-section { padding: 72px 0 96px; }
+.shots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 32px; }
+.shots figure { margin: 0; min-width: 0; }
+.shots img { display: block; width: 100%; height: auto; border: 1px solid var(--border-strong); border-radius: 12px; }
+.shots figcaption { margin-top: 10px; color: var(--muted); font-size: 13px; }
+@media (max-width: 720px) { .shots { grid-template-columns: 1fr; } }
 
 .mockup {
   border: 1px solid var(--border-strong);

@@ -75,16 +75,10 @@
     <!-- ============ 1. GETTING STARTED ============ -->
     <section id="getting-started" class="guide-section">
       <h2>1 · Getting started</h2>
-
-      <h3>Install</h3>
-      <p>
-        Download the signed <code>.dmg</code> (macOS Apple Silicon) or <code>.AppImage</code> (Linux x64) from the
-        <a class="link" href="index.html#install">releases page</a>. The bundle ships everything: the app, the Rust
-        snapshot core, the in-house agent, and its own node runtime. Nothing else to install.
-      </p>
+      <h3 id="install">Install</h3>
+      <p>Download the signed <code>.dmg</code> (macOS Apple Silicon) or <code>.AppImage</code> (Linux x64) from the <a class="link" href="https://github.com/Jesusz0r/termina/releases" target="_blank">releases page</a>. The bundle ships everything: the app, the Rust snapshot core, the in-house agent, and its own node runtime. Nothing else to install.</p>
       <p>Packaged builds check GitHub Releases for updates and install them when you quit the app.</p>
-
-      <h3>First launch</h3>
+      <h3 id="first-launch">First launch</h3>
       <p>A fresh install starts empty:</p>
       <ol>
         <li>Click <b>Open folder</b> (or press <code>Cmd/Ctrl+O</code>) and pick a project folder.</li>
@@ -92,36 +86,24 @@
         <li>Run <code>/models</code> to pick the default model.</li>
       </ol>
       <p>The empty editor tells you about <code>/login</code> and <code>/models</code> when the agent has no provider configured yet.</p>
-      <p>
-        Opening a folder creates one project tab and starts one agent terminal in it. Your open project tabs
-        restore on the next launch.
-      </p>
-
-      <h3>Project tabs</h3>
-      <p>
-        Each tab is one folder with its own explorer, editor, terminals, timeline, and worldlines. Switching tabs
-        never interrupts a running agent — every project keeps working in the background. Reopening a folder that
-        already has a tab reactivates that tab instead of duplicating it.
-      </p>
-      <p>
-        A status dot on the tab matches the terminals: green while every agent is idle, a glowing pulse while one
-        is working, amber glow when one is blocked. An unseen verify failure in a background project turns that
-        project's dot red instead. Settling or blocking plays a short chime and a named toast
-        (<code>pi-editor is idle</code>, or <code>pi-editor · dispatch needs you</code> when that project has
-        more than one agent) unless that terminal already has keyboard focus in the project you are looking at.
-        Click the toast to jump to that project and terminal.
-      </p>
+      <p>Opening a folder adds it to the project rail and starts one agent terminal in it. Your open projects restore on the next launch — including each terminal's plan board and last verify verdict. Dispatched worker assignments never survive a restart; their tasks return to pending.</p>
+      <h3 id="project-rail">Project rail</h3>
+      <p>The persistent left rail lists your folders, each with its own explorer, editor, terminals, timeline, and worldlines. Switching projects never interrupts a running agent. Reopening an existing folder reactivates it instead of creating a duplicate. Folder paths distinguish projects with the same name.</p>
+      <p>Each project shows separate counts for recorded working agents and unresolved attention items. These counts come from current work facts, not unseen notifications; an idle agent is not proof of completion. A failure or outdated check still counts after inspection. If facts cannot be loaded, the counts say <b>unknown</b> rather than implying there is no work or attention.</p>
+      <p>Use <code>Tab</code> to reach a project button, <code>↑</code>/<code>↓</code> or <code>Home</code>/<code>End</code> to browse, and <code>Enter</code> or <code>Space</code> to activate. The rail always opens that project's real workspace. When a live agent has a recorded pending permission, project entry focuses the one waiting longest; otherwise it returns to the last-used terminal that is still available, or another available terminal if that session closed. Explicitly selecting a terminal always opens that exact terminal. Background notifications never change your project, terminal, or keyboard focus. If no terminal is available, the workspace offers agent and shell creation; selecting the project does not create a session.</p>
+      <p>Drag vertically or use <code>Alt+↑</code>/<code>↓</code> to reorder projects; the order uses the existing project preferences. The persistent <b>Attention</b> section above <b>Projects</b> shows recorded issues across projects without interrupting background work.</p>
+      <p>Settling or blocking still plays a short chime and a named toast (<code>pi-editor is idle</code>, or <code>pi-editor · dispatch needs you</code> when that project has more than one agent) unless that terminal already has keyboard focus in the project you are looking at. Click the toast to jump to that project and terminal.</p>
     </section>
 
-    <!-- ============ 2. LAYOUT ============ -->
+    <!-- ============ 2. THE LAYOUT ============ -->
     <section id="layout" class="guide-section">
       <h2>2 · The layout</h2>
       <table>
         <thead><tr><th>Area</th><th>What lives there</th></tr></thead>
         <tbody>
-          <tr><td>Project bar</td><td>Project tabs and <code>＋</code> to open another folder</td></tr>
-          <tr><td>Explorer</td><td>File tree (far left, collapsible with <code>Cmd/Ctrl+B</code>)</td></tr>
-          <tr><td>Terminal pane</td><td>Terminal tabs, the Session Timeline strip, the Plan Board, the Worldlines panel, and the Modified files panel</td></tr>
+          <tr><td>Project rail</td><td>Direct workspace navigation, factual work/attention counts, Attention, and <code>＋</code> to open another folder</td></tr>
+          <tr><td>Explorer</td><td>File tree beside the rail, collapsible with <code>Cmd/Ctrl+B</code></td></tr>
+          <tr><td>Terminal pane</td><td>Terminal tabs and on-demand Checks, Timeline, Plan Board, Worldlines, and Modified files tools</td></tr>
           <tr><td>Editor pane</td><td>Editor tabs, the Monaco editor, and Change Review</td></tr>
           <tr><td>Status bar</td><td>Current folder, the Verify button, and the Git handoff buttons</td></tr>
         </tbody>
@@ -131,45 +113,40 @@
         <li><code>Cmd/Ctrl+B</code> toggles the explorer.</li>
         <li><code>Cmd/Ctrl+Shift+E</code> toggles the terminal.</li>
         <li><code>Cmd/Ctrl+E</code> toggles the editor.</li>
-        <li><code>Cmd/Ctrl+Shift+F</code> makes the terminal fullscreen (only the terminal shows).</li>
+        <li><code>Cmd/Ctrl+Shift+F</code> makes the terminal fullscreen (the work area shows only the terminal; project navigation remains visible).</li>
       </ul>
       <p>Terminal and editor cannot both be minimized. The editor stays minimized while no file or review is open.</p>
+      <p>The compact strip below the terminal opens tools on demand: <b>Checks</b>, <b>Timeline</b>, <b>Plan</b>, <b>Worldlines</b>, and <b>Modified</b>. Panels start closed, even when a preferred tab was saved. New content updates count badges without opening or switching tools.</p>
+      <p><code>Tab</code> enters the strip as a single stop. <code>Enter</code> or <code>Space</code> opens its tool; <code>←</code>/<code>→</code> (<code>Home</code>/<code>End</code> for the ends) select and open another. <b>Close</b> or <code>Escape</code> within a tool closes the panel, retains its content, and returns focus to its tab. <code>Escape</code> in the terminal remains terminal input.</p>
     </section>
 
-    <!-- ============ 3. AGENT ============ -->
+    <!-- ============ 3. WORKING WITH THE AGENT ============ -->
     <section id="agent" class="guide-section">
       <h2>3 · Working with the agent</h2>
-
-      <h3>Terminals</h3>
-      <p>Click <code>＋</code> next to the terminal tabs to open the terminal chooser:</p>
-      <ul>
-        <li><b>Agent (core)</b> — Termina's in-house coding agent.</li>
-        <li><b>Shells</b> — any shell detected on your system (<code>zsh</code>, <code>bash</code>, …).</li>
-      </ul>
-      <p>
-        Shell tabs show the shell name as a badge. <code>Cmd/Ctrl+T</code> opens the chooser.
-        Each terminal tab carries the same idle / working / blocked status dot as the project tab.
-      </p>
-      <p>
-        Cycle without the mouse: <code>Ctrl+Tab</code> / <code>Ctrl+Shift+Tab</code> move between terminal tabs,
-        <code>Cmd/Ctrl+Shift+[</code> / <code>]</code> move between project tabs, and scrolling over a tab strip
-        cycles its tabs.
-      </p>
-
-      <h3>Talking to the agent</h3>
-      <p>
-        The terminal is a full agent TUI. Everything the agent can do, you can do here: <code>/settings</code>,
-        <code>/login</code>, <code>/models</code>, plan mode, completions, and so on.
-      </p>
-      <p>Multi-line input works everywhere:</p>
+      <h3 id="terminals">Terminals</h3>
+      <p>Click <code>＋</code> (<b>New terminal</b>) next to the terminal tabs, or press <code>Cmd/Ctrl+T</code>, to choose what to open: <b>Agent</b> (Termina's in-house agent), an original agent TUI when its program is on <code>PATH</code> (<b>Codex</b>, <b>Claude</b>, <b>Grok</b>, <b>Gemini</b> via <code>agy</code>, or <b>Muse</b>), or a detected shell (<code>zsh</code>, <code>bash</code>, …). Nothing starts until you pick a row. The new agent reuses the active agent's model when available; isolated sessions also inherit its effort. Main retains the existing admission policy: when a live terminal overlaps the project source, another agent opens in a separate sandboxed work area. Creation does not submit a prompt or apply changes.</p>
+      <p>Each external CLI keeps its own login and conversation. Termina does not fork or promote that session. External CLI tabs reopen with your project on the next launch; Claude, Codex, Grok, and Gemini resume the conversation their own hooks reported, and Muse starts a new one. Activity (working, waiting for permission, or an unconfirmed stop) comes from an observational hook. A prompt alone does not count as started work, and a stop event does not mean the task succeeded. Grok has no documented permission hook, so a Grok approval may not show as waiting. File changes still come from the project watcher. The menu supports arrow keys, Home/End and Enter; Escape cancels and returns focus to <code>＋</code>. Shell tabs show the shell name as a badge. A refused creation shows the actual error and permits an explicit retry; it never falls back to a shell or shared-source agent.</p>
+      <p>Opening a folder starts one <b>Agent (core)</b> tab. Agent terminal tabs carry idle / working / blocked status dots; the project rail shows separate factual work and attention counts.</p>
+      <p>Cycle without the mouse: <code>Ctrl+Tab</code> / <code>Ctrl+Shift+Tab</code> move between terminal tabs, <code>Cmd/Ctrl+Shift+[</code> / <code>]</code> move between projects, and scrolling over a terminal tab strip cycles its tabs. The project rail scrolls vertically without changing the selected project.</p>
+      <h3 id="talking-to-the-agent">Talking to the agent</h3>
+      <p>A core tab is a full-screen TUI: <code>/login</code>, <code>/models</code>, <code>/clear</code>, <code>/compact</code>, <code>/resume</code>, <code>/effort</code>, <code>/skills</code>. Every turn starts with a bounded project snapshot (top of the tree first), so the agent is oriented without spending tool calls on discovery — file tools always see live state.</p>
+      <p>Type <code>@</code> to pick a project file; keep typing to filter. Tab completes, Enter inserts the path, Enter again submits. Esc closes the picker and keeps what you typed. Ctrl+R searches prompt history. Drag to select transcript text; Cmd/Ctrl+C copies. Reasoning starts at medium; <code>/effort</code> shows the levels available for the current model, and your last choice sticks: new tabs reopen on it (clamped to what each model supports). Type <code>/skills</code> to pick a discovered skill (<code>~/.agents/skills</code>, then <code>.agents/skills</code> in the project); selecting one starts a turn that reads that skill and follows it. A skill with a <code>paths</code> field in its front matter is a path-scoped rule: its body is attached to the agent's file reads and edits of matching project files. The optional <a class="link" href="https://github.com/Jesusz0r/termina/blob/main/docs/examples/skills/notes/SKILL.md" target="_blank">notes skill</a> saves working notes under <code>.termina-notes/</code> and reads them back only when asked; notes are not verified work. Ctrl+J inserts a newline; Enter submits. Paste keeps newlines. <code>/help</code> lists keys. <code>/doctor</code> reports how many skills were omitted from the frozen index, whether the skill scan was capped, whether user/project <code>AGENTS.md</code> was truncated, and the latest MCP connection failures by server name and error code. It reads the existing loader results without reconnecting or starting a model turn. It does not print instruction bodies, credentials, MCP environment values, or raw errors. Paste a screenshot (Cmd/Ctrl+V) to attach it to the next prompt — up to four images, about 4 MB each. The composer keeps that count above whatever you have already typed, and the status line shows it too. Drop files anywhere on the terminal: onto a tab for that terminal, anywhere else for the active one. Dropped images attach like pasted screenshots, and a non-image project file inserts <code>@path</code> in the composer. Files outside the project, or names the composer cannot tag (spaces, <code>@</code>), paste as a quoted path. Extra images past that cap paste as paths too.</p>
+      <p>Multi-line input:</p>
       <ul>
         <li><code>Shift+Enter</code>, <code>Ctrl+Enter</code>, or <code>Cmd+Enter</code> (macOS) inserts a newline.</li>
         <li><code>Option+Enter</code> (macOS) queues a follow-up message while the agent runs.</li>
       </ul>
-      <p><code>Cmd/Ctrl+.</code> sends an interrupt to the active terminal. <code>Cmd/Ctrl+Shift+W</code> closes it.</p>
+      <p><code>Cmd/Ctrl+.</code> sends Ctrl+C to the selected terminal. <code>Cmd/Ctrl+Shift+W</code> closes that terminal. When work may be affected, these commands ask for confirmation naming the terminal, project, and current task. Shell command activity is not inferred from output: closing or natively interrupting a live shell always asks. Direct Ctrl+C in the terminal and the emergency-stop chord remain immediate.</p>
+      <p><b>Interrupt is not close.</b> Ctrl+C targets the selected terminal's foreground work. It does not directly stop background child runs, separate dispatch workers, or a separate verification command. If the owner exits, its background child runs are terminated.</p>
+      <p><b>Close is not detach.</b> Closing ends that terminal session, stops its background child runs, cancels its verification command, and removes its terminal-local Change Review state. Other terminal tabs, including separate dispatch workers, remain open. Running commands are interrupted or terminated; separately detached processes are not guaranteed to stop. Files already written are not reverted. Cancel leaves the terminal pane and work intact. If the target or affected work changes during confirmation, the close is rejected; review it and close again.</p>
+      <p>Closing a project applies this warning to that project's terminals and candidate work, while other projects keep running. Quitting or restarting for an update applies it to all projects. Unsaved editor buffers have their separate Save / Discard / Cancel gate; a later cancellation does not delete their recovery copies.</p>
+      <p>Closing the window keeps the app and its terminal sessions alive on every platform. Open Termina again to reconnect to the same sessions. Model responses and reads can continue with the window closed. A new core-agent action that could write waits for you to reconnect and choose <b>Approve once</b> in its terminal, even if that terminal uses automatic approval. The window hides at once; an action already running finishes before it closes, and opening Termina in the meantime brings the same window back. Quitting the app stops the agents.</p>
+      <h3 id="mcp-servers-core">MCP servers (core)</h3>
+      <p>A core tab can call MCP tools listed in the user-owned <code>~/.termina/agent/mcp.json</code>. Project files cannot start MCP processes.</p>
+      <p>Use the Claude/Cursor <code>mcpServers</code> shape with <code>command</code>, <code>args</code>, and <code>env</code> for local servers, or a <code>url</code> with <code>type: "http"</code> / <code>"sse"</code> (https only) for remote Streamable HTTP and SSE servers. The kernel starts those processes when the tab starts and keeps the tool list frozen until <code>/clear</code> or a new tab. MCP is a program you installed. It is not limited to the project jail.</p>
     </section>
 
-    <!-- ============ 4. LIVE ============ -->
+    <!-- ============ 4. WATCHING WORK LIVE ============ -->
     <section id="live" class="guide-section">
       <h2>4 · Watching work live</h2>
       <p>While the agent works:</p>
@@ -178,34 +155,27 @@
         <li>Files the agent touches auto-open in a replaceable preview tab mid-run, so you can follow along without hunting for paths — a long run never pins a tab per file. Edit, double-click, or Keep Open to pin one. Turn this off in Settings → General → <b>Open files the agent edits</b>.</li>
         <li>The Modified files panel (bottom of the terminal pane) lists every file the current run changed, with a badge per file: <code>A</code> created, <code>M</code> modified, <code>D</code> deleted.</li>
       </ul>
-      <p>Files larger than 2&nbsp;MB cannot be opened in the editor; the terminal stays the place to inspect them.</p>
+      <p>Files larger than 2 MB cannot be opened in the editor; the terminal stays the place to inspect them.</p>
     </section>
 
     <!-- ============ 5. CHANGE REVIEW ============ -->
     <section id="review" class="guide-section">
       <h2>5 · Change Review</h2>
-      <p>
-        Every run gets a <b>baseline</b>: the content of each file at the moment the run started. Change Review
-        compares against that baseline, not against Git.
-      </p>
+      <p>Every run gets a <b>baseline</b>: the content of each file at the moment the run started. Change Review compares against that baseline, not against Git.</p>
       <p>To review a change:</p>
       <ol>
         <li>Click a file in the Modified files panel. Change Review opens a side-by-side diff: baseline on the left, current content on the right.</li>
         <li>Choose an action:
           <ul>
-            <li><b>Accept</b> — mark the change as kept (<code>✓</code> mark in the list).</li>
+            <li><b>Accept</b> — mark the change as reviewed (<code>✓</code> mark in the list, with the review time). The mark drops if the file changes again — it reviewed the bytes the file no longer has.</li>
             <li><b>Revert</b> — restore the pre-run version (<code>↩</code> mark in the list).</li>
             <li><b>Open file</b> — leave the diff and edit the file as a normal tab.</li>
           </ul>
         </li>
-        <li>Use <b>Accept all</b> in the panel header to accept every change at once, or <b>Clear</b> to forget review state. Clear only hides the list — files stay changed on disk.</li>
+        <li>Use <b>Accept all</b> in the panel header to accept every change at once, or <b>Clear</b> to forget review state. Clear only hides the list — files stay changed on disk, and their review marks are dropped.</li>
       </ol>
-      <p>
-        Deleted files are reviewable too: the left side shows the stored baseline and the right side is empty.
-        <b>Accept</b> keeps the deletion; <b>Revert</b> recreates the original file, including its parent folder when needed.
-      </p>
-
-      <h3>Handing off to Git</h3>
+      <p><code>Esc</code> and the <code>←</code> button both leave the diff and return to the editor. <code>Esc</code> stays with the terminal while keyboard focus is in it.</p>
+      <h3 id="handing-off-to-git">Handing off to Git</h3>
       <p>Termina never writes your Git repository — no staging, no commits, no refs. After a green Verify or after you Accept changes, the status bar shows two handoff actions:</p>
       <ul>
         <li><b>Copy commit subject</b> — copies a commit subject derived from the last run's prompt.</li>
@@ -213,17 +183,11 @@
       </ul>
     </section>
 
-    <!-- ============ 6. VERIFY ============ -->
+    <!-- ============ 6. VERIFY & ITERATE ============ -->
     <section id="verify" class="guide-section">
       <h2>6 · Verify &amp; Iterate</h2>
-      <p>
-        The <b>Verify</b> button in the status bar runs your tests in a background process and feeds the result back
-        to the agent on its next turn. The agent sees the failure output and can fix it without you relaying anything.
-      </p>
-      <p>
-        Termina detects the test command automatically from <code>package.json</code> scripts, pytest, cargo, or go.
-        The button's tooltip shows the detected command.
-      </p>
+      <p>The <b>Verify</b> button in the status bar runs your tests in a background process and feeds the result back to the agent on its next turn. The agent sees the failure output and can fix it without you relaying anything.</p>
+      <p>Termina detects the test command automatically from <code>package.json</code> scripts, pytest, cargo, or go. The button's tooltip shows the detected command.</p>
       <p>States you will see:</p>
       <table>
         <thead><tr><th>Badge</th><th>Meaning</th></tr></thead>
@@ -236,109 +200,80 @@
           <tr><td><code>⏸ …</code></td><td>Cancelled.</td></tr>
         </tbody>
       </table>
+      <p>A failure on a background terminal tab dots that tab red (amber for timeout) until you look at it, so an idle terminal's verdict never sits unseen. The project rail and global attention also show the recorded issue, including for background projects. Opening a terminal clears only its unseen notification; it does not clear the failure or its factual attention count.</p>
+      <h3 id="attention-across-all-projects">Attention across all projects</h3>
+      <p><b>Attention</b> is a non-interactive level-two heading above <b>Projects</b> in the project rail, not a button. Its rows remain visible for every open project while another project is selected. The heading shows the total current item count, not just the loaded page; canonical updates refresh that count, and a read failure makes it <b>unknown</b> rather than zero. Choose <b>View → Attention across all projects</b> or press <code>Cmd/Ctrl+Alt+A</code> to focus this persistent section. Starting work opens the terminal/editor directly. There is no Attention popover to open or close and no dedicated close button.</p>
+      <p>Items identify their exact project path, task assignment when one is recorded, agent/model, work area, and reason. Blockers and unavailable workers appear before failed/incomplete/interrupted attempts, followed by check issues and <b>Result pending review</b>. A separate candidate tree is labelled separately from shared project files; it is not automatically a sandbox.</p>
+      <p><b>Result pending review</b> means a task has a recorded completed attempt, not that an idle agent, a checked task box, or a passing check proves acceptance. Independent results additionally require an available captured candidate; the item names that result's root and version, not the source owner's checks. Inspection does not record human acceptance. A candidate that is explicitly promoted or discarded leaves this queue; a new attempt replaces its previous result. Shared-file results are historical completion records and do not claim that those files remain unapplied. Recording persistent human acceptance is not yet supported.</p>
+      <p>In <b>Attention</b>, <b>Inspect terminal</b>, <b>Inspect plan</b>, and <b>Inspect check</b> navigate directly to the exact current owner through main. <b>Inspect plan</b> reveals the owner's Plan Board and <b>Inspect check</b> reveals its Checks tool. A check without a single recorded task opens its terminal's Checks; it is not attributed to the first task on that Plan Board. Stale, closed, or superseded targets are rejected rather than opening a different project or terminal. Inspection never runs or cancels checks, retries a task, accepts changes, or resolves the item. Historical passing output remains <b>Outdated</b> when it no longer applies to current files.</p>
+      <p>The section initially shows up to 50 items; <b>Show more</b> reveals the next page. Session, task, file, check, and project changes update the section automatically. A loading failure is explicit, the count becomes <b>unknown</b>, and retained rows are marked potentially outdated, not replaced with a false empty-success state. Attention retries failed reads automatically; there is no manual refresh button.</p>
+      <h3 id="jump-to-work">Jump to work</h3>
+      <p>Open the <b>Command palette</b> with <code>Cmd/Ctrl+K</code> to find an open project or an existing Plan Board task, as well as run commands. Search by project name, full path, or task text. Words are matched without case sensitivity; results include the project path and Plan Board owner to distinguish repeated names. Use <code>↑</code> / <code>↓</code>, <code>Home</code> / <code>End</code>, and <code>Enter</code>, or click a result. <code>Escape</code> cancels and restores focus to the opener.</p>
+      <p>A project result activates that project's existing workspace. A task result opens its exact owner's <b>Plan Board</b> in the real workspace and focuses the existing task row. It does not start the task or automatically open its worker. Use the existing Plan Board controls for dispatch, retry, or worker navigation. Previous projects retain their editor buffers and background work when you switch back.</p>
+      <p>Navigation never creates tasks or terminals, dispatches or retries work, answers permissions, or marks anything reviewed. Targets are checked again before opening. If the project, owner, assigned source, or task changed or closed, search again to choose its current context. The palette shows at most 50 matching project/task results and asks you to refine broader searches; commands remain usable if project/task data is unavailable.</p>
+      <h3 id="factual-work-context">Factual work context</h3>
+      <p>Use the project rail and terminal tabs to select the real workspace, then open its <b>Plan</b>, <b>Checks</b>, <b>Worldlines</b>, or <b>Modified</b> tool as needed. The persistent <b>Attention</b> section identifies recorded issues and their assigned work areas across projects. Shared project files and a separate candidate tree are labelled differently; a separate tree alone is not a claim of filesystem sandboxing.</p>
+      <p>An idle terminal is not proof of task completion. An incomplete, failed, or interrupted dispatch remains visible on its owner's Plan Board after its worker closes. Inspection and navigation never retry work automatically; retry remains an explicit Plan Board action.</p>
+      <p>Open <b>Checks</b> below the terminal, then <b>Check details</b>, for the exact recorded command, tested source, timing, exit outcome, and retained bounded output. If source validity is lost, the check says <b>Outdated</b> even when the historical execution passed. Loaded reports are invalidated when their terminal, workspace, generation, or exact evidence changes. Inspecting a report does not run or cancel tests. The <b>Modified</b> tool opens the existing Change Review controls; its cumulative tracked paths are not proof of a clean tree or completed human review.</p>
+      <p>TypeScript projects get background typechecks: after your run settles, <code>tsc --noEmit</code> refreshes silently into the agent's next-turn context when the tree moved since the last clean run, at most once a minute per workspace. Other stacks stay manual for now.</p>
       <p>Candidate terminals (see Worldlines) detect their own test command from their own copy of the project.</p>
     </section>
 
-    <!-- ============ 7. TIMELINE ============ -->
+    <!-- ============ 7. SESSION TIMELINE ============ -->
     <section id="timeline" class="guide-section">
       <h2>7 · Session Timeline</h2>
-      <p>
-        Below the terminal sits a dot strip: one dot per stable action the agent took, with a running count. This is
-        the record of what happened, in order.
-      </p>
+      <p>Below the terminal sits a dot strip: one dot per stable action the agent took, with a running count. This is the record of what happened, in order.</p>
       <ul>
         <li><b>Hover a dot</b> for the time, the tool, the file, and an on-demand diff of what changed at that point.</li>
         <li><b>▶ Replay</b> walks through the run's snapshots step by step.</li>
+        <li><b>Restore captured file</b> in a dot's right-click menu restores only that file from its retained source capture in the primary project. <code>Shift+F10</code> opens the same menu from a focused dot. A preview without a retained capture cannot restore a file. Open unsaved edits to that file go through the usual Save / Discard / Cancel check; unrelated editor buffers stay open. Restore requires active writes to finish and keeps the terminal conversation intact.</li>
         <li><b>Cmd/Ctrl+Click a forkable dot</b> to fork a candidate from that exact source state — any moment of any run becomes a branch point. See <a class="link" href="#fork-any-moment">Fork Any Moment</a>.</li>
         <li><b>Keyboard</b>: <code>Tab</code> enters the strip once (not once per dot), <code>←</code>/<code>→</code> move the selection a moment at a time, <code>Home</code>/<code>End</code> go to the oldest and newest moment, <code>Enter</code> opens the selected moment, and <code>Cmd/Ctrl+Enter</code> forks a candidate from it. <code>Esc</code> stops a running replay.</li>
       </ul>
       <p>The recorder label next to the count tells you the recording health:</p>
-      <table>
-        <thead><tr><th>Label</th><th>Meaning</th></tr></thead>
-        <tbody>
-          <tr><td><i>(empty)</i></td><td>Recording normally.</td></tr>
-          <tr><td><code>indexing</code></td><td>Termina is indexing the source before moments can fork.</td></tr>
-          <tr><td><code>paused</code></td><td>Moment forking is paused; no Git recording is happening.</td></tr>
-          <tr><td><code>degraded</code></td><td>Some moments could not be captured.</td></tr>
-          <tr><td><code>budget</code></td><td>The retained-blob budget is full, so old unpinned moments are being evicted to make room.</td></tr>
-        </tbody>
-      </table>
-      <p>If a dot exists, it is forkable. Termina never shows a dot whose source state it cannot restore.</p>
+      <ul>
+        <li><i>(empty)</i> — recording normally.</li>
+        <li><b>indexing</b> — Termina is indexing the source before moments can fork.</li>
+        <li><b>paused</b> — moment forking is paused; no Git recording is happening.</li>
+        <li><b>degraded</b> — some moments could not be captured.</li>
+        <li><b>budget</b> — the retained-blob budget is full, so old unpinned moments are being evicted to make room.</li>
+      </ul>
+      <p>Only dots with a retained source capture can fork or restore. A dot whose capture was evicted may still have a read-only file preview.</p>
     </section>
 
-    <!-- ============ 8. PLAN BOARD ============ -->
+    <!-- ============ 8. PLAN BOARD AND DISPATCH ============ -->
     <section id="plan" class="guide-section">
       <h2>8 · Plan Board and Dispatch</h2>
-      <p>
-        Type <code>/plan</code> or <code>/plan &lt;request&gt;</code> in the terminal. The Plan Board (below the timeline)
-        shows the task list with live progress: <code>○</code> pending, <code>◐</code> active, <code>✓</code> done.
-        Ordinary replies do not fill the board; only a <code>/plan</code> turn publishes the list.
-        The list stays until the next <code>/plan</code> or <code>/clear</code>.
-      </p>
-      <p>
-        Plans do not need one exact Markdown format. Dash, star, plus, and numbered bullets are recognized;
-        optional <code>[ ]</code>, <code>[x]</code>, and <code>[X]</code> checkboxes preserve pending and completed state.
-      </p>
-
-      <h3>Dispatching tasks</h3>
+      <p>When the agent plans multi-step work — type <b><code>/plan</code></b> or <b><code>/plan &lt;request&gt;</code></b> in the terminal — the Plan Board (below the timeline) shows the task list with live progress: <code>○</code> pending, <code>◐</code> active, <code>✓</code> done. Ordinary replies do not fill the board. A <code>/plan</code> turn publishes its reply; if that reply only asks what to plan, later replies keep publishing until one contains the list. The list stays until the next <code>/plan</code> or <code>/clear</code>.</p>
+      <p>An agent's checked box or claim that tests passed does not complete a task. Tasks become done after a current, passing Verify and successful file-tool outcomes for every declared task path. A passing check does not complete unrelated or pathless tasks. Failed, cancelled, timed-out, and outdated checks leave unfinished tasks open. Existing completed marks survive repeated plan replies only while the task's paths remain the same.</p>
+      <p>A <code>/plan</code> request can read files, search, fetch a URL, and discover available MCP tools. It cannot edit files, run shell commands, call MCP tools, or spawn or redirect a worker. Producing a task list does not unlock those tools during that request. Send an ordinary message such as “implement this plan” to allow implementation; this works even if a plan list is still owed. A new ordinary message can also steer an active planning run at its next safe boundary. <code>/clear</code> (or <code>/new</code>) resets both the planning restriction and pending plan publication. This restriction applies to the agent's tools, not manual editor changes or clicking Dispatch.</p>
+      <h3 id="dispatching-tasks">Dispatching tasks</h3>
       <ul>
-        <li><b>Click any pending task</b> to send it to a parallel worker — a separate agent that works on the same project simultaneously. A toast confirms the dispatch.</li>
-        <li><b>⇉ Dispatch</b> sends the plan's tasks out.</li>
+        <li><b>Click any pending task</b> to send it to a parallel worker — a separate agent that works on the same project simultaneously. The row updates with the worker; failures toast.</li>
+        <li><b>Pick a worker model</b> on the row chip. The default is <b>Inherit</b> (this tab's current <code>/model</code>). Recent models and other live agent tabs are listed too. A task may also name <code>@model provider/id</code>; Inherit still wins if you choose it.</li>
+        <li><b>Schedule a task</b> with a trailing <code>@every 30m</code> / <code>@every 2h</code> / <code>@at 09:30</code> marker: while its terminal stays open and idle, Termina dispatches it to a worker on cadence through the same briefing, settle-note, and auto-verify loop. Intervals below 5 minutes are ignored. Scheduled workers inherit this tab's model unless the task has <code>@model</code>.</li>
+        <li><b>⇉ Dispatch</b> sends the plan's tasks out, each with its row's model.</li>
+        <li><b>Review files</b> by adding <code>@review</code> to a task that names existing project files, for example <code>Review src/auth.ts src/session.ts @review</code>. Its worker can only read and search; it reports findings in its terminal and never edits, runs commands, or completes the task. The optional <a class="link" href="https://github.com/Jesusz0r/termina/blob/main/docs/examples/skills/review/SKILL.md" target="_blank">review skill</a> writes such tasks for you.</li>
       </ul>
-      <p>
-        Dispatched tasks show their worker and claimed files on the board. Clicking a dispatched task jumps to that
-        worker's terminal (tabs are named <code>dispatch</code>). Workers receive a mailbox briefing with their task,
-        and settle notes flow back to siblings so they stay aware of each other's results.
-      </p>
-
-      <h3>Scheduled dispatch</h3>
-      <p>
-        End any task with <code>@every 30m</code> or <code>@at 09:30</code> to dispatch it on cadence — seconds,
-        minutes, hours, and days all work, and the first <code>@every</code> run fires immediately. Settled
-        workers auto-verify once and report back; failing suites re-verify automatically up to 3 attempts, while
-        timeouts are reported and left alone.
-      </p>
+      <p>Dispatched tasks show their worker and claimed files on the board. Clicking a dispatched task jumps to that worker's terminal (tabs are named <code>dispatch</code>). Workers receive a mailbox briefing with their task, and settle notes flow back to siblings so they stay aware of each other's results. A completed worker attempt retains its successful paths, but the task waits for Verify. When the owner is idle and no sibling worker is still running, Termina automatically runs Verify once (when the project has a detectable test command) and reports the verdict to your next turn — cancellable like any verify run. Shared-file tasks use the owner's check; independent tasks use their own candidate's check. For shared-file attempts, retained paths allow a later check to complete the task after its worker closes. A failing verify — manual or automatic — re-runs automatically when your next run settles, up to 3 consecutive failed attempts; then it stops and asks for attention instead of burning more test runs. Timed-out suites never auto-retry: a hang would just burn three 10-minute runs.</p>
     </section>
 
-    <!-- ============ 9. WORLDLINES ============ -->
+    <!-- ============ 9. WORLDLINES: FORK, COMPARE, PROMOTE ============ -->
     <section id="worldlines-guide" class="guide-section">
       <h2>9 · Worldlines: fork, compare, promote</h2>
-      <p>
-        Worldlines answer one question: <i>what if the agent had done it differently?</i> A completed run can be
-        forked into isolated candidates — full copies of the project with their own agent sessions — that run side by
-        side with the original.
-      </p>
-      <p>
-        Requirements: the project must be inside a Git repository, on macOS with the candidate
-        sandbox helpers available (<code>sandbox-exec</code>, <code>taskpolicy</code>).
-        Candidates are not supported on other platforms yet. Otherwise the feature disables itself with a precise reason.
-      </p>
-
-      <h3>Fork Run</h3>
+      <p>Worldlines answer one question: <i>what if the agent had done it differently?</i> A completed run can be forked into isolated candidates — full copies of the project with their own agent sessions — that run side by side with the original.</p>
+      <p>Requirements: the project must be inside a Git repository, on macOS with the candidate sandbox helpers available (<code>sandbox-exec</code>, <code>taskpolicy</code>). Candidates are not supported on other platforms yet. Otherwise the feature disables itself with a precise reason.</p>
+      <h3 id="fork-run">Fork Run</h3>
       <p>When a terminal's last run completes, a <b>⇉ Fork Run</b> button appears above the timeline. It forks the run into two candidates:</p>
       <ul>
         <li><b>Candidate A — Reference</b>: the run's final result, preserved exactly.</li>
         <li><b>Candidate B — Alternative</b>: the project at the run's start, with the original prompt loaded. Text prompts arrive editable, so you can change the instructions and get a different implementation of the same task.</li>
       </ul>
-      <p>
-        Both candidates open as real agent terminals (badged <code>A</code> and <code>B</code>). They are
-        filesystem-isolated: their own source trees, sessions, homes, and process groups, with writes denied
-        outside their own tree. Live candidates keep network access (the model provider must stay reachable);
-        only candidate Verify and evidence workers run fully offline.
-      </p>
-      <p>
-        The Fork Run button is disabled with the exact reason when a run is not replayable — for example when you
-        steered mid-run with extra messages, another writer touched the workspace, or you edited files during the run.
-      </p>
-
+      <p>Both candidates open as real agent terminals (badged <code>A</code> and <code>B</code>). They are filesystem-isolated: their own source trees, sessions, homes, and process groups, with writes denied outside their own tree. Live candidates keep network access (the model provider must stay reachable); only candidate Verify and evidence workers run fully offline.</p>
+      <p>The Fork Run button is disabled with the exact reason when a run is not replayable — for example when you steered mid-run with extra messages, another writer touched the workspace, or you edited files during the run.</p>
       <h3 id="fork-any-moment">Fork Any Moment</h3>
-      <p>
-        <code>Cmd/Ctrl+Click</code> or <code>Cmd/Ctrl+Enter</code> any forkable timeline dot to fork a candidate from
-        that exact moment instead of a run boundary. The candidate starts from that source state with the conversation
-        branched at the matching point.
-      </p>
-
-      <h3>Working with candidates</h3>
+      <p><code>Cmd/Ctrl+Click</code> any forkable timeline dot to fork a candidate from that exact moment instead of a run boundary. The candidate starts from that source state with the conversation branched at the matching point.</p>
+      <h3 id="working-with-candidates">Working with candidates</h3>
       <p>Each comparison gets a card pair in the Worldlines panel:</p>
       <table>
         <thead><tr><th>Action</th><th>What it does</th></tr></thead>
@@ -348,25 +283,14 @@
           <tr><td><b>A ⇄ B</b></td><td>Compares the two candidates file by file.</td></tr>
           <tr><td><b>▾</b></td><td>Details: changed-file statistics, provenance, dependency changes.</td></tr>
           <tr><td><b>Promote</b></td><td>Three-way merges the candidate back into your project.</td></tr>
-          <tr><td><b>Export</b></td><td>Writes a patch + PR bundle (<code>candidate.patch</code>, <code>pr-body.md</code>, <code>metadata.json</code>) without touching Git history.</td></tr>
+          <tr><td><b>Export</b></td><td>Writes a patch bundle (<code>candidate.patch</code>, <code>pr-body.md</code>, <code>metadata.json</code>) with the evidence summary — ready for <code>git apply</code> or a PR.</td></tr>
           <tr><td><b>Discard</b></td><td>Removes both candidates and every app-owned resource.</td></tr>
         </tbody>
       </table>
-      <p>
-        Promotion merges source changes only — never commits, branches, or staging state. It refuses on conflicts
-        before touching anything, journals every step so a crash recovers cleanly, and opens the merged result in
-        Change Review plus a fresh terminal continuing the candidate's conversation.
-      </p>
-      <p>
-        Candidates are temporary. Closing the project or quitting asks for confirmation when candidates hold changes;
-        confirmed closes discard them.
-      </p>
-
-      <h3>Challenge Mode</h3>
-      <p>
-        When candidate A has settled, the comparison header offers four direct <b>Challenge</b> actions. Pick one to
-        relaunch candidate B as an automatic challenger that replays the original task under that constraint:
-      </p>
+      <p>Promotion merges source changes only — never commits, branches, or staging state. It refuses on conflicts before touching anything, journals every step so a crash recovers cleanly, and opens the merged result in Change Review plus a fresh terminal continuing the candidate's conversation.</p>
+      <p>Candidates are temporary. The project-close or quit warning includes candidates with source changes or session activity. Confirmed closes discard their normal work areas; recovery files may be retained when cleanup cannot safely finish. Export anything you need before closing.</p>
+      <h3 id="challenge-mode">Challenge Mode</h3>
+      <p>When candidate A has settled, the comparison header offers <b>Challenge</b>: it relaunches candidate B as an automatic challenger that replays the original task under one fixed constraint:</p>
       <table>
         <thead><tr><th>Profile</th><th>The challenger must…</th></tr></thead>
         <tbody>
@@ -376,58 +300,44 @@
           <tr><td>Performance-first</td><td>Improve measured performance without breaking correctness.</td></tr>
         </tbody>
       </table>
-      <p>
-        Ranking never asks a model for opinions. Termina measures deterministic evidence (tests, dependency counts,
-        API manifests, footprint, benchmark samples) and labels the result an <b>evidence winner</b> — a measurement,
-        not a claim that one implementation is objectively better. Equal or noisy measurements report a tie.
-      </p>
+      <p>Ranking never asks a model for opinions. Termina measures deterministic evidence (tests, dependency counts, API manifests, footprint, benchmark samples) and labels the result an <b>evidence winner</b> — a measurement, not a claim that one implementation is objectively better. Equal or noisy measurements report a tie.</p>
     </section>
 
-    <!-- ============ 10. FILES ============ -->
+    <!-- ============ 10. EXPLORER, EDITOR, AND MINE MARKS ============ -->
     <section id="files" class="guide-section">
       <h2>10 · Explorer, editor, and Mine marks</h2>
-
-      <h3>Explorer</h3>
-      <p>
-        Full file tree with VS Code-style interactions: right-click context menu, New File / New Folder,
-        Cut / Copy / Paste, Copy Path and Copy Relative Path, Rename (<code>F2</code>), Delete, and Refresh.
-      </p>
-      <p>
-        The <b>Filter files</b> box narrows the tree in place as you type; very wide matches show a
-        <code>50+ matches (refine to narrow)</code> note instead of flooding the tree. Click × in the box or
-        press <code>Escape</code> to clear. The tree answers the keyboard: arrows move and expand,
-        <code>Enter</code> opens, <code>Home</code>/<code>End</code> jump, and typing jumps to the first match.
-      </p>
-
-      <h3>Editor</h3>
+      <h3 id="explorer">Explorer</h3>
+      <p>Full file tree with VS Code-style interactions: right-click context menu, New File / New Folder, Cut / Copy / Paste, Copy Path and Copy Relative Path, Rename (<code>F2</code>), Delete, and Refresh. The <b>Filter files</b> box narrows the tree as you type; click × or press <code>Escape</code> to clear.</p>
+      <h3 id="editor">Editor</h3>
       <ul>
         <li>Preview tabs: single-click opens a replaceable preview; editing the file or double-clicking the tab pins it. Middle-click closes; drag reorders; tab context menus offer close and pin actions.</li>
-        <li>Unsaved edits show a dot on the tab; <b>Save</b> is <code>Cmd/Ctrl+S</code>; <b>Save all</b> is <code>Cmd/Ctrl+Alt+S</code>.</li>
+        <li>Unsaved edits show a dot on the tab; <b>Save</b> is <code>Cmd/Ctrl+S</code>, <b>Save all</b> is <code>Cmd/Ctrl+Alt+S</code>.</li>
         <li>Word wrap and minimap follow your Settings preferences.</li>
       </ul>
-
-      <h3>Mine marks</h3>
-      <p>
-        Every editor tab has an <code>M</code> marker: click it to mark the file as yours. Mine marks matter to
-        Worldlines: a candidate that modifies a file marked as yours is disqualified from automatic challenge ranking,
-        and promotion checks your current Mine set before merging.
-      </p>
+      <h3 id="unsaved-draft-recovery">Unsaved draft recovery</h3>
+      <p>Termina writes asynchronous recovery copies of editable text to its private application-data directory, not to your project files. Hover the unsaved dot to see whether the latest copy is saved, pending, or unavailable. A failed copy also shows a warning; do not rely on recovery while that warning persists.</p>
+      <p>After a renderer reload or application restart, opening the owning project restores its available drafts as pinned, <b>unsaved</b> tabs. Candidate drafts can be recovered only while their original candidate workspace still exists; recovery does not recreate a discarded candidate. Recovered text is marked for review against the current file. If the file was deleted, saving requires the explicit restore confirmation. Recovery never applies text automatically.</p>
+      <p>Recovery retains the last confirmed copy, not edits still pending when the process dies. It does not restore undo history, selections, or scroll position. There are at most 64 recovery copies, each limited to 2 MiB of UTF-8 text. Saving or explicitly discarding a buffer removes its copy; cancelling a close keeps it. Copies may contain sensitive text and remain in local application data until saved or discarded.</p>
+      <h3 id="file-previews">File previews</h3>
+      <p>Images open with <b>− / +</b>, a zoom percentage, <b>Fit</b>, and <b>100%</b> controls. Scroll or drag to move around an enlarged image. Use <code>Ctrl/Cmd</code> + scroll or a trackpad pinch to zoom at the pointer. With the image area focused, <code>+</code> / <code>−</code> zoom, <code>0</code> restores actual size, and <code>F</code> fits the image to the pane. Fit does not enlarge small images. Pinned image tabs retain their zoom and scroll position when you switch tabs.</p>
+      <p>PDFs use the built-in viewer's zoom, fit, rotation, and page-number controls. They are read-only previews, not editable text.</p>
+      <p>Code, Markdown, HTML, and other UTF-8 text files open in the text editor; Markdown and HTML are not rendered. Binary files without a supported preview, and unsupported text encodings, show an error instead of opening as editable text. There are no dedicated Office, archive, audio, or video viewers.</p>
+      <h3 id="mine-marks">Mine marks</h3>
+      <p>Every editor tab has an <code>M</code> marker: click it to mark the file as yours. Mine marks matter to Worldlines: a candidate that modifies a file marked as yours is disqualified from automatic challenge ranking, and promotion checks your current Mine set before merging.</p>
     </section>
 
     <!-- ============ 11. SETTINGS ============ -->
     <section id="settings" class="guide-section">
       <h2>11 · Settings</h2>
       <p>Open with <code>Cmd/Ctrl+,</code> or <b>Termina → Settings</b>. It opens on <b>General</b>. Settings has three sections: <b>General</b>, <b>Appearance</b>, and <b>Keyboard</b>.</p>
-
-      <h3>General</h3>
+      <p><b>General</b></p>
       <table>
         <thead><tr><th>Setting</th><th>Options</th></tr></thead>
         <tbody>
           <tr><td>Open files the agent edits</td><td>On / off. When on, a file opens as a replaceable preview tab as the agent starts editing it. On by default.</td></tr>
         </tbody>
       </table>
-
-      <h3>Appearance</h3>
+      <p><b>Appearance</b></p>
       <table>
         <thead><tr><th>Setting</th><th>Options</th></tr></thead>
         <tbody>
@@ -439,25 +349,23 @@
           <tr><td>Minimap</td><td>On / off</td></tr>
         </tbody>
       </table>
-
-      <h3>Shortcuts</h3>
-      <p>Every command is remappable, including layout toggles and terminal management. Press Escape while recording to cancel.</p>
+      <p><b>Shortcuts</b> — every command is remappable, including layout toggles and terminal management. Press Escape while recording to cancel.</p>
       <p>Preferences apply immediately and persist across launches.</p>
     </section>
 
-    <!-- ============ 12. SHORTCUTS ============ -->
+    <!-- ============ 12. KEYBOARD SHORTCUTS ============ -->
     <section id="shortcuts" class="guide-section">
       <h2>12 · Keyboard shortcuts</h2>
-      <p>Defaults (all remappable in Settings; most use <code>Cmd</code> on macOS, <code>Ctrl</code> elsewhere —
-      <code>Ctrl+Tab</code> is literal <code>Ctrl</code> on every platform):</p>
+      <p>Defaults (all remappable in Settings; most use <code>Cmd</code> on macOS, <code>Ctrl</code> elsewhere — <code>Ctrl+Tab</code> is literal <code>Ctrl</code> on every platform):</p>
       <table>
         <thead><tr><th>Shortcut</th><th>Command</th></tr></thead>
         <tbody>
           <tr><td><code>Cmd/Ctrl+O</code></td><td>Open folder</td></tr>
-          <tr><td><code>Cmd/Ctrl+T</code></td><td>New terminal (chooser: agent or shell)</td></tr>
+          <tr><td><code>Cmd/Ctrl+T</code></td><td>Choose a new terminal in the current project</td></tr>
           <tr><td><code>Cmd/Ctrl+Shift+W</code></td><td>Close terminal</td></tr>
           <tr><td><code>Ctrl+Tab</code> / <code>Ctrl+Shift+Tab</code></td><td>Next / previous terminal tab</td></tr>
-          <tr><td><code>Cmd/Ctrl+Shift+[</code> / <code>]</code></td><td>Previous / next project tab</td></tr>
+          <tr><td><code>Cmd/Ctrl+Shift+[</code> / <code>]</code></td><td>Previous / next project</td></tr>
+          <tr><td><code>Cmd/Ctrl+Alt+A</code></td><td>Attention across all projects</td></tr>
           <tr><td><code>Cmd/Ctrl+.</code></td><td>Interrupt the active terminal</td></tr>
           <tr><td><code>Cmd/Ctrl+Alt+N</code></td><td>New file</td></tr>
           <tr><td><code>Cmd/Ctrl+Alt+Shift+N</code></td><td>New folder</td></tr>
@@ -468,41 +376,29 @@
           <tr><td><code>Cmd/Ctrl+Shift+E</code></td><td>Toggle terminal</td></tr>
           <tr><td><code>Cmd/Ctrl+E</code></td><td>Toggle editor</td></tr>
           <tr><td><code>Cmd/Ctrl+Shift+F</code></td><td>Terminal fullscreen</td></tr>
-          <tr><td><code>Cmd/Ctrl+Shift+P</code></td><td>Search sessions</td></tr>
           <tr><td><code>Cmd/Ctrl+P</code></td><td>Quick Open (open a project file by name; in a focused core terminal, Ctrl+P cycles models instead)</td></tr>
-          <tr><td><code>Cmd/Ctrl+K</code></td><td>Command palette — run any command by name</td></tr>
+          <tr><td><code>Cmd/Ctrl+K</code></td><td>Command palette</td></tr>
           <tr><td><code>Cmd/Ctrl+Alt+F</code></td><td>Search file contents</td></tr>
-          <tr><td><code>Cmd/Ctrl+F</code></td><td>Find in the active terminal's scrollback</td></tr>
+          <tr><td><code>Cmd/Ctrl+Shift+P</code></td><td>Search sessions</td></tr>
           <tr><td><code>Cmd/Ctrl+,</code></td><td>Open settings</td></tr>
           <tr><td><code>Shift+Enter</code> / <code>Ctrl+Enter</code></td><td>Newline in the terminal input</td></tr>
           <tr><td><code>Option+Enter</code> (macOS)</td><td>Queue a follow-up while the agent runs</td></tr>
           <tr><td><code>Cmd/Ctrl+Click</code> / <code>Cmd/Ctrl+Enter</code> on a timeline dot</td><td>Fork a candidate at that moment</td></tr>
+          <tr><td><code>Esc</code></td><td>Dismiss Change Review, or stop a timeline replay (never while focus is in the terminal)</td></tr>
         </tbody>
       </table>
-
-      <h3>Session Search</h3>
-      <p>
-        <code>Cmd/Ctrl+Shift+P</code> opens a full-text search over past agent sessions of the project. Results list the
-        matching moments; clicking one opens the file it mentions. Backtick paths and ordinary mentions such as
-        <code>src/main.ts</code> resolve to project files. Type at least two characters.
-      </p>
-
-      <h3>Quick Open and Command Palette</h3>
-      <p>
-        <code>Cmd/Ctrl+P</code> finds any project file by name from a persistent index, so repeated searches stay
-        instant. In a focused core terminal, <code>Ctrl+P</code> cycles models instead.
-        <code>Cmd/Ctrl+K</code> runs any Termina command by name.
-      </p>
+      <h3 id="session-search">Session Search</h3>
+      <p><code>Cmd/Ctrl+Shift+P</code> opens a full-text search over past agent sessions of the project. Results list the matching moments; clicking one opens the file it mentions. Type at least two characters. Closing a core tab keeps that session on disk. <code>/clear</code> in a core tab starts a fresh session and leaves the previous one searchable.</p>
     </section>
 
-    <!-- ============ 13. PRIVACY ============ -->
+    <!-- ============ 13. PRIVACY AND SAFETY MODEL ============ -->
     <section id="privacy" class="guide-section">
       <h2>13 · Privacy and safety model</h2>
       <ul>
         <li><b>Local first.</b> Sessions, snapshots, preferences, and events live on your machine. The only network traffic is your chosen model provider (and the update check in packaged builds).</li>
         <li><b>Your Git is read-only to Termina.</b> Snapshots live in an app-owned store outside your repository. Promotion writes files, never Git history.</li>
         <li><b>Renderer isolation.</b> The editor UI never talks to the agent directly; it renders state the main process pushes.</li>
-        <li><b>Clean environments.</b> Host <code>PI_*</code> session variables are stripped before the agent starts, so a host session can never attach to a terminal.</li>
+        <li><b>Clean environments.</b> Host session variables are stripped before the agent starts, so a host session can never attach to a terminal.</li>
         <li><b>Primary terminals are unsandboxed.</b> Your main agent and shell tabs run with your normal user access, including network.</li>
         <li><b>Candidate sandboxes (macOS only).</b> Worldline candidates run under OS-level profiles that deny writes outside their own tree. Live candidates keep network access; candidate Verify and evidence runs execute fully offline.</li>
         <li><b>External effects are not isolated.</b> Filesystem isolation does not cover remote services: a command inside a sandbox can still affect an allowed cloud account or deployed service.</li>
@@ -512,37 +408,18 @@
     <!-- ============ 14. TROUBLESHOOTING ============ -->
     <section id="troubleshooting" class="guide-section">
       <h2>14 · Troubleshooting</h2>
-
-      <p><b>The editor says to run <code>/login</code> and <code>/models</code>.</b><br>
-      the agent has no provider configured yet. Run <code>/login</code> in the terminal, then pick a model with <code>/models</code>.</p>
-
-      <p><b>Worldlines is unavailable.</b><br>
-      The opened folder must be inside a Git repository, on macOS with the sandbox helpers available —
-      candidates are not supported on other platforms yet. Submodules,
-      sparse checkouts, content-transforming Git filters, unresolved merge states, or unsupported file types also
-      disable it — the UI names the specific reason.</p>
-
-      <p><b>Fork Run is greyed out.</b><br>
-      Hover the button: it states the reason. Most often the run had steering messages or follow-ups, another writer
-      overlapped the workspace, or the run was interrupted.</p>
-
-      <p><b>A timeline dot is missing or marked evicted.</b><br>
-      Recording pauses when the event budget fills, and captures skip themselves when the filesystem could not
-      settle. The terminal keeps working either way; only the forkable record is affected.</p>
-
-      <p><b>Verification says no test command detected.</b><br>
-      Add a <code>test</code> script to <code>package.json</code>, or use pytest / cargo / go so the detector finds your suite.</p>
-
-      <p><b>The window is blank.</b><br>
-      The paint watchdog reloads it automatically. State rebuilds from the recorded events; nothing is lost.</p>
-
-      <p><b>An update is stuck downloading.</b><br>
-      Updates install on quit. If the download stalls, quit and relaunch, then check again from the menu.</p>
+      <p><b>The editor says to run <code>/login</code> and <code>/models</code>.</b> The agent has no provider configured yet. Run <code>/login</code> in the terminal, then pick a model with <code>/models</code>.</p>
+      <p><b>Worldlines is unavailable.</b> The opened folder must be inside a Git repository, on macOS with the sandbox helpers available — candidates are not supported on other platforms yet. Submodules, sparse checkouts, content-transforming Git filters, unresolved merge states, or unsupported file types also disable it — the UI names the specific reason.</p>
+      <p><b>Fork Run is greyed out.</b> Hover the button: it states the reason. Most often the run had steering messages or follow-ups, another writer overlapped the workspace, or the run was interrupted.</p>
+      <p><b>A timeline dot is missing or marked evicted.</b> Recording pauses when the event budget fills, and captures skip themselves when the filesystem could not settle. The terminal keeps working either way; only the forkable record is affected.</p>
+      <p><b>Verification says no test command detected.</b> Add a <code>test</code> script to <code>package.json</code>, or use pytest / cargo / go so the detector finds your suite.</p>
+      <p><b>The window is blank.</b> The paint watchdog reloads it automatically. Terminal views rebuild from main-owned state and retained events. Unsaved editor text recovers from the last confirmed draft copy, with the <a class="link" href="#unsaved-draft-recovery">draft recovery limits</a> above; edits that were still pending can be lost.</p>
+      <p><b>An update is stuck downloading.</b> Updates install on quit. If the download stalls, quit and relaunch, then check again from the menu.</p>
     </section>
 
     <div class="guide-end">
       <a href="index.html#install" class="btn btn-primary">↓ Download Termina — free</a>
-      <a href="https://github.com/Jesusz0r/termina/blob/master/docs/reference/USER-GUIDE.md" target="_blank" class="btn btn-ghost">this guide on GitHub ↗</a>
+      <a href="https://github.com/Jesusz0r/termina/blob/main/docs/reference/USER-GUIDE.md" target="_blank" class="btn btn-ghost">this guide on GitHub ↗</a>
     </div>
   </main>
 

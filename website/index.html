@@ -23,6 +23,7 @@
       </a>
       <nav class="nav-links">
         <a href="#watch">See it work</a>
+        <a href="#new">What's new</a>
         <a href="#how">How it works</a>
         <a href="#worldlines">Worldlines</a>
         <a href="#safety">Safety</a>
@@ -77,6 +78,12 @@
         <span><i>●</i>&nbsp; Effort memory + fuzzy /models</span>
         <span><i>●</i>&nbsp; Quick Open + command palette</span>
         <span><i>●</i>&nbsp; In-place explorer filter</span>
+        <span><i>●</i>&nbsp; Codex · Claude · Grok · Gemini tabs</span>
+        <span><i>●</i>&nbsp; Sessions survive window close</span>
+        <span><i>●</i>&nbsp; Read-only @review workers</span>
+        <span><i>●</i>&nbsp; Restore any captured file</span>
+        <span><i>●</i>&nbsp; Image + PDF previews</span>
+        <span><i>●</i>&nbsp; Unsaved draft recovery</span>
       </div>
     </div>
   </section>
@@ -132,6 +139,17 @@
           <span style="color:var(--lime)">⌘+CLICK A DOT TO FORK</span>
         </div>
       </div>
+
+      <div class="shots reveal">
+        <figure>
+          <img src="assets/screenshot-editor.png?v=__VERSION__" width="1440" height="900" loading="lazy" alt="Termina: the project rail and Attention, the explorer, the agent terminal with its Timeline and Fork Run, and the live editor showing the agent's edit; Verify is green">
+          <figcaption>The real app: a planned run, its timeline, and a green Verify.</figcaption>
+        </figure>
+        <figure>
+          <img src="assets/screenshot-worldlines.png?v=__VERSION__" width="1440" height="900" loading="lazy" alt="Termina Worldlines: a forked run with candidates A and B ready to compare, verify, promote, or export">
+          <figcaption>The same run forked into candidates A and B.</figcaption>
+        </figure>
+      </div>
     </div>
   </section>
 
@@ -173,6 +191,55 @@
     </div>
   </section>
 
+  <!-- ============ WHAT'S NEW ============ -->
+  <section id="new" class="section latest-section">
+    <div class="container">
+      <div class="reveal">
+        <span class="eyebrow">What's new</span>
+        <h2 class="section-title">More agents. Fewer surprises.</h2>
+        <p class="section-sub">Recent releases widen what runs in the cockpit and tighten what counts as done.</p>
+      </div>
+
+      <div class="latest-grid reveal">
+        <article class="latest-card latest-primary">
+          <span class="latest-key">BRING YOUR AGENT</span>
+          <h3>Codex, Claude, Grok, and Gemini tabs.</h3>
+          <p><code>Cmd/Ctrl+T</code> opens a chooser: Termina's agent, any agent CLI on your <code>PATH</code>, or a shell. External tabs report working / waiting through their own hooks, restore with the project, and resume their conversation.</p>
+        </article>
+
+        <article class="latest-card">
+          <span class="latest-key">ATTENTION</span>
+          <h3>Every project's issues, always visible.</h3>
+          <p>A persistent Attention section above Projects lists blockers, failed checks, and results pending review across every open project. <code>Cmd/Ctrl+K</code> jumps straight to a project or a Plan Board task.</p>
+        </article>
+
+        <article class="latest-card">
+          <span class="latest-key">DONE MEANS VERIFIED</span>
+          <h3>Plan tasks complete on a passing Verify.</h3>
+          <p>A checked box or a claim that tests pass no longer completes a task. Add <code>@review</code> to send a task's files to a read-only review worker that reports findings and never edits.</p>
+        </article>
+
+        <article class="latest-card">
+          <span class="latest-key">NOTHING LOST</span>
+          <h3>Close the window; the agents keep going.</h3>
+          <p>Sessions stay alive when the window closes and reconnect when you reopen it. Restore a single file from any timeline dot without resetting the conversation, and unsaved editor drafts recover after a restart.</p>
+        </article>
+
+        <article class="latest-card">
+          <span class="latest-key">SKILLS + MCP</span>
+          <h3>Rules that follow the files they cover.</h3>
+          <p>Path-scoped skills attach to reads and edits of matching files. MCP servers connect over stdio, HTTP, or SSE; <code>/mcp</code> shows their status and <code>/doctor</code> reports load failures.</p>
+        </article>
+
+        <article class="latest-card">
+          <span class="latest-key">EDITOR</span>
+          <h3>Images and PDFs open as previews.</h3>
+          <p>Zoom, fit, and pan images; read PDFs in the built-in viewer. Drop or paste screenshots into the terminal to attach them to your next prompt.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
   <!-- ============ HOW IT WORKS ============ -->
   <section id="how" class="section">
     <div class="container">
@@ -186,7 +253,7 @@
           <div class="step-num">01<small>PROMPT</small></div>
           <div>
             <h3>Prompt the in-house agent — not a chat wrapper</h3>
-            <p>A true PTY terminal runs Termina's in-house agent (core) with <code>/login</code>, <code>/models</code>, <code>/effort</code>, an <code>@</code> file picker, and MCP tools. The terminal stays the source of truth; Termina never replaces it.</p>
+            <p>A true PTY terminal runs Termina's in-house agent (core) with <code>/login</code>, <code>/models</code>, <code>/effort</code>, an <code>@</code> file picker, skills, and MCP tools. Prefer another agent? Open Codex, Claude, Grok, or Gemini in the same terminal chooser — Termina watches their activity and resumes their conversations next launch. The terminal stays the source of truth; Termina never replaces it.</p>
           </div>
         </div>
         <div class="step">

@@ -153,8 +153,10 @@ the existing admission policy: when a live terminal overlaps the project
 source, another agent opens in a separate sandboxed work area. Creation does
 not submit a prompt or apply changes.
 
-Each external CLI keeps its own login and conversation. Termina does not fork,
-promote, or restore that session. Activity (working, waiting for permission,
+Each external CLI keeps its own login and conversation. Termina does not fork
+or promote that session. External CLI tabs reopen with your project on the next
+launch; Claude, Codex, Grok, and Gemini resume the conversation their own hooks
+reported, and Muse starts a new one. Activity (working, waiting for permission,
 or an unconfirmed stop) comes from an observational hook. A prompt alone does
 not count as started work, and a stop event does not mean the task succeeded.
 Grok has no documented permission hook, so a Grok approval may not show as
@@ -176,7 +178,7 @@ changing the selected project.
 ### Talking to the agent
 
 A core tab is a full-screen TUI: `/login`, `/models`, `/clear`, `/compact`,
-`/resume`, `/effort`, `/skills`. Every turn starts with a bounded project snapshot (top)
+`/resume`, `/effort`, `/skills`. Every turn starts with a bounded project snapshot (top
 of the tree first), so the agent is oriented without spending tool calls on
 discovery — file tools always see live state.
 
@@ -187,7 +189,12 @@ select transcript text; Cmd/Ctrl+C copies. Reasoning starts at medium;
 `/effort` shows the levels available for the current model, and your last
 choice sticks: new tabs reopen on it (clamped to what each model supports). Type `/skills`
 to pick a discovered skill (`~/.agents/skills`, then `.agents/skills` in the project);
-selecting one starts a turn that reads that skill and follows it. Ctrl+J inserts
+selecting one starts a turn that reads that skill and follows it. A skill with a
+`paths` field in its front matter is a path-scoped rule: its body is attached
+to the agent's file reads and edits of matching project files. The optional
+[notes skill](../examples/skills/notes/SKILL.md) saves working notes under
+`.termina-notes/` and reads them back only when asked; notes are not verified
+work. Ctrl+J inserts
 a newline; Enter submits. Paste keeps newlines. `/help` lists keys.
 `/doctor` reports how many skills were omitted from the frozen index, whether
 the skill scan was capped, whether user/project `AGENTS.md` was truncated, and
@@ -510,6 +517,11 @@ to the agent's tools, not manual editor changes or clicking Dispatch.
   loop. Intervals below 5 minutes are ignored. Scheduled workers inherit
   this tab's model unless the task has `@model`.
 - **⇉ Dispatch** sends the plan's tasks out, each with its row's model.
+- **Review files** by adding `@review` to a task that names existing project
+  files, for example `Review src/auth.ts src/session.ts @review`. Its worker
+  can only read and search; it reports findings in its terminal and never
+  edits, runs commands, or completes the task. The optional
+  [review skill](../examples/skills/review/SKILL.md) writes such tasks for you.
 
 Dispatched tasks show their worker and claimed files on the board. Clicking a
 dispatched task jumps to that worker's terminal (tabs are named `dispatch`).

@@ -11,8 +11,8 @@ work live.
 ```
 ┌──────────────────────────────┬───────────────────────────────┐
 │ agent TUI (real terminal, pty)│  Monaco IDE + file explorer   │
-│  /login /models /plan /effort │   files auto-open mid-run     │
-│  completions…                 │   live-synced via fs.watch    │
+│  /login /models /plan /skills │   files auto-open mid-run     │
+│  or Codex · Claude · Grok…    │   live-synced via fs.watch    │
 ├──────────────────────────────┴───────────────────────────────┤
 │ terminal tabs · status bar                                   │
 └──────────────────────────────┴───────────────────────────────┘
@@ -22,15 +22,14 @@ Everything runs locally. The terminal stays the source of truth; the app
 records byte-exact source states in an app-owned snapshot store and never
 writes your Git repository.
 
-![Termina — the agent TUI on the left, the live Monaco editor with the
-modified list and session timeline on the right](docs/assets/screenshot.png)
+![Termina — the project rail and Attention, the explorer, the agent
+terminal with its Timeline and Fork Run, and the live editor showing the
+agent's edit; Verify is green with the Git handoff
+buttons](docs/assets/screenshot.png)
 
-![Worldlines — a forked run with candidates A and B, and the plan
-board showing the completed tasks](docs/assets/screenshot-worldlines.png)
-
-Screenshots are from an earlier 0.1.x build. Settings now include Atom,
-terminal font, and word wrap; first launch is empty until you open a
-folder; the Plan Board shows Dispatch assignments.
+![Worldlines — a forked run with candidates A and B in the Worldlines
+tool, and Attention flagging the primary's outdated
+check](docs/assets/screenshot-worldlines.png)
 
 ## User guide
 
@@ -42,22 +41,26 @@ New to Termina? Read **[`docs/reference/USER-GUIDE.md`](docs/reference/USER-GUID
 |---|---|
 | Empty first launch | fresh launches start with no folder until you pick one; later launches restore saved projects; the empty editor tells you to `/login` and `/models` when pi has no provider |
 | Project rail & attention | up to 12 projects in a persistent rail, with direct workspace navigation, distinct paths and factual work/attention counts; an always-visible Attention section above Projects shows the total current item count and recorded issues across projects without resolving them by viewing — agents keep running when you switch |
+| Terminal chooser | `Cmd/Ctrl+T` opens Termina's agent, an agent CLI found on `PATH` (Codex, Claude, Grok, Gemini via `agy`, Muse), or a detected shell. External CLIs keep their own login; activity comes from their hooks, and restored tabs resume the Claude, Codex, Grok, and Gemini conversation |
+| Background sessions | closing the window keeps the app and its terminal sessions alive; reopening reconnects. A new core-agent write waits for **Approve once** after you reconnect. Quitting stops the agents |
 | Command palette | `Cmd/Ctrl+K` searches commands, open projects and existing tasks; project results open the real workspace, and task results open the exact owner's Plan Board without starting work |
 | File explorer | full tree with create / rename / delete, a VS Code-style context menu, cut / copy / paste, path actions, and Mine marks for files you own |
 | Editor tabs | VS Code-style preview tabs, drag reorder, middle-click close, tab context menus, unsaved-edit dots, save all |
 | Live editor | the file watcher pushes every disk change into open Monaco models; files the agent touches auto-open mid-run; word wrap and minimap toggle per preference |
+| Previews & drafts | images open with zoom / fit / pan and PDFs in the built-in viewer; unsaved buffers keep recovery copies and reopen as unsaved tabs after a restart |
 | Change Review | per-terminal modified-files panel with pre-run baselines: side-by-side diffs, Accept / Revert, Accept all. Termina never writes your Git repo; after a green Verify or Accept it offers a commit subject to copy and a shell in the project |
 | Verify & Iterate | `✓ Verify` detects your test script, runs it in a background process, and feeds the result back to the agent on its next turn; cancellable mid-run |
-| Session Timeline | a dot strip of every agent action with on-demand snapshots, replay, and a recorder state (indexing / paused / degraded) |
-| Multi-line input | Cmd/Ctrl/Shift+Enter inserts a newline in the terminal; Option+Enter (macOS) queues a follow-up while an agent runs |
-| Plan Board | type `/plan` for a task list with live progress; Dispatch starts workers on claimed files. Add `@review` to a task for a worker restricted to local reads and search. Reports stay in the worker terminal |
+| Session Timeline | a dot strip of every agent action with on-demand snapshots, replay, and a recorder state (indexing / paused / degraded); **Restore captured file** brings back one file from a dot without resetting the conversation |
+| Multi-line input | Cmd/Ctrl/Shift+Enter inserts a newline in the terminal; Option+Enter (macOS) queues a follow-up while an agent runs; paste or drop screenshots to attach them |
+| Plan Board | type `/plan` for a read-only planning turn and a task list with live progress; a task completes only on a current passing Verify. Dispatch starts workers on claimed files, with per-task models and `@every` / `@at` schedules. Add `@review` to a task for a worker restricted to local reads and search, with an optional [review skill](docs/examples/skills/review/SKILL.md). Reports stay in the worker terminal |
+| Skills & MCP | `/skills` runs discovered skills; a skill with `paths` front matter attaches to reads and edits of matching files. MCP servers over stdio, HTTP, or SSE from `~/.termina/agent/mcp.json`; `/mcp` shows status and `/doctor` reports load failures |
 | Working notes | an optional [notes skill](docs/examples/skills/notes/SKILL.md) saves project context and reads it on request; notes stay out of startup instructions and do not count as verified work |
 | Session Search | full-text over past sessions with click-to-jump (`Cmd/Ctrl+Shift+P`) |
 | Fork Run | fork any completed run into isolated candidates (A = result, B = start + task) |
 | Fork Any Moment | Cmd/Ctrl+Click any timeline dot to fork a candidate at that exact source state |
 | Challenge Mode | replay the task against candidates and rank them with deterministic evidence |
 | Candidate sandbox | macOS `sandbox-exec` deny-list profiles; evidence and Verify processes run fully offline |
-| Promote | three-way merge candidates back with durable journaling and crash recovery |
+| Promote & Export | three-way merge candidates back with durable journaling and crash recovery, or export a patch bundle with a PR body |
 | Layout | terminal left / right / top / bottom, fullscreen terminal, minimizable explorer / terminal / editor panes, remappable shortcuts |
 | Auto-update | packaged builds check GitHub Releases and install updates on quit |
 
@@ -123,7 +126,7 @@ Termina terminal before running model-driven e2e suites.
 - `electron/` — the main process: terminals, workspaces, watchers, IPC,
   preferences, the worldline manager, the evidence engine, candidate
   sandboxes, and the auto-updater. The in-house agent host writes sidecar
-  JSONL (`agent-core/host.ts`, `logEvent` in `agent-core/main.ts`);
+  JSONL (`agent-core/host.ts`, `logEvent` in `agent-core/main/sidecar.ts`);
   `sidecar.ts` is the only parser. Session forks run off the main thread
   in a worker (`session-fork.ts` → `session-worker.ts`).
 - `core/` — `termina-core`, the Rust snapshot core: captures,
