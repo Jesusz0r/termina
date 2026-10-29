@@ -4,7 +4,9 @@ import type { TimelineEvent } from "../../../shared/types.ts";
 import { FakeEl, installFakeDom } from "./fake-dom.ts";
 
 vi.mock("../../../src/components/modals", () => ({ toast: vi.fn() }));
+vi.mock("../../../src/components/context-menu", () => ({ showContextMenu: vi.fn() }));
 import { toast } from "../../../src/components/modals";
+import { showContextMenu } from "../../../src/components/context-menu";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -16,7 +18,7 @@ function deferred<T>() {
 function sourcePane(instanceId: string) {
   return {
     instanceId, generation: 1,
-    timeline: [{ seq: 1, t: "tool", ts: 1, toolName: "edit", relPath: "a.ts", stateId: "state-1" } satisfies TimelineEvent],
+    timeline: [{ seq: 1, t: "tool", ts: 1, toolName: "edit", path: "/project/a.ts", relPath: "a.ts", stateId: "state-1" } satisfies TimelineEvent],
     timelineLoaded: true, timelineRequestToken: 0, timelinePrefix: null,
     recorderState: "ready", recorderDetail: null,
   };
@@ -39,7 +41,8 @@ function harness() {
   let active = panes.get("term-a")!;
   let project = { id: "project-a", generation: 1 };
   const requests: ReturnType<typeof deferred<ForkResult>>[] = [];
-  const editor = { openSnapshot: vi.fn() };
+  const editor = { openSnapshot: vi.fn(), requestCloseTab: vi.fn(async () => true) };
+  const restoreTimelineFile = vi.fn(async (_id: string, _generation: number, _seq: number) => ({ ok: true }));
   const forkPoint = vi.fn((_id: string, _seq: number) => {
     const request = deferred<ForkResult>();
     requests.push(request);
@@ -47,7 +50,7 @@ function harness() {
   });
   const subscribe = () => () => {};
   vi.stubGlobal("window", { termina: {
-    forkPoint, getTimelineProgress: async (seq: number) => ({ ok: false, seq }),
+    forkPoint, restoreTimelineFile, getTimelineProgress: async (seq: number) => ({ ok: false, seq }),
     getTimelineContent: async () => ({ ok: true, relPath: "a.ts", content: "original source" }),
     onTimelineEvent: subscribe, onTimelineEvict: subscribe, onTimelineClear: subscribe,
     onTimelinePrefix: subscribe, onRecorderState: subscribe,
@@ -66,7 +69,12 @@ function harness() {
     else dot().dispatch("click", { metaKey: true });
   };
   return {
-    panes, forkPoint, requests, dot, activate, editor,
+    panes, forkPoint, requests, dot, activate, editor, restoreTimelineFile,
+    restore: () => {
+      dot().dispatch("contextmenu", { clientX: 0, clientY: 0 });
+      const items = vi.mocked(showContextMenu).mock.calls.at(-1)![0];
+      items.find(item => item.label === "Restore captured file")?.action?.();
+    },
     count: container.querySelector("#timeline-count")!,
     switchPane: (id: string) => { active = panes.get(id)!; controller.renderTimeline(); },
     switchProject: (id: string, generation: number) => {
@@ -86,12 +94,50 @@ beforeEach(() => {
   vi.stubGlobal("HTMLElement", FakeEl);
   vi.stubGlobal("Element", FakeEl);
   vi.mocked(toast).mockClear();
+  vi.mocked(showContextMenu).mockClear();
 });
 
 afterEach(() => {
   controller?.dispose();
   vi.unstubAllGlobals();
   fake.cleanup();
+});
+
+describe("timeline file restore", () => {
+  it("uses the existing unsaved-close gate before requesting a restore", async () => {
+    const h = harness();
+    const closed = deferred<boolean>();
+    h.editor.requestCloseTab.mockReturnValue(closed.promise);
+    h.restore();
+    h.restore();
+    expect(h.editor.requestCloseTab).toHaveBeenCalledExactlyOnceWith("/project/a.ts");
+    expect(h.restoreTimelineFile).not.toHaveBeenCalled();
+    closed.resolve(true);
+    await flushCompletion();
+    expect(h.restoreTimelineFile).toHaveBeenCalledExactlyOnceWith("term-a", 1, 1);
+    expect(h.forkPoint).not.toHaveBeenCalled();
+  });
+
+  it("leaves the file and session alone when the unsaved close is cancelled", async () => {
+    const h = harness();
+    h.editor.requestCloseTab.mockResolvedValue(false);
+    h.restore();
+    await flushCompletion();
+    expect(h.restoreTimelineFile).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("does not restore after switching projects while the unsaved prompt is open", async () => {
+    const h = harness();
+    const closed = deferred<boolean>();
+    h.editor.requestCloseTab.mockReturnValue(closed.promise);
+    h.restore();
+    h.switchProject("project-b", 2);
+    closed.resolve(true);
+    await flushCompletion();
+    expect(h.restoreTimelineFile).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+  });
 });
 
 describe("timeline fork preparation feedback", () => {

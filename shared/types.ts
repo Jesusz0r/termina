@@ -942,6 +942,8 @@ export interface TerminaBridge {
     terminalId: string,
     seq: number,
   ): Promise<{ ok: boolean; seq: number; path?: string; relPath?: string; content?: string; ts?: number; toolName?: string }>;
+  /** Restore only this file from the moment's existing core capture. Keeps the session. */
+  restoreTimelineFile(terminalId: string, generation: number, seq: number): Promise<{ ok: boolean; error?: string }>;
   /** Clear the terminal's modified-file list. Main owns the list; the
    *  next change re-adds only files that change after the clear. */
   clearModified(terminalId: string): Promise<{ ok: boolean; error?: string }>;

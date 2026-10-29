@@ -9378,6 +9378,7 @@ class TerminaApp {
       return this.timelinePrefixOf(inst);
     });
     ipcMain.handle("timeline:progress", (_e, terminalId: string, seq: number) => this.timelineProgress(terminalId, seq));
+    ipcMain.handle("timeline:restore-file", (_e, terminalId: unknown, generation: unknown, seq: unknown) => this.restoreTimelineFile(terminalId, generation, seq));
     ipcMain.handle("timeline:content", async (_e, terminalId: string, seq: number) => {
       const inst = this.runtime.get(terminalId);
       const ev = inst?.timeline.find((e) => e.seq === seq);
@@ -9807,6 +9808,53 @@ class TerminaApp {
       return { ok: false, error: (err as Error).message };
     } finally {
       this.releaseWriteLease(inst.workspaceId, requester);
+    }
+  }
+
+  /** Restore one real captured file, never a reconstructed Timeline preview or a whole tree. */
+  private async restoreTimelineFile(terminalId: unknown, generation: unknown, seq: unknown): Promise<{ ok: boolean; error?: string }> {
+    if (typeof terminalId !== "string" || !Number.isSafeInteger(generation) || !Number.isSafeInteger(seq)) {
+      return { ok: false, error: "invalid timeline moment" };
+    }
+    const inst = this.runtime.get(terminalId);
+    if (!inst || inst.closed || inst.generation !== generation) return { ok: false, error: "the terminal is no longer available" };
+    const workspace = this.workspaceOfTerminal(inst);
+    const project = this.projectOfTerminal(terminalId);
+    const ev = inst.timeline.find(event => event.seq === seq);
+    if (!workspace?.primary || !project) return { ok: false, error: "restore is only available in the primary project" };
+    if (!ev || (ev.t !== "tool" && ev.t !== "change") || !ev.path || !ev.stateId || ev.evicted) {
+      return { ok: false, error: "this file has no retained capture for that moment" };
+    }
+    const stateId = ev.stateId;
+    const path = ev.path;
+    const workspaceGeneration = workspace.generation;
+    const requester = `timeline-restore:${randomUUID()}`;
+    const lease = await this.acquireWriteLease(workspace.id, requester, 0);
+    if (!lease.ok) return { ok: false, error: "the project is busy; try again when file operations finish" };
+    const live = (): boolean => !this.disposed && !inst.closed && this.runtime.get(terminalId) === inst
+      && inst.generation === generation && inst.workspaceId === workspace.id && workspace.generation === workspaceGeneration
+      && this.explorerWorkspaceIsLive(project.id, project, workspace, requester)
+      && inst.timeline.includes(ev) && ev.path === path && ev.stateId === stateId && !ev.evicted;
+    try {
+      if (!live()) return { ok: false, error: "the timeline moment is no longer available" };
+      if (this.sourceAdmissions.writerAt(workspace.canonicalRoot)) return { ok: false, error: "wait for the source writer to finish before restoring" };
+      const managed = await this.managedPath(path, workspace.id, true);
+      if (!managed || managed.path !== path || managed.workspace !== workspace) return { ok: false, error: "the captured path is no longer a regular project path" };
+      const expected = (await readPromotionEntry(path)).state;
+      if (expected.type !== "file" && expected.type !== "missing") return { ok: false, error: "path is not a regular file" };
+      const store = await project.storePromise;
+      if (!store) return { ok: false, error: "the captured source is unavailable" };
+      const rel = relative(workspace.canonicalRoot, path).split(sep).join("/");
+      if (await store.symlinkTarget(stateId, rel) !== null) return { ok: false, error: "the capture is a symbolic link, not file content" };
+      const content = await store.readBlob(stateId, rel);
+      if (content === null) return { ok: false, error: "no file content was captured at this moment" };
+      if (!live() || this.sourceAdmissions.writerAt(workspace.canonicalRoot)) return { ok: false, error: "the source changed while preparing the restore" };
+      await revertReviewedFile(workspace.canonicalRoot, path, expected, content);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      this.releaseWriteLease(workspace.id, requester);
     }
   }
 

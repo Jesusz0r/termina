@@ -433,6 +433,12 @@ with a running count. This is the record of what happened, in order.
 - **Hover a dot** for the time, the tool, the file, and an on-demand diff of
   what changed at that point.
 - **▶ Replay** walks through the run's snapshots step by step.
+- **Restore captured file** in a dot's right-click menu restores only that
+  file from its retained source capture in the primary project. `Shift+F10`
+  opens the same menu from a focused dot. A preview without a retained capture
+  cannot restore a file. Open unsaved edits to that file go through the usual
+  Save / Discard / Cancel check; unrelated editor buffers stay open. Restore
+  requires active writes to finish and keeps the terminal conversation intact.
 - **Cmd/Ctrl+Click a forkable dot** to fork a candidate from that exact source
   state — any moment of any run becomes a branch point. See
   [Fork Any Moment](#fork-any-moment).
@@ -450,8 +456,8 @@ The recorder label next to the count tells you the recording health:
 - **budget** — the retained-blob budget is full, so old unpinned moments are
   being evicted to make room.
 
-If a dot exists, it is forkable. Termina never shows a dot whose source state
-it cannot restore.
+Only dots with a retained source capture can fork or restore. A dot whose
+capture was evicted may still have a read-only file preview.
 
 ---
 

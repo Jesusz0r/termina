@@ -25,6 +25,7 @@ interface TimelinePaneProject {
 
 interface TimelinePaneEditor {
   openSnapshot(terminalId: string, eventKey: string, relPath: string, content: string, label: string, replay?: boolean): void;
+  requestCloseTab(key: string): Promise<boolean>;
 }
 
 interface TimelinePaneBindings<TPane extends TimelinePaneState> {
@@ -51,17 +52,18 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
   const view = new TimelineView(bindings.container);
   let jumpEpoch = 0;
   let disposed = false;
+  let restoring = false;
   // Sequence numbers are local to a terminal lifecycle, not globally unique.
-  type PendingFork = {
+  type PendingMoment = {
     pane: TPane;
     terminalGeneration: number;
     projectId: string | null;
     projectGeneration: number;
     seq: number;
   };
-  const pendingForks = new Set<PendingFork>();
+  const pendingForks = new Set<PendingMoment>();
 
-  function isActiveForkSource(fork: PendingFork): boolean {
+  function isActiveMomentSource(fork: PendingMoment): boolean {
     const project = bindings.getActiveProject();
     return !disposed
       && bindings.getActivePane() === fork.pane
@@ -73,7 +75,7 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
 
   function renderPendingForks(): void {
     if (disposed) return;
-    view.setPendingForks([...pendingForks].filter(isActiveForkSource).map((fork) => fork.seq));
+    view.setPendingForks([...pendingForks].filter(isActiveMomentSource).map((fork) => fork.seq));
   }
 
   /** Session Timeline: show the active pane's points, fetch once per pane. */
@@ -135,6 +137,27 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
   }
 
   view.bind({
+    onRestore: async (ev) => {
+      const pane = bindings.getActivePane();
+      if (!pane || disposed || restoring || !ev.path || !ev.stateId) return;
+      const project = bindings.getActiveProject();
+      const source = { pane, terminalGeneration: pane.generation, projectId: project.id, projectGeneration: project.generation, seq: ev.seq };
+      const editor = bindings.getEditor();
+      const current = () => isActiveMomentSource(source) && bindings.getEditor() === editor;
+      restoring = true;
+      try {
+        // The existing close gate owns Save / Discard / Cancel and recovery copies.
+        if (!await editor.requestCloseTab(ev.path) || !current()) return;
+        const result = await window.termina.restoreTimelineFile(pane.instanceId, source.terminalGeneration, ev.seq);
+        if (!current()) return;
+        if (!result.ok) toast(`could not restore ${ev.relPath ?? ev.path}: ${result.error ?? "unknown error"}`, "warning");
+        else toast(`restored ${ev.relPath ?? ev.path}`, "info");
+      } catch (error) {
+        if (current()) toast(`could not restore this file: ${(error as Error).message}`, "warning");
+      } finally {
+        restoring = false;
+      }
+    },
     onJump: async (ev, opts) => {
       const pane = bindings.getActivePane();
       if (!pane) return;
@@ -173,7 +196,7 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
         toast("this moment is not forkable yet", "warning");
         return;
       }
-      if ([...pendingForks].some((fork) => fork.seq === ev.seq && isActiveForkSource(fork))) return;
+      if ([...pendingForks].some((fork) => fork.seq === ev.seq && isActiveMomentSource(fork))) return;
       const project = bindings.getActiveProject();
       const fork = {
         pane, terminalGeneration: pane.generation,
@@ -185,9 +208,9 @@ export function createTimelinePane<TPane extends TimelinePaneState>(
         try {
           const res = await window.termina.forkPoint(pane.instanceId, ev.seq);
           // Success needs no toast: the new candidate cards are the confirmation.
-          if (!res.ok && isActiveForkSource(fork)) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
+          if (!res.ok && isActiveMomentSource(fork)) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
         } catch (err) {
-          if (isActiveForkSource(fork)) toast(`fork at this moment failed: ${(err as Error).message}`, "warning");
+          if (isActiveMomentSource(fork)) toast(`fork at this moment failed: ${(err as Error).message}`, "warning");
         } finally {
           pendingForks.delete(fork);
           renderPendingForks();

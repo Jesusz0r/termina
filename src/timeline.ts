@@ -9,6 +9,7 @@
  */
 import type { AgentActivityView, TimelineEvent, RecorderState, TimelinePrefix, TimelineProgress } from "../shared/types";
 import { asKnownState, KNOWN_ACTIVITY_STATES, KNOWN_RECORDER_STATES, presentBlockedLabel } from "./known-state";
+import { showContextMenu } from "./components/context-menu";
 
 export const MAX_TIMELINE_EVENTS = 400;
 
@@ -51,6 +52,7 @@ export class TimelineView {
 
   private onJump: (ev: TimelineEvent, opts?: { replay?: boolean }) => void = () => {};
   private onFork: (ev: TimelineEvent) => void = () => {};
+  private onRestore: (ev: TimelineEvent) => void = () => {};
   private onProgress: (seq: number) => Promise<TimelineProgress> = async (seq) => ({ ok: false, seq });
   private onContent: (has: boolean, count: number) => void = () => {};
   private activity: AgentActivityView | null = null;
@@ -86,12 +88,14 @@ export class TimelineView {
   bind(handlers: {
     onJump: (ev: TimelineEvent, opts?: { replay?: boolean }) => void;
     onFork: (ev: TimelineEvent) => void;
+    onRestore?: (ev: TimelineEvent) => void;
     onProgress: (seq: number) => Promise<TimelineProgress>;
     /** Badge + empty-copy sync. Timeline never auto-switches the tab. */
     onContent?: (has: boolean, count: number) => void;
   }): void {
     this.onJump = handlers.onJump;
     this.onFork = handlers.onFork;
+    this.onRestore = handlers.onRestore ?? (() => {});
     this.onProgress = handlers.onProgress;
     this.onContent = handlers.onContent ?? (() => {});
   }
@@ -312,6 +316,10 @@ export class TimelineView {
       this.jumpTo(latest);
     });
     dot.addEventListener("pointerenter", () => this.scheduleProgress(ev.seq));
+    dot.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      this.openMomentMenu(this.eventBySeq(ev.seq) ?? ev, event.clientX, event.clientY);
+    });
     dot.addEventListener("pointerleave", () => this.clearHover());
     // Keyboard parity with hover: focusing a forkable dot fetches its diff.
     dot.addEventListener("focus", () => this.scheduleProgress(ev.seq));
@@ -384,6 +392,16 @@ export class TimelineView {
     else this.jumpTo(ev);
   }
 
+  private openMomentMenu(ev: TimelineEvent, x: number, y: number): void {
+    this.stopReplay();
+    this.highlight(ev.seq);
+    showContextMenu([
+      { label: "View captured file", disabled: !ev.path, action: () => this.jumpTo(ev) },
+      { label: "Restore captured file", disabled: !ev.path || !ev.stateId || ev.evicted === true, action: () => this.onRestore(ev) },
+      { label: "Fork at this moment", disabled: !ev.stateId, action: () => this.forkAt(ev) },
+    ], x, y);
+  }
+
   /** Esc stops a replay from anywhere except the terminal, a nested modal,
    *  or Change Review (those surfaces already own the key). */
   private onDocumentKeydown = (e: KeyboardEvent): void => {
@@ -406,6 +424,17 @@ export class TimelineView {
     if (idx === -1) return;
     let to: number | null;
     switch (e.key) {
+      case "ContextMenu":
+      case "F10": {
+        if (e.key === "F10" && !e.shiftKey) return;
+        e.preventDefault();
+        const ev = this.eventBySeq(seq);
+        if (ev && target) {
+          const box = target.getBoundingClientRect();
+          this.openMomentMenu(ev, box.left, box.bottom);
+        }
+        return;
+      }
       case "ArrowLeft":
         to = stepTimelineIndex(this.events.length, idx, -1);
         break;

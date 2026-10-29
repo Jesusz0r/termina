@@ -8,10 +8,11 @@ import { promotionIdentityOf } from "./worldlines/bindings.js";
 import { ensureBoundRelativeDirectory } from "./worldlines/promotion-recovery/bound-dirs.js";
 import { assertPromotionState, boundPromotionExpectedLeaf } from "./worldlines/promotion-recovery/entry-state.js";
 import type { PromotionEntryState } from "./worldlines/types.js";
+import { splitPromotionComponents } from "./worldlines/promotion-recovery/primitives.js";
 
 export async function revertReviewedFile(root: string, path: string, expected: PromotionEntryState, data: Buffer | string | null): Promise<void> {
   const rel = relative(root, path);
-  const components = rel.split(/[\\/]/);
+  const components = splitPromotionComponents(rel);
   if (!rel || isAbsolute(rel) || components.some((p) => !p || p === "." || p === "..")) throw new Error("file is outside the review workspace");
   if (expected.type !== "file" && expected.type !== "missing") throw new Error("path is not a regular file");
   await assertPromotionState(path, expected, "the file changed after this session's edit; review the current changes before reverting");

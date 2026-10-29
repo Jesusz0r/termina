@@ -150,6 +150,7 @@ const bridge: TerminaBridge = {
   setMineFile: (path, mine, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("mine:set", path, mine, owner),
   getMineFiles: (owner: ProjectWorkspaceRef) => ipcRenderer.invoke("mine:list", owner),
   getTimelineContent: (terminalId, seq) => ipcRenderer.invoke("timeline:content", terminalId, seq),
+  restoreTimelineFile: (terminalId, generation, seq) => ipcRenderer.invoke("timeline:restore-file", terminalId, generation, seq),
   clearModified: (terminalId) => ipcRenderer.invoke("modified:clear", terminalId),
   reviewBaseline: (terminalId, path) => ipcRenderer.invoke("review:baseline", terminalId, path),
   reviewRevert: (terminalId, path) => ipcRenderer.invoke("review:revert", terminalId, path),
