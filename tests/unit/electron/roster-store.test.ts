@@ -239,6 +239,17 @@ describe("TerminalRosterStore durable save", () => {
     expect(probes.events).toEqual(["sync", "rename", "syncParentDir"]);
   });
 
+  it("preserves review policy on disk and drops oversized task text instead of losing its marker", async () => {
+    const path = await preparePath();
+    const store = openStore();
+    const review = { text: "Review file.ts @review", paths: ["file.ts"], state: "pending" as const };
+    const oversized = { ...review, text: `Review file.ts ${"x".repeat(500)} @review` };
+    store.save(path, [{ ...agent("term-1"), plan: [{ ...review, workerId: "term-2", claimed: ["file.ts"] }, oversized] }], []);
+    await store.drain();
+    expect((await loadRosterFile(path)).entries[0]?.plan).toEqual([review]);
+    expect(JSON.parse(await readFile(path, "utf8")).terminals[0].plan).toEqual([review]);
+  });
+
   it("replaces an existing roster with complete new JSON, never a mix", async () => {
     const path = await preparePath();
     const store = openStore();

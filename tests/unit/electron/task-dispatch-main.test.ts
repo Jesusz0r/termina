@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
   dispatchWorkerModel, MAX_DISPATCH_WORKERS, pickDispatchTasks, planOwnerError,
   samePlanTaskSnapshot, parsePlanTaskCandidate,
   markPlanProgress, finalizePlanTasks, reattachDispatchAssignments, settleDispatchTask,
+  isReviewTask,
 } from "../../../electron/plan-board.ts";
 import type { PlanTask } from "../../../shared/types.ts";
 
@@ -35,7 +36,8 @@ function fixture() {
   const main = loadMethods(["planOwnerFacts", "dispatchRun", "dispatchPreparedRun",
     "dispatchSharedPreparedRun", "ownerDispatchCount", "projectOfTerminal", "workspaceOfTerminal", "projectIsSwitching"], {
     planOwnerError, samePlanTaskSnapshot,
-    pickDispatchTasks, MAX_DISPATCH_WORKERS, dispatchWorkerModel,
+    pickDispatchTasks, MAX_DISPATCH_WORKERS, dispatchWorkerModel, isReviewTask, resolve,
+    stat: async () => ({ isFile: () => true }),
     dispatchViewerId: (id: string) => `dispatch:${id}`,
     isPtyRendererSendTargetCurrent: (a: unknown, b: unknown) => a === b,
   }) as { dispatchRun(id: string, text?: string): Promise<{ ok: boolean; error?: string; dispatched?: number }> };
@@ -51,6 +53,7 @@ function fixture() {
     dispatchWorkers: new Map(), dispatchRuns: new Map(), dispatchPreparations: new Set<string>(),
     disposed: false, activeProjectId: "different-project", captureRendererSendTarget: () => target,
     usableAgentModel: (model: string) => model,
+    managedPath: vi.fn(async (path: string) => ({ path, workspace })),
     dispatchPathKeysInFlight: vi.fn(async () => { await stage("claims"); return new Set<string>(); }),
     taskPathKey: vi.fn(async (path: string) => { await stage("path"); return `/actual/root/${path}`; }),
     acquireWriteLease: vi.fn(async () => { await stage("lease"); return { ok: true }; }),

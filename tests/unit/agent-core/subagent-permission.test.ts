@@ -229,7 +229,7 @@ describe("headless child permission mode (#206)", () => {
     const outputs = result.requests[1].input.filter((item: Row) => item.type === "function_call_output");
     expect(outputs).toHaveLength(reads.length + actions.length);
     expect(JSON.stringify(outputs[0].output)).toContain("delete me");
-    for (const output of outputs.slice(reads.length)) expect(JSON.stringify(output.output)).toContain("not executed by a read-only subagent");
+    for (const output of outputs.slice(reads.length)) expect(JSON.stringify(output.output)).toContain("not executed in a read-only session");
   });
 
   it("runs safe commands unasked in dangerous mode", async () => {

@@ -32,6 +32,8 @@ export class AgentTerminalInstance {
   type: "agent" | "shell";
   /** The engine for an agent terminal. Shells leave this unset. */
   engine?: "core";
+  /** Immutable launch policy for a file-scoped review worker. */
+  readOnly = false;
   /** Original external CLI in this PTY. Not a core engine and not a worldline. */
   externalCli?: ExternalCli;
   /** Children of this PTY may report hook activity, including a CLI started in a shell. */

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { mcpDiscoveryDeclared, planTurnRejectsTool, readOnlySubagentRejectsTool, sessionOmitsTool } from "../../../agent-core/tool-eligibility.ts";
+import { mcpDiscoveryDeclared, planTurnRejectsTool, readOnlyRejectsTool, sessionOmitsTool } from "../../../agent-core/tool-eligibility.ts";
 
 describe("tool eligibility", () => {
   it("admits only local inspection for research children without restricting ordinary workers", () => {
     for (const name of ["read_file", "read_files", "grep", "glob"]) {
-      expect(readOnlySubagentRejectsTool(name), name).toBe(false);
+      expect(readOnlyRejectsTool(name), name).toBe(false);
     }
     for (const name of ["write_file", "edit", "bash", "fetch", "web_search", "browser", "spawn_subagent", "message_subagent", "search_mcp_tools", "call_mcp_tool", "mcp_anything"]) {
-      expect(readOnlySubagentRejectsTool(name), name).toBe(true);
+      expect(readOnlyRejectsTool(name), name).toBe(true);
     }
     expect(sessionOmitsTool("write_file", { worldlineCandidate: false, subagentToolsVisible: true })).toBe(false);
   });

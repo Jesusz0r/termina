@@ -11,6 +11,7 @@ const pins = {
   TERMINA_CORE_SESSION_ID: "core-parent",
   TERMINA_CORE_SESSION_FILE: "/unused/session.jsonl",
   TERMINA_CORE_RESUME: "1",
+  TERMINA_CORE_READ_ONLY: "1",
   TERMINA_HOST_PID: "123",
 };
 

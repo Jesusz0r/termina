@@ -16,11 +16,11 @@ import { reapWriteTemps } from "../shared/durable-write.js";
 import type { ExternalCli, PlanTask, VerifyInfo } from "../shared/types.js";
 import {
   MAX_ROSTER_FILE_BYTES,
-  MAX_ROSTER_PLAN_TASKS,
   composeTerminalRoster,
   fitTerminalRoster,
   isRosterShellCwd,
   parseTerminalRoster,
+  parseRosterPlan,
   type TerminalRosterEntry,
 } from "./terminal-roster.js";
 
@@ -145,13 +145,9 @@ export class TerminalRosterStore {
       // Handoff: board tasks (assignments never survive — workers are gone)
       // and the last settled verdict. A running verify restores as untested.
       if (inst.plan.length > 0) {
-        entry.plan = inst.plan.slice(0, MAX_ROSTER_PLAN_TASKS).map((t) => ({
-          text: t.text.slice(0, 500),
-          paths: t.paths.slice(0, 100),
-          state: t.state,
-          dispatchResult: t.dispatchResult,
-          ...(t.candidate ? { candidate: { ...t.candidate } } : {}),
-        }));
+        // Task text carries launch policy such as @review. Never truncate it
+        // into a different assignment; use the same bounds as restoration.
+        entry.plan = parseRosterPlan(inst.plan);
       }
       if (inst.verify.state !== "untested" && inst.verify.state !== "running") {
         entry.verify = { ...inst.verify };

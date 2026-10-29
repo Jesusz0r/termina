@@ -28,8 +28,8 @@ export function planTurnRejectsTool(name: string): boolean {
   return !READ_TOOLS.has(name);
 }
 
-/** Research children may inspect local files, but cannot access the browser or MCP. */
-export function readOnlySubagentRejectsTool(name: string): boolean {
+/** Read-only sessions inspect local files without shell, network, or MCP access. */
+export function readOnlyRejectsTool(name: string): boolean {
   return planTurnRejectsTool(name) || name === "fetch";
 }
 

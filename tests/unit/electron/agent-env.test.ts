@@ -57,10 +57,12 @@ describe("filterAgentEnvironment", () => {
       TERMINA_CORE_SESSION_ID: "pinned-core",
       TERMINA_CORE_SESSION_FUTURE: "x",
       TERMINA_CORE_RESUME: "1",
+      TERMINA_CORE_READ_ONLY: "1",
     });
     expect(env.PATH).toBe("/usr/bin:/bin");
     for (const key of Object.keys(env)) expect(key.startsWith("TERMINA_CORE_SESSION_")).toBe(false);
     expect(env.TERMINA_CORE_RESUME).toBeUndefined();
+    expect(env.TERMINA_CORE_READ_ONLY).toBeUndefined();
   });
 
   it("keeps the toolchain, credentials, and host opt-ins the agent needs", () => {

@@ -68,6 +68,7 @@ import {
   findTaskByText,
   finalizePlanTasks,
   formatDispatchBriefing,
+  isReviewTask,
   markPlanProgress,
   parsePlanModelMarker,
   parsePlanTasks,
@@ -3238,6 +3239,7 @@ class TerminaApp {
       type?: "agent" | "shell";
       shell?: string;
       engine?: "core";
+      readOnly?: boolean;
       workspaceId?: string;
       projectId?: string;
       id?: string;
@@ -3379,6 +3381,7 @@ class TerminaApp {
         ELECTRON_RUN_AS_NODE: "1",
         TERMINA_TERMINAL_ID: id,
         TERMINA_EVENTS_DIR: this.eventsDir,
+        ...(opts?.readOnly ? { TERMINA_CORE_READ_ONLY: "1" } : {}),
       };
       if (sessionFile) env.TERMINA_CORE_SESSION_FILE = sessionFile;
       else delete env.TERMINA_CORE_SESSION_FILE;
@@ -3451,6 +3454,7 @@ class TerminaApp {
         setup: (created) => {
           created.projectId = owner?.id ?? null;
           created.persist = persist;
+          created.readOnly = opts?.readOnly === true;
           created.shellPath = shellPath;
           created.sessionId = sessionId;
           created.sessionFile = sessionFile;
@@ -4416,6 +4420,7 @@ class TerminaApp {
       }
     }
     if (namedTask?.candidate) {
+      if (isReviewTask(namedTask)) return { ok: false, error: "Use a file-scoped task for a read-only review worker." };
       if (this.ownerDispatchCount(ownerId) >= MAX_DISPATCH_WORKERS) return { ok: false, error: "All task workers are busy." };
       const task = owner.plan.find((entry) => entry.text === taskText);
       if (!task || task.state === "active" || task.state === "done" || task.workerId) return { ok: false, error: "The task is no longer pending." };
@@ -4532,6 +4537,14 @@ class TerminaApp {
     });
     if (picked.error) return { ok: false, error: picked.error };
     const chosen = picked.tasks;
+    for (const task of chosen.filter(isReviewTask)) {
+      for (const path of task.paths) {
+        const managed = await this.managedPath(resolve(dispatchRoot, path), owner.workspaceId);
+        if (!managed || !(await stat(managed.path).catch(() => null))?.isFile()) {
+          return { ok: false, error: `Review needs existing project files: ${path}` };
+        }
+      }
+    }
     const alreadyDispatching = this.ownerDispatchCount(ownerId) > 0;
     if (owner.busy && !alreadyDispatching) owner.pty.write("\x03"); // the workers replace the owner's run
     // Hold a real write lease across the flush so the editor saves go through as a genuine
@@ -4579,6 +4592,7 @@ class TerminaApp {
           workspaceId: owner.workspaceId,
           id: job.id,
           fromTerminalId: ownerId,
+          readOnly: isReviewTask(job.task),
           ...(workerModel ? { model: workerModel } : {}),
         });
         if (this.runtime.get(worker.id) !== worker || worker.closed || worker.pty.hasExited) throw new Error("The dispatch worker exited before assignment.");
@@ -5872,6 +5886,10 @@ class TerminaApp {
   // ---------------------------------------------------- run boundaries ----
 
   private async admitTerminalMutation(inst: AgentTerminalInstance, streamId: string, requestId: string): Promise<void> {
+    if (inst.readOnly) {
+      this.writeAck(streamId, requestId, { ok: false, error: "This review worker is read-only." });
+      return;
+    }
     const workspace = this.workspaceOfTerminal(inst);
     const writer = `tool:${streamId}:${requestId}`;
     try {
@@ -5987,6 +6005,7 @@ class TerminaApp {
   }
 
   private async admitSource(inst: AgentTerminalInstance, readOnly = false): Promise<{ ok: boolean; error?: string }> {
+    readOnly ||= inst.readOnly;
     const ws = this.workspaceOfTerminal(inst);
     const project = this.projectOfTerminal(inst.id);
     if (!ws || !project) return { ok: false, error: "source folder is no longer open" };

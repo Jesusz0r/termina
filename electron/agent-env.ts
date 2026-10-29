@@ -29,6 +29,7 @@ const AGENT_ENV_DENY_EXACT = new Set([
   "LD_PRELOAD",
   "LD_LIBRARY_PATH",
   "TERMINA_CORE_RESUME",
+  "TERMINA_CORE_READ_ONLY",
 ]);
 
 /** Host variable prefixes that never reach an agent child. */

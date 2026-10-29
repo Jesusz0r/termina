@@ -127,7 +127,7 @@ test.describe("Read-only research and writable Dispatch", () => {
     const outputs = childRequests[1]!.input.filter(item => item.type === "function_call_output");
     expect(outputs).toHaveLength(actions.length + 1);
     expect(JSON.stringify(outputs[0]!.output)).toContain("hello");
-    for (const item of outputs.slice(1)) expect(JSON.stringify(item.output)).toContain("not executed by a read-only subagent");
+    for (const item of outputs.slice(1)) expect(JSON.stringify(item.output)).toContain("not executed in a read-only session");
     expect(existsSync(marker)).toBe(false);
     expect(readFileSync(join(projectRoot, "hello.txt"), "utf8")).toBe("hello\n");
     const childPath = join(runRoot, "events", `${subagentChildTid(owner.id, "bg-1")}.jsonl`);

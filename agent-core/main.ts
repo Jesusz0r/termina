@@ -127,7 +127,7 @@ import {
 } from "./stall.ts";
 import { decodeToolCallArguments, providerToolAdmissionError, READ_TOOLS, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
 import { readSystemProcessIdentity } from "../shared/process-identity.ts";
-import { planTurnRejectsTool, readOnlySubagentRejectsTool, sessionOmitsTool } from "./tool-eligibility.ts";
+import { planTurnRejectsTool, readOnlyRejectsTool, sessionOmitsTool } from "./tool-eligibility.ts";
 import { READ_TOOL_DEFS } from "./main/read-tools.ts";
 import {
   HIGH_WATER,
@@ -510,6 +510,9 @@ export function parseEffortCommand(
 }
 
 const sessionEnvironment = consumeAgentSessionEnvironment();
+function isReadOnlySession(): boolean {
+  return sessionEnvironment.TERMINA_CORE_READ_ONLY === "1" || activeSubagent?.task.readOnly === true;
+}
 const eventsDir = sessionEnvironment.TERMINA_EVENTS_DIR ?? "";
 const rawTerminalId = sessionEnvironment.TERMINA_TERMINAL_ID ?? "";
 const terminalId = isValidTerminalId(rawTerminalId) ? rawTerminalId : "";
@@ -1696,8 +1699,8 @@ async function requestToolWriteAccess(use: ToolUse) {
 async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolOutcome> {
   const notExecuted = (text: string): ToolOutcome => ({ ...done(use, text, true), executed: false });
   if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
-  if (activeSubagent?.task.readOnly && readOnlySubagentRejectsTool(use.name)) {
-    return notExecuted(`error: ${use.name} is not executed by a read-only subagent. Only local reads and search are allowed.`);
+  if (isReadOnlySession() && readOnlyRejectsTool(use.name)) {
+    return notExecuted(`error: ${use.name} is not executed in a read-only session. Only local reads and search are allowed.`);
   }
   if (!clientTools.some((tool) => tool.name === use.name)) return notExecuted(`error: unknown tool ${use.name}`);
   // MCP annotations, bash commands, and child briefs cannot establish read-only
@@ -1990,7 +1993,7 @@ const TOOLS: Array<Record<string, unknown>> = [
     description: "Fetch an https URL. Output caps near 20 KB. No file or data URLs.",
     input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } }, required: ["url"] },
   },
-];
+].filter(tool => !(isReadOnlySession() && typeof tool.name === "string" && readOnlyRejectsTool(tool.name)));
 
 /**
  * Background subagents (SUBAGENTS-PLAN.md Phase 1: tool surface + registry).
@@ -2002,6 +2005,7 @@ const TOOLS: Array<Record<string, unknown>> = [
 const SUBAGENT_DEPTH = subagentDepthFromEnv(process.env);
 const IS_WORLDLINE_CANDIDATE = isWorldlineCandidateEnv(process.env);
 for (const def of visibleSubagentTools(SUBAGENT_DEPTH)) {
+  if (isReadOnlySession()) break;
   if (typeof def.name !== "string" || sessionOmitsTool(def.name, {
     worldlineCandidate: IS_WORLDLINE_CANDIDATE,
     subagentToolsVisible: SUBAGENT_DEPTH < MAX_SUBAGENT_DEPTH,
@@ -2065,6 +2069,7 @@ function mcpLaunchOptions(generation: number, announced: Set<string>, announcedN
 
 /** Replace the session. No argument connects every enabled server. */
 async function connectMcp(configs = loadMcpConfigs(userMcpPath(homedir()))): Promise<void> {
+  if (isReadOnlySession()) return;
   const generation = ++mcpGeneration;
   mcpSession?.shutdown();
   mcpSession = null;
@@ -2090,7 +2095,7 @@ async function connectMcp(configs = loadMcpConfigs(userMcpPath(homedir()))): Pro
 
 /** Connect servers a prompt names. Leaves other servers down, and leaves an already-connected server up. */
 async function ensureNamedMcp(text: string): Promise<void> {
-  if (activeSubagent?.task.readOnly) return;
+  if (isReadOnlySession()) return;
   const all = loadMcpConfigs(userMcpPath(homedir()));
   const named = new Set(mcpServersNamedIn(text, all.map((cfg) => cfg.name)));
   if (named.size === 0) return;
@@ -2128,6 +2133,11 @@ function startMcpCommand(line: string): void {
   }
   if (parsed.action === "list") {
     printMcpStatus();
+    showPrompt();
+    return;
+  }
+  if (isReadOnlySession()) {
+    out("(MCP actions are disabled in a read-only session)\n");
     showPrompt();
     return;
   }
@@ -2216,13 +2226,18 @@ export function requestTools(
   provider: string = "anthropic",
   model: string = "",
 ): Array<Record<string, unknown>> {
-  if (activeSubagent?.task.readOnly) return cachedClientTools;
+  if (isReadOnlySession()) return cachedClientTools;
   if (provider !== "anthropic") return cachedClientTools;
   const type = claudeThinkingApi(model) === "adaptive" ? WEB_SEARCH_TOOL.type : "web_search_20250305";
   return [...cachedClientTools, { type, name: "web_search", max_uses: 5 }];
 }
 
 function logToolStart(use: ToolUse): void {
+  if (isReadOnlySession() && readOnlyRejectsTool(use.name)) {
+    // A refused action is a diagnostic, never evidence that a file was edited.
+    sidecar.logEvent({ t: "tool", toolName: use.name, toolCallId: use.id });
+    return;
+  }
   sidecar.logEvent(sidecarStartFor(use));
 }
 
@@ -4266,7 +4281,7 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   }
   activeSubagent = { task, inboxSeq: 0 };
   if (task.readOnly) {
-    clientTools = TOOLS.filter(tool => typeof tool.name === "string" && !readOnlySubagentRejectsTool(tool.name));
+    clientTools = TOOLS.filter(tool => typeof tool.name === "string" && !readOnlyRejectsTool(tool.name));
   }
   lastRunOutcome = null;
   const roleLine = task.resumeRunId
@@ -4402,7 +4417,7 @@ async function runPrompt(
     }
     const requestId = randomUUID();
     const timeoutMs = 15_000;
-    sidecar.logEvent({ t: "preflight_request", requestId, hasImages, readOnly: planToolsRestricted, deadlineAt: Date.now() + timeoutMs });
+    sidecar.logEvent({ t: "preflight_request", requestId, hasImages, readOnly: isReadOnlySession() || planToolsRestricted, deadlineAt: Date.now() + timeoutMs });
     const ack = await waitForAck(eventsDir, terminalId, requestId, timeoutMs, bridgeId, {
       shouldStop: () => interrupted,
     });
@@ -5377,6 +5392,11 @@ export function bangCommandContext(command: string, output: string): string {
 }
 
 async function runBangCommand(command: string): Promise<void> {
+  if (isReadOnlySession()) {
+    out("(bash is disabled in a read-only session)\n");
+    showPrompt();
+    return;
+  }
   running = true;
   interrupted = false;
   showPrompt();

@@ -63,7 +63,7 @@ export function isRosterModel(value: string): boolean {
   return cut > 0 && cut < value.length - 1;
 }
 
-function parseRosterPlan(value: unknown): TerminalRosterEntry["plan"] {
+export function parseRosterPlan(value: unknown): TerminalRosterEntry["plan"] {
   if (!Array.isArray(value)) return undefined;
   const out: NonNullable<TerminalRosterEntry["plan"]> = [];
   for (const item of value) {

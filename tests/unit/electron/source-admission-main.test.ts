@@ -9,7 +9,7 @@ import { findTaskByText, settleDispatchTask } from "../../../electron/plan-board
 
 // Exercise main's real admission methods without importing Electron or launching a PTY.
 const source = ts.createSourceFile("main.ts", readFileSync(join(process.cwd(), "electron/main.ts"), "utf8"), ts.ScriptTarget.ES2022, true);
-const names = ["admitSource", "sourceWorkspaceWriter", "sourceConflictText", "expireSourceAdmission", "rejectDispatchStart"];
+const names = ["admitSource", "admitTerminalMutation", "sourceWorkspaceWriter", "sourceConflictText", "expireSourceAdmission", "rejectDispatchStart"];
 const members = source.statements.filter(ts.isClassDeclaration).flatMap((node) => [...node.members]);
 const methods = names.map((name) => {
   const member = members.find((node) => ts.isMethodDeclaration(node) && node.name.getText(source) === name);
@@ -31,6 +31,7 @@ interface Actor {
   id: string;
   generation: number;
   busy: boolean;
+  readOnly: boolean;
   closed: boolean;
   projectId: string;
   pty: { hasExited: boolean; interrupt: ReturnType<typeof vi.fn> };
@@ -52,6 +53,8 @@ interface MainMethods {
   pendingPreflights: Map<string, { terminalId: string }>;
   expirePreflight: ReturnType<typeof vi.fn>;
   admitSource(actor: Actor): Promise<{ ok: boolean; error?: string }>;
+  admitTerminalMutation(actor: Actor, streamId: string, requestId: string): Promise<void>;
+  writeAck: ReturnType<typeof vi.fn>;
   expireSourceAdmission(claim: SourceClaim): void;
 }
 
@@ -85,7 +88,7 @@ function harness() {
     const canonicalRoot = await fsRealpath(displayRoot);
     const stat = await lstat(canonicalRoot, { bigint: true });
     const ws: Workspace = { id: `ws-${id}`, root: displayRoot, canonicalRoot, primary: true, writerId: null };
-    const value: Actor = { id, generation: 1, busy: false, closed: false, projectId: `project-${id}`, pty: { hasExited: false, interrupt: vi.fn() } };
+    const value: Actor = { id, generation: 1, busy: false, readOnly: false, closed: false, projectId: `project-${id}`, pty: { hasExited: false, interrupt: vi.fn() } };
     main.projects.set(value.projectId, {
       id: value.projectId, canonicalRoot, primaryRootIdentity: { dev: String(stat.dev), ino: String(stat.ino) }, workspaces: new Map([[ws.id, ws]]),
     });
@@ -98,6 +101,18 @@ function harness() {
 }
 
 describe("main source admission wiring", () => {
+  it("enforces a review's launch policy even when its producer requests write admission", async () => {
+    const h = harness();
+    const reviewer = await h.actor("reviewer");
+    reviewer.readOnly = true;
+    expect(await h.main.admitSource(reviewer)).toEqual({ ok: true });
+    expect(h.main.sourceAdmissions.ownsWrite(reviewer.id, reviewer.generation, h.root)).toBe(false);
+    h.main.writeAck = vi.fn();
+    await h.main.admitTerminalMutation(reviewer, reviewer.id, "forged-write");
+    expect(h.main.writeAck).toHaveBeenCalledWith(reviewer.id, "forged-write", { ok: false, error: "This review worker is read-only." });
+    expect(h.main.sourceAdmissions.writerAt(h.root)).toBeNull();
+  });
+
   it("resolves aliases physically and admits overlapping roots", async () => {
     const h = harness();
     const alias = join(h.dir, "alias");

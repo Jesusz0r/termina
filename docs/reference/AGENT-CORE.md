@@ -451,8 +451,8 @@ safety guarantees above:
 - `spawn_subagent` accepts `read_only: true` for research. The child can use
   `read_file`, `read_files`, `grep`, and `glob`. It refuses edits, bash,
   browsing, MCP, and child spawning, including with full parent approval.
-  Resuming that run preserves the restriction. Dispatch workers keep their
-  existing write claims. Results use the existing bounded delivery; no extra
+  Resuming that run preserves the restriction. Ordinary Dispatch workers keep
+  their existing write claims. Results use the existing bounded delivery; no extra
   summarizer replaces the child's result.
 - Child assistant comments can reach the parent while the child works. Tool-name
   summaries and intermediate tool traces are not injected into the parent.
@@ -462,6 +462,36 @@ safety guarantees above:
   (the live-owner budget plus 18 seconds). These are latency budgets, not
   evidence that admission will succeed or permission to bypass a lock. Expired
   waits fail closed; cancellation remains available during the wait.
+
+### File-scoped review workers
+
+Add `@review` to a Plan Board task with explicit file paths, for example
+`Review src/auth.ts src/session.ts @review`, then use the existing Dispatch
+action. The task uses the same file claims, worker limit, briefing, and terminal
+as other Dispatch tasks. Overlapping implementation workers wait until the
+review releases its claims. Each review path must resolve to an existing file
+inside the project, including through symlinks. Directory and pathless reviews
+are rejected. Use Change Review for a whole diff, or name its files explicitly.
+
+The review worker declares only `read_file`, `read_files`, `grep`, and `glob`.
+It refuses shell commands, writes, network tools, MCP connections, and child
+workers even with `always` permissions or fabricated tool calls. This launch
+policy survives model changes, `/clear`, `/new`, and follow-up prompts. Main
+also refuses mutation requests from that terminal. Related files remain
+readable for context; the claims identify the review assignment, not a read
+sandbox. A task assigned to a Worldline cannot also request this review mode.
+
+The reviewer reports concrete findings with file, line, failing scenario, and
+evidence in its terminal. It must disclose unavailable comparison context or
+checks. No report is promoted or applied automatically. A settled review with
+no edits retains the normal `incomplete` Dispatch result and leaves its task
+pending; a report is not implementation or passing Verify evidence. The owner
+decides which findings to fix. There is no review IPC or separate claims store.
+
+An optional [review skill template](../examples/skills/review/SKILL.md) prepares
+these tasks using the existing skill discovery. Copy its folder to
+`~/.agents/skills/review` or `<project>/.agents/skills/review` to use it; the app
+does not install another skill catalog.
 
 Regression coverage: `stall-tracker.test.ts`, `tool-dispatch.test.ts`,
 `main-tool-loop.test.ts`, `main-steering.test.ts`, `plan-slash.test.ts`,

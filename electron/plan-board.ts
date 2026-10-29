@@ -31,6 +31,11 @@ const SCHEDULE_EVERY = /@every\s+(\d+)\s*([smhd])\b/i;
 const SCHEDULE_AT = /@at\s+(\d{1,2}):(\d{2})\b/;
 const PLAN_MODEL_MARKER = /@model\s+(\S+)/i;
 
+/** Review uses the existing file-scoped Dispatch queue and claims. */
+export function isReviewTask(task: Pick<PlanTask, "text">): boolean {
+  return /(?:^|\s)@review(?=\s|$)/i.test(task.text);
+}
+
 export type ScheduleSpec = { kind: "every"; intervalMs: number } | { kind: "at"; hour: number; minute: number };
 
 /**
@@ -250,6 +255,12 @@ export function formatDispatchBriefing(
     assigned.text,
   ];
   if (assigned.paths.length > 0) lines.push(`Paths: ${assigned.paths.map((p) => `\`${p}\``).join(", ")}`);
+  if (isReviewTask(assigned)) {
+    lines.push("", "### Read-only review",
+      "Review the claimed files. Local reads and search are available; writes, shell commands, network tools, MCP, and child workers are disabled for this entire session.",
+      "Report actionable defects introduced by the changes, with file and line, the failing scenario, and supporting evidence. Read related files for context as needed. Disclose missing comparison context. If none are found, say so and state any limits of the review.",
+      "Do not fix files or claim tests ran. The report stays in this worker's terminal; the owner decides what to fix and runs Verify. A review report does not complete implementation tasks.");
+  }
   lines.push("", "### Plan");
   for (const job of jobs) lines.push(`- ${job.task.text}`);
   const siblingClaims = siblingClaimPaths(workerId, jobs);
@@ -269,6 +280,9 @@ async function pickNamedDispatchTask(
   const task = findTaskByText(plan, taskText);
   if (!task) return { tasks: [], error: "that task is not on the plan board" };
   if (dispatchUnavailable(task)) return { tasks: [], error: "that task is already dispatched" };
+  if (isReviewTask(task) && task.paths.length === 0) {
+    return { tasks: [], error: "Review needs explicit file paths. Use Change Review for a whole-diff review." };
+  }
   if ((await pathKeysOf(task, pathKey)).some((k) => used.has(k))) {
     return { tasks: [], error: "that task overlaps a running dispatch" };
   }

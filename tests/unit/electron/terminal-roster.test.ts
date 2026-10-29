@@ -147,9 +147,8 @@ describe("roster handoff wiring", () => {
   it("persists the board and verdict, and restores without worker claims", () => {
     const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
     const store = readFileSync(new URL("../../../electron/roster-store.ts", import.meta.url), "utf8");
-    // Persist: board without assignments, settled verdicts only.
-    expect(store.includes("entry.plan = inst.plan.slice(0, MAX_ROSTER_PLAN_TASKS).map((t) => ({"))
-      .toBe(true);
+    // Persist settled verdicts only. Board persistence has real file coverage
+    // in roster-store.test.ts, including policy markers and assignment removal.
     expect(store.includes("if (inst.verify.state !== \"untested\" && inst.verify.state !== \"running\") {"))
       .toBe(true);
     // Restore: assignments never survive, active tasks return to pending.

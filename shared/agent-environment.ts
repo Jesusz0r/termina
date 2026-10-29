@@ -13,6 +13,7 @@ export function consumeAgentSessionEnvironment(): Readonly<Record<string, string
     "TERMINA_CORE_SESSION_ID",
     "TERMINA_CORE_SESSION_FILE",
     "TERMINA_CORE_RESUME",
+    "TERMINA_CORE_READ_ONLY",
     "TERMINA_HOST_PID",
   ];
   const captured: Record<string, string | undefined> = {};

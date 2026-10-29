@@ -225,7 +225,7 @@ describe("Subagent Approval Engine Contract", () => {
     const result = await runChild({ name: "read-only-search", toolName: "fetch", toolArgs: { url: "https://example.com" },
       readOnly: true, answerApproval: true, approvalTimeoutMs: 4000 });
     expect(result.exit, result.output).toBe(0);
-    expect(result.output).toContain("not executed by a read-only subagent");
+    expect(result.output).toContain("not executed in a read-only session");
     const requests = readFileSync(join(result.dir, "requests.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
     expect(requests).toHaveLength(2);
     for (const request of requests) expect(request.tools.map((tool: { name: string }) => tool.name)).toEqual(["read_file", "read_files", "grep", "glob"]);
