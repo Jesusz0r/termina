@@ -91,7 +91,7 @@ Follow the existing owner for the behavior: `agent-core/auth.ts` (auth/provider 
 - Done = requested product behavior shipped and proven by facts: define done before work; as-is vs should-be; fix before next step. No invented gates. Cap retries at 3, then honest report. Blocked only for a missing requested product path. Standing exclusions and unrun optional checks are not remaining feature work.
 - No Quiet Wins (critical class): a success claim after file edits with no observed check fails closed. An observed check is a succeeding bash tool outcome already on the run (no error, exit code 0 or absent).
 - One-ticket-one-run: one finding ticket maps to exactly one verify run. A verify run never closes two tickets. A second cite of the same verify run fails closed.
-- Tiered evidence: docs-only = path/command checks; TS-only = typecheck + focused unit; behavior/UI/main/snapshot/core = + build and relevant e2e.
+- Tiered evidence: docs-only = path/command checks; TS-only = typecheck + relevant unit tests; behavior/UI/main/snapshot/core = + build and integration or E2E checks where the risks require them. Select coverage using Test scope below; existing tests can provide the evidence.
 - Leave build green, remove debug code.
 
 ## Harness change isolation
@@ -117,6 +117,18 @@ Agent runs a tool → the engine's sidecar writer records it → main tails the 
 - IPC `area:action` (`verify:run`, `timeline:get`), terminals `term-N`, app-created snapshot commits `termina <dev@termina.local>`, release tags `v<version>`.
 - Preserve unrelated working-tree changes. Keep edits scoped to the task; when changing a contract, migrate its callers and remove obsolete artifacts together.
 - Use `package.json` as the source for commands. Development: `pnpm run dev`. Typecheck: `pnpm run typecheck`. Unit tests: `pnpm run test:unit` (or a relevant focused script). Build: `pnpm run build`. Rust: `cargo test --manifest-path core/Cargo.toml`.
-- For code changes, run typecheck and relevant tests. Run the build for bundling/packaging changes and Rust tests for `core/` changes. For Electron/UI integration changes, build first, then run the relevant Playwright suite with `pnpm run test:e2e`. Documentation-only changes need path/command checks, not an application test run. Report checks run and any failures or checks not run.
+- For code changes, run typecheck and relevant tests. Run the build for bundling/packaging changes and relevant Rust tests for `core/` changes. For Electron/UI integration changes, build first, then run the focused integration or Playwright checks needed for the affected contracts and flows (`pnpm run test:e2e` for Playwright). Documentation-only changes need path/command checks, not an application test run. Report checks run and any failures or checks not run.
 - E2E isolation is defined in `tests/e2e/fixtures.ts`: fresh roots for projects, events, worlds, Electron user data, and a HOME. Never use or modify the host `~/.termina/agent` tree. Use Playwright's Electron launcher; keep process termination and cleanup scoped to resources the test owns, and wait for children to exit before deleting their files.
 - Gotchas: `@lydell/node-pty` external; cargo needed for `core/`; packaged app ships its own `node` (`cleanEnv` prepends `resourcesPath/node/bin`); macOS paths canonical (`/tmp` → `/private/tmp`); events dir is `app.getPath("temp")/termina-events`; bridge is app-owned in user-data dir.
+
+## Test scope
+
+Add or update tests to protect a specific behavior or detect a concrete regression. Use the smallest set that covers the relevant risks.
+
+- Inspect existing coverage first. Identify the failure each new test must detect that current tests do not catch.
+- Add or update focused tests when coverage is missing, especially for changed business rules, authorization, data integrity, data transformations, or bug fixes. Include relevant failure cases and boundary conditions.
+- Extend the existing suite for the canonical owner. Do not create a test for every changed file, helper, or implementation step. Avoid duplicate cases and repeated coverage across layers unless they detect distinct failures.
+- Test observable behavior and public contracts. Avoid assertions about private details, source text, or mock call order unless that detail is itself a required contract, such as crash-durability ordering.
+- Use the least expensive test level that reliably detects the failure. Use integration tests when behavior depends on real filesystem, PTY, IPC, core, database, or external-system boundaries. Use browser or Electron E2E tests for critical user flows and rendering or lifecycle behavior that lower-level tests cannot reliably verify.
+- Do not add tests to raise coverage numbers or test counts. Documentation, comments, formatting, cosmetic edits, and simple refactors that preserve behavior do not require new tests when existing checks provide sufficient evidence.
+- **Relevant tests by default.** Scope unit, Rust, and E2E runs to the changed behavior and affected callers or contracts. Run a full suite only when cross-cutting changes, an unresolved regression, or an explicit user, CI, or release requirement makes it necessary; state the reason before running it. Do not repeat or expand passing checks without new changes, failures, or a concrete unresolved concern.
