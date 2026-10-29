@@ -96,10 +96,32 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
   });
 
   describe("Chat Completions and Responses tool argument validation", () => {
+    it("keeps failed-stream salvage strict instead of attempting repair again", () => {
+      const args = '{"path":"hello.txt",}';
+      assertRejected(compat.completionResultFromEvents([
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", function: { name: "read_file", arguments: args } }] } }] },
+      ], () => {}, 0, false), /tool call arguments.*JSON object/i);
+      assertRejected(compat.responsesResultFromEvents([
+        { type: "response.output_item.done", item: { type: "function_call", id: "item-1", call_id: "call-1", name: "read_file", arguments: args } },
+      ], () => {}, 0, false), /tool call arguments.*JSON object/i);
+    });
+
     for (const [label, make] of [
       ["Chat Completions", completion],
       ["Responses", responses],
     ] as const) {
+      it(`${label} uses the common repair without altering string arguments`, () => {
+        const input = { command: 'printf "literal,} and ,]"', path: "literal,}.txt" };
+        const raw = JSON.stringify(input);
+        const repaired = make("call-1", "bash", `${raw.slice(0, -1)},}`);
+        expect(repaired.error).toBeUndefined();
+        expect(repaired.blocks.find((block: any) => block.type === "tool_use")?.input).toEqual(input);
+        const parsed = make("call-1", "bash", raw);
+        expect(parsed.error).toBeUndefined();
+        expect(parsed.blocks.find((block: any) => block.type === "tool_use")?.input).toEqual(input);
+        assertRejected(make("call-1", "bash", '{"command":"echo x",,}'), /tool call arguments.*JSON object/i);
+      });
+
       it(`${label} rejects malformed JSON and non-object inputs`, () => {
         assertRejected(make("call-1", "bash", "{"), /tool call arguments.*JSON object/i);
         for (const raw of ["null", "[]", '"text"', "1", "true"]) {
@@ -138,6 +160,9 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
       const validGoogle = google("bash", {});
       expect(validGoogle.error).toBeUndefined();
       expect(validGoogle.blocks.find((block: any) => block.type === "tool_use")?.input).toEqual({});
+      const input = Object.freeze({ command: 'printf "literal,}"', path: 7 });
+      expect(google("bash", input).blocks.find((block: any) => block.type === "tool_use")?.input).toBe(input);
+      assertRejected(google("bash", '{"command":"echo x",}'), /tool call arguments.*JSON object/i);
     });
   });
 
@@ -258,6 +283,8 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
       assertRejected(responses(undefined, undefined, undefined), /tool call identity/i);
       assertRejected(atomicCompletion("null"), /tool call arguments.*JSON object/i);
       assertRejected(atomicResponses("null"), /tool call arguments.*JSON object/i);
+      assertRejected(atomicCompletion('{"command":"echo x",,}'), /tool call arguments.*JSON object/i);
+      assertRejected(atomicResponses('{"command":"echo x",,}'), /tool call arguments.*JSON object/i);
       assertRejected(atomicGoogle(null), /tool call arguments.*JSON object/i);
     });
 

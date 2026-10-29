@@ -4,8 +4,8 @@
  * Owns live deltas, terminal results, and payload text. Split from
  * agent-core/openai-compat.ts (issue #38).
  */
-import { TOOL_CALL_ARGUMENT_ERROR, TOOL_CALL_IDENTITY_ERROR, TOOL_CALL_INDEX_ERROR, toolCallIdentityError, toolCallIndex } from "./tool-calls.ts";
-import { decodeToolCallArguments } from "./parsers.ts";
+import { TOOL_CALL_IDENTITY_ERROR, TOOL_CALL_INDEX_ERROR, toolCallIdentityError, toolCallIndex } from "./tool-calls.ts";
+import { decodeToolCallArguments, TOOL_CALL_ARGUMENT_ERROR } from "../tool-dispatch.ts";
 import type { CallResultLike } from "./types.ts";
 import { mergeUsageRecords, usageFromOpenAI } from "./usage.ts";
 
@@ -71,6 +71,7 @@ export function responsesResultFromEvents(
   events: Array<Record<string, unknown>>,
   onText: (text: string) => void,
   started: number,
+  allowArgumentRepair = true,
 ): CallResultLike {
   let text = "";
   type ResponseToolCall = {
@@ -353,7 +354,7 @@ export function responsesResultFromEvents(
   for (const call of order) {
     const identityError = toolCallIdentityError(call.id, call.name);
     if (identityError) return { blocks, usage, ttftMs, stopReason, error: toolProtocolError(identityError) };
-    const args = decodeToolCallArguments(call.args, true);
+    const args = decodeToolCallArguments(call.args, true, allowArgumentRepair);
     if ("error" in args) {
       return { blocks, usage, ttftMs, stopReason, error: toolProtocolError(args.error ?? TOOL_CALL_ARGUMENT_ERROR) };
     }

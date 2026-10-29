@@ -1,8 +1,50 @@
 import { describe, expect, it } from "vitest";
-import { toolExecutionWaves, toolInputError } from "../../../agent-core/tool-dispatch.ts";
+import { decodeToolCallArguments, TOOL_CALL_ARGUMENT_ERROR, toolExecutionWaves, toolInputError } from "../../../agent-core/tool-dispatch.ts";
 import { SUBAGENT_TOOL_DEFS } from "../../../agent-core/subagents.ts";
 
 const call = (name: string, input: unknown = {}) => ({ name, input });
+
+describe("one syntactic tool-call repair", () => {
+  it("repairs trailing commas in objects and arrays in one pass", () => {
+    expect(decodeToolCallArguments('{"task":"review","paths":["a.ts", \n],"options":{"nested":true,},}', true)).toEqual({
+      input: { task: "review", paths: ["a.ts"], options: { nested: true } },
+    });
+  });
+
+  it("preserves command and path strings, including comma-like syntax and escapes", () => {
+    const input = { command: 'printf "a,} b,] \\"quoted\\""', path: 'literal,}with\\backslash,"quote.txt' };
+    const valid = JSON.stringify(input);
+    expect(decodeToolCallArguments(valid, true)).toEqual({ input });
+    expect(decodeToolCallArguments(`${valid.slice(0, -1)},}`, true)).toEqual({ input });
+  });
+
+  it("returns an already parsed object unchanged, including schema errors", () => {
+    const input = Object.freeze({ task: 12, paths: Object.freeze(["literal,}.ts"]), read_only: "true" });
+    const decoded = decodeToolCallArguments(input, false);
+    expect("input" in decoded && decoded.input).toBe(input);
+    expect(toolInputError(call("spawn_subagent", input), SUBAGENT_TOOL_DEFS)).toContain("task must be string");
+    expect(decodeToolCallArguments(JSON.stringify(input), true)).toEqual({ input });
+  });
+
+  it("does not invent schema fields or coerce values after syntactic repair", () => {
+    const decoded = decodeToolCallArguments('{"task":12,}', true);
+    expect(decoded).toEqual({ input: { task: 12 } });
+    expect("input" in decoded && toolInputError(call("spawn_subagent", decoded.input), SUBAGENT_TOOL_DEFS)).toContain("task must be string");
+    expect(toolInputError(call("spawn_subagent", {}), SUBAGENT_TOOL_DEFS)).toContain("task is required");
+  });
+
+  it("stops after one attempt and rejects incomplete or non-object arguments", () => {
+    for (const raw of ['{"command":"echo x",,}', '{"path":"x"', '{"path":"x}', '```json\n{"path":"x",}\n```', '{/*comment*/"path":"x",}', "[]", "null", '"{\\"path\\":\\"x\\"}"']) {
+      expect(decodeToolCallArguments(raw, true), raw).toEqual({ error: TOOL_CALL_ARGUMENT_ERROR });
+    }
+    expect(decodeToolCallArguments('{"path":"x",}', false)).toEqual({ error: TOOL_CALL_ARGUMENT_ERROR });
+  });
+
+  it("keeps server-executed arguments strict", () => {
+    expect(decodeToolCallArguments('{"query":"x",}', true, false)).toEqual({ error: TOOL_CALL_ARGUMENT_ERROR });
+    expect(decodeToolCallArguments('{"query":"x"}', true, false)).toEqual({ input: { query: "x" } });
+  });
+});
 
 describe("tool batch admission and ordering", () => {
   it("keeps path errors for object, array and missing required input", () => {

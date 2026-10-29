@@ -125,7 +125,7 @@ import {
   emptyToolLoopTracker,
   trackToolLoopTurn,
 } from "./stall.ts";
-import { providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
+import { decodeToolCallArguments, providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
 import { planTurnRejectsTool, readOnlySubagentRejectsTool, sessionOmitsTool } from "./tool-eligibility.ts";
 import { READ_TOOL_DEFS } from "./main/read-tools.ts";
 import {
@@ -3502,11 +3502,12 @@ async function callModel(
       const source = collected.length > 0 ? collected : events;
       let parsedBlocks: Block[] = [];
       try {
+        // Recover history from original JSON; salvage cannot spend another repair.
         const parsed = viaResponses
-          ? responsesResultFromEvents(source, () => {}, attemptStarted)
+          ? responsesResultFromEvents(source, () => {}, attemptStarted, false)
           : viaGoogle
             ? googleResultFromEvents(source, () => {}, attemptStarted)
-            : completionResultFromEvents(source, () => {}, attemptStarted);
+            : completionResultFromEvents(source, () => {}, attemptStarted, false);
         parsedBlocks = (parsed.blocks ?? []) as Block[];
       } catch {
         parsedBlocks = [];
@@ -3933,16 +3934,9 @@ async function callModel(
     if (parsedPart.truncated) {
       failProviderStream("partial tool JSON", cacheDiagnostics, reader);
     }
-    let input: unknown;
-    try {
-      input = JSON.parse(parsedPart.text);
-    } catch {
-      failProviderStream("partial tool JSON", cacheDiagnostics, reader);
-    }
-    if (!input || typeof input !== "object" || Array.isArray(input)) {
-      failProviderStream("tool call arguments must be an object", cacheDiagnostics, reader);
-    }
-    target.input = input as typeof target.input;
+    const decoded = decodeToolCallArguments(parsedPart.text, true, target.type === "tool_use");
+    if ("error" in decoded) failProviderStream(decoded.error, cacheDiagnostics, reader);
+    target.input = decoded.input;
   }
   if (traceAttempt) traceAttempt.ended = Date.now();
   return { blocks: compactStreamBlocks(slots), usage, ttftMs, stopReason, cache: cacheDiagnostics, traceAttempt };

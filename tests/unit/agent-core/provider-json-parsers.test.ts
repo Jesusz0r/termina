@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { decodeToolCallArguments, parseCompletionStreamEvent, parseGoogleStreamEvent } from "../../../agent-core/openai-compat/parsers.ts";
+import { parseCompletionStreamEvent, parseGoogleStreamEvent } from "../../../agent-core/openai-compat/parsers.ts";
+import { decodeToolCallArguments } from "../../../agent-core/tool-dispatch.ts";
 import { completionResultFromEvents, googleResultFromEvents } from "../../../agent-core/openai-compat.ts";
 
 describe("provider JSON parsers", () => {

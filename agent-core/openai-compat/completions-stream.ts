@@ -5,7 +5,8 @@
  * agent-core/openai-compat.ts (issue #38).
  */
 import { TOOL_CALL_IDENTITY_ERROR, TOOL_CALL_INDEX_ERROR, TOOL_CALL_SHAPE_ERROR, toolCallIdentityError } from "./tool-calls.ts";
-import { decodeToolCallArguments, parseCompletionStreamEvent, parseCompletionTextPayload } from "./parsers.ts";
+import { parseCompletionStreamEvent, parseCompletionTextPayload } from "./parsers.ts";
+import { decodeToolCallArguments } from "../tool-dispatch.ts";
 import type { CallResultLike } from "./types.ts";
 import { mergeUsageRecords, usageFromOpenAI } from "./usage.ts";
 
@@ -22,6 +23,7 @@ export function completionResultFromEvents(
   events: readonly unknown[],
   onText: (text: string) => void,
   started: number,
+  allowArgumentRepair = true,
 ): CallResultLike {
   let text = "";
   let thinking = "";
@@ -129,7 +131,7 @@ export function completionResultFromEvents(
   for (const [, call] of ordered) {
     const identityError = toolCallIdentityError(call.id, call.name);
     if (identityError) return { blocks, usage, ttftMs, stopReason, error: identityError };
-    const args = decodeToolCallArguments(call.args, true);
+    const args = decodeToolCallArguments(call.args, true, allowArgumentRepair);
     if ("error" in args) return { blocks, usage, ttftMs, stopReason, error: args.error };
     decoded.push({
       id: call.id,

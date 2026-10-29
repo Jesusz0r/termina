@@ -1,11 +1,9 @@
 /**
  * Streaming tool-call decoding shared by protocols.
  *
- * Owns tool-call identity/index/argument validation. Split from
- * agent-core/openai-compat.ts (issue #38).
+ * Owns tool-call identity/index validation. Argument admission lives in
+ * tool-dispatch.ts. Split from agent-core/openai-compat.ts (issue #38).
  */
-
-export const TOOL_CALL_ARGUMENT_ERROR = "provider protocol error: tool call arguments must be a JSON object";
 
 export const TOOL_CALL_IDENTITY_ERROR = "provider protocol error: tool call identity is missing";
 

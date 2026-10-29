@@ -1,19 +1,7 @@
 /** Provider JSON admission. Stream reducers consume these parsed values only. */
 import { isRecord } from "../../shared/guards.ts";
-import { TOOL_CALL_ARGUMENT_ERROR, TOOL_CALL_IDENTITY_ERROR, TOOL_CALL_INDEX_ERROR, TOOL_CALL_SHAPE_ERROR, toolCallIndex } from "./tool-calls.ts";
-
-export function decodeToolCallArguments(
-  raw: unknown,
-  jsonEncoded: boolean,
-): { input: Record<string, unknown> } | { error: string } {
-  let parsed = raw;
-  if (jsonEncoded) {
-    if (typeof raw !== "string") return { error: TOOL_CALL_ARGUMENT_ERROR };
-    try { parsed = JSON.parse(raw); }
-    catch { return { error: TOOL_CALL_ARGUMENT_ERROR }; }
-  }
-  return isRecord(parsed) ? { input: parsed } : { error: TOOL_CALL_ARGUMENT_ERROR };
-}
+import { TOOL_CALL_IDENTITY_ERROR, TOOL_CALL_INDEX_ERROR, TOOL_CALL_SHAPE_ERROR, toolCallIndex } from "./tool-calls.ts";
+import { decodeToolCallArguments, TOOL_CALL_ARGUMENT_ERROR } from "../tool-dispatch.ts";
 
 export type CompletionToolDelta = {
   index: number;

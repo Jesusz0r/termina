@@ -106,7 +106,7 @@ describe("Agent Core Main Process Execution & Policy Verification", () => {
   });
 
   describe("Anthropic Streaming Tool Call Input Validation", () => {
-    async function runToolScenario(name: string, { id = "call-1", toolName = "read_file", args, streamEvents, expectFailure = true }: any) {
+    async function runToolScenario(name: string, { id = "call-1", toolName = "read_file", blockType = "tool_use", args, streamEvents, expectFailure = true }: any) {
       const dir = join(root, name);
       const eventsDir = join(dir, "events");
       const terminalId = `term-${name}`;
@@ -115,7 +115,7 @@ describe("Agent Core Main Process Execution & Policy Verification", () => {
       mkdirSync(eventsDir, { recursive: true, mode: 0o700 });
       const body = (streamEvents ?? [
         { type: "message_start", message: { usage: {} } },
-        { type: "content_block_start", index: 0, content_block: { type: "tool_use", id, name: toolName, input: {} } },
+        { type: "content_block_start", index: 0, content_block: { type: blockType, id, name: toolName, input: {} } },
         ...(args === undefined ? [] : [{ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: args } }]),
         { type: "content_block_stop", index: 0 },
         { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: {} },
@@ -197,6 +197,7 @@ describe("Agent Core Main Process Execution & Policy Verification", () => {
         expect(session.some((row: any) => row.message?.role === "assistant")).toBe(true);
         expect(sidecar.some((row: any) => row.t === "tool")).toBe(true);
       }
+      return { session, sidecar, output };
     }
 
     it("rejects non-object array arguments", async () => {
@@ -209,6 +210,21 @@ describe("Agent Core Main Process Execution & Policy Verification", () => {
 
     it("rejects malformed json arguments", async () => {
       await runToolScenario("malformed", { args: "{" });
+    });
+
+    it("repairs a complete client call once while preserving its path", async () => {
+      const { session } = await runToolScenario("trailing-comma", { args: '{"path":"literal,}.txt",}', expectFailure: false });
+      const uses = session.flatMap((row: any) => row.message?.role === "assistant" ? row.message.content : []).filter((block: any) => block.type === "tool_use");
+      expect(uses).toHaveLength(1);
+      expect(uses[0].input).toEqual({ path: "literal,}.txt" });
+    });
+
+    it("rejects a second syntax defect without executing a tool", async () => {
+      await runToolScenario("double-comma", { args: '{"path":"literal,}.txt",,}' });
+    });
+
+    it("does not repair arguments of a server-executed tool", async () => {
+      await runToolScenario("server-comma", { blockType: "server_tool_use", toolName: "web_search", args: '{"query":"x",}' });
     });
 
     it("rejects empty id or empty name", async () => {

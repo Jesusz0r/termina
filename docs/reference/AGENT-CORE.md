@@ -333,6 +333,17 @@ footprint, not these numbers.
 
 ### Tool-call safety and progress
 
+- `agent-core/tool-dispatch.ts` owns tool-argument decoding. After a failed JSON
+  parse, it makes one syntax-only attempt: remove trailing commas outside strings
+  and parse once more. It never changes commands, paths, field names, or values.
+  Already parsed inputs (including schema-invalid objects) are not rewritten;
+  schema errors follow the normal tool-error path. Non-objects and unrepairable
+  JSON keep the normal provider error. Complete client calls share this owner
+  across providers; truncated streams and server-executed tool records stay
+  strict. Stream salvage does not repair arguments or request another model turn.
+  Provider input contracts: [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling),
+  [Anthropic tool streaming](https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming),
+  [Gemini function calling](https://ai.google.dev/gemini-api/docs/function-calling).
 - `agent-core/tool-dispatch.ts` validates built-in arguments against their
   published schemas before sidecar formatting, approval, or execution. Missing
   write/edit bodies are errors, never implicit empty writes. Domain-specific

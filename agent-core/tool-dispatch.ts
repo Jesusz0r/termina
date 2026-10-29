@@ -25,6 +25,55 @@ const TOOL_CONCURRENCY = 4;
 // a trust boundary, and bash can mutate anything regardless of its command name.
 export const READ_TOOLS = new Set(["read_file", "read_files", "grep", "glob", "fetch"]);
 
+export const TOOL_CALL_ARGUMENT_ERROR = "provider protocol error: tool call arguments must be a JSON object";
+
+/** Remove trailing commas outside strings, without guessing keys or values. */
+function withoutTrailingCommas(raw: string): string {
+  const parts: string[] = [];
+  let start = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === ",") {
+      let next = index + 1;
+      while (next < raw.length && /[ \t\r\n]/.test(raw[next]!)) next++;
+      if (raw[next] === "}" || raw[next] === "]") {
+        parts.push(raw.slice(start, index));
+        start = index + 1;
+      }
+    }
+  }
+  return parts.length ? parts.join("") + raw.slice(start) : raw;
+}
+
+/** One syntax-only repair after a failed parse; parsed inputs are never rewritten.
+ * Server tools already ran remotely, so their recorded arguments stay strict. */
+export function decodeToolCallArguments(
+  raw: unknown,
+  jsonEncoded: boolean,
+  allowRepair = true,
+): { input: Record<string, unknown> } | { error: string } {
+  let parsed = raw;
+  if (jsonEncoded) {
+    if (typeof raw !== "string") return { error: TOOL_CALL_ARGUMENT_ERROR };
+    try { parsed = JSON.parse(raw); }
+    catch {
+      if (!allowRepair) return { error: TOOL_CALL_ARGUMENT_ERROR };
+      const repaired = withoutTrailingCommas(raw);
+      if (repaired === raw) return { error: TOOL_CALL_ARGUMENT_ERROR };
+      try { parsed = JSON.parse(repaired); }
+      catch { return { error: TOOL_CALL_ARGUMENT_ERROR }; }
+    }
+  }
+  return isRecord(parsed) ? { input: parsed } : { error: TOOL_CALL_ARGUMENT_ERROR };
+}
+
 /** Validate the small schema vocabulary used by our own tool definitions.
  * MCP schemas remain owned by the server; this is not a general JSON Schema engine. */
 function inputError(value: unknown, schema: Schema, path: string): string | null {
