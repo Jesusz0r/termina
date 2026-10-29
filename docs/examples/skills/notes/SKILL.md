@@ -35,7 +35,8 @@ NOTE_TEXT
 ```
 
 The helper creates a new `.termina-notes/<generated-id>.md` in the project and
-prints its path. Use that path with `read_file` to check the saved note. Return
+prints its path. Notes live in the project tree, so add `.termina-notes/` to
+the project's `.gitignore` unless they should be committed. Use that path with `read_file` to check the saved note. Return
 the path to the user. Each save is a new note; correct an earlier observation
 by saving a new note that references it. Never edit, replace, or delete an
 existing note, including notes from another session. Never use `write_file`,
