@@ -692,6 +692,7 @@ class TerminaApp {
     ownerRunsChanged: (terminalId) => this.sourceAdmissions.releaseRetained(terminalId),
     watchStream: (terminalId) => this.runtime.watchSidecar(terminalId),
     releaseStream: (terminalId) => {
+      this.runtime.finishMutation(terminalId);
       this.runtime.stopSidecar(terminalId);
       this.runtime.deleteSidecarQueue(terminalId);
     },
@@ -1290,6 +1291,7 @@ class TerminaApp {
   }
 
   async createWindow(): Promise<void> {
+    if (this.disposed || (this.win && !this.win.isDestroyed())) return;
     // Dev runs the Electron binary, whose Dock icon is Electron's. The
     // packaged bundle carries the Termina icon; override the Dock here.
     if (!app.isPackaged) {
@@ -1311,6 +1313,7 @@ class TerminaApp {
     const devUrl = process.env.VITE_DEV_SERVER_URL;
     this.configureTrustedRendererTarget(devUrl);
     this.win = win;
+    this.runtime.openWindow(windowGeneration);
     this.rendererWindowGeneration = windowGeneration;
     this.rendererGeneration = rendererGeneration;
     this.rendererDocumentNonce = randomUUID();
@@ -1333,6 +1336,17 @@ class TerminaApp {
     // Attach lifecycle listeners before loading.  PTY output can arrive while
     // the first document or a reload is still being parsed; it stays in the
     // bounded egress queues until the new renderer has finished loading.
+    let closeReady = false;
+    let closing: Promise<void> | null = null;
+    win.on("close", (event) => {
+      if (this.disposed || closeReady) return;
+      event.preventDefault();
+      closing ??= this.runtime.prepareWindowClose(windowGeneration).then(() => {
+        if (this.win !== win || win.isDestroyed()) return;
+        closeReady = true;
+        win.close();
+      });
+    });
     win.on("closed", () => {
       if (this.win !== win || this.rendererWindowGeneration !== windowGeneration) return;
       this.rendererReady = false;
@@ -5488,6 +5502,14 @@ class TerminaApp {
 
   private async handleSidecarEvent(terminalId: string, event: SidecarEvent): Promise<void> {
     if (this.disposed) return;
+    if (event.t === "mutation_request" || event.t === "mutation_finished") {
+      const child = this.subagents.streamInfo(terminalId);
+      const owner = this.runtime.get(child?.parentTerminalId ?? terminalId);
+      if (!owner || !event.requestId || !/^[A-Za-z0-9_-]{1,128}$/.test(event.requestId)) return;
+      if (event.t === "mutation_finished") this.runtime.finishMutation(terminalId, event.requestId);
+      else await this.admitTerminalMutation(owner, terminalId, event.requestId);
+      return;
+    }
     if (this.subagents.hasStream(terminalId)) {
       // Child liveness only (booted/activity/touched for merge evidence).
       // Settlement stays exit-authoritative; no dots are fabricated onto
@@ -5848,6 +5870,35 @@ class TerminaApp {
    * reference even if newer events arrive in between.
    */
   // ---------------------------------------------------- run boundaries ----
+
+  private async admitTerminalMutation(inst: AgentTerminalInstance, streamId: string, requestId: string): Promise<void> {
+    const workspace = this.workspaceOfTerminal(inst);
+    const writer = `tool:${streamId}:${requestId}`;
+    try {
+      const result = await this.runtime.admitMutation(inst, streamId, requestId, async () => {
+        if (!workspace) return null;
+        const directCommand = !inst.busy && streamId === inst.id;
+        if (!this.sourceAdmissions.ownsWrite(inst.id, inst.generation, workspace.canonicalRoot)) {
+          if (!directCommand || !(await this.admitSource(inst)).ok) return null;
+          this.sourceAdmissions.start(inst.id, inst.generation);
+        }
+        const lease = await this.acquireWriteLease(workspace.id, writer, 5000);
+        const releaseSource = () => { if (directCommand && !inst.busy) this.sourceAdmissions.finish(inst.id, inst.generation); };
+        if (!lease.ok) { releaseSource(); return null; }
+        const release = () => { this.releaseWriteLease(workspace.id, writer); releaseSource(); };
+        if (this.disposed || this.runtime.get(inst.id) !== inst || this.workspaceOfTerminal(inst) !== workspace
+          || inst.closed || inst.pty.hasExited || (streamId !== inst.id && !this.subagents.hasStream(streamId))) {
+          release();
+          return null;
+        }
+        return release;
+      });
+      this.writeAck(streamId, requestId, result);
+    } catch (error) {
+      this.runtime.finishMutation(streamId, requestId);
+      this.writeAck(streamId, requestId, { ok: false, error: error instanceof Error ? error.message : "action admission failed" });
+    }
+  }
 
   /** Write an acknowledgement file for the bridge to consume exactly once. */
   private writeAck(terminalId: string, requestId: string, payload: Record<string, unknown>): void {
@@ -8146,6 +8197,12 @@ class TerminaApp {
       await this.drainVerifyJobs(closingIds);
       await this.drainSidecarQueues(closingIds);
       await project.mineCommit.catch(() => undefined);
+      // Confirmed close stops writers before waiting for their action leases.
+      for (const { id, inst } of closingTerminals) {
+        if (!inst || this.runtime.get(id) !== inst) continue;
+        this.subagents.killOwner(id, "project closed");
+        this.closeTerminal(id);
+      }
       const primary = this.primaryWorkspace(project);
       if (primary) {
         const lease = await this.acquireWriteLease(primary.id, closeLeaseRequester, 8000);
@@ -8171,9 +8228,8 @@ class TerminaApp {
         inst !== null && this.runtime.get(id) === inst;
       const idsStillClosing = (): string[] =>
         closingTerminals.filter(({ id, inst }) => closingInstanceOurs(id, inst)).map(({ id }) => id);
-      for (const { id, sidecarGeneration, inst } of closingTerminals) {
+      for (const { id, sidecarGeneration } of closingTerminals) {
         if (sidecarGeneration !== undefined) this.runtime.stopSidecar(id, sidecarGeneration);
-        if (closingInstanceOurs(id, inst)) this.closeTerminal(id);
       }
       await this.drainTerminals(closingIds, 2000, new Map(closingTerminals.map(({ id, inst }) => [id, inst])));
       await this.drainSidecarQueues(idsStillClosing());
@@ -10237,6 +10293,10 @@ class TerminaApp {
   }
 
   focusWindow(): void {
+    if (!this.win || this.win.isDestroyed()) {
+      void this.createWindow();
+      return;
+    }
     // An e2e run must never pull focus off whatever the user is doing.
     if (E2E_HIDDEN_WINDOW) return;
     if (this.win && !this.win.isDestroyed()) {
@@ -10383,7 +10443,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  // Closing the final viewer never disposes TerminalRuntime. Explicit quit does.
 });
 
 app.on("activate", () => {

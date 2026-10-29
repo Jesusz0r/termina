@@ -13,4 +13,5 @@ export { MAX_IMAGE_BYTES, MAX_PENDING_IMAGES } from "./host/image-types.ts";
 export type { PendingImageMediaType } from "./host/image-types.ts";
 export { withPendingImageLock } from "./host/images.ts";
 export { acknowledgePendingImages, appendPendingImages, claimPendingImages, pendingImageState } from "./host/image-queue.ts";
+export { admitHostMutation } from "./host/mutation.ts";
 export { expandFileImageSource, loadImageFromRoots, persistLoadedImages, structuredStartup } from "./host/image-store.ts";

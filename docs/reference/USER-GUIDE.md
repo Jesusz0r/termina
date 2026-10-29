@@ -232,7 +232,14 @@ Closing a project applies this warning to that project's terminals and candidate
 work, while other projects keep running. Quitting or restarting for an update
 applies it to all projects. Unsaved editor buffers have their separate
 Save / Discard / Cancel gate; a later cancellation does not delete their recovery
-copies. On macOS, closing the window is not quitting the app.
+copies.
+
+Closing the window keeps the app and its terminal sessions alive on every
+platform. Open Termina again to reconnect to the same sessions. Model responses
+and reads can continue with the window closed. A new core-agent action that
+could write waits for you to reconnect and choose **Approve once** in its
+terminal, even if that terminal uses automatic approval. An action already
+running finishes before the window closes. Quitting the app stops the agents.
 
 ### MCP servers (core)
 

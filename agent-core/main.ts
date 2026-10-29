@@ -125,7 +125,8 @@ import {
   emptyToolLoopTracker,
   trackToolLoopTurn,
 } from "./stall.ts";
-import { decodeToolCallArguments, providerToolAdmissionError, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
+import { decodeToolCallArguments, providerToolAdmissionError, READ_TOOLS, toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
+import { readSystemProcessIdentity } from "../shared/process-identity.ts";
 import { planTurnRejectsTool, readOnlySubagentRejectsTool, sessionOmitsTool } from "./tool-eligibility.ts";
 import { READ_TOOL_DEFS } from "./main/read-tools.ts";
 import {
@@ -159,6 +160,7 @@ import {
 } from "./models.ts";
 import { createPromptImagePreparer, RUN_IMAGE_CAP } from "./main/prompt-images.ts";
 import {
+  admitHostMutation,
   consumeStartupControl,
   pendingImageState,
   promptFileName,
@@ -1301,7 +1303,7 @@ function cancelPendingApproval(): boolean {
  * once-only: the child can never grant itself (or its parent) `always`.
  */
 let subagentApprovalSeq = 0;
-async function requestParentApproval(kind: "bash" | "protected", text: string): Promise<boolean> {
+async function requestParentApproval(kind: "bash" | "protected" | "action", text: string): Promise<boolean> {
   const run = activeSubagent;
   if (!run || !eventsDir) return false;
   const parentTid = run.task.parentTerminalId;
@@ -1565,7 +1567,8 @@ function pollSubagentApprovals(): void {
           interrupted || !surface?.active()) return false;
       const question = kind === "bash"
         ? `Subagent ${runId} asks to run bash: ${text.slice(0, 160)}`
-        : `Subagent ${runId} asks to edit protected file: ${text.slice(0, 160)}`;
+        : kind === "protected" ? `Subagent ${runId} asks to edit protected file: ${text.slice(0, 160)}`
+        : `Subagent ${runId} asks to continue after window close: ${text.slice(0, 160)}`;
       const line = await approvalPicker.ask(question, [
         { name: "Deny", hint: "reject this request", submit: "/approve deny" },
         { name: "Approve once", hint: "allow this once", submit: "/approve once" },
@@ -1671,6 +1674,25 @@ async function confirmProtectedMutation(inputPath: string | undefined): Promise<
   return queueApproval(() => confirmProtectedMutationNow(inputPath));
 }
 
+async function requestToolWriteAccess(use: ToolUse) {
+  return admitHostMutation({
+    eventsDir, terminalId, bridgeId,
+    shouldStop: () => interrupted || shutdownRequested,
+    logEvent: event => sidecar.logEvent(event),
+    confirmDetached: () => {
+      const detail = `${use.name}: ${use.input.command ?? use.input.path ?? use.input.task ?? "action"}`;
+      if (activeSubagent) return requestParentApproval("action", detail);
+      return queueApproval(async () => {
+        const line = await approvalPicker.ask(`Continue after window close? ${detail.slice(0, 160)}`, [
+          { name: "Deny", hint: "leave this action unexecuted", submit: "/approve deny" },
+          { name: "Approve once", hint: "continue this action after reattaching", submit: "/approve once" },
+        ]);
+        return line === "/approve once";
+      });
+    },
+  });
+}
+
 async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolOutcome> {
   const notExecuted = (text: string): ToolOutcome => ({ ...done(use, text, true), executed: false });
   if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
@@ -1692,6 +1714,26 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     }
     return notExecuted(`error: ${use.name} is not available in this session`);
   }
+  if (use.name === "bash" && !(await confirmBash(use.input.command ?? ""))) return notExecuted("error: bash denied");
+  if ((use.name === "write_file" || use.name === "edit") && !(await confirmProtectedMutation(use.input.path))) {
+    return notExecuted("error: protected file edit denied");
+  }
+  let finish: (() => void) | undefined;
+  if (sessionEnvironment.TERMINA_HOST_PID && !READ_TOOLS.has(use.name)) {
+    const admission = await requestToolWriteAccess(use);
+    if (!admission.ok) return notExecuted(`error: ${admission.error}`);
+    finish = admission.finish;
+  }
+  try {
+    if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
+    return await executeAdmittedTool(use, parentTruncated);
+  } finally {
+    finish?.();
+  }
+}
+
+async function executeAdmittedTool(use: ToolUse, parentTruncated: boolean): Promise<ToolOutcome> {
+  const notExecuted = (text: string): ToolOutcome => ({ ...done(use, text, true), executed: false });
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
     return done(use, attachPathRules(canonicalCwd, frontMatter.skills, [use.input.path ?? ""], got));
@@ -1703,7 +1745,6 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   }
   if (use.name === "write_file") {
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
-      if (!(await confirmProtectedMutation(use.input.path))) return notExecuted("error: protected file edit denied");
       if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
       const confined = confinePath(canonicalCwd, use.input.path);
       if (confined.ok) {
@@ -1716,7 +1757,6 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   }
   if (use.name === "edit") {
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
-      if (!(await confirmProtectedMutation(use.input.path))) return notExecuted("error: protected file edit denied");
       if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
       const confined = confinePath(canonicalCwd, use.input.path, { mustExist: true });
       if (confined.ok) {
@@ -1750,7 +1790,6 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   }
   if (use.name === "bash") {
     const command = use.input.command ?? "";
-    if (!(await confirmBash(command))) return notExecuted("error: bash denied");
     if (interrupted) return notExecuted("(interrupted by user; tool not executed)");
     let sandboxProfile: string | undefined;
     if (eventsDir && terminalId) {
@@ -2329,6 +2368,20 @@ function installReplayedMessages(replayed: {
   storageSeq = Math.max(storageSeq, replayed.maxSeq);
 }
 
+/** A crash can land after the call append but before its result. Never rerun it. */
+function completeInterruptedToolTurn(): void {
+  const last = history.at(-1);
+  if (last?.role !== "assistant" || !Array.isArray(last.content) || providerToolAdmissionError(last.content)) return;
+  const results = last.content.flatMap(block => {
+    if (block.type !== "tool_use" || typeof block.id !== "string" || typeof block.name !== "string") return [];
+    return [{
+      type: "tool_result", tool_use_id: block.id, tool: block.name, is_error: true,
+      content: "error: the agent stopped before recording this tool result. Its outcome is unknown. Inspect the current state before deciding whether to run it again.",
+    }];
+  });
+  if (results.length > 0) pushMessage("user", results);
+}
+
 export function installResumedSubagentHistory(replayed: {
   messages: ReadonlyArray<{ role: "user" | "assistant"; content: unknown; sseq: number }>;
   maxSeq: number;
@@ -2336,6 +2389,7 @@ export function installResumedSubagentHistory(replayed: {
   installReplayedMessages(replayed);
   openSessionWriter();
   streamPrepared = true;
+  completeInterruptedToolTurn();
   resetCacheContinuity();
 }
 
@@ -4981,12 +5035,13 @@ async function resumeSessionBody(overrides?: {
   }
   try {
     open();
+    streamPrepared = true;
+    completeInterruptedToolTurn();
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     abortResumeKeepBundle(`(resume failed: ${error})`);
     return { ok: false, error };
   }
-  streamPrepared = true;
   resetCacheContinuity();
   syncStatus();
   renderHistoryTranscript(history, surface);
@@ -5222,8 +5277,17 @@ function installProcessShutdownHandlers(): void {
   process.once("SIGTERM", () => requestProcessShutdown(0, "sigterm"));
   process.once("SIGHUP", () => requestProcessShutdown(0, "sighup"));
   process.once("SIGINT", () => requestProcessShutdown(0, "sigint"));
+  const parentPid = process.ppid;
+  const hostPid = Number(sessionEnvironment.TERMINA_HOST_PID);
+  const hosted = Number.isSafeInteger(hostPid) && hostPid > 0;
+  const hostIdentity = hosted ? readSystemProcessIdentity(hostPid) : null;
+  const hostAlive = (): boolean => {
+    if (!hosted) return process.ppid === parentPid && process.ppid !== 1;
+    try { process.kill(hostPid, 0); } catch { return false; }
+    return hostIdentity === null || readSystemProcessIdentity(hostPid) === hostIdentity;
+  };
   const orphanWatch = setInterval(() => {
-    if (process.ppid !== 1) return;
+    if (hostAlive()) return;
     clearInterval(orphanWatch);
     requestProcessShutdown(0, "parent-exited");
   }, 1000);
@@ -5317,10 +5381,16 @@ async function runBangCommand(command: string): Promise<void> {
   interrupted = false;
   showPrompt();
   startSubagentApprovalTimer();
+  let finish: (() => void) | undefined;
   try {
     if (!(await confirmBash(command))) {
       out("(bash denied)\n");
       return;
+    }
+    if (sessionEnvironment.TERMINA_HOST_PID) {
+      const admission = await requestToolWriteAccess({ id: `bang-${randomUUID()}`, name: "bash", input: { command } });
+      if (!admission.ok) { out(`(${admission.error})\n`); return; }
+      finish = admission.finish;
     }
     const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
     out(got.content.endsWith("\n") ? got.content : `${got.content}\n`);
@@ -5330,6 +5400,7 @@ async function runBangCommand(command: string): Promise<void> {
     ensureFreshSession();
     pushMessage("user", bangCommandContext(command, got.content));
   } finally {
+    finish?.();
     running = false;
     flushMcpTools();
     stopSubagentApprovalTimer();

@@ -57,7 +57,7 @@ function atomicWriteJsonSync(dir: string, name: string, body: string): boolean {
   }
 }
 
-export type SubagentApprovalKind = "bash" | "protected";
+export type SubagentApprovalKind = "bash" | "protected" | "action";
 
 export interface SubagentApprovalRequest {
   version: 1;
@@ -146,7 +146,7 @@ export function readSubagentApprovalRequest(
   if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "not an object" };
   const r = v as Record<string, unknown>;
   if (r.version !== 1 || typeof r.runId !== "string" || !RUN_RE.test(r.runId)) return { ok: false, error: "bad run" };
-  if ((r.kind !== "bash" && r.kind !== "protected") || typeof r.text !== "string" || !r.text.trim()) {
+  if ((r.kind !== "bash" && r.kind !== "protected" && r.kind !== "action") || typeof r.text !== "string" || !r.text.trim()) {
     return { ok: false, error: "bad kind" };
   }
   if (typeof r.createdAt !== "number" || !Number.isFinite(r.createdAt)) return { ok: false, error: "bad time" };

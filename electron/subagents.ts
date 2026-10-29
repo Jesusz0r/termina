@@ -293,7 +293,7 @@ export class SubagentHost {
     return out;
   }
 
-  /** Test seam: child stream liveness fields. Production uses hasStream / noteChildEvent. */
+  /** Resolve a child stream to its live parent, with liveness fields for diagnostics. */
   streamInfo(childTid: string): { runId: string; parentTerminalId: string; booted: boolean; lastActivityAt: number } | null {
     const stream = this.streams.get(childTid);
     if (!stream) return null;
@@ -684,6 +684,7 @@ export class SubagentHost {
     const env: Record<string, string | undefined> = { ...this.sinks.baseEnv() };
     env.TERMINA_TERMINAL_ID = run.childTid;
     env.TERMINA_EVENTS_DIR = dir;
+    env.TERMINA_HOST_PID = String(process.pid);
     env.TERMINA_CORE_SESSION_ID = resumeSessionId ?? sessionId;
     env.TERMINA_CORE_SESSION_FILE = sessionFile;
     env.TERMINA_CORE_SUBAGENT_DEPTH = String(run.task.depth);

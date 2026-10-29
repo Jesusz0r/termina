@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const TEST_PROVIDER_TURN_CAP = 80;
@@ -76,7 +76,9 @@ async function scenario(toolProgram: string, check: (result: {
     try {
       for (const record of jsonLines(join(events, `${terminalId}.jsonl`))) {
         if (!["preflight_request", "checkpoint_request"].includes(record.t) || !record.requestId || acked.has(record.requestId)) continue;
-        writeFileSync(join(events, `ack-${terminalId}-${record.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
+        const ack = join(events, `ack-${terminalId}-${record.requestId}.json`);
+        writeFileSync(`${ack}.tmp`, JSON.stringify({ ok: true }), { mode: 0o600 });
+        renameSync(`${ack}.tmp`, ack);
         acked.add(record.requestId);
       }
       // The parent run stays open until the host settles children. This harness is the host.

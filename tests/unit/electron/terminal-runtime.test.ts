@@ -105,6 +105,98 @@ async function finishWithoutViewer(inst: AgentTerminalInstance, code = 0, origin
 afterEach(() => vi.useRealTimers());
 
 describe("TerminalRuntime", () => {
+  it("requires a renderer for writes; background subscribers cannot grant permission", async () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    const acquire = vi.fn(async () => () => {});
+    runtime.adopt(inst, { tailer: fakeTailer(), rendererTarget: null });
+    runtime.subscribe(inst.id, "subagent:bg-1");
+    runtime.subscribe(inst.id, "dispatch:owner");
+    assert.deepEqual(await runtime.admitMutation(inst, inst.id, "action-1", acquire), {
+      ok: false, needsApproval: true, error: "Reopen the window and approve this action to continue.",
+    });
+    assert.equal(acquire.mock.calls.length, 0);
+    runtime.disposeEgress();
+  });
+
+  it("drains admitted writes before window close and reattaches the same session", async () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    const tailer = fakeTailer();
+    const release = vi.fn();
+    runtime.adopt(inst, { tailer, rendererTarget: null });
+    runtime.openWindow(1);
+    runtime.attachViewer(1, 1);
+    runtime.attach(inst.id, inst.generation, 1, 1);
+    assert.deepEqual(await runtime.admitMutation(inst, inst.id, "action-1", async () => release), { ok: true });
+    let closed = false;
+    const closing = runtime.prepareWindowClose(1).then(() => { closed = true; });
+    await Promise.resolve();
+    assert.equal(closed, false);
+    assert.equal((await runtime.admitMutation(inst, inst.id, "action-2", async () => release)).ok, false);
+    runtime.finishMutation(inst.id, "wrong-action");
+    assert.equal(release.mock.calls.length, 0);
+    runtime.finishMutation(inst.id, "action-1");
+    await closing;
+    assert.equal(release.mock.calls.length, 1);
+    runtime.detachViewer(1, 1);
+    assert.equal(runtime.get(inst.id), inst);
+    assert.deepEqual(tailer.stopped, []);
+    runtime.openWindow(2);
+    runtime.attachViewer(2, 2);
+    runtime.attach(inst.id, inst.generation, 2, 2);
+    assert.equal(runtime.detachViewer(1, 1), false);
+    assert.deepEqual(await runtime.admitMutation(inst, inst.id, "action-3", async () => release), { ok: true });
+    assert.deepEqual(tailer.watched, [inst.id]);
+    runtime.finishMutation(inst.id, "action-3");
+    runtime.disposeEgress();
+  });
+
+  it("rechecks attachment after acquiring the write lease and releases a raced grant", async () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    const release = vi.fn();
+    runtime.adopt(inst, { tailer: fakeTailer(), rendererTarget: null });
+    runtime.openWindow(1);
+    runtime.attachViewer(1, 1);
+    let grant!: (release: () => void) => void;
+    const pending = runtime.admitMutation(inst, inst.id, "action-1", () => new Promise(resolve => { grant = resolve; }));
+    const closing = runtime.prepareWindowClose(1);
+    grant(release);
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(release.mock.calls.length, 1);
+    await closing;
+    runtime.disposeEgress();
+  });
+
+  it("releases the primary on native exit but retains child leases until their stream stops", async () => {
+    vi.useFakeTimers();
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    runtime.adopt(inst, { tailer: fakeTailer(), rendererTarget: null });
+    runtime.openWindow(1);
+    runtime.attachViewer(1, 1);
+    assert.deepEqual(await runtime.admitMutation(inst, inst.id, "busy", async () => null), { ok: false, error: "the source files are busy or no longer available" });
+    const release = vi.fn();
+    assert.deepEqual(await runtime.admitMutation(inst, inst.id, "primary-action", async () => release), { ok: true });
+    assert.deepEqual(await runtime.admitMutation(inst, "child-1", "action-1", async () => release), { ok: true });
+    let closed = false;
+    const closing = runtime.prepareWindowClose(1).then(() => { closed = true; });
+    inst.pty.onNativeExit();
+    await Promise.resolve();
+    assert.equal(release.mock.calls.length, 1);
+    assert.equal(closed, false, "a live child must keep its lease after the parent exits");
+    runtime.finishMutation("child-1");
+    await closing;
+    assert.equal(release.mock.calls.length, 2);
+    runtime.finishMutation("child-1");
+    assert.equal(release.mock.calls.length, 2);
+    await finishWithoutViewer(inst);
+    runtime.disposeEgress();
+    assert.equal((await runtime.admitMutation(inst, inst.id, "after-quit", async () => release)).ok, false);
+  });
+
   it("rejects admission before spawning or watching a child", () => {
     const runtime = new TerminalRuntime(hostWithSends([]), { eventsDir: "/tmp/termina-admission-test" });
     const tailer = fakeTailer();

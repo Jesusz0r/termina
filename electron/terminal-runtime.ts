@@ -139,6 +139,12 @@ export interface TerminalRuntimeSpawnOptions {
  * the session. A separate process is still conditional and is not this module.
  */
 export class TerminalRuntime {
+  private windowGeneration = 0;
+  private windowClosing = false;
+  private rendererAttached = false;
+  private quitting = false;
+  private readonly mutations = new Map<string, { owner: AgentTerminalInstance; streamId: string; release: (() => void) | null }>();
+  private readonly closeWaiters = new Set<() => void>();
   private terminalSeq = 0;
   private readonly terminals = new Map<string, AgentTerminalInstance>();
   /** A forced logical release does not complete node-pty's native callback. */
@@ -180,6 +186,71 @@ export class TerminalRuntime {
     return this.terminals.get(id);
   }
 
+  openWindow(generation: number): void {
+    if (this.quitting || generation <= this.windowGeneration) return;
+    this.windowGeneration = generation;
+    this.windowClosing = false;
+  }
+
+  /** Finish already admitted actions before the UI disappears; admit no new ones. */
+  prepareWindowClose(generation: number): Promise<void> {
+    if (generation !== this.windowGeneration || this.quitting) return Promise.resolve();
+    this.windowClosing = true;
+    if (this.mutations.size === 0) return Promise.resolve();
+    return new Promise(resolve => { this.closeWaiters.add(resolve); });
+  }
+
+  private mutationViewerPresent(owner: AgentTerminalInstance): boolean {
+    return !this.quitting && !this.windowClosing && !this.host.isDisposed()
+      && !owner.closed && !owner.pty.hasExited && this.terminals.get(owner.id) === owner
+      && this.rendererAttached;
+  }
+
+  /** Main supplies the canonical workspace lease. Other subscribers cannot approve writes. */
+  async admitMutation(
+    owner: AgentTerminalInstance,
+    streamId: string,
+    requestId: string,
+    acquire: () => Promise<(() => void) | null>,
+  ): Promise<{ ok: true } | { ok: false; needsApproval?: true; error: string }> {
+    const detached = () => ({ ok: false as const, needsApproval: true as const, error: "Reopen the window and approve this action to continue." });
+    if (!this.mutationViewerPresent(owner)) return detached();
+    const key = JSON.stringify([streamId, requestId]);
+    if (this.mutations.has(key)) return { ok: false, error: "action is already admitted" };
+    const action = { owner, streamId, release: null as (() => void) | null };
+    this.mutations.set(key, action);
+    try {
+      const release = await acquire();
+      if (!release) return { ok: false, error: "the source files are busy or no longer available" };
+      action.release = release;
+      if (this.mutations.get(key) !== action || !this.mutationViewerPresent(owner)) return detached();
+      return { ok: true };
+    } finally {
+      if (action.release === null || this.mutations.get(key) !== action || !this.mutationViewerPresent(owner)) {
+        action.release?.();
+        action.release = null;
+        if (this.mutations.get(key) === action) this.mutations.delete(key);
+        this.resolveWindowClose();
+      }
+    }
+  }
+
+  finishMutation(streamId: string, requestId?: string): void {
+    for (const [key, action] of this.mutations) {
+      if (action.streamId !== streamId || (requestId !== undefined && key !== JSON.stringify([streamId, requestId]))) continue;
+      this.mutations.delete(key);
+      action.release?.();
+      action.release = null;
+    }
+    this.resolveWindowClose();
+  }
+
+  private resolveWindowClose(): void {
+    if (this.mutations.size > 0) return;
+    for (const resolve of this.closeWaiters) resolve();
+    this.closeWaiters.clear();
+  }
+
   has(id: string): boolean {
     return this.terminals.has(id);
   }
@@ -200,7 +271,10 @@ export class TerminalRuntime {
   private trackNativeExit(inst: AgentTerminalInstance): void {
     if (this.nativeExits.has(inst)) return;
     this.nativeExits.add(inst);
-    inst.pty.onNativeExit = () => { this.nativeExits.delete(inst); };
+    inst.pty.onNativeExit = () => {
+      this.nativeExits.delete(inst);
+      this.finishMutation(inst.id);
+    };
   }
 
   clear(): void {
@@ -240,7 +314,7 @@ export class TerminalRuntime {
       opts.shellName,
       opts.cmd,
       opts.args,
-      opts.env,
+      opts.type === "agent" ? { ...opts.env, TERMINA_HOST_PID: String(process.pid) } : opts.env,
       opts.cols ?? 80,
       opts.rows ?? 24,
       opts.beforeSpawn,
@@ -350,7 +424,9 @@ export class TerminalRuntime {
 
   /** Bind the current renderer document so per-terminal attach can hydrate. */
   attachViewer(windowGeneration: number, rendererGeneration: number): boolean {
-    return this.egress.setRendererReady(windowGeneration, rendererGeneration, true);
+    const accepted = this.egress.setRendererReady(windowGeneration, rendererGeneration, true);
+    if (accepted) this.rendererAttached = true;
+    return accepted;
   }
 
   /**
@@ -360,8 +436,10 @@ export class TerminalRuntime {
    * stopWatching — that is destroy-only.
    */
   detachViewer(windowGeneration: number, rendererGeneration: number): boolean {
+    if (!this.egress.setRendererReady(windowGeneration, rendererGeneration, false)) return false;
+    this.rendererAttached = false;
     this.unsubscribeViewer(RENDERER_VIEWER_ID);
-    return this.egress.setRendererReady(windowGeneration, rendererGeneration, false);
+    return true;
   }
 
   /**
@@ -434,6 +512,7 @@ export class TerminalRuntime {
   }
 
   disposeEgress(): void {
+    this.quitting = true;
     this.egressDisposed = true;
     this.egress.dispose();
     for (const cancelTail of this.pendingSourceDrains.values()) cancelTail();

@@ -141,6 +141,9 @@ export function runBash(
       return;
     }
     const pid = child.pid;
+    // A dead PTY can end the agent before its async interruption poll runs.
+    const stopOnExit = () => killBashTree(pid, child);
+    process.once("exit", stopOnExit);
     const stdout = new BoundedTextAccumulator({ maxBytes: BASH_CAP_BYTES, direction: "tail", marker: "" });
     const stderr = new BoundedTextAccumulator({ maxBytes: BASH_CAP_BYTES, direction: "tail", marker: "" });
     child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
@@ -163,6 +166,7 @@ export function runBash(
     const finish = (status: { code?: number | null; signal?: string | null; failed: boolean }): void => {
       if (settled) return;
       settled = true;
+      process.off("exit", stopOnExit);
       clearTimeout(timer);
       clearInterval(poll);
       const state: CompletionState = timedOut

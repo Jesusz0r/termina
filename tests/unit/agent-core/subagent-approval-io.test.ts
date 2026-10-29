@@ -50,18 +50,18 @@ describe("subagent approval + inbox I/O", () => {
     expect(subagentApprovalTimeoutMs({ TERMINA_SUBAGENT_APPROVAL_TIMEOUT_MS: "nope" })).toBe(120_000);
   });
 
-  it("round-trips approval requests and rejects malformed ones", () => {
+  it.each(["bash", "protected", "action"] as const)("round-trips %s approval requests and rejects malformed ones", (kind) => {
     const dir = mkdtempSync(join(tmpdir(), "subagent-appr-"));
     roots.push(dir);
     expect(subagentApprovalRequestName("term-7", "bg-1", "appr-1")).toBe("subagent-term-7-bg-1.approval-appr-1.json");
     expect(subagentApprovalRequestName("../x", "bg-1", "appr-1")).toBeNull();
-    const written = writeSubagentApprovalRequest(dir, "term-7", "bg-1", { reqId: "appr-1", kind: "bash", text: "rm -rf /" });
+    const written = writeSubagentApprovalRequest(dir, "term-7", "bg-1", { reqId: "appr-1", kind, text: "requested action" });
     expect(written.ok).toBe(true);
     if (!written.ok) return;
     const read = readSubagentApprovalRequest(join(dir, written.file));
     expect(read.ok).toBe(true);
     if (!read.ok) return;
-    expect(read.file).toMatchObject({ runId: "bg-1", kind: "bash", text: "rm -rf /" });
+    expect(read.file).toMatchObject({ runId: "bg-1", kind, text: "requested action" });
     expect(writeSubagentApprovalRequest(dir, "term-7", "bg-1", { reqId: "appr-2", kind: "protected", text: "  " }).ok).toBe(false);
     expect(readSubagentApprovalRequest(join(dir, "missing.json")).ok).toBe(false);
     expect(writeSubagentAckFile(dir, "sub-term-7-bg-1", "appr-1", { ok: true })).toBe(true);

@@ -205,8 +205,7 @@ test("normal app quit discloses all projects; Cancel preserves work and acceptan
   await expect.poll(() => alive(other.pid), { timeout: 10_000 }).toBe(false);
 });
 
-test("macOS window close keeps work alive; later quit still confirms and stops it", async ({ page, electronApp, projectRoot }) => {
-  test.skip(process.platform !== "darwin", "Only macOS keeps the app running after its last window closes");
+test("window close keeps work alive; later quit still confirms and stops it", async ({ page, electronApp, projectRoot }) => {
   await firstAgent(page);
   const { instance, pid } = await shellCommand(page, projectRoot);
   await mockLifecycleDialogs(electronApp, 1);

@@ -82,6 +82,8 @@ export interface SidecarMeta {
 
 
 export type SidecarEvent =
+  | (SidecarMeta & { t: "mutation_request"; requestId?: string })
+  | (SidecarMeta & { t: "mutation_finished"; requestId?: string })
   | (SidecarMeta & { t: "preflight_request"; requestId?: string; hasImages?: boolean; readOnly?: boolean; deadlineAt?: number })
   | (SidecarMeta & { t: "preflight_cancel"; requestId?: string })
   | (SidecarMeta & { t: "prompt"; file?: string; hasPreflight?: boolean })

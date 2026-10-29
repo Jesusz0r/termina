@@ -333,6 +333,22 @@ footprint, not these numbers.
 
 ### Tool-call safety and progress
 
+- Window close detaches the renderer; explicit app quit disposes the sessions.
+  `electron/terminal-runtime.ts` retains the PTY, sidecar cursor, and viewer
+  registry across a new window. It fences new mutation admission as soon as
+  close is requested and drains admitted actions before the window disappears.
+  Core tools outside `READ_TOOLS`, including child tools and direct `!` commands,
+  take the existing main-owned workspace write lease through
+  `mutation_request` / `mutation_finished`. A detached request must use the
+  existing TUI approval picker, then request a fresh lease after reattachment.
+  Background subscribers do not grant write authority. Native owner exit and
+  child stream teardown release their action leases. Agent processes watch
+  their explicit host PID and, where available, birth identity, then use the
+  existing shutdown path to stop tools and close the session writer when the
+  host dies. Retained-session lock recovery stays with its existing owner.
+  Resume appends an error result for a trailing unanswered local tool call:
+  its outcome is unknown, and the call is never replayed. Existing session
+  bytes and completed results stay intact. This also applies to child resume.
 - `agent-core/tool-dispatch.ts` owns tool-argument decoding. After a failed JSON
   parse, it makes one syntax-only attempt: remove trailing commas outside strings
   and parse once more. It never changes commands, paths, field names, or values.

@@ -9,6 +9,8 @@ import { SIDECAR_TOOL_EDIT_ELEMENTS, SIDECAR_TOOL_EDIT_FIELD_BYTES, SIDECAR_TOOL
 
 
 const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
+  "mutation_request",
+  "mutation_finished",
   "preflight_request",
   "preflight_cancel",
   "prompt",
@@ -85,6 +87,9 @@ export function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>
         readOnly: optionalBoolean(rec.readOnly),
         deadlineAt: optionalSafeInteger(rec.deadlineAt),
       };
+    case "mutation_request":
+    case "mutation_finished":
+      return { ...meta, t, requestId: optionalString(rec.requestId) };
     case "preflight_cancel":
       return { ...meta, t: "preflight_cancel", requestId: optionalString(rec.requestId) };
     case "prompt":
