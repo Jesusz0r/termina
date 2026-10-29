@@ -27,6 +27,7 @@
     "electron",
     "scripts",
     "agent-core",
+    "docs/**/*.ts",
     "shared",
     "website"
   ]

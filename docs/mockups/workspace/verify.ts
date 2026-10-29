@@ -7,11 +7,11 @@ const directory = dirname(fileURLToPath(import.meta.url));
 const url = new URL("index.html", import.meta.url).href;
 const screenshots = process.argv.includes("--screenshots");
 const browser = await chromium.launch();
-const errors = [];
-const externalRequests = [];
+const errors: string[] = [];
+const externalRequests: string[] = [];
 let checks = 0;
 
-async function check(label, action) {
+async function check(label: string, action: () => Promise<void>): Promise<void> {
   await action();
   checks++;
   console.log(`PASS ${label}`);
@@ -115,7 +115,7 @@ try {
     await page.locator('[data-action="new-task"]').click();
     await page.locator("#task-goal").fill("   ");
     await page.getByRole("button", { name: "Queue sample task", exact: true }).click();
-    assert.equal(await page.locator("#task-dialog").evaluate((dialog) => dialog.open), true);
+    assert.equal(await page.locator("#task-dialog").evaluate((dialog) => dialog instanceof HTMLDialogElement && dialog.open), true);
     await page.locator("#task-goal").fill("Investigate long project names <script>alert(1)</script>");
     await page.getByRole("button", { name: "Queue sample task", exact: true }).click();
     await expect(page.locator(".task-card")).toHaveCount(1);

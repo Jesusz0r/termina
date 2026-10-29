@@ -51,6 +51,7 @@ New to Termina? Read **[`docs/reference/USER-GUIDE.md`](docs/reference/USER-GUID
 | Session Timeline | a dot strip of every agent action with on-demand snapshots, replay, and a recorder state (indexing / paused / degraded) |
 | Multi-line input | Cmd/Ctrl/Shift+Enter inserts a newline in the terminal; Option+Enter (macOS) queues a follow-up while an agent runs |
 | Plan Board | type `/plan` for a task list with live progress; Dispatch starts workers on claimed files. Add `@review` to a task for a worker restricted to local reads and search. Reports stay in the worker terminal |
+| Working notes | an optional [notes skill](docs/examples/skills/notes/SKILL.md) saves project context and reads it on request; notes stay out of startup instructions and do not count as verified work |
 | Session Search | full-text over past sessions with click-to-jump (`Cmd/Ctrl+Shift+P`) |
 | Fork Run | fork any completed run into isolated candidates (A = result, B = start + task) |
 | Fork Any Moment | Cmd/Ctrl+Click any timeline dot to fork a candidate at that exact source state |

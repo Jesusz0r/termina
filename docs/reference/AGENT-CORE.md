@@ -463,6 +463,38 @@ safety guarantees above:
   evidence that admission will succeed or permission to bypass a lock. Expired
   waits fail closed; cancellation remains available during the wait.
 
+### Working notes through a skill
+
+The optional [notes skill](../examples/skills/notes/SKILL.md) saves observations
+and open questions for later recall. Copy the whole `notes` folder, including
+`scripts/` and `package.json`, into `~/.agents/skills/notes` or
+`<project>/.agents/skills/notes`.
+Use `/skills notes save ...` or `/skills notes recall <path>`. The existing
+discovery index exposes the skill; its body and the notes stay out of zone 1.
+Nothing loads note contents at startup, and notes have no path-rule marker.
+
+The skill's `scripts/save-note.ts` runs with
+`node --experimental-strip-types` through the normal bash tool in the project
+directory. Node.js 22.6 or later is required; the skill's own `package.json`
+declares its module format, with no dependencies or compilation step. It takes
+note text on stdin, accepts no destination argument, and
+exclusively creates `.termina-notes/<generated-id>.md`. It never updates an
+existing note or writes an instruction file. Corrections create another note.
+It rejects a symlinked notes directory and caps each note at 16 KiB. The skill
+forbids secrets and reads saved notes with the existing `read_file` tool on
+demand. Installing the template adds no memory service or startup hook.
+
+Normal bash approval and the host write lease still apply, including when
+another terminal is writing. Project notes are ordinary source files captured
+by `core/`, subject to the project's ignore rules, and can follow normal
+promotion. Saving or reading a note does not run Verify or complete a Plan Board
+task. Notes about earlier checks are unverified context for the current task.
+The helper constrains the notes operation; it does not remove the agent's
+ordinary tools for unrelated implementation work.
+
+The instructions and saved notes remain Markdown. TypeScript provides the
+executable destination checks. See [Node's native TypeScript support](https://nodejs.org/api/typescript.html).
+
 ### File-scoped review workers
 
 Add `@review` to a Plan Board task with explicit file paths, for example

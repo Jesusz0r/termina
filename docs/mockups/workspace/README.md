@@ -43,11 +43,11 @@ All labels, commands, checks, diffs, work areas, terminal output and activity ar
 
 ## Verify and regenerate screenshots
 
-Use the repository's existing Playwright development dependency and an installed Chromium browser:
+Use Node.js 22.6 or later, the repository's existing Playwright development dependency, and an installed Chromium browser:
 
 ```sh
-node docs/mockups/workspace/verify.mjs
-node docs/mockups/workspace/verify.mjs --screenshots
+node --experimental-strip-types docs/mockups/workspace/verify.ts
+node --experimental-strip-types docs/mockups/workspace/verify.ts --screenshots
 ```
 
 If Chromium is not installed, install it explicitly with `pnpm exec playwright install chromium` before running the check. This downloads a browser; viewing the mockup itself does not require Playwright.
