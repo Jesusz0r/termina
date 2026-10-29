@@ -200,6 +200,17 @@ export class TerminalRuntime {
     return new Promise(resolve => { this.closeWaiters.add(resolve); });
   }
 
+  windowIsClosing(generation: number): boolean {
+    return generation === this.windowGeneration && this.windowClosing;
+  }
+
+  /** Reopen during a close drain: keep the window and admit actions again. */
+  reopenWindow(generation: number): boolean {
+    if (this.quitting || !this.windowIsClosing(generation)) return false;
+    this.windowClosing = false;
+    return true;
+  }
+
   private mutationViewerPresent(owner: AgentTerminalInstance): boolean {
     return !this.quitting && !this.windowClosing && !this.host.isDisposed()
       && !owner.closed && !owner.pty.hasExited && this.terminals.get(owner.id) === owner

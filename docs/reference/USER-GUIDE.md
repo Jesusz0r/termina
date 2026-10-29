@@ -238,8 +238,9 @@ Closing the window keeps the app and its terminal sessions alive on every
 platform. Open Termina again to reconnect to the same sessions. Model responses
 and reads can continue with the window closed. A new core-agent action that
 could write waits for you to reconnect and choose **Approve once** in its
-terminal, even if that terminal uses automatic approval. An action already
-running finishes before the window closes. Quitting the app stops the agents.
+terminal, even if that terminal uses automatic approval. The window hides at
+once; an action already running finishes before it closes, and opening Termina
+in the meantime brings the same window back. Quitting the app stops the agents.
 
 ### MCP servers (core)
 

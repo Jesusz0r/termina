@@ -338,11 +338,14 @@ footprint, not these numbers.
   registry across a new window. It fences new mutation admission as soon as
   close is requested and drains admitted actions before the window disappears.
   Core tools outside `READ_TOOLS`, including child tools and direct `!` commands,
-  take the existing main-owned workspace write lease through
-  `mutation_request` / `mutation_finished`. A detached request must use the
-  existing TUI approval picker, then request a fresh lease after reattachment.
-  Background subscribers do not grant write authority. Native owner exit and
-  child stream teardown release their action leases. Agent processes watch
+  are admitted by main through `mutation_request` / `mutation_finished`, under
+  the terminal's source admission. They do not hold the exclusive workspace
+  write lease, so editor saves and sibling writers are not blocked by a long
+  command. A detached request must use the existing TUI approval picker, then
+  request a fresh admission after reattachment. Background subscribers do not
+  grant write authority. Native owner exit and child stream teardown release
+  their admissions. The closing window hides at once; reopening during the
+  drain shows the same window and admits actions again. Agent processes watch
   their explicit host PID and, where available, birth identity, then use the
   existing shutdown path to stop tools and close the session writer when the
   host dies. Retained-session lock recovery stays with its existing owner.

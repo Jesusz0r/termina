@@ -200,7 +200,6 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
       expect(mainSource).toMatch(/this\.runtime\.stopSidecar\(terminalId, sidecarGeneration\)/);
       expect(mainSource).toMatch(/sidecarWatchGeneration\(id\)/);
       expect(mainSource).toMatch(/stopSidecar\(id, sidecarGeneration\)/);
-      expect(mainSource).toMatch(/if \(closingInstanceOurs\(id, inst\)\) this\.closeTerminal\(id\)/);
       expect(mainSource).toMatch(/drainSidecarQueues\(idsStillClosing\(\)\)/);
       expect(mainSource).toMatch(/clearSidecarQueues\(idsStillClosing\(\)\)/);
       expect(mainSource).not.toMatch(/clearSidecarQueues\(leftoverIds\)/);

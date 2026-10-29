@@ -1338,12 +1338,14 @@ class TerminaApp {
     // the first document or a reload is still being parsed; it stays in the
     // bounded egress queues until the new renderer has finished loading.
     let closeReady = false;
-    let closing: Promise<void> | null = null;
     win.on("close", (event) => {
       if (this.disposed || closeReady) return;
       event.preventDefault();
-      closing ??= this.runtime.prepareWindowClose(windowGeneration).then(() => {
-        if (this.win !== win || win.isDestroyed()) return;
+      // An admitted action can run for minutes: hide now, close once it drains.
+      // Reopening during the drain lifts the fence and shows this same window.
+      win.hide();
+      void this.runtime.prepareWindowClose(windowGeneration).then(() => {
+        if (this.win !== win || win.isDestroyed() || !this.runtime.windowIsClosing(windowGeneration)) return;
         closeReady = true;
         win.close();
       });
@@ -5891,7 +5893,6 @@ class TerminaApp {
       return;
     }
     const workspace = this.workspaceOfTerminal(inst);
-    const writer = `tool:${streamId}:${requestId}`;
     try {
       const result = await this.runtime.admitMutation(inst, streamId, requestId, async () => {
         if (!workspace) return null;
@@ -5900,10 +5901,9 @@ class TerminaApp {
           if (!directCommand || !(await this.admitSource(inst)).ok) return null;
           this.sourceAdmissions.start(inst.id, inst.generation);
         }
-        const lease = await this.acquireWriteLease(workspace.id, writer, 5000);
-        const releaseSource = () => { if (directCommand && !inst.busy) this.sourceAdmissions.finish(inst.id, inst.generation); };
-        if (!lease.ok) { releaseSource(); return null; }
-        const release = () => { this.releaseWriteLease(workspace.id, writer); releaseSource(); };
+        // Source admission is the run's writer fence. The exclusive workspace
+        // lease would block editor saves and sibling writers for a whole bash run.
+        const release = () => { if (directCommand && !inst.busy) this.sourceAdmissions.finish(inst.id, inst.generation); };
         if (this.disposed || this.runtime.get(inst.id) !== inst || this.workspaceOfTerminal(inst) !== workspace
           || inst.closed || inst.pty.hasExited || (streamId !== inst.id && !this.subagents.hasStream(streamId))) {
           release();
@@ -10316,8 +10316,10 @@ class TerminaApp {
       void this.createWindow();
       return;
     }
+    const reopened = this.runtime.reopenWindow(this.rendererWindowGeneration);
     // An e2e run must never pull focus off whatever the user is doing.
     if (E2E_HIDDEN_WINDOW) return;
+    if (reopened) this.win.show();
     if (this.win && !this.win.isDestroyed()) {
       if (this.win.isMinimized()) this.win.restore();
       this.win.focus();
@@ -10466,7 +10468,8 @@ app.on("window-all-closed", () => {
 });
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) void appState.createWindow();
+  // A window hidden by a draining close still counts; focusWindow reopens it.
+  appState.focusWindow();
 });
 
 app.on("before-quit", (event) => {

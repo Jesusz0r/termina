@@ -152,6 +152,26 @@ describe("TerminalRuntime", () => {
     runtime.disposeEgress();
   });
 
+  it("reopening during a close drain lifts the fence and keeps the window", async () => {
+    const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
+    const { inst } = fakeTerminal("term-1", 1);
+    runtime.adopt(inst, { tailer: fakeTailer(), rendererTarget: null });
+    runtime.openWindow(1);
+    runtime.attachViewer(1, 1);
+    assert.deepEqual(await runtime.admitMutation(inst, inst.id, "long", async () => () => {}), { ok: true });
+    const closing = runtime.prepareWindowClose(1);
+    assert.equal(runtime.windowIsClosing(1), true);
+    assert.equal((await runtime.admitMutation(inst, inst.id, "fenced", async () => () => {})).ok, false);
+    assert.equal(runtime.reopenWindow(2), false);
+    assert.equal(runtime.reopenWindow(1), true);
+    assert.equal(runtime.windowIsClosing(1), false);
+    assert.deepEqual(await runtime.admitMutation(inst, inst.id, "after-reopen", async () => () => {}), { ok: true });
+    runtime.finishMutation(inst.id);
+    await closing;
+    assert.equal(runtime.windowIsClosing(1), false, "a drained close must not close a reopened window");
+    runtime.disposeEgress();
+  });
+
   it("rechecks attachment after acquiring the write lease and releases a raced grant", async () => {
     const runtime = new TerminalRuntime(hostWithSends([]), { flushIntervalMs: 0 });
     const { inst } = fakeTerminal("term-1", 1);
