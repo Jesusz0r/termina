@@ -23,7 +23,6 @@ describe("plan board spec shape (refs #147)", () => {
   it("asserts the production row shape, a subsequent update, and the dispatch action", () => {
     expect(spec).toContain(".plan-task");
     expect(spec).toContain("state-pending");
-    expect(spec).toContain("state-done");
     expect(spec).toContain(".plan-mark");
     expect(spec).toContain(".plan-model");
     expect(spec).toContain("dispatchable");

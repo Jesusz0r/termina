@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  MAX_PLAN_TASK_TEXT,
   MIN_SCHEDULE_INTERVAL_MS,
   dispatchWorkerModel,
   nextScheduleRun,
@@ -30,6 +31,12 @@ describe("Plan Board Task Parser Contract", () => {
     );
 
     expect(summaryTasks.length).toBe(0);
+  });
+
+  it("skips a task the roster could not persist instead of truncating its policy", async () => {
+    const long = `${"x".repeat(MAX_PLAN_TASK_TEXT)} @review`;
+    const tasks = await parsePlanTasks(`## Plan\n- ${long}\n- short`, null, (path: string) => path);
+    expect(tasks.map((task) => task.text)).toEqual(["short"]);
   });
 
   it("ignores a heading-less checkbox list", async () => {

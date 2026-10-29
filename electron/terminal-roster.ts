@@ -8,13 +8,12 @@ import { isRecord } from "../shared/guards.ts";
 import { isExternalSessionId } from "./external-cli/session.ts";
 import { DISPATCH_OUTCOMES, EXTERNAL_CLIS, type ExternalCli, type PlanTask, type VerifyInfo } from "../shared/types.ts";
 import { parseStoredVerify, parseStoredVerifyOutput } from "./main/verify-source.ts";
-import { parsePlanTaskCandidate } from "./plan-board.ts";
+import { MAX_PLAN_TASK_TEXT, parsePlanTaskCandidate } from "./plan-board.ts";
 
 export const MAX_ROSTER_FILE_BYTES = 16 * 1024 * 1024;
 export const MAX_ROSTER_HANDOFF_BYTES = 64 * 1024;
 /** Handoff tasks per terminal: the board survives restarts, not archives. */
 export const MAX_ROSTER_PLAN_TASKS = 50;
-const MAX_PLAN_TEXT = 500;
 const MAX_PLAN_PATHS = 100;
 const MAX_PLAN_PATH = 256;
 const MAX_ID = 64;
@@ -70,7 +69,7 @@ export function parseRosterPlan(value: unknown): TerminalRosterEntry["plan"] {
     if (out.length >= MAX_ROSTER_PLAN_TASKS) break;
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
     const rec = item as Record<string, unknown>;
-    if (typeof rec.text !== "string" || !rec.text || rec.text.length > MAX_PLAN_TEXT || /[\x00-\x1f]/.test(rec.text)) continue;
+    if (typeof rec.text !== "string" || !rec.text || rec.text.length > MAX_PLAN_TASK_TEXT || /[\x00-\x1f]/.test(rec.text)) continue;
     if (rec.state !== "pending" && rec.state !== "active" && rec.state !== "done") continue;
     const paths: string[] = [];
     if (Array.isArray(rec.paths)) {

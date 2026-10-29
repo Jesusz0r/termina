@@ -19,6 +19,8 @@ export function parsePlanTaskCandidate(value: unknown): PlanTask["candidate"] | 
 
 const MAX_PLAN_TASKS = 20;
 const MAX_PATHS_PER_TASK = 5;
+/** Board and roster share this bound; text carries policy such as @review, so it is never truncated. */
+export const MAX_PLAN_TASK_TEXT = 500;
 
 export const MAX_DISPATCH_WORKERS = 3;
 
@@ -99,6 +101,7 @@ export function nextScheduleRun(spec: ScheduleSpec, fromMs: number, first: boole
 export async function parsePlanTasks(text: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<PlanTask[]> {
   const tasks: PlanTask[] = [];
   for (const line of planListEntries(text, MAX_PLAN_TASKS)) {
+    if (line.body.length > MAX_PLAN_TASK_TEXT) continue;
     const model = parsePlanModelMarker(line.body);
     tasks.push({
       text: line.body,
