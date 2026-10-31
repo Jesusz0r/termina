@@ -4,13 +4,13 @@ import { fileURLToPath } from "node:url";
 import { underRoot } from "./files.ts";
 
 /** Locate only our unpacked release resource, never a cwd- or environment-selected executable. */
-export function resolveBundledRipgrep(selfUrl: string, cwdRoot: string): string | null {
+export function resolveBundledBinary(selfUrl: string, cwdRoot: string, name: string): string | null {
   try {
     const bundleDir = dirname(fileURLToPath(selfUrl));
     const unpackedDir = dirname(bundleDir);
     if (basename(bundleDir) !== "dist-electron" || basename(unpackedDir) !== "app.asar.unpacked") return null;
     const resources = realpathSync(dirname(unpackedDir));
-    const expected = join(resources, "bin", "rg");
+    const expected = join(resources, "bin", name);
     const binary = realpathSync(expected);
     // Reject redirected resources, including symlinks into the project or arbitrary host paths.
     if (binary !== expected) return null;

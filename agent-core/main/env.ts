@@ -10,7 +10,7 @@ import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IGNORED_SEGMENTS, parseGitignore, type GitignoreRules } from "../../shared/gitignore.ts";
 import { freezeCwd, gitignoreSkips, readIgnoreFile, sortUtf8, underRoot } from "./files.ts";
-import { resolveBundledRipgrep } from "./bundled-ripgrep.ts";
+import { resolveBundledBinary } from "./bundled-bin.ts";
 
 const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
@@ -71,10 +71,13 @@ export function trustedPath(pathEnv = process.env.PATH ?? "", cwdRoot?: string):
   return parts.join(delimiter);
 }
 
+/** Binaries `scripts/prepare-resources.ts` ships in `resources/bin`; they win over PATH. */
+const BUNDLED_BINS: ReadonlySet<string> = new Set(["rg", "agent-desktop"]);
+
 export function resolveTrustedBin(bin: string, cwdRoot: string): string | null {
   const root = freezeCwd(cwdRoot);
-  if (bin === "rg") {
-    const bundled = resolveBundledRipgrep(import.meta.url, root);
+  if (BUNDLED_BINS.has(bin)) {
+    const bundled = resolveBundledBinary(import.meta.url, root, bin);
     if (bundled !== null) return bundled;
   }
   for (const dir of trustedPath(process.env.PATH, cwdRoot).split(delimiter)) {

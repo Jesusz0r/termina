@@ -35,7 +35,8 @@ export function bashProcessGroupAlive(pid: number | undefined): boolean {
   }
 }
 
-function killBashTree(pid: number | undefined, child: ChildProcess): void {
+/** Kill a detached child and its process group (taskkill /T on Windows). */
+export function killProcessTree(pid: number | undefined, child: ChildProcess): void {
   if (typeof pid !== "number" || pid <= 0) {
     try {
       child.kill("SIGKILL");
@@ -142,7 +143,7 @@ export function runBash(
     }
     const pid = child.pid;
     // A dead PTY can end the agent before its async interruption poll runs.
-    const stopOnExit = () => killBashTree(pid, child);
+    const stopOnExit = () => killProcessTree(pid, child);
     process.once("exit", stopOnExit);
     const stdout = new BoundedTextAccumulator({ maxBytes: BASH_CAP_BYTES, direction: "tail", marker: "" });
     const stderr = new BoundedTextAccumulator({ maxBytes: BASH_CAP_BYTES, direction: "tail", marker: "" });
@@ -208,7 +209,7 @@ export function runBash(
     };
     const requestReap = (): void => {
       if (reapDeadline == null) reapDeadline = Date.now() + BASH_GROUP_REAP_MS;
-      killBashTree(pid, child);
+      killProcessTree(pid, child);
     };
     const resolveIfReady = (): void => {
       if (settled || closeStatus == null) return;

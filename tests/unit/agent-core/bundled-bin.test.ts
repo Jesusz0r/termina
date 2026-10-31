@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
-import { resolveBundledRipgrep } from "../../../agent-core/main/bundled-ripgrep.ts";
+import { resolveBundledBinary } from "../../../agent-core/main/bundled-bin.ts";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -25,7 +25,7 @@ describe("packaged ripgrep resolution", () => {
   it("finds the executable from the unpacked bundle without consulting PATH", () => {
     const f = fixture();
     writeFileSync(f.binary, "fixture", { mode: 0o755 });
-    expect(resolveBundledRipgrep(f.url, f.project)).toBe(f.binary);
+    expect(resolveBundledBinary(f.url, f.project, "rg")).toBe(f.binary);
   });
   it("prefers packaged rg to PATH through the actual bundled environment resolver", async () => {
     const f = fixture();
@@ -47,25 +47,25 @@ describe("packaged ripgrep resolution", () => {
   });
   it("rejects missing, nonexecutable, directory, or redirected resources", () => {
     const f = fixture();
-    expect(resolveBundledRipgrep(f.url, f.project)).toBeNull();
+    expect(resolveBundledBinary(f.url, f.project, "rg")).toBeNull();
     writeFileSync(f.binary, "fixture", { mode: 0o644 });
-    expect(resolveBundledRipgrep(f.url, f.project)).toBeNull();
+    expect(resolveBundledBinary(f.url, f.project, "rg")).toBeNull();
     chmodSync(f.binary, 0o755);
-    expect(resolveBundledRipgrep(f.url, f.resources)).toBeNull();
+    expect(resolveBundledBinary(f.url, f.resources, "rg")).toBeNull();
     rmSync(f.binary);
     mkdirSync(f.binary);
-    expect(resolveBundledRipgrep(f.url, f.project)).toBeNull();
+    expect(resolveBundledBinary(f.url, f.project, "rg")).toBeNull();
     rmSync(f.binary, { recursive: true });
     const hostile = join(f.project, "rg");
     writeFileSync(hostile, "fixture", { mode: 0o755 });
     symlinkSync(hostile, f.binary);
-    expect(resolveBundledRipgrep(f.url, f.project)).toBeNull();
+    expect(resolveBundledBinary(f.url, f.project, "rg")).toBeNull();
   });
   it("does not infer resources from source, development bundles, or unrelated directories", () => {
     const f = fixture();
     writeFileSync(f.binary, "fixture", { mode: 0o755 });
     for (const path of ["dist-electron/agent-core.mjs", "agent-core/main/env.ts", "app.asar.unpacked/other/env.mjs"]) {
-      expect(resolveBundledRipgrep(pathToFileURL(join(f.resources, path)).href, f.project)).toBeNull();
+      expect(resolveBundledBinary(pathToFileURL(join(f.resources, path)).href, f.project, "rg")).toBeNull();
     }
   });
 });
