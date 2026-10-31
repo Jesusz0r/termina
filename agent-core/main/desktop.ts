@@ -517,22 +517,12 @@ export function isBlockedDesktopApp(app: string): boolean {
   return key === "termina" || key === "dev.termina.app";
 }
 
-export function parseComputerCommand(
-  line: string,
-): { action: "show" | "on" | "off" } | { error: string } | null {
-  if (line !== "/computer" && !line.startsWith("/computer ")) return null;
-  const rest = line.slice("/computer".length).trim().toLowerCase();
-  if (!rest) return { action: "show" };
-  if (rest === "on" || rest === "off") return { action: rest };
-  return { error: "use /computer, /computer on, or /computer off" };
-}
-
 /** The model-facing tool schema. Keep this in sync with parseDesktopRequest. */
 export function desktopToolDefinition(): Record<string, unknown> {
   return {
     name: DESKTOP_TOOL_NAME,
     description:
-      "Observe and operate a macOS desktop app through the native accessibility tree. This is semantic computer use, not screenshots. Start with snapshot (use skeleton for dense apps), act on a qualified ref, then snapshot again to verify. Refs belong to one snapshot; a stale ref is an error, not a guess. Every action is scoped to one app and requires human approval. Do not use this to operate Termina itself.",
+      "Observe and operate a macOS desktop app through the native accessibility tree. Use it only when the task needs a native app; web pages are not this tool's job. This is semantic computer use, not screenshots. Start with snapshot (use skeleton for dense apps), act on a qualified ref, then snapshot again to verify. Refs belong to one snapshot; a stale ref is an error, not a guess. Every action is scoped to one app and requires human approval. Do not use this to operate Termina itself.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -698,7 +688,6 @@ export class DesktopSession {
   private readonly stateRoot: string;
   private readonly cwd: string;
   private readonly timeoutMs: number;
-  private enabled = false;
   private readonly snapshots = new Map<string, DesktopSnapshot>();
   private readonly approvedApps = new Set<string>();
 
@@ -711,17 +700,8 @@ export class DesktopSession {
     ensurePrivateDirectory(options.stateRoot);
   }
 
-  get isEnabled(): boolean {
-    return this.enabled;
-  }
-
-  enable(): void {
-    ensurePrivateDirectory(this.stateRoot);
-    this.enabled = true;
-  }
-
-  disable(): void {
-    this.enabled = false;
+  /** Drop refs and app approvals; `/clear` starts the next task from nothing. */
+  reset(): void {
     this.snapshots.clear();
     this.approvedApps.clear();
   }
@@ -755,9 +735,6 @@ export class DesktopSession {
   }
 
   async run(request: DesktopRequest): Promise<DesktopRunResult> {
-    if (!this.enabled) {
-      return failResult("computer use is off; run /computer on");
-    }
     const argv = desktopArgv(request);
     const waitBudget = request.action === "wait" && "timeoutMs" in request
       ? request.timeoutMs + DESKTOP_TIMEOUT_GRACE_MS

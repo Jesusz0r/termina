@@ -9,7 +9,6 @@ import {
   desktopRequestLabel,
   desktopRequestNeedsActionApproval,
   desktopToolDefinition,
-  parseComputerCommand,
   parseDesktopRequest,
 } from "../../../agent-core/main/desktop.ts";
 
@@ -76,9 +75,7 @@ describe("desktop tool", () => {
   }
 
   function session() {
-    const s = new DesktopSession({ binaryPath: fakeBin, stateRoot, cwd });
-    s.enable();
-    return s;
+    return new DesktopSession({ binaryPath: fakeBin, stateRoot, cwd });
   }
 
   function loggedArgs(): string[][] {
@@ -113,12 +110,7 @@ describe("desktop tool", () => {
     expect(desktopArgv(request({ action: "wait", ms: 100 }))).toEqual(["wait", "100"]);
   });
 
-  it("parses /computer and labels the tool/actions", () => {
-    expect(parseComputerCommand("/computer")).toEqual({ action: "show" });
-    expect(parseComputerCommand("/computer on")).toEqual({ action: "on" });
-    expect(parseComputerCommand("/computer off")).toEqual({ action: "off" });
-    expect(parseComputerCommand("/computer nope")).toEqual({ error: "use /computer, /computer on, or /computer off" });
-    expect(parseComputerCommand("/other")).toBeNull();
+  it("labels the tool/actions", () => {
     expect(desktopRequestLabel(request({ action: "click", ref: "@s1:e1" }))).toBe("click @s1:e1");
     expect(desktopRequestNeedsActionApproval(request({ action: "snapshot", app: "Finder" }))).toBe(false);
     expect(desktopRequestNeedsActionApproval(request({ action: "click", ref: "@s1:e1" }))).toBe(true);
@@ -137,9 +129,10 @@ describe("desktop tool", () => {
     expect(s.appForSnapshot("s1")).toBe("Finder");
     expect(s.appForRef("@s1:e1")).toBe("Finder");
     expect(loggedArgs().at(-1)).toEqual(["snapshot", "--app", "Finder", "-i", "--compact"]);
-    s.disable();
-    expect(s.isEnabled).toBe(false);
-    expect((await s.run(request({ action: "snapshot", app: "Finder" }))).output.isError).toBe(true);
+    s.approveApp("Finder");
+    s.reset();
+    expect(s.appForRef("@s1:e1")).toBeNull();
+    expect(s.isAppApproved("Finder")).toBe(false);
   });
 
   it("formats permission errors and does not manufacture a snapshot", async () => {

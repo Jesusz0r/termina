@@ -21,7 +21,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/skills", hint: "session · pick a skill to follow" },
   { name: "/mcp", hint: "session · list, add, or reconnect MCP servers" },
   { name: "/doctor", hint: "session · report instruction, skill, and MCP loading" },
-  { name: "/computer", hint: "danger · macOS semantic computer use" },
   { name: "/effort", hint: "model · show or set reasoning effort" },
   { name: "/permissions", hint: "danger · set bash approval policy" },
   { name: "/exit", hint: "danger · quit the engine" },

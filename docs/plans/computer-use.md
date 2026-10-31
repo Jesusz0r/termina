@@ -80,8 +80,9 @@ Approved 2026-10-31 as a separate owner, not as part of the browser.
   `desktop` to `KERNEL_TOOL_NAMES` so an MCP server cannot take the name.
 - macOS primary sessions only. Absent from print runs, subagents, worldline
   candidates, and read-only sessions.
-- Off by default. `/computer on|off` toggles the process flag; `/clear`
-  disables it and clears approved apps and refs.
+- No slash command or enable flag: the model decides when a task needs a
+  native app and calls the tool. The approvals below are the control.
+  `/clear` clears approved apps and refs.
 - Per-app observation approval, plus a separate approval for
   `click`, `type`, `set_value`, `press`, and `scroll`.
 - No screenshots, clipboard, notifications, app/window lifecycle, pointer
@@ -93,8 +94,7 @@ Approved 2026-10-31 as a separate owner, not as part of the browser.
 - The browser slice remains headless and never drives the desktop.
 
 Desktop first-slice tests cover request parsing, exact argv, snapshot/ref
-ownership, disable, permission errors, `/computer` parsing, and the tool
-schema.
+ownership, reset, permission errors, and the tool schema.
 
 ## Known holes
 
@@ -138,15 +138,14 @@ copied `auth.json`.
 ### Process
 
 One browser per terminal process. Start it lazily, on the first
-approved action after enable, not at process start. It is a child of
+approved action, not at process start. It is a child of
 the agent, in a process group the owner kills, following
 `agent-core/main/bash.ts`. Do not daemonize. Interrupt, timeout, and
 process exit kill the child and return an error result. A hang is not
 an open approval. The bound is not longer than `BASH_TIMEOUT_MS`.
 
-`/clear` destroys the process and its profile and clears enablement.
-Clean exit does the same. A new enable always creates a new profile
-directory. Never reuse a profile from a previous process, including one
+`/clear` destroys the process and its profile. Clean exit does the
+same. A new browser start always creates a new profile directory. Never reuse a profile from a previous process, including one
 left by a crash. Do not put the profile in the session bundle. A fork materializes
 that session through the fork point, including referenced images. It
 does not restore a page or cookies unless they were stored in the
@@ -197,8 +196,8 @@ user approved.
 The schema is fixed at process start.
 
 - Interactive TUI sessions, including worldline candidates, include the
-  tool. Calls before enable fail with the tool off. They do not start
-  the browser.
+  tool. The model decides when a task needs a page; the approvals
+  below are the control.
 - `-p` / `--print` and piped runs omit it, even when
   `TERMINA_CORE_APPROVE=all`. A print run can still have a TTY, so the
   print flag is the check, not the absence of a surface.
@@ -208,10 +207,9 @@ The schema is fixed at process start.
 If a call is forced where there is no local picker, deny. Never wait.
 Do not extend the parent approval file format in v1.
 
-Enablement is a flag on this process, set by a `/browser` slash command.
-It is not a preference and not bash's permission mode. It is off at
-start and off after `/clear`. Enabling or disabling must not add or
-remove the tool.
+There is no `/browser` slash command, enable flag, or preference. The
+tool is in the schema for every session above, and the model chooses
+it like any other tool.
 
 ### Tool
 
@@ -268,8 +266,8 @@ modal. Do not offer "Always approve". v1 has no always-approve mode,
 and `TERMINA_CORE_APPROVE=all` does not skip these asks.
 
 - `navigate`, `click`, `type`, and `key` ask every time.
-- `snapshot` does not ask again after enable. It only observes the
-  Termina-owned page.
+- `snapshot` does not ask. It only observes the Termina-owned page,
+  which only an approved `navigate` can load.
 - Schema rejection stays in `agent-core/tool-dispatch.ts`, before the
   prompt and before the browser starts.
 - The prompt shows scheme, host, and port in full. A 160-character slice
@@ -299,8 +297,8 @@ string.
 ## First slice
 
 1. Confinement and lifecycle above. Refuse to start when the child deny
-   list cannot be applied. New profile on every enable. No reuse.
-2. The `browser` tool, `/browser`, approval, origin failure, stale-ref
+   list cannot be applied. New profile on every start. No reuse.
+2. The `browser` tool, approval, origin failure, stale-ref
    failure, and the batch halt.
 3. Tests:
    - a failed or denied browser action does not run the next browser
@@ -314,8 +312,7 @@ string.
      user's Chrome profile, and not a directory that contains
      `auth.json`;
    - print mode and subagents are not offered the tool;
-   - enablement does not change the schema, and the picker has no
-     always-approve choice;
+   - the picker has no always-approve choice;
    - downloads and popups are denied;
    - there is no screenshot action and no image bytes in the sidecar.
 

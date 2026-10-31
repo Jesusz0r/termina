@@ -198,7 +198,6 @@ import {
   desktopRequestNeedsApp,
   desktopToolDefinition,
   isBlockedDesktopApp,
-  parseComputerCommand,
   parseDesktopRequest,
   resolveAgentDesktopBinary,
   type DesktopRequest,
@@ -1386,8 +1385,9 @@ function clearSubagentApprovals(): void {
   clearSubagentApprovalFiles(eventsDir, terminalId);
 }
 
-/** Per-process computer-use state. `/computer off` and `/clear` drop approvals
- *  and refs; the temporary refmap root is left to the OS temp reaper. */
+/** Per-process computer-use state, started on the model's first desktop call.
+ *  `/clear` drops approvals and refs; the temporary refmap root is left to the
+ *  OS temp reaper. */
 let desktopSession: DesktopSession | null = null;
 
 function ensureDesktopSession(): DesktopSession | { error: string } {
@@ -1409,13 +1409,11 @@ function ensureDesktopSession(): DesktopSession | { error: string } {
 }
 
 function resetComputerUse(): void {
-  desktopSession?.disable();
+  desktopSession?.reset();
   desktopSession = null;
 }
 
-async function confirmDesktopObservationNow(app: string): Promise<boolean> {
-  const session = desktopSession;
-  if (!session?.isEnabled) return false;
+async function confirmDesktopObservationNow(session: DesktopSession, app: string): Promise<boolean> {
   if (session.isAppApproved(app)) return true;
   if (!surface?.active()) return false;
   const line = await approvalPicker.ask(`Allow desktop observation? App: ${app}`, [
@@ -1439,8 +1437,8 @@ async function confirmDesktopActionNow(request: DesktopRequest, app: string): Pr
 async function confirmDesktopCall(use: ToolUse): Promise<{ ok: true } | { ok: false; error: string }> {
   const parsed = parseDesktopRequest(use.input);
   if (!parsed.ok) return { ok: false, error: `error: ${parsed.error}` };
-  const session = desktopSession;
-  if (!session?.isEnabled) return { ok: false, error: "error: computer use is off; run /computer on" };
+  const session = ensureDesktopSession();
+  if ("error" in session) return { ok: false, error: `error: computer use unavailable: ${session.error}` };
   const request = parsed.request;
   if (!desktopRequestNeedsApp(request)) return { ok: true };
   const app = session.appForRequest(request);
@@ -1452,8 +1450,8 @@ async function confirmDesktopCall(use: ToolUse): Promise<{ ok: true } | { ok: fa
     error: "error: desktop approval cancelled",
   };
   await queueApproval(async () => {
-    if (!session.isEnabled) {
-      outcome = { ok: false, error: "error: computer use was turned off" };
+    if (desktopSession !== session) {
+      outcome = { ok: false, error: "error: desktop session was reset" };
       return false;
     }
     if (desktopRequestNeedsActionApproval(request)) {
@@ -1465,56 +1463,11 @@ async function confirmDesktopCall(use: ToolUse): Promise<{ ok: true } | { ok: fa
       outcome = approved ? { ok: true } : { ok: false, error: "error: desktop action denied" };
       return approved;
     }
-    const approved = await confirmDesktopObservationNow(app);
+    const approved = await confirmDesktopObservationNow(session, app);
     outcome = approved ? { ok: true } : { ok: false, error: "error: desktop observation denied" };
     return approved;
   });
   return outcome;
-}
-
-function startComputerCommand(line: string): void {
-  const parsed = parseComputerCommand(line);
-  if (!parsed) return;
-  if ("error" in parsed) {
-    out(`(${parsed.error})\n`);
-    showPrompt();
-    return;
-  }
-  if (isReadOnlySession()) {
-    out("(computer use is disabled in a read-only session)\n");
-    showPrompt();
-    return;
-  }
-  if (engineBusy()) {
-    out("(engine busy)\n");
-    showPrompt();
-    return;
-  }
-  if (parsed.action === "show") {
-    out(`(computer use ${desktopSession?.isEnabled ? "on" : "off"}; macOS semantic; per-action approval)\n`);
-    showPrompt();
-    return;
-  }
-  if (parsed.action === "off") {
-    resetComputerUse();
-    out("(computer use off)\n");
-    showPrompt();
-    return;
-  }
-  if (process.platform !== "darwin") {
-    out("(computer use is available on macOS only)\n");
-    showPrompt();
-    return;
-  }
-  const session = ensureDesktopSession();
-  if ("error" in session) {
-    out(`(computer use unavailable: ${session.error})\n`);
-    showPrompt();
-    return;
-  }
-  session.enable();
-  out("(computer use on; grant Accessibility to Termina if macOS asks; every action asks before running)\n");
-  showPrompt();
 }
 
 let subagentApprovalTimer: ReturnType<typeof setInterval> | null = null;
@@ -1940,11 +1893,12 @@ async function executeAdmittedTool(use: ToolUse, parentTruncated: boolean): Prom
     return done(use, got);
   }
   if (use.name === "desktop") {
-    if (!desktopSession?.isEnabled) return notExecuted("error: computer use is off; run /computer on");
     const parsed = parseDesktopRequest(use.input);
     if (!parsed.ok) return notExecuted(`error: ${parsed.error}`);
+    const session = ensureDesktopSession();
+    if ("error" in session) return notExecuted(`error: computer use unavailable: ${session.error}`);
     try {
-      const result = await desktopSession.run(parsed.request);
+      const result = await session.run(parsed.request);
       return done(use, { ...result.output, repro: reproFor(use) ?? null });
     } catch (error) {
       return done(use, `error: ${error instanceof Error ? error.message : String(error)}`, true);
@@ -6118,10 +6072,6 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
   if (line === "/doctor") {
     out(`${formatDoctor(frontMatter.diagnostics, mcpSession)}\n`);
     showPrompt();
-    return;
-  }
-  if (line === "/computer" || line.startsWith("/computer ")) {
-    startComputerCommand(line);
     return;
   }
   if (line === "/login" || line === "/logout") {
