@@ -339,7 +339,7 @@ export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<{
   return {
     deviceCode,
     userCode,
-    verificationUri: validateHttpsVerificationUri(verification, { hosts: ["auth.x.ai"], label: "xAI" }),
+    verificationUri: validateHttpsVerificationUri(verification, { hosts: ["auth.x.ai", "accounts.x.ai"], label: "xAI" }),
     intervalMs: intervalMs(
       parsed.interval,
       XAI_DEFAULT_INTERVAL_MS,

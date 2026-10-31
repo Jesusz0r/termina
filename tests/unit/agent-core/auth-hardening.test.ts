@@ -100,6 +100,10 @@ describe("auth hardening batch", () => {
       stub("https://auth.x.ai/device");
       const pinned = await oauth.requestXaiDeviceCode();
       expect(pinned.verificationUri).toBe("https://auth.x.ai/device");
+      // xAI moved the live device verification page to accounts.x.ai.
+      stub("https://accounts.x.ai/oauth2/device?user_code=ABCD-1234");
+      const accounts = await oauth.requestXaiDeviceCode();
+      expect(accounts.verificationUri).toBe("https://accounts.x.ai/oauth2/device?user_code=ABCD-1234");
       stub("https://evil.example/verify");
       await expect(oauth.requestGithubDeviceCode()).rejects.toThrow(/Untrusted verification URI/);
       stub("https://github.com/login/device");
