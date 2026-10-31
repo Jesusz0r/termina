@@ -7,32 +7,32 @@
  * refs and approvals. It never exposes screenshots, clipboard, notifications,
  * app/window lifecycle, pointer input, or headed mode.
  */
-import { spawn, type ChildProcess } from "node:child_process";
 import {
   accessSync,
   chmodSync,
   constants as fsConstants,
-  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
+  statSync,
 } from "node:fs";
-import { createRequire } from "node:module";
-import { arch, platform, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, sep } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { evictOldest } from "../../shared/evict-oldest.ts";
 import { isRecord } from "../../shared/guards.ts";
 import { boundedToolResult, type ToolTextResult } from "../tool-output.ts";
-import { resolveTrustedBin, trustedPath } from "./env.ts";
+import { resolveTrustedBin } from "./env.ts";
+import { nativeCliEnv, runNativeCli } from "./native-cli.ts";
 
 export const DESKTOP_TOOL_NAME = "desktop";
 
 /** Tool results are bounded so a dense accessibility tree cannot flood the context. */
 export const DESKTOP_OUTPUT_BYTES = 32 * 1024;
 const DESKTOP_STDOUT_BYTES = 512 * 1024;
-const DESKTOP_STDERR_BYTES = 16 * 1024;
 const DESKTOP_TIMEOUT_MS = 30_000;
 const DESKTOP_TIMEOUT_GRACE_MS = 5_000;
-const DESKTOP_REAP_MS = 2_000;
+const DESKTOP_MAX_SNAPSHOTS = 64;
 const DESKTOP_MAX_TEXT = 8_000;
 const DESKTOP_MAX_APP = 256;
 const DESKTOP_MAX_REF = 256;
@@ -106,7 +106,7 @@ export type DesktopParseResult =
   | { ok: true; request: DesktopRequest }
   | { ok: false; error: string };
 
-export type DesktopBinary = { binary: string; helper?: string };
+export type DesktopBinary = { binary: string; helper: string };
 
 export type DesktopRunResult = {
   output: ToolTextResult;
@@ -115,16 +115,6 @@ export type DesktopRunResult = {
 };
 
 type DesktopSnapshot = { app: string; windowTitle?: string };
-
-type SpawnResult = {
-  stdout: string;
-  stderr: string;
-  code: number | null;
-  signal: NodeJS.Signals | null;
-  timedOut: boolean;
-  outputOverflow: boolean;
-  spawnError: string | null;
-};
 
 const DESKTOP_FIELDS = new Set([
   "action",
@@ -514,7 +504,8 @@ export function desktopRequestLabel(request: DesktopRequest): string {
 
 export function isBlockedDesktopApp(app: string): boolean {
   const key = app.trim().toLowerCase();
-  return key === "termina" || key === "dev.termina.app";
+  // An unpackaged dev build of Termina runs as "Electron".
+  return key === "termina" || key === "dev.termina.app" || key === "electron";
 }
 
 /** The model-facing tool schema. Keep this in sync with parseDesktopRequest. */
@@ -559,99 +550,19 @@ export function desktopToolDefinition(): Record<string, unknown> {
 }
 
 /**
- * Resolve the pinned package's native binary and macOS helper. The package is
- * a production dependency, so packaged apps carry it under asar.unpacked.
+ * The bundled `resources/bin/agent-desktop` (see `scripts/prepare-native-tools.ts`)
+ * or a trusted PATH install. The macOS helper must sit beside the real binary.
  */
 export function resolveAgentDesktopBinary(cwdRoot: string): DesktopBinary | { error: string } {
-  const override = process.env.TERMINA_AGENT_DESKTOP_BIN?.trim();
-  if (override) {
-    if (!isAbsolute(override)) return { error: "TERMINA_AGENT_DESKTOP_BIN must be an absolute path" };
-    const binary = preferUnpacked(override);
-    if (!isExecutable(binary)) return { error: `agent-desktop binary is not executable: ${override}` };
-    const helper = helperForBinary(binary);
-    if (platform() === "darwin" && !helper) return { error: "agent-desktop macOS helper is missing next to the binary" };
-    return { binary, ...(helper ? { helper } : {}) };
-  }
-
-  let packageRoot: string | null = null;
+  const binary = resolveTrustedBin("agent-desktop", cwdRoot);
+  if (!binary) return { error: "agent-desktop is not installed" };
   try {
-    const require = createRequire(import.meta.url);
-    packageRoot = dirname(require.resolve("agent-desktop/package.json"));
+    const helper = join(dirname(realpathSync(binary)), "agent-desktop-macos-helper");
+    if (!statSync(helper).isFile()) throw new Error("not a file");
+    accessSync(helper, fsConstants.X_OK);
+    return { binary, helper };
   } catch {
-    packageRoot = null;
-  }
-  if (packageRoot) {
-    const name = platformBinaryName();
-    if (name) {
-      const candidate = preferUnpacked(join(packageRoot, "bin", name));
-      if (isExecutable(candidate)) {
-        const helper = helperForBinary(candidate);
-        if (platform() === "darwin" && !helper) {
-          return { error: "agent-desktop macOS helper is missing; reinstall the agent-desktop package" };
-        }
-        return { binary: candidate, ...(helper ? { helper } : {}) };
-      }
-    }
-  }
-
-  const fromPath = resolveTrustedBin("agent-desktop", cwdRoot);
-  if (fromPath) {
-    const binary = preferUnpacked(fromPath);
-    if (isExecutable(binary)) {
-      const helper = helperForBinary(binary);
-      if (platform() === "darwin" && !helper) {
-        return { error: "agent-desktop macOS helper is missing next to the binary; reinstall agent-desktop" };
-      }
-      return { binary, ...(helper ? { helper } : {}) };
-    }
-  }
-  return {
-    error: "agent-desktop is not installed; install the pinned package or run npm install -g agent-desktop",
-  };
-}
-
-function platformBinaryName(): string | null {
-  const key = `${platform()}-${arch()}`;
-  const names: Record<string, string> = {
-    "darwin-arm64": "agent-desktop-darwin-arm64",
-    "darwin-x64": "agent-desktop-darwin-x64",
-    "linux-arm64": "agent-desktop-linux-arm64",
-    "linux-x64": "agent-desktop-linux-x64",
-    "win32-arm64": "agent-desktop-win32-arm64.exe",
-    "win32-x64": "agent-desktop-win32-x64.exe",
-  };
-  return names[key] ?? null;
-}
-
-function helperForBinary(binary: string): string | undefined {
-  if (platform() !== "darwin") return undefined;
-  const override = process.env.AGENT_DESKTOP_MACOS_HELPER_PATH?.trim();
-  if (override && isAbsolute(override) && isExecutable(override)) return preferUnpacked(override);
-  const dir = dirname(binary);
-  for (const name of [
-    "agent-desktop-macos-helper",
-    `agent-desktop-macos-helper-darwin-${arch()}`,
-  ]) {
-    const candidate = preferUnpacked(join(dir, name));
-    if (isExecutable(candidate)) return candidate;
-  }
-  return undefined;
-}
-
-function preferUnpacked(path: string): string {
-  const marker = `${sep}app.asar${sep}`;
-  if (!path.includes(marker)) return path;
-  const unpacked = path.replace(marker, `${sep}app.asar.unpacked${sep}`);
-  return existsSync(unpacked) ? unpacked : path;
-}
-
-function isExecutable(path: string): boolean {
-  try {
-    if (!lstatSync(path).isFile()) return false;
-    if (platform() !== "win32") accessSync(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
+    return { error: "agent-desktop macOS helper is missing next to the binary" };
   }
 }
 
@@ -675,7 +586,7 @@ function ensurePrivateDirectory(path: string): void {
 
 export type DesktopSessionOptions = {
   binaryPath: string;
-  helperPath?: string;
+  helperPath: string;
   stateRoot: string;
   cwd: string;
   timeoutMs?: number;
@@ -684,7 +595,7 @@ export type DesktopSessionOptions = {
 /** Per-process computer-use state. The TUI owns approvals; this owns refs. */
 export class DesktopSession {
   private readonly binaryPath: string;
-  private readonly helperPath: string | undefined;
+  private readonly helperPath: string;
   private readonly stateRoot: string;
   private readonly cwd: string;
   private readonly timeoutMs: number;
@@ -734,16 +645,22 @@ export class DesktopSession {
     return this.snapshots.get(snapshotId)?.windowTitle;
   }
 
-  async run(request: DesktopRequest): Promise<DesktopRunResult> {
+  async run(request: DesktopRequest, shouldStop?: () => boolean): Promise<DesktopRunResult> {
     const argv = desktopArgv(request);
     const waitBudget = request.action === "wait" && "timeoutMs" in request
       ? request.timeoutMs + DESKTOP_TIMEOUT_GRACE_MS
       : this.timeoutMs;
-    const result = await runDesktopProcess(this.binaryPath, argv, {
+    const result = await runNativeCli(this.binaryPath, argv, {
       cwd: this.stateRoot,
-      env: this.childEnv(),
+      env: nativeCliEnv(this.cwd, {
+        AGENT_DESKTOP_HOME: this.stateRoot,
+        AGENT_DESKTOP_MACOS_HELPER_PATH: this.helperPath,
+      }),
       timeoutMs: waitBudget,
+      maxStdoutBytes: DESKTOP_STDOUT_BYTES,
+      ...(shouldStop ? { shouldStop } : {}),
     });
+    if (result.interrupted) return failResult("desktop command interrupted by user");
     if (result.outputOverflow) {
       return failResult("desktop output exceeded the safety cap; use a skeleton snapshot and drill into one region");
     }
@@ -774,161 +691,26 @@ export class DesktopSession {
     const data = isRecord(envelope.data) ? envelope.data : null;
     if (!data) return failResult("agent-desktop returned ok without data");
     if (request.action === "snapshot" || request.action === "find") {
-      const app = request.app ?? this.appForRequest(request) ?? (typeof data.app === "string" ? data.app : null);
+      // The app agent-desktop resolved, not only the name the model asked for, decides ownership.
+      const resolved = typeof data.app === "string" ? data.app : null;
+      const app = resolved ?? request.app ?? this.appForRequest(request);
       if (!app) return failResult("could not determine which app the snapshot belongs to");
-      if (isBlockedDesktopApp(app)) return failResult("Termina cannot operate its own window");
+      if (isBlockedDesktopApp(app) || (request.app !== undefined && isBlockedDesktopApp(request.app))) {
+        return failResult("Termina cannot operate its own window");
+      }
       const snapshotId = typeof data.snapshot_id === "string" ? data.snapshot_id : null;
       if (!snapshotId) return failResult("agent-desktop returned a snapshot without a snapshot_id");
       const windowTitle = isRecord(data.window) && typeof data.window.title === "string" ? data.window.title : undefined;
       this.snapshots.set(snapshotId, { app, ...(windowTitle ? { windowTitle } : {}) });
+      evictOldest(this.snapshots, DESKTOP_MAX_SNAPSHOTS);
     }
     return formatDesktopSuccess(data, request);
   }
 
-  private childEnv(): Record<string, string> {
-    const env: Record<string, string> = {
-      PATH: trustedPath(process.env.PATH, this.cwd),
-      AGENT_DESKTOP_HOME: this.stateRoot,
-    };
-    for (const key of [
-      "HOME",
-      "TMPDIR",
-      "TMP",
-      "TEMP",
-      "LANG",
-      "LC_ALL",
-      "LC_CTYPE",
-      "TERM",
-      "USER",
-      "LOGNAME",
-      "SHELL",
-    ] as const) {
-      const value = process.env[key];
-      if (value !== undefined && !value.includes("\0")) env[key] = value;
-    }
-    if (this.helperPath) env.AGENT_DESKTOP_MACOS_HELPER_PATH = this.helperPath;
-    return env;
-  }
 }
 
 function normalizeApp(app: string): string {
   return app.trim().toLowerCase();
-}
-
-function runDesktopProcess(
-  binary: string,
-  argv: string[],
-  opts: { cwd: string; env: Record<string, string>; timeoutMs: number },
-): Promise<SpawnResult> {
-  return new Promise((resolve) => {
-    let child: ChildProcess;
-    try {
-      child = spawn(binary, argv, {
-        cwd: opts.cwd,
-        detached: true,
-        env: opts.env,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      });
-    } catch (error) {
-      resolve({
-        stdout: "",
-        stderr: "",
-        code: null,
-        signal: null,
-        timedOut: false,
-        outputOverflow: false,
-        spawnError: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
-
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let outputOverflow = false;
-    let timedOut = false;
-    let settled = false;
-    let closeStatus: { code: number | null; signal: NodeJS.Signals | null } | null = null;
-    let reaping = false;
-    let reapTimer: ReturnType<typeof setTimeout> | null = null;
-    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const finish = (spawnError: string | null = null): void => {
-      if (settled) return;
-      settled = true;
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (reapTimer) clearTimeout(reapTimer);
-      process.off("exit", stopOnParentExit);
-      resolve({
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        code: closeStatus?.code ?? null,
-        signal: closeStatus?.signal ?? null,
-        timedOut,
-        outputOverflow,
-        spawnError,
-      });
-    };
-
-    const killTree = (): void => {
-      const pid = child.pid;
-      if (typeof pid === "number" && pid > 0 && platform() !== "win32") {
-        try {
-          process.kill(-pid, "SIGKILL");
-          return;
-        } catch {
-          /* fall through */
-        }
-      }
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-    };
-
-    const requestReap = (): void => {
-      if (reaping) return;
-      reaping = true;
-      killTree();
-      reapTimer = setTimeout(() => finish(), DESKTOP_REAP_MS);
-    };
-
-    const stopOnParentExit = (): void => killTree();
-    process.once("exit", stopOnParentExit);
-
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      requestReap();
-    }, Math.max(1, opts.timeoutMs));
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      if (outputOverflow) return;
-      stdoutBytes += chunk.byteLength;
-      if (stdoutBytes > DESKTOP_STDOUT_BYTES) {
-        outputOverflow = true;
-        requestReap();
-        return;
-      }
-      stdoutChunks.push(chunk);
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderrBytes >= DESKTOP_STDERR_BYTES) return;
-      const remaining = DESKTOP_STDERR_BYTES - stderrBytes;
-      const kept = chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
-      stderrBytes += kept.byteLength;
-      stderrChunks.push(kept);
-    });
-    child.on("error", (error) => {
-      finish(error.message);
-    });
-    child.on("close", (code, signal) => {
-      closeStatus = { code, signal };
-      finish();
-    });
-  });
 }
 
 function formatDesktopSuccess(data: Record<string, unknown>, request: DesktopRequest): DesktopRunResult {

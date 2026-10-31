@@ -26,9 +26,6 @@ importers:
       '@xterm/xterm':
         specifier: ^6.0.0
         version: 6.0.0
-      agent-desktop:
-        specifier: 1.0.2
-        version: 1.0.2
       dompurify:
         specifier: 3.4.14
         version: 3.4.14
@@ -750,13 +747,6 @@ packages:
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
-
-  agent-desktop@1.0.2:
-    resolution: {integrity: sha512-k2Qi3f0y1U60YaJOw1dob3EO55P/DuH4HK3WKdI9sMZLjVxpGZAzuG50rIWuIqS0JIVy07g+0pp9Of2JDjTX0w==}
-    engines: {node: '>=18'}
-    cpu: [arm64, x64]
-    os: [darwin, win32, linux]
-    hasBin: true
 
   ajv@8.20.0:
     resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
@@ -2413,8 +2403,6 @@ snapshots:
   abbrev@4.0.0: {}
 
   agent-base@7.1.4: {}
-
-  agent-desktop@1.0.2: {}
 
   ajv@8.20.0:
     dependencies:

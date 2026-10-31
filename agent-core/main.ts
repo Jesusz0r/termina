@@ -1398,7 +1398,7 @@ function ensureDesktopSession(): DesktopSession | { error: string } {
     const stateRoot = createDesktopStateRoot();
     desktopSession = new DesktopSession({
       binaryPath: binary.binary,
-      ...(binary.helper ? { helperPath: binary.helper } : {}),
+      helperPath: binary.helper,
       stateRoot,
       cwd: canonicalCwd,
     });
@@ -1898,7 +1898,7 @@ async function executeAdmittedTool(use: ToolUse, parentTruncated: boolean): Prom
     const session = ensureDesktopSession();
     if ("error" in session) return notExecuted(`error: computer use unavailable: ${session.error}`);
     try {
-      const result = await session.run(parsed.request);
+      const result = await session.run(parsed.request, () => interrupted);
       return done(use, { ...result.output, repro: reproFor(use) ?? null });
     } catch (error) {
       return done(use, `error: ${error instanceof Error ? error.message : String(error)}`, true);

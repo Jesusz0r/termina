@@ -23,8 +23,12 @@ if (args[0] === "get") {
   process.stdout.write(JSON.stringify({ ok: false, error: { code: "PERM_DENIED", message: "no access" } }) + "\\n");
   process.exit(1);
 }
-if (args[0] === "snapshot") {
-  process.stdout.write(JSON.stringify({ ok: true, data: { app: "Finder", snapshot_id: "s1", window: { title: "Finder" }, complete: true } }) + "\\n");
+if (args[0] === "wait") {
+  setTimeout(() => {}, 30000);
+} else if (args[0] === "snapshot") {
+  // "Term" stands in for a fuzzy name that agent-desktop resolves to Termina.
+  const app = args[2] === "Term" ? "Termina" : "Finder";
+  process.stdout.write(JSON.stringify({ ok: true, data: { app, snapshot_id: "s1", window: { title: app }, complete: true } }) + "\\n");
 } else {
   process.stdout.write(JSON.stringify({ ok: true, data: { done: true } }) + "\\n");
 }
@@ -50,7 +54,7 @@ describe("desktop tool", () => {
     fakeBin = join(root, "agent-desktop");
     writeFileSync(fakeBin, FAKE_DESKTOP, { mode: 0o755 });
     chmodSync(fakeBin, 0o755);
-    for (const name of ["HOME", "TERMINA_AGENT_DESKTOP_BIN"]) saved.set(name, process.env[name]);
+    for (const name of ["HOME"]) saved.set(name, process.env[name]);
     process.env.HOME = home;
   });
 
@@ -75,7 +79,7 @@ describe("desktop tool", () => {
   }
 
   function session() {
-    return new DesktopSession({ binaryPath: fakeBin, stateRoot, cwd });
+    return new DesktopSession({ binaryPath: fakeBin, helperPath: join(root, "helper"), stateRoot, cwd });
   }
 
   function loggedArgs(): string[][] {
@@ -142,5 +146,24 @@ describe("desktop tool", () => {
     expect(failed.errorCode).toBe("PERM_DENIED");
     expect(failed.output.content).toContain("Grant Accessibility");
     expect(s.appForSnapshot("s1")).toBeNull();
+  });
+
+  it("blocks Termina by the app agent-desktop resolved, not only the requested name", async () => {
+    const s = session();
+    const blocked = await s.run(request({ action: "snapshot", app: "Term" }));
+    expect(blocked.output.isError).toBe(true);
+    expect(blocked.output.content).toContain("Termina cannot operate its own window");
+    expect(s.appForSnapshot("s1")).toBeNull();
+  });
+
+  it("kills a running command when the user interrupts", async () => {
+    const s = session();
+    let stop = false;
+    setTimeout(() => { stop = true; }, 200);
+    const started = Date.now();
+    const result = await s.run(request({ action: "wait", ms: 5000 }), () => stop);
+    expect(result.output.isError).toBe(true);
+    expect(result.output.content).toContain("interrupted");
+    expect(Date.now() - started).toBeLessThan(3000);
   });
 });

@@ -76,8 +76,15 @@ the desktop.
 
 Approved 2026-10-31 as a separate owner, not as part of the browser.
 
-- Owner: `agent-core/main/desktop.ts` over `agent-desktop@1.0.2`; add
+- Owner: `agent-core/main/desktop.ts` over `agent-desktop` v1.0.2; add
   `desktop` to `KERNEL_TOOL_NAMES` so an MCP server cannot take the name.
+- Packaging: `scripts/prepare-native-tools.ts` stages the macOS release
+  archive (binary plus helper) and its Apache-2.0 license into
+  `resources/bin`, checksum-pinned like ripgrep. No npm dependency, no
+  install script. Development uses a trusted `PATH` install.
+- Process: `agent-core/main/native-cli.ts` is the only spawner for the
+  native agent CLIs (allowlisted env, bounded output, interrupt, tree kill
+  via `agent-core/main/bash.ts`).
 - macOS primary sessions only. Absent from print runs, subagents, worldline
   candidates, and read-only sessions.
 - No slash command or enable flag: the model decides when a task needs a
@@ -86,7 +93,8 @@ Approved 2026-10-31 as a separate owner, not as part of the browser.
 - Per-app observation approval, plus a separate approval for
   `click`, `type`, `set_value`, `press`, and `scroll`.
 - No screenshots, clipboard, notifications, app/window lifecycle, pointer
-  input, or headed mode. Termina's own window is blocked.
+  input, or headed mode. Termina's own window is blocked by the requested
+  name and by the app `agent-desktop` resolved (`Electron` in development).
 - Accessibility permission is required. A `PERM_DENIED` result names the
   System Settings pane and does not pretend the action completed.
 - Snapshot refs belong to one snapshot and one app; stale or unknown refs fail
@@ -94,7 +102,8 @@ Approved 2026-10-31 as a separate owner, not as part of the browser.
 - The browser slice remains headless and never drives the desktop.
 
 Desktop first-slice tests cover request parsing, exact argv, snapshot/ref
-ownership, reset, permission errors, and the tool schema.
+ownership, reset, permission errors, the resolved-app Termina block,
+interrupt, release staging, and the tool schema.
 
 ## Known holes
 
@@ -104,6 +113,13 @@ closing them.
 - The macOS desktop tool is unsandboxed and operates under the user's
   Accessibility permission. Per-app and per-action approval is the control;
   it is not a sandbox.
+- macOS grants Accessibility to the responsible app, Termina. The grant
+  likely also reaches the agent's `bash` and the terminal shells
+  (`osascript`, System Events), which have no per-app approval. Confirm
+  in the manual smoke test.
+- `desktop` can observe and operate a browser app, including the user's
+  signed-in Chrome, behind the same per-app approval. The tool
+  description steers web pages to the browser tool; it is not a block.
 - Primary terminals are unsandboxed. `isDangerousBash` in
   `agent-core/main/tools.ts` does not treat `osascript`, `screencapture`,
   or `cliclick` as dangerous. The agent can already drive the GUI
