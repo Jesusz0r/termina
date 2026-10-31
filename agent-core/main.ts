@@ -202,6 +202,14 @@ import {
   resolveAgentDesktopBinary,
   type DesktopRequest,
 } from "./main/desktop.ts";
+import {
+  BrowserSession,
+  browserApprovalPrompt,
+  browserRequestNeedsApproval,
+  browserToolDefinition,
+  parseBrowserRequest,
+  resolveAgentBrowserBinary,
+} from "./main/browser.ts";
 import { isDirectRunFrom } from "./main/env.ts";
 import { DNS_LOOKUP_ABORTED, DNS_LOOKUP_TIMED_OUT, dnsAbortError, outboundUrlError, resolvedHostError } from "./main/url.ts";
 import { policyRequest } from "./main/policy-fetch.ts";
@@ -1470,6 +1478,53 @@ async function confirmDesktopCall(use: ToolUse): Promise<{ ok: true } | { ok: fa
   return outcome;
 }
 
+/** One private browser per agent process, started by the first approved open.
+ *  `/clear`, a model `close`, and process exit delete its profile. */
+let browserSession: BrowserSession | null = null;
+
+function resetBrowserUse(): void {
+  const session = browserSession;
+  browserSession = null;
+  if (session) void session.close();
+}
+
+function ensureBrowserSession(): BrowserSession | { error: string } {
+  if (browserSession && !browserSession.isClosed) return browserSession;
+  const binary = resolveAgentBrowserBinary(canonicalCwd);
+  if ("error" in binary) return binary;
+  try {
+    browserSession = new BrowserSession({ binaryPath: binary.binary, cwd: canonicalCwd });
+    return browserSession;
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** open/click/fill/type/press ask every time; there is no allow-all choice. */
+async function confirmBrowserCall(use: ToolUse): Promise<{ ok: true } | { ok: false; error: string }> {
+  const parsed = parseBrowserRequest(use.input);
+  if (!parsed.ok) return { ok: false, error: `error: ${parsed.error}` };
+  const session = ensureBrowserSession();
+  if ("error" in session) return { ok: false, error: `error: browser unavailable: ${session.error}` };
+  const request = parsed.request;
+  const refused = session.admit(request);
+  if (refused) return { ok: false, error: `error: ${refused}` };
+  if (!browserRequestNeedsApproval(request)) return { ok: true };
+  if (!surface?.active()) return { ok: false, error: "error: browser actions need an interactive approval" };
+  const ref = "selector" in request && request.selector?.startsWith("@") ? session.refLabel(request.selector) : null;
+  const question = browserApprovalPrompt(request, session.pageOrigin, ref);
+  let approved = false;
+  await queueApproval(async () => {
+    const line = await approvalPicker.ask(question, [
+      { name: "Deny", hint: "do not run this browser action", submit: "/approve deny" },
+      { name: "Approve once", hint: "run this browser action once", submit: "/approve once" },
+    ]);
+    approved = line === "/approve once" && browserSession === session;
+    return approved;
+  });
+  return approved ? { ok: true } : { ok: false, error: "error: browser action denied" };
+}
+
 let subagentApprovalTimer: ReturnType<typeof setInterval> | null = null;
 
 /** True while the parent turn is live or a child can still ask for approval. */
@@ -1819,6 +1874,10 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     const admitted = await confirmDesktopCall(use);
     if (!admitted.ok) return notExecuted(admitted.error);
   }
+  if (use.name === "browser") {
+    const admitted = await confirmBrowserCall(use);
+    if (!admitted.ok) return notExecuted(admitted.error);
+  }
   if ((use.name === "write_file" || use.name === "edit") && !(await confirmProtectedMutation(use.input.path))) {
     return notExecuted("error: protected file edit denied");
   }
@@ -1897,6 +1956,18 @@ async function executeAdmittedTool(use: ToolUse, parentTruncated: boolean): Prom
     if (!parsed.ok) return notExecuted(`error: ${parsed.error}`);
     const session = ensureDesktopSession();
     if ("error" in session) return notExecuted(`error: computer use unavailable: ${session.error}`);
+    try {
+      const result = await session.run(parsed.request, () => interrupted);
+      return done(use, { ...result.output, repro: reproFor(use) ?? null });
+    } catch (error) {
+      return done(use, `error: ${error instanceof Error ? error.message : String(error)}`, true);
+    }
+  }
+  if (use.name === "browser") {
+    const parsed = parseBrowserRequest(use.input);
+    if (!parsed.ok) return notExecuted(`error: ${parsed.error}`);
+    const session = ensureBrowserSession();
+    if ("error" in session) return notExecuted(`error: browser unavailable: ${session.error}`);
     try {
       const result = await session.run(parsed.request, () => interrupted);
       return done(use, { ...result.output, repro: reproFor(use) ?? null });
@@ -2037,10 +2108,10 @@ async function executeAdmittedTool(use: ToolUse, parentTruncated: boolean): Prom
   return done(use, `error: unknown tool ${use.name}`, true);
 }
 
-/** Computer use is a macOS primary-session feature. It is deliberately absent
- *  from print runs, subagents, worldline candidates, and read-only sessions. */
-function desktopToolDeclared(): boolean {
-  if (process.platform !== "darwin") return false;
+/** Desktop and browser use need a person at the picker. They are absent from
+ *  print runs, subagents, worldline candidates (auto-approve, and Chrome cannot
+ *  start inside the candidate sandbox), and read-only sessions. */
+function interactivePrimarySession(): boolean {
   if (process.argv.includes("-p") || process.argv.includes("--print")) return false;
   if (subagentDepthFromEnv(process.env) > 0) return false;
   if (isWorldlineCandidateEnv(process.env)) return false;
@@ -2117,7 +2188,8 @@ const TOOLS: Array<Record<string, unknown>> = [
     description: "Fetch an https URL. Output caps near 20 KB. No file or data URLs.",
     input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } }, required: ["url"] },
   },
-  ...(desktopToolDeclared() ? [desktopToolDefinition()] : []),
+  ...(process.platform === "darwin" && interactivePrimarySession() ? [desktopToolDefinition()] : []),
+  ...((process.platform === "darwin" || process.platform === "linux") && interactivePrimarySession() ? [browserToolDefinition()] : []),
 ].filter(tool => !(isReadOnlySession() && typeof tool.name === "string" && readOnlyRejectsTool(tool.name)));
 
 /**
@@ -4871,6 +4943,9 @@ async function runPrompt(
       const pendingOutcomes = new Map<number, Promise<ToolOutcome>>();
       const inputErrors = uses.map((use) => toolInputError(use, clientTools));
       const waves = toolExecutionWaves(uses);
+      // A failed or denied browser/desktop action stops the rest of this
+      // response's UI actions; each skipped call still gets a result.
+      let uiHalted = false;
       try {
       for (const wave of waves) {
         if (interrupted || hasQueuedSteering()) break;
@@ -4889,7 +4964,8 @@ async function runPrompt(
         });
         const wrapped = wave.map((entry) => {
           const use = uses[entry.index]!;
-          const promise = (async (): Promise<ToolOutcome> => {
+          const ui = use.name === "browser" || use.name === "desktop";
+          const run = async (): Promise<ToolOutcome> => {
             if (inputErrors[entry.index]) return done(use, inputErrors[entry.index]!, true);
             if (entry.duplicateOf !== undefined) {
               if (!entry.reuseResult) return done(use, "error: duplicate action in the same batch was not executed again. Inspect the first result before deciding whether another action is needed.", true);
@@ -4897,6 +4973,14 @@ async function runPrompt(
               return { ...original, result: { ...original.result, tool_use_id: use.id } };
             }
             return executeTool(use, isTruncatedStopReason(result.stopReason));
+          };
+          const promise = (async (): Promise<ToolOutcome> => {
+            if (ui && uiHalted) {
+              return done(use, "error: not run: an earlier browser or desktop action in this response failed or was denied. Check the current state before trying again.", true);
+            }
+            const outcome = await run();
+            if (ui && outcome.isError) uiHalted = true;
+            return outcome;
           })();
           pendingOutcomes.set(entry.index, promise);
           return promise;
@@ -5236,6 +5320,7 @@ function resetLiveSessionState(): void {
   lastHandoff = null;
   clearSubagentApprovals();
   resetComputerUse();
+  resetBrowserUse();
   resetCacheContinuity();
   usageIndicators.reset();
   lastUsd = null;
@@ -5291,6 +5376,7 @@ function stopInteractiveResources(): void {
 }
 
 function shutdownSynchronousResources(): void {
+  browserSession?.closeSync();
   stopInteractiveResources();
   closeSessionWriter();
 }

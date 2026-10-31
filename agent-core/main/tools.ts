@@ -8,6 +8,7 @@ import { isGrepNoMatches } from "../stall.ts";
 import { genericToolText, toolResultContent, toolResultText, utf8TextSuffix, type BoundedText, type ToolOutput, type ToolResultContent } from "../tool-output.ts";
 import { isReplaceAll } from "./file-ops.ts";
 import { shellQuote } from "./files.ts";
+import { browserRequestLabel, parseBrowserRequest } from "./browser.ts";
 import { desktopRequestLabel, parseDesktopRequest } from "./desktop.ts";
 import { boundedSidecarEdits } from "./sidecar.ts";
 
@@ -136,12 +137,20 @@ function desktopLabelForUse(use: ToolUse): string | null {
   return parsed.ok ? desktopRequestLabel(parsed.request) : null;
 }
 
+function browserLabelForUse(use: ToolUse): string | null {
+  if (use.name !== "browser") return null;
+  const parsed = parseBrowserRequest(use.input);
+  return parsed.ok ? browserRequestLabel(parsed.request) : null;
+}
+
 export function reproFor(use: ToolUse): string | undefined {
   // Error results also need reproduction metadata; malformed runtime values
   // must not throw while we are trying to report their validation failure.
   const text = (key: string): string => typeof use.input[key] === "string" ? use.input[key] as string : "";
   const desktop = desktopLabelForUse(use);
   if (desktop) return `desktop ${desktop}`;
+  const browser = browserLabelForUse(use);
+  if (browser) return `browser ${browser}`;
   if (use.name === "bash") return `bash ${shellQuote(text("command"))}`;
   if (use.name === "read_file") {
     return `read_file(${JSON.stringify(text("path"))})`;
@@ -179,8 +188,8 @@ export function sidecarStartFor(use: {
 }
 
 export function toolTranscriptDetail(use: ToolUse): string {
-  const desktop = desktopLabelForUse(use);
-  if (desktop) return desktop;
+  const uiLabel = desktopLabelForUse(use) ?? browserLabelForUse(use);
+  if (uiLabel) return uiLabel;
   if (use.name === "edit" || use.name === "write_file") return use.input.path ?? "";
   if (use.name === "read_file") return use.input.path ?? "";
   if (use.name === "read_files") return `${Array.isArray(use.input.paths) ? use.input.paths.length : 0} paths`;

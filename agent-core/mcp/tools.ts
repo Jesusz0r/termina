@@ -18,6 +18,7 @@ export const KERNEL_TOOL_NAMES = new Set([
   "web_search",
   "fetch",
   "desktop",
+  "browser",
 ]);
 
 

@@ -72,7 +72,7 @@ export function trustedPath(pathEnv = process.env.PATH ?? "", cwdRoot?: string):
 }
 
 /** Binaries `scripts/prepare-resources.ts` ships in `resources/bin`; they win over PATH. */
-const BUNDLED_BINS: ReadonlySet<string> = new Set(["rg", "agent-desktop"]);
+const BUNDLED_BINS: ReadonlySet<string> = new Set(["rg", "agent-desktop", "agent-browser"]);
 
 export function resolveTrustedBin(bin: string, cwdRoot: string): string | null {
   const root = freezeCwd(cwdRoot);

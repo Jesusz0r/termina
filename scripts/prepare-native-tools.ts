@@ -86,3 +86,72 @@ export async function prepareAgentDesktop({
     rmSync(stage, { recursive: true, force: true });
   }
 }
+
+export const PINNED_AGENT_BROWSER_VERSION = "0.41.0";
+
+// sha256 of the v0.41.0 release assets, cross-checked against the npm tarball's
+// bin/ copies; the release publishes no checksums file.
+const AGENT_BROWSER_BINARIES: Record<string, string> = {
+  "darwin-arm64": "a402fef2489c221b17522aa21f103ca5dc47f00ff5879d4a72c39881544730ab",
+  "darwin-x64": "f108d4aa02f41eee05d6b1b05817475fd5d576d802826783ef80800da16f33e2",
+  "linux-arm64": "e196e9cabe6cb1b01bd5912973628361b9f40a332683a12426abad007f0d3589",
+  "linux-x64": "399c7e9f06bd29aa933fdf25c0bd958eea06927fc0ce6f536ba6347aabd64628",
+};
+// Apache-2.0 for agent-browser, MPL-2.0 for the bundled axe-core, at the same tag.
+const AGENT_BROWSER_LICENSES: ReadonlyArray<readonly [string, string, string]> = [
+  ["LICENSE", "agent-browser-LICENSE", "014bb31e83d5c2e76aea1cc6e82217346ab41362f32cb355ad0f5c10aa0aeaff"],
+  ["cli/src/native/a11y/LICENSE-axe-core.txt", "agent-browser-LICENSE-axe-core", "af175b9d96ee93c21a036152e1b905b0b95304d4ae8c2c921c7609100ba8df7e"],
+  ["cli/src/native/a11y/LICENSE-axe-core-THIRD-PARTY.txt", "agent-browser-LICENSE-axe-core-THIRD-PARTY", "cadf92d5df0bf94bb4d74f906d5207f6198923e4f96aff0b6793d793f5f80e77"],
+];
+
+/** The browser tool runs on macOS and Linux; other targets ship nothing. */
+export function agentBrowserReleaseFor(platform: string, arch: string) {
+  const sha256 = AGENT_BROWSER_BINARIES[`${platform}-${arch}`];
+  if (!sha256) return null;
+  const tag = `v${PINNED_AGENT_BROWSER_VERSION}`;
+  return {
+    binary: { sha256, url: `https://github.com/vercel-labs/agent-browser/releases/download/${tag}/agent-browser-${platform}-${arch}` },
+    licenses: AGENT_BROWSER_LICENSES.map(([path, name, licenseSha]) => ({
+      name,
+      sha256: licenseSha,
+      url: `https://raw.githubusercontent.com/vercel-labs/agent-browser/${tag}/${path}`,
+    })),
+  };
+}
+
+export async function prepareAgentBrowser({
+  resourcesDir,
+  downloadArchive,
+  targetPlatform = process.platform,
+  targetArch = process.arch,
+}: {
+  resourcesDir: string;
+  downloadArchive: DownloadArchive;
+  targetPlatform?: string;
+  targetArch?: string;
+}) {
+  const release = agentBrowserReleaseFor(targetPlatform, targetArch);
+  if (!release) return;
+  mkdirSync(resourcesDir, { recursive: true });
+  requireDirectory(resourcesDir);
+  const binDir = join(resourcesDir, "bin");
+  mkdirSync(binDir, { recursive: true });
+  requireDirectory(binDir);
+  const stage = mkdtempSync(join(resourcesDir, ".agent-browser-stage-"));
+  try {
+    const binary = join(stage, "agent-browser");
+    await downloadArchive({ ...release.binary, destination: binary, maxBytes: 64 * 1024 * 1024 });
+    for (const license of release.licenses) {
+      await downloadArchive({ url: license.url, sha256: license.sha256, destination: join(stage, license.name), maxBytes: 64 * 1024 });
+    }
+    chmodSync(binary, 0o755);
+    // Stage by atomic file replacement: a failed download preserves the prior binary.
+    for (const license of release.licenses) {
+      chmodSync(join(stage, license.name), 0o644);
+      renameSync(join(stage, license.name), join(binDir, license.name));
+    }
+    renameSync(binary, join(binDir, "agent-browser"));
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
