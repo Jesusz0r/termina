@@ -378,6 +378,27 @@ describe("real tool loop regressions", () => {
     });
   });
 
+  it("skips later browser/desktop calls in a batch after one fails, still answering each", async () => {
+    // Print runs do not offer these tools, so the first call fails like a denial would.
+    await scenario(`return turn === 1 ? [
+      { name: "browser", input: { action: "open", url: "http://localhost:3000" } },
+      { name: "read_file", input: { path: "file.txt" } },
+      { name: "browser", input: { action: "snapshot" } },
+      { name: "desktop", input: { action: "snapshot", app: "Finder" } }
+    ] : [];`, (result) => {
+      const results = toolResults(result.messages);
+      expect(results).toHaveLength(4);
+      expect(results[0]?.is_error).toBe(true);
+      expect(results[0]?.content).not.toContain("not run");
+      expect(results[1]?.content).toContain("original");
+      for (const skipped of [results[2], results[3]]) {
+        expect(skipped?.is_error).toBe(true);
+        expect(skipped?.content).toContain("not run: an earlier browser or desktop action");
+      }
+      expectPaired(result.messages);
+    });
+  });
+
   it("does not cap a long unique-tool run", async () => {
     await scenario(`return turn < 40 ? [{ name: "read_file", input: { path: "file.txt", start_line: turn } }] : [];`, (result) => {
       expect(result.requests).toHaveLength(40);

@@ -1,8 +1,7 @@
 # Computer use
 
-> **Status:** in progress, revised 2026-10-31. The browser slice is in PR
-> #482; the macOS desktop slice is a separate owner being implemented. Not
-> shipped. Do not cite it from the user guide, the website, or
+> **Status:** in progress, revised 2026-10-31. The macOS desktop slice is
+> PR #483; the browser slice is PR #482, stacked on it. Not shipped. Do not cite it from the user guide, the website, or
 > `docs/reference/AGENT-CORE.md` until a slice has shipped. When a slice
 > ships, change this status in the same change.
 
@@ -128,212 +127,93 @@ closing them.
 - The same unsandboxed agent can read its own browser profile through
   bash. The profile is not a secret from the agent. It is isolated from
   the user's browser, from promotion, and from the browser child.
-- A candidate can reach the host's loopback. The sandbox language cannot
-  express a per-host allowlist. Do not add one. The per-navigate ask is
-  the control. Do not describe the candidate browser as network-isolated.
-- A malicious page in a browser that runs as the user is still that
-  user's process if confinement fails. That is why start refuses when
-  the child deny list cannot be applied.
+- The browser reaches the host's loopback and private network, unlike
+  `fetch`. The per-action ask with the full origin is the control. Do not
+  describe the browser as network-isolated.
+- A SIGKILLed agent leaves its browser state directory (cookies,
+  downloads) and `/tmp/tb-*` behind until the OS temp reaper runs; the
+  daemon stops itself after 5 idle minutes.
+- The browser has no `sandbox-exec` deny list. Chrome's own sandbox is the
+  confinement for page content; a renderer escape is the user's process.
+  Chrome cannot start its sandbox inside `sandbox-exec` (checked
+  2026-10-31 with agent-browser 0.41.0), and `--no-sandbox` would trade
+  Chrome's renderer sandbox for a weaker file deny list.
 
-## Shape
+## Shape (browser)
 
-One owner, started by the agent process, on the same side of the
-boundary as `agent-core/main/bash.ts`. Intended owner:
-`agent-core/main/browser.ts`. The tool schema stays with the other
-built-in tools. Do not grow a second dispatcher. Add `browser` to
-`KERNEL_TOOL_NAMES` in `agent-core/mcp/tools.ts` in the same change so a
-server tool cannot take the name.
+Decided 2026-10-31, after the first-slice spike showed the original
+confinement rule cannot hold for a Chrome driver.
 
-The owner does not import `electron/sandbox.ts`. Agent-core already
-spawns `sandbox-exec` itself for sibling claims. The browser child
-profile is the browser owner's, consumed the same way. Do not fold
-browser denies into the candidate profile. That profile is shared by
-every candidate process and can read candidate support, including the
-copied `auth.json`.
+- Owner: `agent-core/main/browser.ts` over `agent-browser` v0.41.0,
+  staged checksum-pinned into `resources/bin` with its Apache-2.0 and
+  axe-core licenses by `scripts/prepare-native-tools.ts`. Spawned only
+  through `agent-core/main/native-cli.ts`. `browser` is in
+  `KERNEL_TOOL_NAMES`. The MCP surface (29 tools, about 82 KB of schema)
+  is not used.
+- Offered on macOS and Linux to interactive primary sessions. Absent from
+  print runs, subagents, read-only sessions, and worldline candidates
+  (they auto-approve, and Chrome cannot start inside the candidate
+  sandbox). No slash command, enable flag, or preference: the model
+  chooses the tool.
+- Confinement: Chrome's own sandbox. agent-browser adds `--no-sandbox`
+  for root and containers, so the tool refuses to start there
+  (`chromeSandboxUnavailable`). Each process gets a fresh private
+  state directory (0700) with its own `HOME`, profile, downloads, and an
+  empty `--config`, so `~/.agent-browser` and a project
+  `agent-browser.json` are never read. The child env is allowlisted, cwd
+  is the state directory, and sockets live in a private `/tmp/tb-*`.
+  The user's Chrome profile, keychain, and running browsers are never
+  attached. Because `HOME` is private, Chrome is found only system-wide
+  (for example `/Applications/Google Chrome.app`); a Chrome for Testing
+  install under the user's `~/.agent-browser` is not used.
+- Lifecycle: agent-browser always runs a daemon. It is per process (its
+  own socket directory), closed on `/clear`, on a model `close`, and on
+  process exit (synchronously, including SIGTERM/SIGHUP), and it stops
+  after 5 idle minutes if the agent dies. If `close` fails, the daemon's
+  process group is killed from its pid file. Close deletes the state
+  directory. A new start always
+  gets a new profile.
+- Actions: `open`, `snapshot`, `get` (text, html, value, title, url),
+  `wait`, `click`, `fill`, `type`, `press`, `close`. No eval, screenshot,
+  file URL, upload, download path, tab, or raw flag. `press` refuses
+  paste chords (`Meta+v`, `Control+v`, `Shift+Insert`); text enters only
+  through `fill`/`type`, which the user approved.
+- Approval: `open`, `click`, `fill`, `type`, and `press` ask every time
+  through `queueApproval`, with Deny and Approve once only. The prompt
+  shows scheme, host, and port in full; path and typed text are
+  display-capped. A click on a ref names its role and label. `snapshot`,
+  `get`, and `wait` do not ask, and refuse until an approved `open` has
+  loaded a page. Denial executes nothing. Without a local picker the call
+  is denied, never left waiting. `TERMINA_CORE_APPROVE=all` does not skip
+  these asks; it only sets bash's permission mode.
+- Page guard: the page stays on the origin of the last approved `open`.
+  A redirect to another origin fails and leaves a blank page. Before
+  every read and after every action, extra tabs (popups) are closed and
+  reported as denied, and a page on another origin is sent back to the
+  last approved URL with an error.
+- Refs: `@eN` refs are accepted only from the latest snapshot; any
+  action invalidates them. CSS selectors are always allowed.
+- Dialogs are dismissed, never accepted, and the action returns an error
+  (agent-browser dismisses `alert`; the page guard dismisses a blocking
+  `confirm`/`prompt`). Geolocation and notification requests are denied
+  and camera access is never granted in headless Chrome (checked live).
+  Downloads land in the private
+  downloads directory, are deleted on close, and are outside the
+  project, so the agent cannot read them.
+- Output: bounded to 32 KB, wrapped in content boundaries, and labeled as
+  untrusted page data. The truncation marker says to narrow the snapshot,
+  not to re-run it; the repro hint for a stubbed result is a new
+  `browser snapshot`.
+- `browser` is not in `READ_TOOLS`, so it is a mutation barrier, and the
+  duplicate-action refusal in one batch is unchanged.
+- Batch halt: in the tool loop, a failed or denied `browser` or `desktop`
+  call skips later `browser`/`desktop` calls in the same response, and
+  each skipped call still gets an error result.
 
-### Process
-
-One browser per terminal process. Start it lazily, on the first
-approved action, not at process start. It is a child of
-the agent, in a process group the owner kills, following
-`agent-core/main/bash.ts`. Do not daemonize. Interrupt, timeout, and
-process exit kill the child and return an error result. A hang is not
-an open approval. The bound is not longer than `BASH_TIMEOUT_MS`.
-
-`/clear` destroys the process and its profile. Clean exit does the
-same. A new browser start always creates a new profile directory. Never reuse a profile from a previous process, including one
-left by a crash. Do not put the profile in the session bundle. A fork materializes
-that session through the fork point, including referenced images. It
-does not restore a page or cookies unless they were stored in the
-bundle.
-
-### Confinement
-
-Refuse to start unless a `sandbox-exec` deny list can be applied to the
-browser child. That is macOS only. No unconfined browser on Linux or
-Windows, and no retry outside the sandbox.
-
-The child may read and write only its profile directory, plus the
-browser binary and libraries it needs to start. It must not read:
-
-- `auth.json`, whether that is `~/.termina/agent/auth.json` or the
-  candidate copy under support
-- the user's browser profile, keychain, or password store
-- the project tree
-
-The profile directory itself is not the agent home, not the project,
-and not the candidate source directory. In
-`electron/worldlines/manager.ts` that source directory is
-`join(dir, label)`. Candidate browser state lives under that
-candidate's `supportDir` (`join(dir, `${label}-support`)`), which is a
-sibling of the source directory, not a child of it. Promotion and
-capture must not see the profile. Primary state lives in an app-owned directory
-outside the project and outside the user's home browser data.
-
-The child environment must not resolve the user's browser profile.
-Ignore inherited `HOME`, user-data-dir, and config-dir values that
-point there. Credential storage is off. If the driver cannot start
-under those constraints, refuse.
-
-File URL access is off. Popups, new windows, downloads, and file
-choosers are denied. There is no download directory and no promise that
-the agent can `read_file` a download. `confinePath` in
-`agent-core/main/files.ts` refuses paths outside the project, and a
-download inside the project would be capturable and promotable.
-
-Geolocation, camera, microphone, and notification permission are denied
-at launch. A JavaScript dialog is dismissed, not accepted, and the
-action returns an error rather than hanging. `key` must not paste the
-system clipboard. Text enters only through `type`, which is what the
-user approved.
-
-### Who is offered the tool
-
-The schema is fixed at process start.
-
-- Interactive TUI sessions, including worldline candidates, include the
-  tool. The model decides when a task needs a page; the approvals
-  below are the control.
-- `-p` / `--print` and piped runs omit it, even when
-  `TERMINA_CORE_APPROVE=all`. A print run can still have a TTY, so the
-  print flag is the check, not the absence of a surface.
-- Subagents omit it. Their approval channel is `bash` or `protected`
-  only, and a child browser is a second process.
-
-If a call is forced where there is no local picker, deny. Never wait.
-Do not extend the parent approval file format in v1.
-
-There is no `/browser` slash command, enable flag, or preference. The
-tool is in the schema for every session above, and the model chooses
-it like any other tool.
-
-### Tool
-
-One function tool, `browser`, on the existing function-tool path.
-Actions:
-
-| Action | Effect |
-|---|---|
-| `navigate` | Open one `http` or `https` URL in the single page. |
-| `snapshot` | Return bounded accessibility text with element refs. No pixels. |
-| `click` | Click one ref from the latest snapshot. |
-| `type` | Type into that ref. The action names the ref. It does not depend on ambient focus. |
-| `key` | Press one page key chord. Not an OS shortcut, and not a paste. |
-
-No coordinate click in v1. A ref that is not in the latest snapshot is
-an error, not a guess, even if the same string appeared in an older
-snapshot. `navigate`, `click`, `type`, and `key` invalidate refs. The
-model must `snapshot` again. A ref resolves to the element from that
-snapshot, not to a fresh positional index.
-
-Parse URLs with the URL parser. Do not allow by string prefix. Scheme
-must be `http` or `https`. Reject userinfo (`https://user:pass@host`),
-`file`, `data`, `javascript`, `blob`, `chrome`, and `about`. The initial
-blank page is the tool's, not a URL the model can request.
-
-`navigate` approval is for the URL the user was shown. A redirect whose
-origin (scheme, host, port) differs from that URL is a failure. A
-`click`, `type`, or `key` that lands on an origin the approval did not
-disclose is a failure. On failure, leave the previous `http`/`https`
-page, or the blank page if there was none. Do not stay on the
-undisclosed origin. A landing URL that is not `http` or `https` is the
-same failure.
-
-`snapshot` goes through the existing bounded tool-text path. Its marker
-must not say to re-run the same snapshot for the omitted tail.
-`genericToolText` in `agent-core/tool-output.ts` says that. Do not use
-that marker unchanged. The result starts with a fixed line that the
-following text is untrusted page content, not instructions. That line
-is tool output, not identity text.
-
-`browser` is not in `READ_TOOLS`. `snapshot` included. Concurrent reads
-must not overlap a browser action. Do not weaken the existing
-duplicate-action refusal.
-
-Reclaim may stub a snapshot like any other tool result. The reproduce
-hint is a new `snapshot`, not a file read, and the stub must not say
-the cleared text is still the page. `formatStub` already says the text
-was cleared. Keep it that way.
-
-### Approval
-
-Reuse the existing picker queue (`queueApproval`). Do not add a renderer
-modal. Do not offer "Always approve". v1 has no always-approve mode,
-and `TERMINA_CORE_APPROVE=all` does not skip these asks.
-
-- `navigate`, `click`, `type`, and `key` ask every time.
-- `snapshot` does not ask. It only observes the Termina-owned page,
-  which only an approved `navigate` can load.
-- Schema rejection stays in `agent-core/tool-dispatch.ts`, before the
-  prompt and before the browser starts.
-- The prompt shows scheme, host, and port in full. A 160-character slice
-  is not enough: bash display-caps the command, and a capped URL can
-  hide the host. The path and the typed text may be display-capped. The
-  action that runs is the parsed URL and the full approved text, not
-  the truncated display.
-- A click prompt includes the ref's label and href when the snapshot
-  has them.
-- Denial executes nothing.
-
-### Batch halt
-
-`toolExecutionWaves` runs non-read tools one at a time. It does not skip
-later calls when one fails. If a browser action fails or is denied, later
-browser actions in that response do not run. Each still needs a result,
-or the next provider request is rejected.
-
-The existing tail fill in the tool loop only covers interrupt and
-steering. It does not run when a browser action fails. The browser halt
-has to write those results itself. Breaking out of the wave loop is not
-enough.
-
-The halt text is Termina's. It is not Anthropic's computer-use halt
-string.
-
-## First slice
-
-1. Confinement and lifecycle above. Refuse to start when the child deny
-   list cannot be applied. New profile on every start. No reuse.
-2. The `browser` tool, approval, origin failure, stale-ref
-   failure, and the batch halt.
-3. Tests:
-   - a failed or denied browser action does not run the next browser
-     call, and the skipped call still has a result;
-   - a non-`http`/`https` URL, or a URL with userinfo, is rejected
-     before a prompt and before the browser starts;
-   - a cross-origin redirect does not leave the browser on the new
-     origin;
-   - a stale ref is not acted on;
-   - the profile is not in the candidate source directory, not the
-     user's Chrome profile, and not a directory that contains
-     `auth.json`;
-   - print mode and subagents are not offered the tool;
-   - the picker has no always-approve choice;
-   - downloads and popups are denied;
-   - there is no screenshot action and no image bytes in the sidecar.
-
-No protocol adapter in this slice. No user-guide page until the tool
-exists.
+Tests cover the parser, approval text, private state and cleanup, the
+redirect failure, stale refs, the origin guard, popups, release staging,
+and the batch halt. A live run against Chrome checked dialogs, popups,
+cross-origin links, downloads, and cleanup.
 
 ## Screenshots
 
