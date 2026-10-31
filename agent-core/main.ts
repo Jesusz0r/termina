@@ -190,6 +190,19 @@ import {
 } from "./main/files.ts";
 import { runBash } from "./main/bash.ts";
 export { runBash };
+import {
+  DesktopSession,
+  createDesktopStateRoot,
+  desktopRequestLabel,
+  desktopRequestNeedsActionApproval,
+  desktopRequestNeedsApp,
+  desktopToolDefinition,
+  isBlockedDesktopApp,
+  parseComputerCommand,
+  parseDesktopRequest,
+  resolveAgentDesktopBinary,
+  type DesktopRequest,
+} from "./main/desktop.ts";
 import { isDirectRunFrom } from "./main/env.ts";
 import { DNS_LOOKUP_ABORTED, DNS_LOOKUP_TIMED_OUT, dnsAbortError, outboundUrlError, resolvedHostError } from "./main/url.ts";
 import { policyRequest } from "./main/policy-fetch.ts";
@@ -1373,6 +1386,137 @@ function clearSubagentApprovals(): void {
   clearSubagentApprovalFiles(eventsDir, terminalId);
 }
 
+/** Per-process computer-use state. `/computer off` and `/clear` drop approvals
+ *  and refs; the temporary refmap root is left to the OS temp reaper. */
+let desktopSession: DesktopSession | null = null;
+
+function ensureDesktopSession(): DesktopSession | { error: string } {
+  if (desktopSession) return desktopSession;
+  const binary = resolveAgentDesktopBinary(canonicalCwd);
+  if ("error" in binary) return binary;
+  try {
+    const stateRoot = createDesktopStateRoot();
+    desktopSession = new DesktopSession({
+      binaryPath: binary.binary,
+      ...(binary.helper ? { helperPath: binary.helper } : {}),
+      stateRoot,
+      cwd: canonicalCwd,
+    });
+    return desktopSession;
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function resetComputerUse(): void {
+  desktopSession?.disable();
+  desktopSession = null;
+}
+
+async function confirmDesktopObservationNow(app: string): Promise<boolean> {
+  const session = desktopSession;
+  if (!session?.isEnabled) return false;
+  if (session.isAppApproved(app)) return true;
+  if (!surface?.active()) return false;
+  const line = await approvalPicker.ask(`Allow desktop observation? App: ${app}`, [
+    { name: "Deny", hint: "do not read this app", submit: "/approve deny" },
+    { name: "Allow observation", hint: "read this app's UI for this task", submit: "/approve desktop-app" },
+  ]);
+  if (line !== "/approve desktop-app") return false;
+  session.approveApp(app);
+  return true;
+}
+
+async function confirmDesktopActionNow(request: DesktopRequest, app: string): Promise<boolean> {
+  if (!surface?.active()) return false;
+  const line = await approvalPicker.ask(`Approve desktop action? ${desktopRequestLabel(request)} (App: ${app})`, [
+    { name: "Deny", hint: "do not run this action", submit: "/approve deny" },
+    { name: "Approve once", hint: "run this action once", submit: "/approve once" },
+  ]);
+  return line === "/approve once";
+}
+
+async function confirmDesktopCall(use: ToolUse): Promise<{ ok: true } | { ok: false; error: string }> {
+  const parsed = parseDesktopRequest(use.input);
+  if (!parsed.ok) return { ok: false, error: `error: ${parsed.error}` };
+  const session = desktopSession;
+  if (!session?.isEnabled) return { ok: false, error: "error: computer use is off; run /computer on" };
+  const request = parsed.request;
+  if (!desktopRequestNeedsApp(request)) return { ok: true };
+  const app = session.appForRequest(request);
+  if (!app) return { ok: false, error: "error: unknown desktop app or ref; take a fresh snapshot first" };
+  if (isBlockedDesktopApp(app)) return { ok: false, error: "error: Termina cannot operate its own window" };
+
+  let outcome: { ok: true } | { ok: false; error: string } = {
+    ok: false,
+    error: "error: desktop approval cancelled",
+  };
+  await queueApproval(async () => {
+    if (!session.isEnabled) {
+      outcome = { ok: false, error: "error: computer use was turned off" };
+      return false;
+    }
+    if (desktopRequestNeedsActionApproval(request)) {
+      if (!session.isAppApproved(app)) {
+        outcome = { ok: false, error: `error: ${app} has no approved observation; snapshot it first` };
+        return false;
+      }
+      const approved = await confirmDesktopActionNow(request, app);
+      outcome = approved ? { ok: true } : { ok: false, error: "error: desktop action denied" };
+      return approved;
+    }
+    const approved = await confirmDesktopObservationNow(app);
+    outcome = approved ? { ok: true } : { ok: false, error: "error: desktop observation denied" };
+    return approved;
+  });
+  return outcome;
+}
+
+function startComputerCommand(line: string): void {
+  const parsed = parseComputerCommand(line);
+  if (!parsed) return;
+  if ("error" in parsed) {
+    out(`(${parsed.error})\n`);
+    showPrompt();
+    return;
+  }
+  if (isReadOnlySession()) {
+    out("(computer use is disabled in a read-only session)\n");
+    showPrompt();
+    return;
+  }
+  if (engineBusy()) {
+    out("(engine busy)\n");
+    showPrompt();
+    return;
+  }
+  if (parsed.action === "show") {
+    out(`(computer use ${desktopSession?.isEnabled ? "on" : "off"}; macOS semantic; per-action approval)\n`);
+    showPrompt();
+    return;
+  }
+  if (parsed.action === "off") {
+    resetComputerUse();
+    out("(computer use off)\n");
+    showPrompt();
+    return;
+  }
+  if (process.platform !== "darwin") {
+    out("(computer use is available on macOS only)\n");
+    showPrompt();
+    return;
+  }
+  const session = ensureDesktopSession();
+  if ("error" in session) {
+    out(`(computer use unavailable: ${session.error})\n`);
+    showPrompt();
+    return;
+  }
+  session.enable();
+  out("(computer use on; grant Accessibility to Termina if macOS asks; every action asks before running)\n");
+  showPrompt();
+}
+
 let subagentApprovalTimer: ReturnType<typeof setInterval> | null = null;
 
 /** True while the parent turn is live or a child can still ask for approval. */
@@ -1718,6 +1862,10 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     return notExecuted(`error: ${use.name} is not available in this session`);
   }
   if (use.name === "bash" && !(await confirmBash(use.input.command ?? ""))) return notExecuted("error: bash denied");
+  if (use.name === "desktop") {
+    const admitted = await confirmDesktopCall(use);
+    if (!admitted.ok) return notExecuted(admitted.error);
+  }
   if ((use.name === "write_file" || use.name === "edit") && !(await confirmProtectedMutation(use.input.path))) {
     return notExecuted("error: protected file edit denied");
   }
@@ -1790,6 +1938,17 @@ async function executeAdmittedTool(use: ToolUse, parentTruncated: boolean): Prom
   if (use.name === "fetch") {
     const got = await fetchUrl(String(use.input.url ?? ""), { shouldStop: () => interrupted });
     return done(use, got);
+  }
+  if (use.name === "desktop") {
+    if (!desktopSession?.isEnabled) return notExecuted("error: computer use is off; run /computer on");
+    const parsed = parseDesktopRequest(use.input);
+    if (!parsed.ok) return notExecuted(`error: ${parsed.error}`);
+    try {
+      const result = await desktopSession.run(parsed.request);
+      return done(use, { ...result.output, repro: reproFor(use) ?? null });
+    } catch (error) {
+      return done(use, `error: ${error instanceof Error ? error.message : String(error)}`, true);
+    }
   }
   if (use.name === "bash") {
     const command = use.input.command ?? "";
@@ -1924,6 +2083,17 @@ async function executeAdmittedTool(use: ToolUse, parentTruncated: boolean): Prom
   return done(use, `error: unknown tool ${use.name}`, true);
 }
 
+/** Computer use is a macOS primary-session feature. It is deliberately absent
+ *  from print runs, subagents, worldline candidates, and read-only sessions. */
+function desktopToolDeclared(): boolean {
+  if (process.platform !== "darwin") return false;
+  if (process.argv.includes("-p") || process.argv.includes("--print")) return false;
+  if (subagentDepthFromEnv(process.env) > 0) return false;
+  if (isWorldlineCandidateEnv(process.env)) return false;
+  if (isReadOnlySession()) return false;
+  return true;
+}
+
 const TOOLS: Array<Record<string, unknown>> = [
   ...READ_TOOL_DEFS,
   {
@@ -1993,6 +2163,7 @@ const TOOLS: Array<Record<string, unknown>> = [
     description: "Fetch an https URL. Output caps near 20 KB. No file or data URLs.",
     input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } }, required: ["url"] },
   },
+  ...(desktopToolDeclared() ? [desktopToolDefinition()] : []),
 ].filter(tool => !(isReadOnlySession() && typeof tool.name === "string" && readOnlyRejectsTool(tool.name)));
 
 /**
@@ -5110,6 +5281,7 @@ function resetLiveSessionState(): void {
   requestOverlays.clear();
   lastHandoff = null;
   clearSubagentApprovals();
+  resetComputerUse();
   resetCacheContinuity();
   usageIndicators.reset();
   lastUsd = null;
@@ -5946,6 +6118,10 @@ function dispatchLine(line: string, commitQueuedLine?: () => void): void {
   if (line === "/doctor") {
     out(`${formatDoctor(frontMatter.diagnostics, mcpSession)}\n`);
     showPrompt();
+    return;
+  }
+  if (line === "/computer" || line.startsWith("/computer ")) {
+    startComputerCommand(line);
     return;
   }
   if (line === "/login" || line === "/logout") {

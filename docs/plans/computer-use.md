@@ -1,8 +1,8 @@
 # Computer use
 
-> **Status:** proposed, revised 2026-09-28 after checking the cited seams.
-> Not implemented. This file is the plan. It is not current behavior. Do
-> not cite it from the user guide, the website, or
+> **Status:** in progress, revised 2026-10-31. The browser slice is in PR
+> #482; the macOS desktop slice is a separate owner being implemented. Not
+> shipped. Do not cite it from the user guide, the website, or
 > `docs/reference/AGENT-CORE.md` until a slice has shipped. When a slice
 > ships, change this status in the same change.
 
@@ -23,16 +23,24 @@ already has. See [Known holes](#known-holes).
 
 A virtual machine is a different product. Do not ship one in this plan.
 
+The product also approved a separate **macOS desktop slice** on 2026-10-31:
+`agent-core/main/desktop.ts` over the native `agent-desktop` CLI. It is
+opt-in, macOS-primary-only, per-app and per-action approved, and is not part
+of the browser owner. The browser must remain headless and must not drive
+the desktop.
+
 ## Do not build
 
-- Control of the user's desktop, Screen Recording of the login session,
-  or posting mouse and keyboard events into other applications. The
-  candidate profile cannot enforce this: `buildSandboxProfile` in
-  `electron/sandbox.ts` is `(allow default)` plus file denies. It does
-  not deny the window server, Apple events, or input injection. The
-  control is the browser owner, which may call only the browser's page
-  API. No `CGEvent`, `osascript`, `screencapture`, or a driver that needs
-  them. If the driver cannot act without those, refuse the driver.
+- Control of the user's desktop **from the browser tool**, Screen Recording
+  of the login session, or posting mouse and keyboard events into other
+  applications from the browser. The separate macOS desktop slice below is
+  the only approved desktop owner.
+- The browser candidate profile cannot enforce desktop isolation:
+  `buildSandboxProfile` in `electron/sandbox.ts` is `(allow default)` plus
+  file denies. It does not deny the window server, Apple events, or input
+  injection. The browser owner may call only the browser's page API. No
+  `CGEvent`, `osascript`, `screencapture`, or a driver that needs them. If
+  the driver cannot act without those, refuse the driver.
 - A visible browser window. v1 is headless. A visible window is a second
   control surface and can be mistaken for the user's browser. The user
   sees the approval text, not a live page.
@@ -64,11 +72,38 @@ A virtual machine is a different product. Do not ship one in this plan.
 - A screenshot action in the first slice. The current result path cannot
   deliver one. See [Screenshots](#screenshots).
 
+## Desktop slice (macOS)
+
+Approved 2026-10-31 as a separate owner, not as part of the browser.
+
+- Owner: `agent-core/main/desktop.ts` over `agent-desktop@1.0.2`; add
+  `desktop` to `KERNEL_TOOL_NAMES` so an MCP server cannot take the name.
+- macOS primary sessions only. Absent from print runs, subagents, worldline
+  candidates, and read-only sessions.
+- Off by default. `/computer on|off` toggles the process flag; `/clear`
+  disables it and clears approved apps and refs.
+- Per-app observation approval, plus a separate approval for
+  `click`, `type`, `set_value`, `press`, and `scroll`.
+- No screenshots, clipboard, notifications, app/window lifecycle, pointer
+  input, or headed mode. Termina's own window is blocked.
+- Accessibility permission is required. A `PERM_DENIED` result names the
+  System Settings pane and does not pretend the action completed.
+- Snapshot refs belong to one snapshot and one app; stale or unknown refs fail
+  closed. The tool is not in `READ_TOOLS`, so it is a mutation barrier.
+- The browser slice remains headless and never drives the desktop.
+
+Desktop first-slice tests cover request parsing, exact argv, snapshot/ref
+ownership, disable, permission errors, `/computer` parsing, and the tool
+schema.
+
 ## Known holes
 
 These stay true after the first slice. Do not describe the slice as
 closing them.
 
+- The macOS desktop tool is unsandboxed and operates under the user's
+  Accessibility permission. Per-app and per-action approval is the control;
+  it is not a sandbox.
 - Primary terminals are unsandboxed. `isDangerousBash` in
   `agent-core/main/tools.ts` does not treat `osascript`, `screencapture`,
   or `cliclick` as dangerous. The agent can already drive the GUI

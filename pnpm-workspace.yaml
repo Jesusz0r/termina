@@ -1,9 +1,13 @@
 allowBuilds:
   '@google/genai': true
+  agent-desktop: true
   electron: true
   electron-winstaller: true
   esbuild: true
   protobufjs: true
+
+minimumReleaseAgeExclude:
+  - agent-desktop@1.0.2
 
 overrides:
   dompurify: 3.4.14
